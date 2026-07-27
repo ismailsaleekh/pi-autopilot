@@ -41,13 +41,14 @@ fn p7_refuses_remote_target_operator_and_agent_mutation_without_side_effects() {
     }
 
     let empty = "0000000000000000000000000000000000000000";
-    vcs.swap(&source, "refs/autopilot/queue", &first, empty)
-        .expect("create package queue ref");
-    vcs.swap(&source, "refs/autopilot/queue", &second, &first)
-        .expect("advance package queue ref");
+    let lane_ref = "refs/heads/autopilot/run/run-local/lane/lane-a/a1";
+    vcs.swap(&source, lane_ref, &first, empty)
+        .expect("create D76 lane attempt ref");
+    vcs.swap(&source, lane_ref, &second, &first)
+        .expect("advance D76 lane attempt ref");
     assert_eq!(
-        vcs.read_tip(&source, "refs/autopilot/queue")
-            .expect("queue ref moved"),
+        vcs.read_tip(&source, lane_ref)
+            .expect("D76 lane attempt ref moved"),
         second
     );
 

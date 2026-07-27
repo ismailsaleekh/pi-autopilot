@@ -77,44 +77,30 @@ impl LocalLifecycle {
     }
 
     pub fn close(&self, request: CloseRequest) -> Result<LifecycleReport, LifecycleError> {
-        let target_before = self
-            .vcs
-            .read_tip(&self.source, &request.target_ref)
-            .map_err(map_failure)?;
-        let result_ref = format!(
-            "refs/autopilot/results/{}/{}",
-            request.workstream, request.run_id
-        );
-        self.vcs
-            .swap(&self.source, &result_ref, &request.final_tip, ZERO)
-            .map_err(map_failure)?;
-        let archive_dir = self.archive(&request.workstream, &request.run_id, "closed", &request.evidence)?;
-        let mut removed = Vec::new();
+        let target_before = self.vcs.read_tip(&self.source, &request.target_ref).map_err(map_failure)?;
+        let result_ref = format!("refs/autopilot/results/{}/{}", request.workstream, request.run_id);
+        let mut cleanup = Vec::new();
         for proof in request.cleanup {
-            if !proof.proven_safe {
-                return Err(LifecycleError::UnsafeCleanup);
-            }
-            match proof.artifact {
-                CleanupArtifact::PackageWorktree(path) => {
-                    let owned = self.owned(&path)?;
-                    fs::remove_dir_all(&owned).map_err(|_| LifecycleError::Io)?;
-                    removed.push(owned.display().to_string());
-                }
-                CleanupArtifact::TempRef(name) => {
-                    if name.strip_prefix("refs/autopilot/tmp/").is_none() {
-                        return Err(LifecycleError::UnsafeCleanup);
-                    }
-                    self.git(os(&["update-ref", "-d", &name]))?;
-                    removed.push(name);
-                }
+            if !proof.proven_safe { return Err(LifecycleError::UnsafeCleanup); }
+            cleanup.push(match proof.artifact {
+                CleanupArtifact::PackageWorktree(path) => CleanupArtifact::PackageWorktree(self.owned(&path)?),
+                CleanupArtifact::TempRef(name) if name.strip_prefix("refs/autopilot/tmp/").is_some() => CleanupArtifact::TempRef(name),
+                CleanupArtifact::TempRef(_) => return Err(LifecycleError::UnsafeCleanup),
+            });
+        }
+        let mut removed = Vec::new();
+        for artifact in cleanup {
+            match artifact {
+                CleanupArtifact::PackageWorktree(path) => { fs::remove_dir_all(&path).map_err(|_| LifecycleError::Io)?; removed.push(path.display().to_string()); }
+                CleanupArtifact::TempRef(name) => { self.git(os(&["update-ref", "-d", &name]))?; removed.push(name); }
             }
         }
-        let target_after = self
-            .vcs
-            .read_tip(&self.source, &request.target_ref)
-            .map_err(map_failure)?;
-        if target_after != target_before {
-            return Err(LifecycleError::TargetMoved);
+        let target_after = self.vcs.read_tip(&self.source, &request.target_ref).map_err(map_failure)?;
+        if target_after != target_before { return Err(LifecycleError::TargetMoved); }
+        let archive_dir = self.archive(&request.workstream, &request.run_id, "closed", &request.evidence)?;
+        if let Err(error) = self.vcs.swap(&self.source, &result_ref, &request.final_tip, ZERO) {
+            fs::remove_dir_all(&archive_dir).map_err(|_| LifecycleError::Io)?;
+            return Err(map_failure(error));
         }
         Ok(LifecycleReport { result_ref: Some(result_ref), archive_dir, watchdog_stopped: true, removed })
     }

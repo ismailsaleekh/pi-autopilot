@@ -10,6 +10,7 @@ use drivers::{
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 const ZERO: &str = "0000000000000000000000000000000000000000";
+const RUN_MAIN_REF: &str = "refs/heads/autopilot/run/run-release/main";
 
 #[test]
 fn release_merge_runs_no_ff_commit_checks_verification_and_cas() {
@@ -27,15 +28,15 @@ fn release_merge_runs_no_ff_commit_checks_verification_and_cas() {
 
     let run_main = fixture
         .vcs
-        .read_tip(&fixture.source, "refs/autopilot/run-main")
-        .expect("run-main");
+        .read_tip(&fixture.source, RUN_MAIN_REF)
+        .expect("D76 run main");
     assert_eq!(run_main, prepared.new_tip);
     assert_ne!(prepared.old_tip, prepared.new_tip);
     assert_eq!(
         fixture
             .vcs
-            .read_tip(&fixture.source, "refs/autopilot/run-main^{tree}")
-            .expect("run-main tree"),
+            .read_tip(&fixture.source, &format!("{RUN_MAIN_REF}^{{tree}}"))
+            .expect("D76 run main tree"),
         prepared.tree
     );
     assert_eq!(prepared.changed_paths, vec!["keep.txt".to_owned()]);
@@ -60,7 +61,7 @@ fn stale_cas_fails_and_does_not_move_ref() {
         .vcs
         .swap(
             &fixture.source,
-            "refs/autopilot/run-main",
+            RUN_MAIN_REF,
             &bump,
             &prepared.old_tip,
         )
@@ -72,8 +73,8 @@ fn stale_cas_fails_and_does_not_move_ref() {
     assert_eq!(
         fixture
             .vcs
-            .read_tip(&fixture.source, "refs/autopilot/run-main")
-            .expect("read run-main"),
+            .read_tip(&fixture.source, RUN_MAIN_REF)
+            .expect("read D76 run main"),
         bump,
         "failed stale CAS must leave the ref at the intervening tip"
     );
@@ -116,13 +117,13 @@ impl Fixture {
         let source = owner.join("repo");
         let vcs = GitVcs::new(&owner);
         let base = vcs.init_fixture(&source).expect("seed repo");
-        vcs.swap(&source, "refs/autopilot/run-main", &base, ZERO)
-            .expect("run-main ref");
+        vcs.swap(&source, RUN_MAIN_REF, &base, ZERO)
+            .expect("D76 run main ref");
         Self { owner, source, base, vcs }
     }
 
     fn integrator(&self) -> ReleaseIntegrator {
-        ReleaseIntegrator::new(&self.owner, &self.source, "refs/autopilot/run-main")
+        ReleaseIntegrator::new(&self.owner, &self.source, RUN_MAIN_REF)
     }
 
     fn lane_commit(&self, body: &str, label: &str) -> String {

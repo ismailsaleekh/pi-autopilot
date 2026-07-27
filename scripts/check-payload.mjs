@@ -2,7 +2,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const PACKAGE_ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -154,6 +154,20 @@ function npmPackDryRun() {
   }
 }
 
+function runtimeInputsFromSource(filePath) {
+  const source = readFileSync(resolve(PACKAGE_ROOT, filePath), 'utf8');
+  const inputs = [];
+  for (const match of source.matchAll(/new URL\(['"]([^'"]+)['"], import\.meta\.url\)/gu)) {
+    const specifier = match[1];
+    if (!specifier.startsWith('.')) continue;
+    const absolute = resolve(dirname(resolve(PACKAGE_ROOT, filePath)), specifier);
+    const payloadPath = relative(PACKAGE_ROOT, absolute).replaceAll('\\', '/');
+    if (payloadPath.startsWith('..')) throw new Error(`${filePath} reads outside package payload: ${specifier}`);
+    inputs.push({ path: payloadPath, reason: `${filePath} runtime file URL` });
+  }
+  return inputs;
+}
+
 function allowedRuntimePath(path, binEntry) {
   if (path === 'package.json' || path === 'README.md' || path === 'LICENSE' || path === 'logo.png' || path === 'AUTOPILOT-INSTRUCTIONS.md') return true;
   if (path === binEntry) return true;
@@ -179,10 +193,14 @@ function main() {
   const files = new Set(packFiles.map((entry) => entry.path));
   const errors = [];
   const requireFile = (path, reason) => { if (!files.has(path)) errors.push(`missing required payload path ${path} (${reason})`); };
-  requireFile(binEntry, 'package.json bin.autopilot-core');
-  for (const required of ['host/src/extension.ts', 'host/src/commands.ts', 'host/src/effects.ts', 'host/src/guard.ts', 'host/src/resolve-core.ts', 'host/src/transport.ts', 'host/src/generated/index.ts']) {
-    requireFile(required, 'Host runtime source and generated seam types');
-  }
+  const hostRuntimeSources = ['host/src/extension.ts', 'host/src/commands.ts', 'host/src/effects.ts', 'host/src/guard.ts', 'host/src/resolve-core.ts', 'host/src/transport.ts'];
+  const runtimeInputs = [
+    { path: binEntry, reason: 'package.json bin.autopilot-core' },
+    { path: 'host/src/generated/index.ts', reason: 'generated seam types and guard timeout' },
+    ...hostRuntimeSources.map((path) => ({ path, reason: 'Host runtime source' })),
+    ...hostRuntimeSources.flatMap(runtimeInputsFromSource),
+  ];
+  for (const required of runtimeInputs) requireFile(required.path, required.reason);
 
   for (const path of files) {
     const disposition = winningDisposition(manifest.dispositions, path);

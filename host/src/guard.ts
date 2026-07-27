@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 
+import { GUARD_TIMEOUT_DEFAULT_MS } from "./generated/index.ts";
 import type {
   CoreToHostGuardDecisionPayload,
   HostToCoreGuardQueryPayload,
@@ -49,7 +49,8 @@ export async function guardToolCall(
   }
 }
 
-export function guardTimeoutDefaultMs(contractsPath = defaultContractsPath()): number {
+export function guardTimeoutDefaultMs(contractsPath?: string): number {
+  if (contractsPath === undefined) return GUARD_TIMEOUT_DEFAULT_MS;
   const source = readFileSync(contractsPath, "utf8");
   const match = source.match(/constant\s+"guard_timeout_default"\s+value="([^"]+)"/);
   if (match === null || match[1] === undefined) {
@@ -64,10 +65,6 @@ export function guardTimeoutDefaultMs(contractsPath = defaultContractsPath()): n
 
 function deny(reason: string): GuardResult {
   return { decision: "deny", reason };
-}
-
-function defaultContractsPath(): string {
-  return fileURLToPath(new URL("../../data/contracts.kdl", import.meta.url));
 }
 
 function errorMessage(error: unknown): string {

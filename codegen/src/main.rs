@@ -31,7 +31,7 @@ fn run() -> Result<(), CodegenError> {
         CodegenError::Input(format!("failed to read data/contracts.kdl: {error}"))
     })?;
     let contracts = Contracts::parse(&source)?;
-    let outputs = emit_all(&contracts);
+    let outputs = emit_all(&contracts)?;
 
     if check {
         check_outputs(&outputs)
@@ -76,6 +76,7 @@ struct Contracts {
     schema: String,
     version: u64,
     types: BTreeSet<String>,
+    constants: BTreeMap<String, String>,
     artifacts: Vec<Artifact>,
     enums: Vec<EnumDef>,
     frames: Vec<Frame>,
@@ -151,6 +152,7 @@ impl Contracts {
         let mut schema = None;
         let mut version = None;
         let mut types = BTreeSet::new();
+        let mut constants = BTreeMap::new();
         let mut artifacts = Vec::new();
         let mut enums = Vec::new();
         let mut frames = Vec::new();
@@ -182,10 +184,16 @@ impl Contracts {
                 "frame" => frames.push(parse_frame(node, source)?),
                 "constant" => {
                     ensure_entries(node, 1, &["value", "doc"], source)?;
-                    arg_string(node, 0, source)?;
-                    prop_string(node, "value", source)?;
+                    let key = arg_string(node, 0, source)?.to_owned();
+                    let value = prop_string(node, "value", source)?.to_owned();
                     prop_string_optional(node, "doc", source)?;
                     ensure_no_children(node, source)?;
+                    if constants.insert(key.clone(), value).is_some() {
+                        return Err(CodegenError::Input(format!(
+                            "duplicate constant `{key}` at line {}",
+                            line_of(node, source)
+                        )));
+                    }
                 }
                 "artifact_category" => {
                     ensure_entries(node, 1, &["path", "doc"], source)?;
@@ -233,6 +241,7 @@ impl Contracts {
             schema,
             version,
             types,
+            constants,
             artifacts,
             enums,
             frames,
@@ -827,8 +836,8 @@ struct OutputFile {
     content: String,
 }
 
-fn emit_all(contracts: &Contracts) -> Vec<OutputFile> {
-    let (rust, typescript) = emit_rust_typescript(contracts);
+fn emit_all(contracts: &Contracts) -> Result<Vec<OutputFile>, CodegenError> {
+    let (rust, typescript) = emit_rust_typescript(contracts)?;
     let mut outputs = vec![
         OutputFile {
             path: PathBuf::from("kernel/src/generated/mod.rs"),
@@ -851,10 +860,10 @@ fn emit_all(contracts: &Contracts) -> Vec<OutputFile> {
         }
     }
     outputs.sort_by(|left, right| left.path.cmp(&right.path));
-    outputs
+    Ok(outputs)
 }
 
-fn emit_rust_typescript(contracts: &Contracts) -> (String, String) {
+fn emit_rust_typescript(contracts: &Contracts) -> Result<(String, String), CodegenError> {
     let mut rust = String::new();
     rust.push_str("// ");
     rust.push_str(GENERATED_MARKER);
@@ -868,7 +877,11 @@ fn emit_rust_typescript(contracts: &Contracts) -> (String, String) {
     typescript.push_str("// ");
     typescript.push_str(GENERATED_MARKER);
     typescript.push_str("\n\n");
-    typescript.push_str("export type JsonObject = Record<string, unknown>;\n\n");
+    typescript.push_str("export type JsonObject = Record<string, unknown>;\n");
+    typescript.push_str(&format!(
+        "export const GUARD_TIMEOUT_DEFAULT_MS = {};\n\n",
+        duration_ms(required_constant(contracts, "guard_timeout_default")?)?
+    ));
 
     let mut scalar_types: Vec<String> = contracts
         .types
@@ -997,7 +1010,23 @@ fn emit_rust_typescript(contracts: &Contracts) -> (String, String) {
         core_to_host
     ));
 
-    (rust, typescript)
+    Ok((rust, typescript))
+}
+
+fn required_constant<'a>(contracts: &'a Contracts, key: &str) -> Result<&'a str, CodegenError> {
+    contracts.constants.get(key).map(String::as_str).ok_or_else(|| {
+        CodegenError::Input(format!("missing required constant `{key}`"))
+    })
+}
+
+fn duration_ms(value: &str) -> Result<u64, CodegenError> {
+    let seconds = value.strip_suffix('s').ok_or_else(|| {
+        CodegenError::Input(format!("unsupported duration constant `{value}`"))
+    })?;
+    let seconds = seconds.parse::<u64>().map_err(|error| {
+        CodegenError::Input(format!("invalid duration constant `{value}`: {error}"))
+    })?;
+    Ok(seconds * 1000)
 }
 
 fn emit_shape_tree(
