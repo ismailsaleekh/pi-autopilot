@@ -21,19 +21,12 @@
     "orchestration"
   ],
   "files": [
-    "host/",
+    "host/src/",
     "target/release/autopilot-core",
-    "scripts/",
-    "artifacts/security/",
-    "docs/",
-    "data/",
-    "generated/",
+    "docs/generated/",
     "AUTOPILOT-INSTRUCTIONS.md",
     "logo.png",
     "README.md",
-    "TESTING.md",
-    "TEST_PLAN.md",
-    "PUBLISHING.md",
     "LICENSE"
   ],
   "bin": {
@@ -44,7 +37,11 @@
     "typecheck": "tsc --noEmit -p host/tsconfig.json",
     "test:rust": "cargo test -q",
     "test:host": "node --experimental-strip-types --test host/tests/*.test.ts",
+    "test:packed-consumer": "node scripts/test-packed-consumer.mjs",
     "test": "npm run typecheck && npm run test:rust && npm run test:host",
+    "docs:generate": "node scripts/docs-generate.mjs",
+    "docs:verify": "node scripts/docs-verify.mjs",
+    "payload:check": "node scripts/check-payload.mjs",
     "gate:selftest": "./scripts/gates/selftest.sh",
     "gate:loc:core": "./scripts/gates/loc.sh core",
     "gate:loc:tooling": "./scripts/gates/loc.sh tooling",
