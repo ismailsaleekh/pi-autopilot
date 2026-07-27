@@ -76,5 +76,53 @@ path = "../tests/bg_prereq.rs"
 name = "state_root"
 path = "../tests/state_root.rs"
 
+[[test]]
+name = "control_frame"
+path = "../tests/control_frame.rs"
+
+[[test]]
+name = "exact_command_guard"
+path = "../tests/exact_command_guard.rs"
+
+[[test]]
+name = "watchdog"
+path = "../tests/watchdog.rs"
+
+[[test]]
+name = "allocation_validation"
+path = "../tests/allocation_validation.rs"
+
+[[test]]
+name = "lane_delivery"
+path = "../tests/lane_delivery.rs"
+
+[[test]]
+name = "checkpoint_resume"
+path = "../tests/checkpoint_resume.rs"
+
+[[test]]
+name = "closure_repair"
+path = "../tests/closure_repair.rs"
+
+[[test]]
+name = "conflict_resolution"
+path = "../tests/conflict_resolution.rs"
+
+[[test]]
+name = "staleness_intersection"
+path = "../tests/staleness_intersection.rs"
+
+[[test]]
+name = "forward_two_rounds"
+path = "../tests/forward_two_rounds.rs"
+
+[[test]]
+name = "release_merge_cas"
+path = "../tests/release_merge_cas.rs"
+
+[[test]]
+name = "successor_from_new_main"
+path = "../tests/successor_from_new_main.rs"
+
 [lints]
 workspace = true

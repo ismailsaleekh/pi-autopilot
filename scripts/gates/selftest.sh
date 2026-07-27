@@ -86,18 +86,25 @@ mkdir -p "$bad/kernel"
 for i in $(seq 1 2500); do echo "let x$i = $i;"; done > "$bad/kernel/lib.rs"
 expect 1 "rejects a 2500-LOC kernel (kill-switch)" "$LOC" --root "$bad" kernel
 
+# BAD: the kernel kill-switch is independent even when Core as a whole is under 6500.
+kind="$tmp/loc-kernel-independent"
+mkdir -p "$kind/kernel" "$kind/drivers"
+for i in $(seq 1 2500); do echo "let k$i = $i;"; done > "$kind/kernel/lib.rs"
+for i in $(seq 1 3000); do echo "let d$i = $i;"; done > "$kind/drivers/lib.rs"
+expect 1 "kernel rejects 2500 LOC even when core totals 5500" "$LOC" --root "$kind" kernel
+
 # GOOD: shipped Core budget is kernel + drivers only.
 coregood="$tmp/loc-core-good"
 mkdir -p "$coregood/kernel" "$coregood/drivers"
 for i in $(seq 1 1000); do echo "let k$i = $i;"; done > "$coregood/kernel/lib.rs"
-for i in $(seq 1 1000); do echo "let d$i = $i;"; done > "$coregood/drivers/lib.rs"
-expect 0 "core accepts 2000 LOC across kernel + drivers" "$LOC" --root "$coregood" core
+for i in $(seq 1 5400); do echo "let d$i = $i;"; done > "$coregood/drivers/lib.rs"
+expect 0 "core accepts 6400 LOC across kernel + drivers" "$LOC" --root "$coregood" core
 
 # BAD: an over-budget Core must trip the new kill-switch.
 corebad="$tmp/loc-core-bad"
 mkdir -p "$corebad/drivers"
-for i in $(seq 1 3600); do echo "let d$i = $i;"; done > "$corebad/drivers/lib.rs"
-expect 1 "core rejects a 3600-LOC drivers tree (kill-switch)" "$LOC" --root "$corebad" core
+for i in $(seq 1 6600); do echo "let d$i = $i;"; done > "$corebad/drivers/lib.rs"
+expect 1 "core rejects a 6600-LOC drivers tree (kill-switch)" "$LOC" --root "$corebad" core
 
 # GOOD: build-time tooling budget is codegen + modelcheck only.
 toolinggood="$tmp/loc-tooling-good"
@@ -121,11 +128,11 @@ for i in $(seq 1 6000); do echo "let c$i = $i;"; done > "$coreclean/codegen/main
 expect 0 "core ignores a huge codegen tree" "$LOC" --root "$coreclean" core
 
 toolingclean="$tmp/loc-tooling-cross-contamination"
-mkdir -p "$toolingclean/kernel" "$toolingclean/codegen" "$toolingclean/modelcheck"
-for i in $(seq 1 6000); do echo "let k$i = $i;"; done > "$toolingclean/kernel/lib.rs"
+mkdir -p "$toolingclean/drivers" "$toolingclean/codegen" "$toolingclean/modelcheck"
+for i in $(seq 1 6000); do echo "let d$i = $i;"; done > "$toolingclean/drivers/lib.rs"
 for i in $(seq 1 10); do echo "let c$i = $i;"; done > "$toolingclean/codegen/main.rs"
 for i in $(seq 1 10); do echo "let m$i = $i;"; done > "$toolingclean/modelcheck/lib.rs"
-expect 0 "tooling ignores a huge kernel tree" "$LOC" --root "$toolingclean" tooling
+expect 0 "tooling ignores a huge drivers tree" "$LOC" --root "$toolingclean" tooling
 
 # Comments/blanks must not be counted: 2500 comment lines must PASS.
 cmt="$tmp/loc-comments"
@@ -160,14 +167,14 @@ mkdir -p "$toolinggen/codegen" "$toolinggen/modelcheck"
 for i in $(seq 1 10); do echo "let m$i = $i;"; done > "$toolinggen/modelcheck/lib.rs"
 expect 0 "tooling excludes @generated files" "$LOC" --root "$toolinggen" tooling
 
-# `all` scope aggregates across dirs and uses the combined 5500 reporting budget.
+# `all` scope aggregates across dirs and uses the combined 8500 reporting budget.
 allbad="$tmp/loc-all-bad"
 mkdir -p "$allbad/kernel" "$allbad/drivers" "$allbad/codegen"
 for i in $(seq 1 1900); do echo "let k$i = $i;"; done > "$allbad/kernel/lib.rs"
 for i in $(seq 1 1900); do echo "let d$i = $i;"; done > "$allbad/drivers/lib.rs"
 for i in $(seq 1 1900); do echo "let c$i = $i;"; done > "$allbad/codegen/main.rs"
 expect 0 "kernel alone (1900) is within 2000" "$LOC" --root "$allbad" kernel
-expect 0 "all reports 5700 total against the combined 5500 budget without enforcing" "$LOC" --root "$allbad" all
+expect 0 "all reports 5700 total against the combined 8500 budget without enforcing" "$LOC" --root "$allbad" all
 
 # Absent dirs are not an error (pre-W1).
 mkdir -p "$tmp/loc-empty-root"

@@ -6,3 +6,5 @@ boundary "planning.scout-dossier.v1" mode="enforce" reason="W4 live subscription
 boundary "planning.questions.v1" mode="enforce" reason="W4 live subscription transcript recorded 2026-07-27; flip is one-way"
 boundary "planning.work-map.v1" mode="enforce" reason="W4 live subscription transcript recorded 2026-07-27; flip is one-way"
 boundary "planning.plan-review.v1" mode="enforce" reason="W4 live subscription transcript recorded 2026-07-27; flip is one-way"
+boundary "allocation.lane-proposal.v1" mode="enforce" reason="W5 live subscription transcript recorded 2026-07-27; flip is one-way"
+boundary "validation.verdict.v1" mode="enforce" reason="W6 live subscription transcript recorded 2026-07-27; flip is one-way"

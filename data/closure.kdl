@@ -1,0 +1,6 @@
+finding_effect "forward-blocking" route="tier2" material=true
+finding_effect "closure-blocking" route="tier2" material=true
+finding_effect "advisory" route="none" material=false
+repair_budget "post-release-closure" max_attempts=3 tier2_after_survivals=2
+conflict_class "textual" review="focused"
+conflict_class "semantic-high-risk" review="conflict-review"

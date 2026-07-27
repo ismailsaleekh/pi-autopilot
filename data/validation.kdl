@@ -1,0 +1,23 @@
+schema "autopilot.validation.v1"
+version 1
+
+mode "forward" {
+    command_source "plan-forward-criteria" doc="Commands linked to plan-authored forward criteria."
+    command_source "changed-package-build" doc="Required changed-package build/typecheck release checks."
+    dedupe by="command+cwd+env_profile+commit"
+
+    verdict_route round=1 overall="FORWARD_READY" action="release"
+    verdict_route round=1 overall="FORWARD_BLOCKED" action="one-consolidated-fixer"
+    verdict_route round=1 overall="BLOCKED" action="one-consolidated-fixer"
+    verdict_route round=2 overall="FORWARD_READY" action="release"
+    verdict_route round=2 overall="FORWARD_BLOCKED" action="tier-2-3-no-merge"
+    verdict_route round=2 overall="BLOCKED" action="tier-2-3-no-merge"
+}
+
+criterion_verdict value="PASS"
+criterion_verdict value="FAIL"
+criterion_verdict value="BLOCKED"
+
+finding_effect value="forward-blocking"
+finding_effect value="closure-blocking-forward-safe"
+finding_effect value="advisory"

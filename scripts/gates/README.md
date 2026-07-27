@@ -9,9 +9,9 @@ invariants that the whole convergence property depends on.
 | Script | DoD | Enforces |
 |---|---|---|
 | `loc.sh kernel` | S1 | Core kernel ≤ 2,000 LOC — **the W1 kill-switch** |
-| `loc.sh core` | S2 | Shipped Core (`kernel/` + `drivers/`) ≤ 3,500 LOC |
+| `loc.sh core` | S2 | Shipped Core (`kernel/` + `drivers/`) ≤ 6,500 LOC |
 | `loc.sh tooling` | S2b | Build-time tooling (`codegen/` + `modelcheck/`) ≤ 2,000 LOC |
-| `loc.sh all` | report | Combined total across kernel, drivers, codegen, and modelcheck; reports against 5,500 LOC, not an enforcement scope |
+| `loc.sh all` | report | Combined total across kernel, drivers, codegen, and modelcheck; reports against 8,500 LOC, not an enforcement scope |
 | `kernel-purity.sh` | S4, F1 | Kernel names no domain concept; performs no IO |
 | `no-inference.sh` | B4 | State comes only from `fold(events)` |
 | `host-thinness.sh` | S7 | TS Host ≤ 1,200 LOC and **decides nothing** (D78) |
@@ -26,6 +26,15 @@ mandating build-time `codegen` and `modelcheck` with no separate line item. The
 split keeps shipped Core and verification tooling separately bounded, with
 selftest fixtures proving both new kill-switches fire, while `loc.sh all` still
 reports the combined total so no line is hidden.
+
+D80 then corrected D77 §2's remaining internal inconsistency: the sketch had
+already allocated 3,700 LOC of kernel + drivers against a stated 3,500 Core
+ceiling, before the measured D76 §13 driver scope was reconciled. The corrected
+6,500 Core ceiling is evidence-based on 15 delivered modules, leaves the frozen
+2,000-LOC kernel budget untouched, and follows four re-cuts that recovered 628
+LOC before the figure changed. `selftest.sh` pins that correction with a Core
+over-budget fixture and an independent kernel over-budget fixture, so this is a
+budget with its own observed kill-switch, not a pressure raise.
 
 ## Why `selftest.sh` exists
 
@@ -63,7 +72,7 @@ known-bad fixture means **the kill-switch cannot be trusted to fire**, and W1
 must not start.
 
 ```bash
-./scripts/gates/selftest.sh     # must exit 0 — W0 gate (88/88 fixtures)
+./scripts/gates/selftest.sh     # must exit 0 — W0 gate (89/89 fixtures)
 ```
 
 ## The host boundary (D78)

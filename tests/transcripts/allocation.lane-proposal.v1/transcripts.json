@@ -1,0 +1,15 @@
+{
+  "records": [
+    {
+      "schema": "autopilot.transcript.v1",
+      "boundary_id": "allocation.lane-proposal.v1",
+      "raw_output": "## Delivery boundary DB1\nUtility `--json` behavior and its approved focused verification, comprising **U1, U2, U3**.\n\n**Ordered unit ids:** U1 → U2 → U3\n\n### Lane 1 — Flag handling\n- **Context family:** CF-UTILITY-JSON\n- **Estimate:** Small\n- **Launch wave:** 1\n- **Units:**\n  > unit U1: parse the --json flag in the utility entrypoint; depends on: none;  \n  > forward criterion FC1 = flag recognized and unknown flags exit non-zero\n- **Focused tests:** None separately approved; covered by U3.\n- **Downstream release edges:** U1 → U2 via FC1; U1 → U3 via FC1.\n\n### Lane 2 — JSON output\n- **Context family:** CF-UTILITY-JSON\n- **Estimate:** Small\n- **Launch wave:** 2, after U1 satisfies FC1\n- **Units:**\n  > unit U2: emit the documented JSON object when --json is set, preserving default  \n  > output byte-for-byte; depends on: U1; consumes forward criterion FC1\n- **Focused tests:** None separately approved; covered by U3.\n- **Downstream release edge:** U2 → U3 via FC2. FC2 remains the supplied, undefined reference.\n\n### Lane 3 — Focused verification\n- **Context family:** CF-UTILITY-JSON\n- **Estimate:** Small\n- **Launch wave:** 3, after U1 and U2\n- **Units:**\n  > unit U3: focused test covering --json, default output, and unknown-flag rejection;  \n  > depends on: U1, U2; consumes forward criteria FC1, FC2\n- **Focused tests:** U3 exactly as supplied.\n",
+      "provenance": {
+        "provider": "openai-codex",
+        "model": "gpt-5.6-sol",
+        "thinking": "max",
+        "session_id": "w5-capture-allocation-lane-proposal-43595"
+      }
+    }
+  ]
+}

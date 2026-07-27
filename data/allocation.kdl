@@ -1,0 +1,17 @@
+schema "autopilot.allocation.v1"
+version 1
+
+lane_target min=3 max=6 doc="D76 section 7 normal cohesive implementation lane count."
+resource_gate "parallel_cap" default=8 counts="active Implementers only" excludes="Validators, Fixers, Curators, Allocator, Bughunter, tests, merges, heartbeat, finalization"
+resource_gate "storage_pressure" floor="max(5GiB, projected_sparse_worktree_footprint*2)"
+resource_gate "memory_pressure" floor="max(2GiB, physical_ram/10)"
+
+tie_break order="launch_wave asc, remaining_dependency_path desc, operator_plan_unit_order asc, lane_id lexicographic" owner="kernel::schedule"
+
+delta_allocation_trigger "tier2_or_tier3_dag_change"
+delta_allocation_trigger "disproven_context_sizing"
+delta_allocation_trigger "permanent_lane_failure"
+delta_allocation_trigger "unused_ready_frontier"
+
+forbidden_allocator_authority "file_ownership"
+forbidden_allocator_authority "path_overlap_blocking"

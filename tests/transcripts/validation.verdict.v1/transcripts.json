@@ -1,0 +1,15 @@
+{
+  "records": [
+    {
+      "schema": "autopilot.transcript.v1",
+      "boundary_id": "validation.verdict.v1",
+      "raw_output": "FC1 — BLOCKED  \n- Forward-edge id: L1->L2.FC1  \n- Semantic surface: utility entrypoint `--json` flag parsing  \n- Covered paths: `src/cli.rs`, `tests/cli_flags.rs` declared, but not present in workspace  \n- Evidence refs:  \n  - E1: `git status` failed: not a git repository  \n  - E2: `cargo test --test cli_flags -- json_flag_recognized` exited 101: missing `Cargo.toml`  \n- Finding refs: F-FC1-001 — validation artifact/workspace unavailable; required evidence command could not be executed against delivery\n\nFC2 — BLOCKED  \n- Forward-edge id: L1->L2.FC2  \n- Semantic surface: unknown-flag rejection and diagnostic naming `--bogus`  \n- Covered paths: `src/cli.rs`, `tests/cli_flags.rs` declared, but not present in workspace  \n- Evidence refs:  \n  - E1: `git status` failed: not a git repository  \n  - E3: `cargo test --test cli_flags -- unknown_flag_named` exited 101: missing `Cargo.toml`; expected output `error: unknown flag --bogus` not observed  \n- Finding refs: F-FC2-001 — validation artifact/workspace unavailable; required evidence command could not be executed against delivery\n\nOverall forward verdict: BLOCKED\n",
+      "provenance": {
+        "provider": "openai-codex",
+        "model": "gpt-5.5",
+        "thinking": "xhigh",
+        "session_id": "w6-capture-validation-verdict-96036"
+      }
+    }
+  ]
+}

@@ -1,0 +1,51 @@
+// D76 §6.1/§6.2 thin control vertical data.
+// Rust code consumes these rows; kernel types remain generated from contracts.kdl.
+
+action_kind "launch-background" {
+    effect "LaunchBackground"
+}
+
+action_kind "reconcile-background" {
+    effect "ReconcileBackground"
+}
+
+action_kind "read-failure-log" {
+    effect "ReadFailureLog"
+}
+
+action_kind "stop-background" {
+    effect "StopBackground"
+}
+
+action_kind "request-operator" {
+    effect "RequestOperator"
+}
+
+action_kind "return-idle" {
+    effect "ReturnIdle"
+}
+
+timeout "focused-command" {
+    duration "30m"
+}
+
+timeout "integration" {
+    duration "30m"
+}
+
+timeout "final-suite" {
+    duration "4h"
+}
+
+timeout "cooperative-handoff-checkpoint" {
+    duration "2m"
+}
+
+watchdog "heartbeat" {
+    minutes "25"
+    command "autopilot-heartbeat-wait --minutes 25"
+    display_name "autopilot heartbeat wait"
+    isAgent "#false"
+    notifyOnCompletion "#true"
+    triggerOnCompletion "#true"
+}
