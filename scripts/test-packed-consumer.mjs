@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { accessSync, chmodSync, constants, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { accessSync, chmodSync, constants, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -29,13 +29,33 @@ function jsonRun(command, args, cwd, env, timeout) {
 }
 
 function assertFile(path, label) {
-  const info = lstatSync(path);
+  let info;
+  try { info = lstatSync(path); } catch (error) { fail(`${label} is missing at ${path}: ${error.message}`); }
   if (!info.isFile() || info.isSymbolicLink()) fail(`${label} is not one regular file: ${path}`);
 }
 
 function assertExecutable(path, label) {
   assertFile(path, label);
   try { accessSync(path, constants.X_OK); } catch (error) { fail(`${label} is not executable at ${path}: ${error.message}`); }
+}
+
+function packageRelativePath(value, label) {
+  if (typeof value !== 'string' || value.length === 0) fail(`${label} is absent`);
+  const resolved = resolve('/package', value);
+  const rel = relative('/package', resolved);
+  if (value.startsWith('/') || rel === '..' || rel.startsWith(`..${sep}`)) fail(`${label} must be package-relative, got ${value}`);
+  return rel;
+}
+
+function readPackageJson(packageJsonPath, label) {
+  try { return JSON.parse(readFileSync(packageJsonPath, 'utf8')); } catch (error) { fail(`${label} is not readable JSON at ${packageJsonPath}: ${error.message}`); }
+}
+
+function resolveHostEntry(installed, packageJsonPath) {
+  const pkg = readPackageJson(packageJsonPath, 'installed package.json');
+  if (!Array.isArray(pkg.pi?.extensions) || pkg.pi.extensions.length !== 1) fail('installed package.json pi.extensions must declare exactly one Host entry point');
+  const rel = packageRelativePath(pkg.pi.extensions[0], 'installed package.json pi.extensions[0] Host entry point');
+  return { path: resolve(installed, rel), rel };
 }
 
 function main() {
@@ -80,8 +100,8 @@ function main() {
     const binPath = resolve(installed, metadata);
     assertExecutable(binPath, 'installed bin.autopilot-core target');
 
-    const hostEntry = join(installed, 'host', 'src', 'extension.ts');
-    assertFile(hostEntry, 'Host extension entry point');
+    const hostEntry = resolveHostEntry(installed, packageJsonPath);
+    assertFile(hostEntry.path, `Host extension entry point declared by package.json pi.extensions[0] (${hostEntry.rel})`);
     const loaderPath = join(root, 'strip-installed-types-loader.mjs');
     writeFileSync(loaderPath, `
       import { readFile } from 'node:fs/promises';
@@ -95,10 +115,12 @@ function main() {
       }
     `, 'utf8');
     const loadScript = `
+      import { dirname, join } from 'node:path';
       import { pathToFileURL } from 'node:url';
-      const mod = await import(pathToFileURL(${JSON.stringify(hostEntry)}).href);
+      const hostEntry = ${JSON.stringify(hostEntry.path)};
+      const mod = await import(pathToFileURL(hostEntry).href);
       if (typeof mod.default !== 'function') throw new Error('default export is not a function');
-      const resolver = await import(pathToFileURL(${JSON.stringify(join(installed, 'host', 'src', 'resolve-core.ts'))}).href);
+      const resolver = await import(pathToFileURL(join(dirname(hostEntry), 'resolve-core.ts')).href);
       const actual = resolver.resolveCoreBinary({ packageJsonPath: ${JSON.stringify(packageJsonPath)} });
       if (actual !== ${JSON.stringify(binPath)}) throw new Error('core resolver returned ' + actual);
       console.log(JSON.stringify({ host_entry_loaded: true, resolved_core: actual }));
@@ -108,7 +130,7 @@ function main() {
       schema: 'autopilot.packed_consumer_check.v1',
       passed: true,
       installed_package: relative(root, installed),
-      host_entry: relative(installed, hostEntry),
+      host_entry: relative(installed, hostEntry.path),
       bin_entry: metadata,
       resolved_core: relative(installed, loadResult.resolved_core),
       does_not_prove: 'This offline witness does not drive Pi headlessly or prove extension registration inside a live Pi process; it proves the installed package layout exposes the Host entry and package.json bin path a loader would use.',

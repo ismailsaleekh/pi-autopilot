@@ -37,7 +37,7 @@ export function resolveCoreBinary(options: ResolveCoreOptions = {}): string {
 }
 
 function defaultPackageJsonPath(): string {
-  return fileURLToPath(new URL("../../package.json", import.meta.url));
+  return fileURLToPath(new URL("../package.json", import.meta.url));
 }
 
 function readPackageMetadata(packageJsonPath: string): Record<string, unknown> {

@@ -310,12 +310,23 @@ function collectTsGraph(root, rootFiles) {
   return reachable;
 }
 
+function packageRelativePath(value, label) {
+  if (typeof value !== 'string' || value.length === 0) throw new Error(`${label} must be a non-empty package-relative path`);
+  const relPath = normalize(value).split(sep).join('/');
+  if (value.startsWith('/') || relPath === '..' || relPath.startsWith('../')) throw new Error(`${label} must be a non-absolute path inside the package, got ${value}`);
+  return relPath.replace(/^\.\//u, '');
+}
+
 function packageProductionFiles(root) {
   const files = new Set(['package.json']);
   const packagePath = join(root, 'package.json');
   if (!existsSync(packagePath)) return files;
   const pkg = JSON.parse(readFileSync(packagePath, 'utf8'));
-  for (const value of Object.values(pkg.bin ?? {})) if (typeof value === 'string') files.add(value);
+  for (const value of Object.values(pkg.bin ?? {})) if (typeof value === 'string') files.add(packageRelativePath(value, 'package.json bin entry'));
+  if (pkg.pi?.extensions !== undefined) {
+    if (!Array.isArray(pkg.pi.extensions)) throw new Error('package.json pi.extensions must be an array when present');
+    for (const [index, value] of pkg.pi.extensions.entries()) files.add(packageRelativePath(value, `package.json pi.extensions[${index}]`));
+  }
   for (const command of Object.values(pkg.scripts ?? {})) {
     if (typeof command !== 'string') continue;
     const matches = command.matchAll(/(?:node|tsx|tsc|bash|sh)\s+(?:--[A-Za-z0-9_=.-]+\s+)*(?:--test\s+)?([^\s&|;]+\.(?:mjs|js|ts|mts|sh))/gu);
@@ -339,9 +350,9 @@ function buildReachability(root) {
     }
   }
 
-  const scriptRoots = Array.from(packageProductionFiles(root)).filter((file) => SOURCE_EXTENSIONS.has(extname(file)) && existsSync(join(root, file)));
-  const tsRoots = ['host/src/extension.ts', ...scriptRoots].filter((file, index, arr) => arr.indexOf(file) === index && existsSync(join(root, file)));
-  const reachableFiles = new Set([...collectRustGraph(root, rustRoots), ...collectTsGraph(root, tsRoots), ...packageProductionFiles(root)]);
+  const productionFiles = packageProductionFiles(root);
+  const tsRoots = Array.from(productionFiles).filter((file) => SOURCE_EXTENSIONS.has(extname(file)) && existsSync(join(root, file)));
+  const reachableFiles = new Set([...collectRustGraph(root, rustRoots), ...collectTsGraph(root, tsRoots), ...productionFiles]);
   const packagePath = join(root, 'package.json');
   let packageText = '';
   if (existsSync(packagePath)) packageText = readFileSync(packagePath, 'utf8');

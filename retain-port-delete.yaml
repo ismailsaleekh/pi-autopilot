@@ -530,7 +530,7 @@ dispositions:
     loc: 1354
     reason: "D76 §11 — coordinator/bootstrap/signer/migration CLIs are deleted and replaced by Host/Core commands."
     replacement_slice: slice-7
-    replacement_consumer: host/src
+    replacement_consumer: src
   - path: "src/internal/anthropic-system-prompt-extension.ts"
     kind: exact
     disposition: delete
@@ -558,9 +558,11 @@ dispositions:
     replacement_slice: slice-2
   - path: "src/types/"
     kind: prefix
-    disposition: retain
+    disposition: delete
     loc: 327
-    reason: "D78 — minimal Node type shims are retained for the thin Host TypeScript surface."
+    reason: "D78/D79 §1 — old TypeScript runtime Node shims are obsolete after the Host/Core split; generated seam types replace them."
+    replacement_slice: slice-2
+    replacement_consumer: src/generated
   - path: "src/core/"
     kind: prefix
     disposition: delete
@@ -721,7 +723,7 @@ dispositions:
     loc: 24
     reason: "D76 §11 — retain/port useful capability into the simplified architecture."
     replacement_slice: slice-2
-    replacement_consumer: host/src
+    replacement_consumer: src
   - path: "src/core/unit-merge.ts"
     kind: exact
     disposition: port
@@ -939,7 +941,7 @@ dispositions:
     loc: 6
     reason: "D76 §11 — retain/port useful capability into the simplified architecture."
     replacement_slice: slice-2
-    replacement_consumer: host/src
+    replacement_consumer: src
   - path: "tests/helpers/sdk-ready-roster.ts"
     kind: exact
     disposition: port

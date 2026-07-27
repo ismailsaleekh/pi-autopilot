@@ -96,7 +96,7 @@ files=()
 while IFS= read -r f; do
   head -n "$GENERATED_SCAN_LINES" "$f" 2>/dev/null | grep -qF "$GENERATED_MARKER" && continue
   files+=("$f")
-done < <(find "$host_dir" -type f \( -name '*.ts' -o -name '*.mts' \) \
+done < <(find -L "$host_dir" -type f \( -name '*.ts' -o -name '*.mts' \) \
            -not -path '*/node_modules/*' -not -path '*/dist/*' | LC_ALL=C sort)
 
 if [ "${#files[@]}" -eq 0 ]; then

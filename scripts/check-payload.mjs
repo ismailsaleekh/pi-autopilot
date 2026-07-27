@@ -171,7 +171,7 @@ function runtimeInputsFromSource(filePath) {
 function allowedRuntimePath(path, binEntry) {
   if (path === 'package.json' || path === 'README.md' || path === 'LICENSE' || path === 'logo.png' || path === 'AUTOPILOT-INSTRUCTIONS.md') return true;
   if (path === binEntry) return true;
-  if (path.startsWith('host/src/') && path.endsWith('.ts')) return true;
+  if (path.startsWith('src/') && path.endsWith('.ts')) return true;
   if (path.startsWith('docs/generated/') && path.endsWith('.md')) return true;
   return false;
 }
@@ -193,10 +193,10 @@ function main() {
   const files = new Set(packFiles.map((entry) => entry.path));
   const errors = [];
   const requireFile = (path, reason) => { if (!files.has(path)) errors.push(`missing required payload path ${path} (${reason})`); };
-  const hostRuntimeSources = ['host/src/extension.ts', 'host/src/commands.ts', 'host/src/effects.ts', 'host/src/guard.ts', 'host/src/resolve-core.ts', 'host/src/transport.ts'];
+  const hostRuntimeSources = ['src/extension.ts', 'src/commands.ts', 'src/effects.ts', 'src/guard.ts', 'src/resolve-core.ts', 'src/transport.ts'];
   const runtimeInputs = [
     { path: binEntry, reason: 'package.json bin.autopilot-core' },
-    { path: 'host/src/generated/index.ts', reason: 'generated seam types and guard timeout' },
+    { path: 'src/generated/index.ts', reason: 'generated seam types and guard timeout' },
     ...hostRuntimeSources.map((path) => ({ path, reason: 'Host runtime source' })),
     ...hostRuntimeSources.flatMap(runtimeInputsFromSource),
   ];

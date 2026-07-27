@@ -21,7 +21,7 @@
     "orchestration"
   ],
   "files": [
-    "host/src/",
+    "src/",
     "target/release/autopilot-core",
     "docs/generated/",
     "AUTOPILOT-INSTRUCTIONS.md",
@@ -47,7 +47,7 @@
     "gate:loc:tooling": "./scripts/gates/loc.sh tooling",
     "gate:kernel-purity": "./scripts/gates/kernel-purity.sh",
     "gate:no-inference": "./scripts/gates/no-inference.sh",
-    "gate:host-thinness": "./scripts/gates/host-thinness.sh --root \"$PWD/host\"",
+    "gate:host-thinness": "./scripts/gates/host-thinness.sh",
     "codegen:check": "cargo run -p codegen -- --check",
     "modelcheck": "cargo run -p modelcheck",
     "security:scan": "node scripts/security-scan.mjs",
@@ -58,7 +58,7 @@
   },
   "pi": {
     "extensions": [
-      "./host/src/extension.ts"
+      "./src/extension.ts"
     ],
     "image": "https://raw.githubusercontent.com/ismailsaleekh/pi-autopilot/main/logo.png"
   },
