@@ -267,11 +267,16 @@ pub enum PlanningError {
 fn accept_contains(raw: &str, required: &str, runtime: &BoundaryRuntime) -> Result<String, Rejection> {
     if raw.contains(required) { Ok(raw.to_owned()) } else { runtime.reject(raw)?; Ok(raw.to_owned()) }
 }
+enum MarkdownLine<'a> { Heading(&'a str), Bullet(&'a str), Text(&'a str) }
+fn classify_markdown_line(line: &str) -> MarkdownLine<'_> {
+    let trimmed = line.trim();
+    match trimmed.as_bytes().first() { Some(b'#') => MarkdownLine::Heading(trimmed.trim_start_matches('#').trim_start()), Some(b'-' | b'*') => MarkdownLine::Bullet(trimmed[1..].trim_start()), _ => MarkdownLine::Text(trimmed) }
+}
 fn accepts_work_map(raw: &str) -> bool {
     let (mut units, mut seen, mut objective, mut criteria, mut link) = (0_u8, false, false, false, false);
     for line in raw.lines().chain(std::iter::once("### unit")) {
         let trimmed = line.trim();
-        if trimmed.trim_start_matches('#').trim_start().to_ascii_lowercase().starts_with("unit") {
+        if matches!(classify_markdown_line(trimmed), MarkdownLine::Heading(text) if text.eq_ignore_ascii_case("unit")) {
             if seen { if !(objective && criteria && link) { return false; } units = units.saturating_add(1); }
             seen = true; objective = false; criteria = false; link = false; continue;
         }
@@ -296,8 +301,11 @@ fn verdict_is_pass(line: &str) -> Option<bool> {
     matches!(class, "pass" | "blocker" | "advisory" | "fail" | "blocked" | "needs-fix").then_some(class == "pass")
 }
 fn substantive_finding(line: &str) -> bool {
-    let lower = line.to_ascii_lowercase();
-    (lower.starts_with('-') || lower.starts_with('*') || lower.starts_with("finding") || lower.starts_with("issue")) && ["must", "missing", "omission", "blocker", "substantive", "fail", "unsafe", "incomplete", "not covered"].iter().any(|word| lower.contains(word))
+    let text = match classify_markdown_line(line) { MarkdownLine::Bullet(text) => text, MarkdownLine::Text(text) if named_finding(text) => text, _ => return false }.to_ascii_lowercase();
+    ["must", "missing", "omission", "blocker", "substantive", "fail", "unsafe", "incomplete", "not covered"].iter().any(|word| text.contains(word))
+}
+fn named_finding(text: &str) -> bool {
+    text.split(|ch: char| ch.is_ascii_whitespace() || ch == ':').next().is_some_and(|word| ["finding", "issue"].iter().any(|name| word.eq_ignore_ascii_case(name)))
 }
 fn accepts_question_output(raw: &str) -> bool {
     let trimmed = raw.trim();

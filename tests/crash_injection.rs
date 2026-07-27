@@ -61,7 +61,7 @@ fn integration_crash_between_merge_commit_and_ref_swap_accepts_once() {
 
     let before_swap = fixture
         .vcs
-        .read_tip(&fixture.source, "refs/autopilot/run-main")
+        .read_tip(&fixture.source, "refs/heads/autopilot/run/run-main/main")
         .expect("run-main before swap");
     assert_eq!(
         reconcile_integration_crash(&prepared.old_tip, &prepared.new_tip, &before_swap),
@@ -74,7 +74,7 @@ fn integration_crash_between_merge_commit_and_ref_swap_accepts_once() {
 
     let after_swap = fixture
         .vcs
-        .read_tip(&fixture.source, "refs/autopilot/run-main")
+        .read_tip(&fixture.source, "refs/heads/autopilot/run/run-main/main")
         .expect("run-main after swap");
     assert_eq!(
         reconcile_integration_crash(&prepared.old_tip, &prepared.new_tip, &after_swap),
@@ -105,13 +105,13 @@ impl Fixture {
         let source = owner.join("repo");
         let vcs = GitVcs::new(&owner);
         let base = vcs.init_fixture(&source).expect("seed repo");
-        vcs.swap(&source, "refs/autopilot/run-main", &base, ZERO)
+        vcs.swap(&source, "refs/heads/autopilot/run/run-main/main", &base, ZERO)
             .expect("run-main ref");
         Self { owner, source, base, vcs }
     }
 
     fn integrator(&self) -> ReleaseIntegrator {
-        ReleaseIntegrator::new(&self.owner, &self.source, "refs/autopilot/run-main")
+        ReleaseIntegrator::new(&self.owner, &self.source, "refs/heads/autopilot/run/run-main/main")
     }
 
     fn lane_commit(&self, body: &str, label: &str) -> String {

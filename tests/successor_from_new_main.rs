@@ -74,13 +74,13 @@ impl Fixture {
         let source = owner.join("repo");
         let vcs = GitVcs::new(&owner);
         let base = vcs.init_fixture(&source).expect("seed repo");
-        vcs.swap(&source, "refs/autopilot/run-main", &base, ZERO)
+        vcs.swap(&source, "refs/heads/autopilot/run/run-main/main", &base, ZERO)
             .expect("run-main ref");
         Self { owner, source, base, vcs }
     }
 
     fn integrator(&self) -> ReleaseIntegrator {
-        ReleaseIntegrator::new(&self.owner, &self.source, "refs/autopilot/run-main")
+        ReleaseIntegrator::new(&self.owner, &self.source, "refs/heads/autopilot/run/run-main/main")
     }
 
     fn lane_commit(&self) -> String {

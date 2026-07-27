@@ -119,7 +119,7 @@ fn seed_11_target_movement() -> SurfaceOutcome {
     let recorded_base = fixture.base.clone();
     fixture
         .vcs
-        .swap(&fixture.source, "refs/autopilot/run-main", &fixture.base, ZERO)
+        .swap(&fixture.source, "refs/heads/autopilot/run/run-main/main", &fixture.base, ZERO)
         .expect("run-main ref");
     fs::write(fixture.source.join("keep.txt"), "target moved\n").expect("target edit");
     fixture.vcs.stage_all(&fixture.source).expect("stage target");
@@ -136,7 +136,7 @@ fn seed_11_target_movement() -> SurfaceOutcome {
     let syncer = TargetSyncer::new(
         &fixture.owner,
         &fixture.source,
-        "refs/autopilot/run-main",
+        "refs/heads/autopilot/run/run-main/main",
         "refs/heads/main",
     );
     let outcome = syncer
@@ -146,7 +146,7 @@ fn seed_11_target_movement() -> SurfaceOutcome {
     let integrated = outcome.integrated.expect("moved target creates candidate");
     let run_main_after = fixture
         .vcs
-        .read_tip(&fixture.source, "refs/autopilot/run-main")
+        .read_tip(&fixture.source, "refs/heads/autopilot/run/run-main/main")
         .expect("run-main after");
     let operator_target_after = fixture
         .vcs
@@ -177,12 +177,10 @@ fn seed_13_abort() -> SurfaceOutcome {
     let run_main_before = fixture.base.clone();
     fixture
         .vcs
-        .swap(&fixture.source, "refs/autopilot/run-main", &fixture.base, ZERO)
+        .swap(&fixture.source, "refs/heads/autopilot/run/run-main/main", &fixture.base, ZERO)
         .expect("run-main");
-    fixture
-        .vcs
-        .swap(&fixture.source, "refs/autopilot/tmp/preserve", &fixture.base, ZERO)
-        .expect("temp ref");
+    let lane_ref = "refs/heads/autopilot/run/run-r13/lane/lane-preserve/a1";
+    fixture.vcs.swap(&fixture.source, lane_ref, &fixture.base, ZERO).expect("D76 lane ref");
     let dirty = fixture.owner.join("worktrees/dirty");
     fs::create_dir_all(&dirty).expect("dirty dir");
     fs::write(dirty.join("dirty.txt"), "uncommitted\n").expect("dirty file");
@@ -200,11 +198,11 @@ fn seed_13_abort() -> SurfaceOutcome {
     let dirty_after = fs::read_to_string(dirty.join("dirty.txt")).expect("dirty after abort");
     let temp_ref_after = fixture
         .vcs
-        .read_tip(&fixture.source, "refs/autopilot/tmp/preserve")
-        .expect("temp ref preserved");
+        .read_tip(&fixture.source, lane_ref)
+        .expect("D76 lane ref preserved");
     let run_main_after = fixture
         .vcs
-        .read_tip(&fixture.source, "refs/autopilot/run-main")
+        .read_tip(&fixture.source, "refs/heads/autopilot/run/run-main/main")
         .expect("run-main preserved");
     assert!(report.watchdog_stopped, "seed 13 stops the background watchdog");
     assert_eq!(report.result_ref, None, "seed 13 negative: abort creates no merge/result ref");
@@ -234,7 +232,7 @@ fn seed_14_close() -> SurfaceOutcome {
     let fixture = Fixture::new("r13-close");
     fixture
         .vcs
-        .swap(&fixture.source, "refs/autopilot/run-main", &fixture.base, ZERO)
+        .swap(&fixture.source, "refs/heads/autopilot/run/run-main/main", &fixture.base, ZERO)
         .expect("run-main ref");
     let target_before = fixture
         .vcs
@@ -242,7 +240,7 @@ fn seed_14_close() -> SurfaceOutcome {
         .expect("target before");
     let run_main_before = fixture
         .vcs
-        .read_tip(&fixture.source, "refs/autopilot/run-main")
+        .read_tip(&fixture.source, "refs/heads/autopilot/run/run-main/main")
         .expect("run-main before");
     let operator_checkout = fixture.root.join("operator-checkout");
     fs::create_dir_all(&operator_checkout).expect("operator dir");
@@ -258,11 +256,6 @@ fn seed_14_close() -> SurfaceOutcome {
     let safe_tree = fixture.owner.join("worktrees/safe-terminal");
     fs::create_dir_all(&safe_tree).expect("safe tree");
     fs::write(safe_tree.join("done.txt"), "done\n").expect("safe content");
-    fixture
-        .vcs
-        .swap(&fixture.source, "refs/autopilot/tmp/close", &fixture.base, ZERO)
-        .expect("temp ref");
-
     let lifecycle = LocalLifecycle::new(&fixture.owner, &fixture.source, fixture.owner.join("archive"));
     let report = lifecycle
         .close(CloseRequest {
@@ -289,7 +282,7 @@ fn seed_14_close() -> SurfaceOutcome {
         .expect("target after");
     let run_main_after = fixture
         .vcs
-        .read_tip(&fixture.source, "refs/autopilot/run-main")
+        .read_tip(&fixture.source, "refs/heads/autopilot/run/run-main/main")
         .expect("run-main after");
     let push_refused = matches!(
         fixture.vcs.push(),

@@ -22,7 +22,7 @@ fn target_movement_is_integrated_as_isolated_candidate_without_moving_operator_t
     let syncer = TargetSyncer::new(
         &fixture.owner,
         &fixture.source,
-        "refs/autopilot/run-main",
+        "refs/heads/autopilot/run/run-main/main",
         "refs/heads/main",
     );
     let outcome = syncer
@@ -34,7 +34,7 @@ fn target_movement_is_integrated_as_isolated_candidate_without_moving_operator_t
     assert_eq!(integrated.request.candidate_tip, target_tip);
     assert_ne!(integrated.old_tip, integrated.new_tip);
     assert_eq!(
-        fixture.vcs.read_tip(&fixture.source, "refs/autopilot/run-main").expect("run-main after"),
+        fixture.vcs.read_tip(&fixture.source, "refs/heads/autopilot/run/run-main/main").expect("run-main after"),
         integrated.new_tip,
         "ordinary CAS path advances only the integration ref"
     );
@@ -58,7 +58,7 @@ impl Fixture {
         let source = owner.join("repo");
         let vcs = GitVcs::new(&owner);
         let base = vcs.init_fixture(&source).expect("seed repo");
-        vcs.swap(&source, "refs/autopilot/run-main", &base, ZERO).expect("run-main ref");
+        vcs.swap(&source, "refs/heads/autopilot/run/run-main/main", &base, ZERO).expect("run-main ref");
         Self { owner, source, base, vcs }
     }
 }

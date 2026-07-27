@@ -1,0 +1,12 @@
+schema "autopilot.commands.v1"
+version 1
+
+command "autopilot-plan" driver="planning" args="workstream task-paths..." expects="/autopilot-plan <workstream> <task-paths...>"
+command "autopilot" driver="allocation-dispatch-runner" args="workstream" expects="/autopilot <workstream>"
+command "autopilot-status" driver="state" args="none" expects="/autopilot-status"
+command "autopilot-close" driver="lifecycle-close" args="workstream" expects="/autopilot-close <workstream>"
+command "autopilot-abort" driver="lifecycle-abort" args="workstream" expects="/autopilot-abort <workstream>"
+command "autopilot-config" driver="roster-config" args="show|parallel-cap" expects="/autopilot-config show OR /autopilot-config parallel-cap <n>"
+command "autopilot-handoff" driver="handoff" args="none" expects="/autopilot-handoff"
+command "autopilot-inject" driver="workstream-attach" args="workstream" expects="/autopilot-inject <workstream>"
+command "autopilot-onboard" driver="planning-onboard" args="request..." expects="/autopilot-onboard <request...>"

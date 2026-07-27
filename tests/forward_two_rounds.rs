@@ -79,7 +79,7 @@ fn round_two_remaining_blocker_routes_tier23_and_ref_stays_put() {
     let source = root.join("repo");
     let vcs = GitVcs::new(&root);
     let old_tip = vcs.init_fixture(&source).expect("seed repo");
-    vcs.swap(&source, "refs/autopilot/run-main", &old_tip, ZERO)
+    vcs.swap(&source, "refs/heads/autopilot/run/run-main/main", &old_tip, ZERO)
         .expect("run-main ref");
 
     let decision = decide_forward_round(
@@ -96,7 +96,7 @@ fn round_two_remaining_blocker_routes_tier23_and_ref_stays_put() {
         }
     );
     let after = vcs
-        .read_tip(&source, "refs/autopilot/run-main")
+        .read_tip(&source, "refs/heads/autopilot/run/run-main/main")
         .expect("read run-main");
     assert_eq!(after, old_tip, "round 2 blocker must not auto-merge");
 }

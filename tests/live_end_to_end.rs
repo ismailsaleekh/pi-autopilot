@@ -24,6 +24,7 @@ use kernel::schedule::ResourceFacts;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 const ZERO: &str = "0000000000000000000000000000000000000000";
+const STALE_TIP: &str = "stale-tip";
 
 #[test]
 fn p1_p2_p6_compose_against_throwaway_repo_and_recorded_transcripts() {
@@ -41,7 +42,7 @@ fn p1_p2_p6_compose_against_throwaway_repo_and_recorded_transcripts() {
         "P1 approved plan contains at least one unit with acceptance criteria"
     );
 
-    fixture.vcs.swap(&fixture.source, "refs/autopilot/run-main", &fixture.base, ZERO).expect("run-main ref");
+    fixture.vcs.swap(&fixture.source, "refs/heads/autopilot/run/run-main/main", &fixture.base, ZERO).expect("run-main ref");
     let target_before = fixture.vcs.read_tip(&fixture.source, "refs/heads/main").expect("target before");
     let operator_checkout = fixture.root.join("operator-checkout");
     fs::create_dir_all(&operator_checkout).expect("operator checkout");
@@ -64,7 +65,7 @@ fn p1_p2_p6_compose_against_throwaway_repo_and_recorded_transcripts() {
         &fixture.vcs,
         &fixture.source,
         &fixture.owner.join("worktrees"),
-        "refs/autopilot/run-main",
+        "refs/heads/autopilot/run/run-main/main",
         &selected[0..1],
         &["keep.txt"],
     ).expect("dispatch launches lane worktree");
@@ -97,7 +98,7 @@ fn p1_p2_p6_compose_against_throwaway_repo_and_recorded_transcripts() {
     assert_eq!(expected.base_commit.0, launch.base_commit, "P2 delivery carries exact dispatch base");
     assert_eq!(accepted.audit_ref, Ref("audit:package-delivery".to_owned()), "P2 delivery carries execution audit");
 
-    let integrator = ReleaseIntegrator::new(&fixture.owner, &fixture.source, "refs/autopilot/run-main");
+    let integrator = ReleaseIntegrator::new(&fixture.owner, &fixture.source, "refs/heads/autopilot/run/run-main/main");
     let prepared = integrator.prepare_release(
         CandidateRequest {
             candidate_id: "L1".to_owned(),
@@ -109,27 +110,38 @@ fn p1_p2_p6_compose_against_throwaway_repo_and_recorded_transcripts() {
         &[true_check()],
     ).expect("prepare release");
     assert_eq!(
-        fixture.vcs.read_tip(&fixture.source, "refs/autopilot/run-main").expect("run-main after prepare"),
+        fixture.vcs.read_tip(&fixture.source, "refs/heads/autopilot/run/run-main/main").expect("run-main after prepare"),
         prepared.old_tip,
         "P2 prepare_release does not advance integration tip before CAS"
     );
     integrator.cas_release(&prepared).expect("CAS release");
-    let final_tip = fixture.vcs.read_tip(&fixture.source, "refs/autopilot/run-main").expect("run-main after CAS");
+    let final_tip = fixture.vcs.read_tip(&fixture.source, "refs/heads/autopilot/run/run-main/main").expect("run-main after CAS");
     assert_eq!(final_tip, prepared.new_tip, "P2 integration tip advances only via cas_release");
 
-    let stale_input = final_input("stale-tip");
-    assert_eq!(
-        verify_final_gate(&stale_input),
-        Err(FinalCondition::FinalCommands),
-        "P6 final verification refuses evidence not gathered on the exact final tip"
-    );
-    let final_pass = verify_final_gate(&final_input(&final_tip)).expect("final gate exact tip");
+    for (condition, make_stale) in [
+        (FinalCondition::FinalCommands, stale_final_commands as fn(&mut FinalGateInput)),
+        (FinalCondition::FullSuite, stale_full_suite),
+        (FinalCondition::FinalValidator, stale_final_validator),
+        (FinalCondition::RequiredBughunter, stale_bughunter),
+    ] {
+        let mut input = final_input(&final_tip);
+        make_stale(&mut input);
+        assert_eq!(
+            verify_final_gate(&input),
+            Err(condition),
+            "P6 final verification refuses stale evidence for {} while other evidence is current",
+            condition.id()
+        );
+    }
+    let mut current_input = final_input(&final_tip);
+    require_current_bughunter(&mut current_input);
+    let final_pass = verify_final_gate(&current_input).expect("final gate exact tip");
     assert_eq!(final_pass.tip, final_tip, "P6 final gate passes on the exact final tip");
+    assert!(final_pass.bughunter_required, "P6 positive case includes current required bughunter evidence");
 
     let safe_worktree = fixture.owner.join("worktrees/safe-archive");
     fs::create_dir_all(&safe_worktree).expect("safe archive worktree");
     fs::write(safe_worktree.join("done.txt"), "done\n").expect("safe archive marker");
-    fixture.vcs.swap(&fixture.source, "refs/autopilot/tmp/live-end-to-end", &final_tip, ZERO).expect("tmp ref");
     let lifecycle = LocalLifecycle::new(&fixture.owner, &fixture.source, fixture.owner.join("archive"));
     let report = lifecycle.close(CloseRequest {
         workstream: "ws-live".to_owned(),
@@ -437,6 +449,28 @@ fn final_input(tip: &str) -> FinalGateInput {
 
 fn evidence(tip: &str) -> TipEvidence {
     TipEvidence { tip: tip.to_owned(), passed: true }
+}
+
+fn stale_final_commands(input: &mut FinalGateInput) {
+    input.final_commands = evidence(STALE_TIP);
+}
+
+fn stale_full_suite(input: &mut FinalGateInput) {
+    input.full_suite = evidence(STALE_TIP);
+}
+
+fn stale_final_validator(input: &mut FinalGateInput) {
+    input.final_validator = evidence(STALE_TIP);
+}
+
+fn stale_bughunter(input: &mut FinalGateInput) {
+    input.triggers.implementation_lanes = 2;
+    input.bughunter = Some(evidence(STALE_TIP));
+}
+
+fn require_current_bughunter(input: &mut FinalGateInput) {
+    input.triggers.implementation_lanes = 2;
+    input.bughunter = Some(evidence(&input.final_tip));
 }
 
 fn ids(values: &[&str]) -> Vec<Id> {

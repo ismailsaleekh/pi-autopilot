@@ -157,6 +157,10 @@ name = "multiprocess_race"
 path = "../tests/multiprocess_race.rs"
 
 [[test]]
+name = "command_routing"
+path = "../tests/command_routing.rs"
+
+[[test]]
 name = "packed_install"
 path = "../tests/packed_install.rs"
 
