@@ -1,0 +1,55 @@
+schema "autopilot.planning.v1"
+version 1
+
+assignment_cap default=25 reserved_resolution=3 scout_compiler_first_pass=11
+review full_passes=1 delta_passes=1 wording_style="advisory"
+
+question_gate {
+  class "invalidated-decision-premise"
+  class "material-underdetermination"
+  class "unresolved-task-contradiction"
+  class "mission-dod-scope-hole"
+  class "safety-or-irreversibility"
+}
+
+phase "P1" question="What exactly did the operator task say?" repository_source=#false {
+  artifact "source-manifest"
+  artifact "atoms"
+  artifact "inventory-coverage"
+  boundary "planning.task-atoms.v1"
+}
+
+phase "P2" question="What is true in the repository now?" repository_source=#true {
+  artifact "scout-reports"
+  artifact "findings"
+  artifact "dossier"
+  artifact "resolutions"
+  boundary "planning.scout-dossier.v1"
+}
+
+phase "P3" question="Which material issues cannot be resolved from evidence?" repository_source=#false {
+  artifact "question-nominations"
+  artifact "checkpoint"
+  artifact "operator-answers"
+  boundary "planning.questions.v1"
+}
+
+phase "P4" question="What complete work map and proof system implements it?" repository_source=#false {
+  artifact "compiler-reports"
+  artifact "plan"
+  artifact "assumptions"
+  artifact "deviations"
+  artifact "dispositions"
+  boundary "planning.work-map.v1"
+}
+
+phase "P5" question="Does literal execution imply mission delivery?" repository_source=#false {
+  artifact "trace-audit"
+  artifact "plan-review"
+  boundary "planning.plan-review.v1"
+}
+
+phase "P6" question="Conversational approval to ready-to-execute" repository_source=#false {
+  artifact "approval-packet"
+  artifact "ready-to-execute-transition"
+}

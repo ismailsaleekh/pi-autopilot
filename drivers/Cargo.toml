@@ -10,6 +10,7 @@ kernel-macros = { path = "../kernel/macros" }
 linkme = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 
 [[test]]
 name = "kernel_purity_proof"
@@ -34,6 +35,46 @@ path = "../tests/sparse_failure_classes.rs"
 [[test]]
 name = "local_only"
 path = "../tests/local_only.rs"
+
+[[test]]
+name = "role_matrix_parity"
+path = "../tests/role_matrix_parity.rs"
+
+[[test]]
+name = "roster_parity"
+path = "../tests/roster_parity.rs"
+
+[[test]]
+name = "route_guard"
+path = "../tests/route_guard.rs"
+
+[[test]]
+name = "prompt_render"
+path = "../tests/prompt_render.rs"
+
+[[test]]
+name = "boundary_coverage"
+path = "../tests/boundary_coverage.rs"
+
+[[test]]
+name = "transcript_flip"
+path = "../tests/transcript_flip.rs"
+
+[[test]]
+name = "planning_phases"
+path = "../tests/planning_phases.rs"
+
+[[test]]
+name = "context_budget"
+path = "../tests/context_budget.rs"
+
+[[test]]
+name = "bg_prereq"
+path = "../tests/bg_prereq.rs"
+
+[[test]]
+name = "state_root"
+path = "../tests/state_root.rs"
 
 [lints]
 workspace = true

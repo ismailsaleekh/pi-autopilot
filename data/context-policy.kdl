@@ -1,0 +1,32 @@
+context_policy schema="autopilot.context_policy.v1" revision=1 {
+    role id="implementer" mode="lane-delivery" {
+        mandatory_inline "task-authority"
+        mandatory_inline "approved-plan-unit"
+        mandatory_inline "acceptance-criteria"
+        required_reads "dossier-findings"
+        required_reads "runtime-identity"
+        on_demand "source-anchor"
+    }
+    role id="validator" mode="forward-validation" {
+        mandatory_inline "acceptance-criteria"
+        mandatory_inline "approved-plan-unit"
+        required_reads "delivery-evidence"
+        required_reads "source-anchor"
+        on_demand "dossier-findings"
+    }
+    role id="fixer" mode="targeted-repair" {
+        mandatory_inline "blocking-finding"
+        mandatory_inline "approved-plan-unit"
+        mandatory_inline "acceptance-criteria"
+        required_reads "delivery-evidence"
+        required_reads "source-anchor"
+        on_demand "dossier-findings"
+    }
+    role id="curator" mode="context-reprioritization" {
+        mandatory_inline "budget-overage"
+        mandatory_inline "authority-index"
+        required_reads "context-gaps"
+        required_reads "manifest-revision"
+        on_demand "source-anchor"
+    }
+}

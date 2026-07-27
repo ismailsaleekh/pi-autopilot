@@ -1,0 +1,36 @@
+// default subscription-only roster frozen by D76 section 3
+slot "control" {
+  provider "openai-codex"
+  model "gpt-5.6-terra"
+  thinking "high"
+  route "subscription"
+  roles "orchestrator"
+}
+slot "reasoning" {
+  provider "openai-codex"
+  model "gpt-5.6-sol"
+  thinking "max"
+  route "subscription"
+  roles "onboard" "contradiction-resolver" "plan-compiler" "context-synthesizer" "plan-synthesizer" "context-curator" "execution-allocator"
+}
+slot "extraction" {
+  provider "openai-codex"
+  model "gpt-5.5"
+  thinking "high"
+  route "subscription"
+  roles "task-extractor"
+}
+slot "coding" {
+  provider "openai-codex"
+  model "gpt-5.5"
+  thinking "high"
+  route "subscription"
+  roles "repository-scout" "implementer" "fixer-integrator"
+}
+slot "review" {
+  provider "openai-codex"
+  model "gpt-5.5"
+  thinking "xhigh"
+  route "subscription"
+  roles "plan-reviewer" "validator" "bughunter"
+}
