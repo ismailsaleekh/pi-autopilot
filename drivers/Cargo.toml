@@ -148,5 +148,17 @@ path = "../tests/crash_injection.rs"
 name = "r13_walkthroughs"
 path = "../tests/r13_walkthroughs.rs"
 
+[[test]]
+name = "stale_lock_identity"
+path = "../tests/stale_lock_identity.rs"
+
+[[test]]
+name = "multiprocess_race"
+path = "../tests/multiprocess_race.rs"
+
+[[test]]
+name = "packed_install"
+path = "../tests/packed_install.rs"
+
 [lints]
 workspace = true
