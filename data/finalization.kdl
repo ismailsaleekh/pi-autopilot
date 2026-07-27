@@ -1,0 +1,40 @@
+schema "autopilot.finalization.v1"
+version 1
+
+gate "final-verification" {
+    condition "units-closed" doc="Every approved unit is closed."
+    condition "mandatory-findings-zero" doc="No mandatory finding remains outstanding."
+    condition "required-proof-fresh" doc="No required proof is stale at the final tip."
+    condition "jobs-terminal" doc="No active or unknown implementation, validation, fix, or integration job remains."
+    condition "attributable-integrated-diff" doc="The integrated diff is attributable to accepted candidates."
+    condition "final-commands-exact-tip" evidence="tip-bound" doc="Plan final_commands passed at the proposed result tip."
+    condition "full-suite-exact-tip" evidence="tip-bound" doc="The full suite passed only at the exact final tip."
+    condition "final-validator-exact-tip" evidence="tip-bound" doc="The final independent Validator passed at the exact final tip."
+    condition "required-bughunter-exact-tip" evidence="tip-bound" doc="Bughunter passed at the exact final tip when mandatory."
+}
+
+bughunter "mandatory" {
+    trigger "multiple-implementation-lanes"
+    trigger "high-critical-risk"
+    trigger "protected-security-data-migration"
+    trigger "semantic-conflict-resolution"
+    trigger "operator-requirement"
+}
+
+archive "close" result_ref="refs/autopilot/results/<workstream>/<run-id>" retention="indefinite" {
+    policy "archive-protected-evidence"
+    policy "stop-watchdog"
+    policy "remove-proven-safe-package-worktrees"
+    policy "remove-proven-safe-temp-refs"
+    boundary "no-push"
+    boundary "no-land"
+    boundary "no-target-move"
+    boundary "no-operator-checkout-write"
+}
+
+archive "abort" retention="preserve-work-refs-evidence" {
+    policy "archive-aborted-outcome"
+    policy "stop-run-owned-background-tasks"
+    boundary "no-merge"
+    boundary "delete-nothing"
+}

@@ -124,5 +124,29 @@ path = "../tests/release_merge_cas.rs"
 name = "successor_from_new_main"
 path = "../tests/successor_from_new_main.rs"
 
+[[test]]
+name = "target_sync"
+path = "../tests/target_sync.rs"
+
+[[test]]
+name = "final_verification"
+path = "../tests/final_verification.rs"
+
+[[test]]
+name = "close_abort"
+path = "../tests/close_abort.rs"
+
+[[test]]
+name = "handoff_resume"
+path = "../tests/handoff_resume.rs"
+
+[[test]]
+name = "crash_injection"
+path = "../tests/crash_injection.rs"
+
+[[test]]
+name = "r13_walkthroughs"
+path = "../tests/r13_walkthroughs.rs"
+
 [lints]
 workspace = true

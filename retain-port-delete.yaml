@@ -236,9 +236,9 @@ dispositions:
     kind: exact
     disposition: delete
     loc: 32
-    reason: "D76 §11 and refactor-task Remove list — old architecture slice is deleted with a live replacement consumer."
+    reason: "D76 §11 — deleted legacy agent-run wrapper is replaced by drivers/src/runner, which emits the autopilot-agent-run background descriptor."
     replacement_slice: slice-3
-    replacement_consumer: drivers/src/process
+    replacement_consumer: drivers/src/runner
   - path: "bin/autopilot-s2-corpus-rehearsal.mjs"
     kind: exact
     disposition: delete
@@ -791,9 +791,9 @@ dispositions:
     kind: exact
     disposition: delete
     loc: 2223
-    reason: "D76 §11 and refactor-task Remove list — old architecture slice is deleted with a live replacement consumer."
+    reason: "D76 §11 — deleted legacy parallel runtime is replaced by drivers/src/bgtasks, the in-repo prerequisite guard for pi-background-tasks."
     replacement_slice: slice-2
-    replacement_consumer: pi-background-tasks
+    replacement_consumer: drivers/src/bgtasks
   - path: "src/core/prompts.ts"
     kind: exact
     disposition: delete

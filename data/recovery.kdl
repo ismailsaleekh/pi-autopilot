@@ -1,0 +1,21 @@
+recovery version="v1" {
+  timeout name="cooperative-handoff" seconds=120
+  timeout name="integration-operation" seconds=1800
+
+  lock scope="assignment" backend="os-create-new-file" duplicate="visible-wait" live-holder="no-age-kill"
+
+  r13 number=1 name="planning" status="live"
+  r13 number=2 name="normal execution" status="live"
+  r13 number=3 name="forward release" status="live"
+  r13 number=4 name="two-round blocker" status="live"
+  r13 number=5 name="outside-cap quality" status="live"
+  r13 number=6 name="context continuation" status="live"
+  r13 number=7 name="post-release repair" status="live"
+  r13 number=8 name="conflict" status="live"
+  r13 number=9 name="background shutdown" status="live"
+  r13 number=10 name="integration crash" status="live"
+  r13 number=11 name="target movement" status="live"
+  r13 number=12 name="unsafe operation" status="live"
+  r13 number=13 name="abort" status="live"
+  r13 number=14 name="close" status="live"
+}
