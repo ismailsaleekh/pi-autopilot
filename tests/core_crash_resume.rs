@@ -90,7 +90,7 @@ fn command_parser_rejects_unknown_verb_and_missing_delimiter() {
         .expect("unknown command response");
     assert_eq!(
         done_status(&unknown_line),
-        "rejection:unknown-command:bogus"
+        "rejection:seam.operator-command.v1:expected=Valid invocations are exactly: /autopilot-plan <workstream> <task-paths...>; /autopilot <workstream>; /autopilot-status; /autopilot-close <workstream>; /autopilot-abort <workstream>; /autopilot-config show; /autopilot-config parallel-cap <n>; /autopilot-handoff; /autopilot-inject <workstream>; /autopilot-onboard <request...>.;actual=unknown-command:bogus:test-kind:test-ref;valid=/autopilot-plan, /autopilot, /autopilot-status, /autopilot-close, /autopilot-abort, /autopilot-config, /autopilot-handoff, /autopilot-inject, /autopilot-onboard"
     );
 
     send(
