@@ -1,4 +1,8 @@
-use std::{fs, path::PathBuf, sync::atomic::{AtomicU64, Ordering}};
+use std::{
+    fs,
+    path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use drivers::{
     integration::{
@@ -50,7 +54,12 @@ fn stale_cas_fails_and_does_not_move_ref() {
     let integrator = fixture.integrator();
     let prepared = integrator
         .prepare_release(
-            request("candidate-stale", CandidateKind::ForwardRelease, 1, &lane_tip),
+            request(
+                "candidate-stale",
+                CandidateKind::ForwardRelease,
+                1,
+                &lane_tip,
+            ),
             &fixture.owner.join("integration/candidate-stale"),
             &[true_check()],
         )
@@ -59,12 +68,7 @@ fn stale_cas_fails_and_does_not_move_ref() {
     let bump = fixture.lane_commit("intervening edit\n", "main-bump");
     fixture
         .vcs
-        .swap(
-            &fixture.source,
-            RUN_MAIN_REF,
-            &bump,
-            &prepared.old_tip,
-        )
+        .swap(&fixture.source, RUN_MAIN_REF, &bump, &prepared.old_tip)
         .expect("intervening ref move");
     let error = integrator
         .cas_release(&prepared)
@@ -84,20 +88,49 @@ fn stale_cas_fails_and_does_not_move_ref() {
 fn serialized_queue_honours_six_level_priority() {
     let mut queue = IntegrationQueue::default();
     queue.enqueue(request("final", CandidateKind::FinalTargetSync, 0, "tip"));
-    queue.enqueue(request("forward-b", CandidateKind::ForwardRelease, 1, "tip"));
+    queue.enqueue(request(
+        "forward-b",
+        CandidateKind::ForwardRelease,
+        1,
+        "tip",
+    ));
     queue.enqueue(request("closure", CandidateKind::ClosureRepair, 0, "tip"));
-    queue.enqueue(request("repair", CandidateKind::ReleasedContractRepair, 99, "tip"));
-    queue.enqueue(request("forward-a", CandidateKind::ForwardRelease, 2, "tip"));
-    queue.enqueue(request("forward-c", CandidateKind::ForwardRelease, 1, "tip"));
+    queue.enqueue(request(
+        "repair",
+        CandidateKind::ReleasedContractRepair,
+        99,
+        "tip",
+    ));
+    queue.enqueue(request(
+        "forward-a",
+        CandidateKind::ForwardRelease,
+        2,
+        "tip",
+    ));
+    queue.enqueue(request(
+        "forward-c",
+        CandidateKind::ForwardRelease,
+        1,
+        "tip",
+    ));
 
     assert_eq!(queue.start_next().expect("first").candidate_id, "repair");
-    assert_eq!(queue.start_next().expect_err("serialized"), IntegrationError::SerializedBusy);
+    assert_eq!(
+        queue.start_next().expect_err("serialized"),
+        IntegrationError::SerializedBusy
+    );
     queue.complete_active();
-    assert_eq!(queue.start_next().expect("second").candidate_id, "forward-b");
+    assert_eq!(
+        queue.start_next().expect("second").candidate_id,
+        "forward-b"
+    );
     queue.complete_active();
     assert_eq!(queue.start_next().expect("third").candidate_id, "forward-c");
     queue.complete_active();
-    assert_eq!(queue.start_next().expect("fourth").candidate_id, "forward-a");
+    assert_eq!(
+        queue.start_next().expect("fourth").candidate_id,
+        "forward-a"
+    );
     queue.complete_active();
     assert_eq!(queue.start_next().expect("fifth").candidate_id, "closure");
     queue.complete_active();
@@ -119,7 +152,12 @@ impl Fixture {
         let base = vcs.init_fixture(&source).expect("seed repo");
         vcs.swap(&source, RUN_MAIN_REF, &base, ZERO)
             .expect("D76 run main ref");
-        Self { owner, source, base, vcs }
+        Self {
+            owner,
+            source,
+            base,
+            vcs,
+        }
     }
 
     fn integrator(&self) -> ReleaseIntegrator {

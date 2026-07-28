@@ -213,7 +213,7 @@ role "validator" {
   modes "forward-release" "deep-closure" "delta-revalidation" "conflict-review" "final-review"
   model_slot "review"
   thinking "xhigh"
-  tools "read" "grep" "find" "ls" "bash" "context_budget" "autopilot_emit_status"
+  tools "read" "grep" "find" "ls" "context_budget" "autopilot_request_test" "autopilot_emit_status"
   repository "exact candidate/evidence read-only"
   git "read-only"
   network "denied"

@@ -32,9 +32,20 @@ fn deep_validation_emits_one_bundle_and_delta_revalidates_only_affected_criteria
     )
     .expect("one bundle is accepted");
 
-    assert_eq!(bundle.criteria.len(), 3, "all criteria are in the one bundle");
-    assert_eq!(bundle.ledger.len(), 1, "findings are ledgered inside that bundle");
-    assert_eq!(bundle.material_findings()[0].normalized, "normalized-db-failure");
+    assert_eq!(
+        bundle.criteria.len(),
+        3,
+        "all criteria are in the one bundle"
+    );
+    assert_eq!(
+        bundle.ledger.len(),
+        1,
+        "findings are ledgered inside that bundle"
+    );
+    assert_eq!(
+        bundle.material_findings()[0].normalized,
+        "normalized-db-failure"
+    );
 
     let delta = criteria_for_delta(
         &criteria,
@@ -43,7 +54,10 @@ fn deep_validation_emits_one_bundle_and_delta_revalidates_only_affected_criteria
         &["c-ui".to_owned()],
     );
     assert_eq!(delta, vec!["c-db".to_owned(), "c-ui".to_owned()]);
-    assert!(!delta.contains(&"c-api".to_owned()), "unchanged current evidence is reused");
+    assert!(
+        !delta.contains(&"c-api".to_owned()),
+        "unchanged current evidence is reused"
+    );
 }
 
 #[test]
@@ -69,7 +83,10 @@ fn same_material_finding_after_two_attempts_routes_tier2_and_budget_exhaustion_p
         max_attempts: 1,
         tier2_after_survivals: 9,
     });
-    assert_eq!(exhausted.record_fix_attempt(&first), RepairRouting::Continue);
+    assert_eq!(
+        exhausted.record_fix_attempt(&first),
+        RepairRouting::Continue
+    );
     assert_eq!(
         exhausted.record_fix_attempt(&failing_bundle(&criteria, "log-b")),
         RepairRouting::Failure(Failure::Paused {
@@ -137,7 +154,10 @@ fn repair_merge_uses_throwaway_repo_and_integrates_only_new_repair_commits() {
         repair_commits: vec![CommitId("lane".to_owned())],
         original_lane_commits: vec![CommitId("lane".to_owned())],
     });
-    assert!(repeat_lane.is_err(), "original lane commits are never merged twice");
+    assert!(
+        repeat_lane.is_err(),
+        "original lane commits are never merged twice"
+    );
 }
 
 fn criteria() -> Vec<Criterion> {

@@ -1,4 +1,8 @@
-import type { CoreToHostFrame } from "./generated/index.ts";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+
+import type { CoreToHostFrame, BackgroundAction, CoreToHostUiPayload } from "./generated/index.ts";
+import type { BgTaskSnapshot, PiBackgroundTaskClient } from "./background-tasks.ts";
+import { validateCoreToHostFrame } from "./frame-validation.ts";
 
 export class UnknownCoreEffectError extends Error {
   constructor(kind: string) {
@@ -7,54 +11,100 @@ export class UnknownCoreEffectError extends Error {
   }
 }
 
-export interface HostEffectContext {
-  readonly ui?: Record<string, unknown>;
-  readonly bg_run?: (descriptor: unknown) => unknown | Promise<unknown>;
-  readonly session?: Record<string, unknown>;
-  readonly log?: (line: string) => unknown | Promise<unknown>;
-  readonly done?: (status: string) => unknown | Promise<unknown>;
-  readonly guardDecision?: (payload: unknown) => unknown | Promise<unknown>;
+export type OperatorMessageLevel = "info" | "warning" | "error";
+export type OperatorMessageSink = (message: string, level: OperatorMessageLevel) => unknown | Promise<unknown>;
+
+export type HostEffectContext = Pick<ExtensionContext, "ui" | "hasUI" | "mode">;
+
+export interface HostEffectServices {
+  readonly backgroundTasks: Pick<PiBackgroundTaskClient, "run">;
+  readonly operatorMessage: OperatorMessageSink;
 }
 
-export async function applyCoreEffect(frame: CoreToHostFrame, ctx: HostEffectContext): Promise<void> {
-  switch (frame.kind) {
+export type CoreEffectResult = { readonly kind: "spawn"; readonly action: BackgroundAction; readonly task: BgTaskSnapshot } | undefined;
+
+export async function applyCoreEffect(frame: CoreToHostFrame, ctx: HostEffectContext, services: HostEffectServices): Promise<CoreEffectResult> {
+  const validFrame = validateCoreToHostFrame(frame);
+  switch (validFrame.kind) {
     case "guard-decision":
-      await optionalCall(ctx.guardDecision, frame.payload);
-      return;
+      await emitOperatorMessage(
+        ctx,
+        services,
+        `Autopilot guard decision: ${validFrame.payload.decision} (${validFrame.payload.reason})`,
+        validFrame.payload.decision === "allow" ? "info" : "warning",
+      );
+      return undefined;
     case "ui":
-      await callMember(ctx.ui, frame.payload.ui_kind, frame.payload.content, "ctx.ui");
-      return;
-    case "spawn":
-      await requiredCall(ctx.bg_run, frame.payload.action, "ctx.bg_run");
-      return;
+      await applyUiEffect(validFrame.payload, ctx, services);
+      return undefined;
+    case "spawn": {
+      const task = await services.backgroundTasks.run(validFrame.payload.action.bg_run);
+      return { kind: "spawn", action: validFrame.payload.action, task };
+    }
     case "session":
-      await callMember(ctx.session, frame.payload.session_action, frame.payload.payload, "ctx.session");
-      return;
+      await failClosed(
+        ctx,
+        services,
+        `Autopilot requested unsupported Pi session effect ${validFrame.payload.session_action}. The installed Pi ExtensionCommandContext has only explicit session-control methods; Autopilot stopped instead of calling a fictional generic session API.`,
+      );
+      return undefined;
     case "log":
-      await optionalCall(ctx.log, frame.payload.line);
-      return;
+      await emitOperatorMessage(ctx, services, `Autopilot log: ${validFrame.payload.line}`, "info");
+      return undefined;
     case "done":
-      await optionalCall(ctx.done, frame.payload.status);
-      return;
+      await emitOperatorMessage(ctx, services, `Autopilot done: ${validFrame.payload.status}`, severityForStatus(validFrame.payload.status));
+      return undefined;
     default:
-      throw new UnknownCoreEffectError(String((frame as { readonly kind: string }).kind));
+      throw new UnknownCoreEffectError(String((validFrame as { readonly kind: string }).kind));
   }
 }
 
-async function callMember(target: Record<string, unknown> | undefined, name: string, payload: unknown, label: string): Promise<void> {
-  const member = target?.[name];
-  await requiredCall(member, payload, `${label}.${name}`);
+async function applyUiEffect(payload: CoreToHostUiPayload, ctx: HostEffectContext, services: HostEffectServices): Promise<void> {
+  if (payload.ui_kind === "notify") {
+    await emitOperatorMessage(ctx, services, contentMessage(payload.content), contentLevel(payload.content));
+    return;
+  }
+  if (payload.ui_kind === "text") {
+    await emitOperatorMessage(ctx, services, `Autopilot: ${contentMessage(payload.content)}`, "info");
+    return;
+  }
+  await failClosed(
+    ctx,
+    services,
+    `Autopilot requested unsupported Pi UI effect ${payload.ui_kind}. Supported Host routes are ctx.ui.notify and pi.sendMessage; Autopilot stopped instead of calling a fictional ctx.ui.${payload.ui_kind}.`,
+  );
 }
 
-async function requiredCall(member: unknown, payload: unknown, label: string): Promise<void> {
-  if (typeof member !== "function") {
-    throw new Error(`autopilot host effect target unavailable: ${label}`);
-  }
-  await member(payload);
+async function failClosed(ctx: HostEffectContext, services: HostEffectServices, message: string): Promise<never> {
+  await emitOperatorMessage(ctx, services, message, "error");
+  throw new Error(message);
 }
 
-async function optionalCall(member: unknown, payload: unknown): Promise<void> {
-  if (typeof member === "function") {
-    await member(payload);
+async function emitOperatorMessage(ctx: HostEffectContext, services: HostEffectServices, message: string, level: OperatorMessageLevel): Promise<void> {
+  if (ctx.hasUI) {
+    ctx.ui.notify(message, level);
   }
+  await services.operatorMessage(message, level);
+}
+
+function contentMessage(content: Record<string, unknown>): string {
+  for (const key of ["message", "text", "status", "detail"] as const) {
+    const value = content[key];
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return JSON.stringify(content);
+}
+
+function contentLevel(content: Record<string, unknown>): OperatorMessageLevel {
+  const value = content["type"] ?? content["kind"] ?? content["level"];
+  return value === "warning" || value === "error" || value === "info" ? value : "info";
+}
+
+function severityForStatus(status: string): OperatorMessageLevel {
+  const lower = status.toLowerCase();
+  if (lower.startsWith("rejection:") || lower.includes("context_gap") || lower.includes("paused") || lower.includes("supplycapability")) {
+    return "warning";
+  }
+  if (lower.includes("error") || lower.includes("failed") || lower.includes("unsafe")) return "error";
+  return "info";
 }

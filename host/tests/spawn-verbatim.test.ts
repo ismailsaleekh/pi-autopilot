@@ -3,47 +3,59 @@ import assert from "node:assert/strict";
 
 import { applyCoreEffect } from "../src/effects.ts";
 
-test("spawn executes the core descriptor without rewriting a byte", async () => {
+test("spawn executes the exact Core bg_run descriptor object without rewriting", async () => {
   const action = backgroundAction();
-  const expected = JSON.stringify(action);
-  let actual = "";
+  let actual;
 
   await applyCoreEffect(
     { v: 1, id: 1, kind: "spawn", payload: { action } },
-    { bg_run(descriptor) { actual = JSON.stringify(descriptor); } },
+    effectContext(),
+    { backgroundTasks: { async run(descriptor) { actual = descriptor; return { id: "task-1", command: descriptor.command, status: "running", outputPath: "/tmp/out" }; } }, operatorMessage: async () => {} },
   );
 
-  assert.equal(actual, expected);
+  assert.equal(actual, action.bg_run);
+  assert.deepEqual(actual, action.bg_run);
 });
 
-test("spawn byte comparison detects a one-byte mutation", async () => {
+test("spawn validator rejects null timeout before event-bus mutation", async () => {
   const action = backgroundAction();
-  const expected = JSON.stringify(action);
-  let actual = "";
+  action.bg_run.timeoutSeconds = null;
+  let called = false;
 
-  await applyCoreEffect(
-    { v: 1, id: 1, kind: "spawn", payload: { action } },
-    { bg_run(descriptor) { actual = JSON.stringify(descriptor); } },
+  await assert.rejects(
+    applyCoreEffect(
+      { v: 1, id: 1, kind: "spawn", payload: { action } },
+      effectContext(),
+      { backgroundTasks: { async run() { called = true; throw new Error("must not run"); } }, operatorMessage: async () => {} },
+    ),
+    /bg_run.timeoutSeconds must be a positive integer/u,
   );
 
-  const mutated = `${expected.slice(0, -2)}X${expected.slice(-1)}`;
-  assert.notEqual(mutated, expected);
-  assert.throws(() => assert.equal(actual, mutated));
+  assert.equal(called, false);
 });
+
+function effectContext() {
+  return {
+    hasUI: false,
+    mode: "json",
+    ui: { notify() { throw new Error("notify should not be used in this test"); } },
+  };
+}
 
 function backgroundAction() {
   return {
     action_id: "a-byte-exact",
     assignment_id: "unit-byte-exact",
     kind: "launch-background",
-    command_bytes: "node -e \"process.stdout.write('byte-exact')\"",
-    display_name: "byte exact launch",
-    isAgent: false,
-    timeout: "30m",
-    notifyOnCompletion: false,
-    triggerOnCompletion: true,
+    bg_run: {
+      name: "byte exact launch",
+      command: "node -e \"process.stdout.write('byte-exact')\"",
+      isAgent: false,
+      timeoutSeconds: 1800,
+      notifyOnCompletion: false,
+      triggerOnCompletion: true,
+    },
     run_revision: 12,
-    expires_at: null,
     supersession_state: "active",
   };
 }

@@ -8,3 +8,6 @@ boundary "planning.work-map.v1" mode="enforce" reason="W4 live subscription tran
 boundary "planning.plan-review.v1" mode="enforce" reason="W4 live subscription transcript recorded 2026-07-27; flip is one-way"
 boundary "allocation.lane-proposal.v1" mode="enforce" reason="W5 live subscription transcript recorded 2026-07-27; flip is one-way"
 boundary "validation.verdict.v1" mode="enforce" reason="W6 live subscription transcript recorded 2026-07-27; flip is one-way"
+boundary "evidence.ingress.v1" mode="enforce" reason="package-issued attested assignment/report/sidecar ingress has a production consumer and rejects arbitrary import"
+boundary "validation.verdict.v2" mode="record" reason="v2 Validator vertical source is present; flip to enforce only after a real subscription transcript"
+boundary "finalization.external-attested-evidence.v1" mode="enforce" reason="external attestation is strict advisory-only and cannot satisfy final gates"

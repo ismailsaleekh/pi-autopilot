@@ -6,13 +6,14 @@
 pub mod allocation;
 pub mod bgtasks;
 pub mod checkpoint;
-pub mod closure;
 pub mod clock;
+pub mod closure;
+pub mod conflict;
 pub mod context;
 pub mod control;
-pub mod conflict;
 pub mod dispatch;
 pub mod entropy;
+pub mod evidence;
 pub mod finalize;
 pub mod fs;
 pub mod handoff;

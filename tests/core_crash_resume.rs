@@ -130,7 +130,7 @@ fn send(stdin: &mut ChildStdin, id: u64, raw: &str) {
         "v": 1,
         "id": id,
         "kind": "command",
-        "payload": { "raw": command }
+        "payload": { "raw": command, "background_capabilities": { "api_version": 1, "run": true, "run_is_agent": true, "run_completion_trigger": true, "status": true, "logs": true, "logs_bounded": true, "kill": true } }
     });
     writeln!(stdin, "{}", frame).expect("write frame");
 }

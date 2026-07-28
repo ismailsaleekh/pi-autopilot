@@ -1,4 +1,4 @@
-import { accessSync, constants, readFileSync } from "node:fs";
+import { accessSync, constants, lstatSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -8,7 +8,7 @@ export interface ResolveCoreOptions {
   arch?: NodeJS.Architecture | string;
 }
 
-export type CoreInstallErrorCode = "metadata" | "unsupported-platform" | "missing-binary";
+export type CoreInstallErrorCode = "metadata" | "unsupported-platform" | "missing-binary" | "symlink" | "not-regular-file" | "not-executable";
 
 export class CoreInstallError extends Error {
   readonly code: CoreInstallErrorCode;
@@ -48,8 +48,18 @@ export function resolveCoreBinary(options: ResolveCoreOptions = {}): string {
 
   assertPackageDeclaresResolver(packageJsonPath);
   const candidate = join(dirname(packageJsonPath), "binaries", platformKey, binaryName);
+  assertExecutableRegularFile(candidate, platformKey);
+  return candidate;
+}
+
+export function corePlatformKey(options: Pick<ResolveCoreOptions, "platform" | "arch"> = {}): string {
+  return `${options.platform ?? process.platform}-${options.arch ?? process.arch}`;
+}
+
+function assertExecutableRegularFile(candidate: string, platformKey: string): void {
+  let stat;
   try {
-    accessSync(candidate, constants.X_OK);
+    stat = lstatSync(candidate);
   } catch (error) {
     throw new CoreInstallError(
       `autopilot-core binary missing for ${platformKey}: ${candidate}: ${errorMessage(error)}`,
@@ -57,11 +67,29 @@ export function resolveCoreBinary(options: ResolveCoreOptions = {}): string {
       platformKey,
     );
   }
-  return candidate;
-}
-
-export function corePlatformKey(options: Pick<ResolveCoreOptions, "platform" | "arch"> = {}): string {
-  return `${options.platform ?? process.platform}-${options.arch ?? process.arch}`;
+  if (stat.isSymbolicLink()) {
+    throw new CoreInstallError(
+      `autopilot-core binary for ${platformKey} must not be a symlink: ${candidate}`,
+      "symlink",
+      platformKey,
+    );
+  }
+  if (!stat.isFile()) {
+    throw new CoreInstallError(
+      `autopilot-core binary for ${platformKey} must be a regular file: ${candidate}`,
+      "not-regular-file",
+      platformKey,
+    );
+  }
+  try {
+    accessSync(candidate, constants.X_OK);
+  } catch (error) {
+    throw new CoreInstallError(
+      `autopilot-core binary for ${platformKey} is not executable: ${candidate}: ${errorMessage(error)}`,
+      "not-executable",
+      platformKey,
+    );
+  }
 }
 
 function defaultPackageJsonPath(): string {

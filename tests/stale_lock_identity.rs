@@ -10,7 +10,8 @@ use kernel::generated::Id;
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[test]
-fn pid_reuse_with_different_birth_identity_is_stale_not_live() -> Result<(), Box<dyn std::error::Error>> {
+fn pid_reuse_with_different_birth_identity_is_stale_not_live()
+-> Result<(), Box<dyn std::error::Error>> {
     let root = temp_root("pid-reuse")?;
     let holder_pid = 41;
     let new_runner_pid = std::process::id();
@@ -31,7 +32,10 @@ fn pid_reuse_with_different_birth_identity_is_stale_not_live() -> Result<(), Box
         LockAcquire::Acquired(lock) => {
             assert_eq!(lock.pid(), new_runner_pid);
             assert_eq!(lock.birth_identity().0, "new-runner-birth");
-            assert_eq!(fs::read(root.join("stale-lock-evidence"))?, stale_bytes.as_bytes());
+            assert_eq!(
+                fs::read(root.join("stale-lock-evidence"))?,
+                stale_bytes.as_bytes()
+            );
             assert_eq!(
                 fs::read_to_string(root.join("a1.lock"))?,
                 format!("pid={new_runner_pid}\nbirth=new-runner-birth\n")
@@ -99,8 +103,12 @@ impl ProcessProbe for IdentityProbe {
 }
 
 fn assert_recovery_has_no_kill_path() -> Result<(), Box<dyn std::error::Error>> {
-    let source = fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/recovery/mod.rs"))?;
-    assert!(!source.contains("kill"), "recovery lock code must not kill unrelated processes");
+    let source =
+        fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/recovery/mod.rs"))?;
+    assert!(
+        !source.contains("kill"),
+        "recovery lock code must not kill unrelated processes"
+    );
     Ok(())
 }
 

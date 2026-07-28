@@ -5,8 +5,8 @@ use kernel::{
     effect::{Effect, OperatorMessage},
     failure::{Failure, HardBoundary},
     generated::{
-        ActionKind, BackgroundAction, Bytes, ControlFrame, ControlFrameCounts, ControlFrameTrigger,
-        Duration, Id, Nullable, Ref, SchemaId, Timestamp, TriggerKind, Uuidv7,
+        ActionKind, BackgroundAction, BackgroundActionBgRun, ControlFrame, ControlFrameCounts,
+        ControlFrameTrigger, Duration, Id, Nullable, Ref, SchemaId, Timestamp, TriggerKind, Uuidv7,
     },
 };
 use kernel_macros::acceptance_boundary;
@@ -111,16 +111,6 @@ impl ControlFrameDocument {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BgRunCall {
-    pub command_bytes: Bytes,
-    pub display_name: String,
-    pub is_agent: bool,
-    pub timeout: Option<Duration>,
-    pub notify_on_completion: bool,
-    pub trigger_on_completion: bool,
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub enum GuardOutcome {
     Accepted {
@@ -164,7 +154,7 @@ impl BgRunGuard {
         }
     }
 
-    pub fn admit(&mut self, call: &BgRunCall) -> Result<GuardOutcome, GuardRejection> {
+    pub fn admit(&mut self, call: &BackgroundActionBgRun) -> Result<GuardOutcome, GuardRejection> {
         let action = self
             .live_launch()
             .ok_or(GuardRejection::Unsafe {
@@ -211,7 +201,7 @@ pub fn effect_for(action: BackgroundAction) -> Effect {
         ActionKind::ReadFailureLog => Effect::ReadFailureLog(action.action_id),
         ActionKind::StopBackground => Effect::StopBackground(action.action_id),
         ActionKind::RequestOperator => {
-            Effect::RequestOperator(OperatorMessage(action.command_bytes.0.into_bytes()))
+            Effect::RequestOperator(OperatorMessage(action.bg_run.command.0.into_bytes()))
         }
         ActionKind::ReturnIdle => Effect::ReturnIdle,
     }
@@ -221,11 +211,11 @@ pub fn effect_for(action: BackgroundAction) -> Effect {
     id = "control.bg-run-exact.v1",
     producer = Producer::Package,
     visible = true,
-    admits = "A parent bg_run call must byte-match exactly one live package-issued launch action: command bytes, display name, isAgent, timeout, notifyOnCompletion, and triggerOnCompletion. Unissued launches are Unsafe(UnissuedBackgroundLaunch).",
+    admits = "A parent bg_run call must byte-match exactly one live package-issued launch action bg_run object: name, command bytes, isAgent, timeoutSeconds, notifyOnCompletion, and triggerOnCompletion. Unissued launches are Unsafe(UnissuedBackgroundLaunch).",
     mode = BoundaryMode::Enforce
 )]
 pub fn admit_exact_bg_run<'a>(
-    pair: (&'a BackgroundAction, &'a BgRunCall),
+    pair: (&'a BackgroundAction, &'a BackgroundActionBgRun),
 ) -> Result<&'a BackgroundAction, Rejection> {
     let (action, call) = pair;
     if !matches_call(action, call) {
@@ -235,13 +225,8 @@ pub fn admit_exact_bg_run<'a>(
     Ok(action)
 }
 
-fn matches_call(action: &BackgroundAction, call: &BgRunCall) -> bool {
-    action.command_bytes == call.command_bytes
-        && action.display_name == call.display_name
-        && action.is_agent == call.is_agent
-        && action.timeout == call.timeout
-        && action.notify_on_completion == call.notify_on_completion
-        && action.trigger_on_completion == call.trigger_on_completion
+fn matches_call(action: &BackgroundAction, call: &BackgroundActionBgRun) -> bool {
+    &action.bg_run == call
 }
 
 fn observation_value(observation: ControlObservation) -> serde_json::Value {

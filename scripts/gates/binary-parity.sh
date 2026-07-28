@@ -99,11 +99,11 @@ if inside != "true":
     env_error(f"not inside a git work tree: {root}")
 
 source_files = sorted(
-    p for p in git_ls_files(["kernel", "drivers", "codegen"])
+    p for p in git_ls_files(["kernel", "drivers", "codegen", "data"])
     if p.endswith(".rs") and (root / p).is_file()
 )
 if not source_files:
-    env_error("no tracked Rust source files under kernel/, drivers/, or codegen/")
+    env_error("no tracked Rust source files under kernel/, drivers/, codegen/, or data/")
 
 source_hasher = hashlib.sha256()
 newest_source: tuple[int, str] | None = None

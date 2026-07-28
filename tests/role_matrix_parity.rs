@@ -146,6 +146,30 @@ fn role_matrix_matches_d76_section_2_3_exactly() {
     assert_eq!(actual, expected);
 }
 
+#[test]
+fn validator_role_is_mechanically_read_only_and_context_modes_are_registered() {
+    let registry = RoleRegistry::package().expect("role registry loads");
+    let validator = registry.get("validator").expect("validator role");
+    assert_eq!(
+        validator.tools,
+        vec![
+            "read".to_owned(),
+            "grep".to_owned(),
+            "find".to_owned(),
+            "ls".to_owned(),
+            "context_budget".to_owned(),
+            "autopilot_request_test".to_owned(),
+            "autopilot_emit_status".to_owned(),
+        ]
+    );
+    assert!(!validator.tools.iter().any(|tool| matches!(tool.as_str(), "bash" | "edit" | "write")));
+    let policy = include_str!("../data/context-policy.kdl");
+    assert!(!policy.contains("forward-validation"));
+    for mode in ["forward-release", "deep-closure", "delta-revalidation", "conflict-review", "final-review"] {
+        assert!(policy.contains(&format!("role id=\"validator\" mode=\"{mode}\"")), "missing validator context policy for {mode}");
+    }
+}
+
 fn row(
     id: &str,
     modes: &str,

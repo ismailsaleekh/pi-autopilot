@@ -28,9 +28,7 @@ pub enum RepairMergeError {
     LaneCommitWouldRepeat(CommitId),
 }
 
-pub fn plan_repair_merge(
-    request: RepairMergeRequest,
-) -> Result<RepairMergePlan, RepairMergeError> {
+pub fn plan_repair_merge(request: RepairMergeRequest) -> Result<RepairMergePlan, RepairMergeError> {
     if request.repair_base != request.run_main {
         return Err(RepairMergeError::RepairBaseNotRunMain);
     }
@@ -114,10 +112,12 @@ pub enum DependentAction {
 impl ContractChangePlan {
     pub fn every_affected_edge_has_action(&self) -> bool {
         self.invalidated_edges.iter().all(|edge_id| {
-            self.paused_or_refreshed_dependents.iter().any(|action| match action {
-                DependentAction::PauseAndRefresh { edge_id: id, .. }
-                | DependentAction::TargetedAmendment { edge_id: id, .. } => id == edge_id,
-            })
+            self.paused_or_refreshed_dependents
+                .iter()
+                .any(|action| match action {
+                    DependentAction::PauseAndRefresh { edge_id: id, .. }
+                    | DependentAction::TargetedAmendment { edge_id: id, .. } => id == edge_id,
+                })
         })
     }
 }
@@ -161,5 +161,6 @@ pub fn route_released_contract_change(
 }
 
 fn overlap(left: &[String], right: &[String]) -> bool {
-    left.iter().any(|item| right.iter().any(|other| item == other))
+    left.iter()
+        .any(|item| right.iter().any(|other| item == other))
 }

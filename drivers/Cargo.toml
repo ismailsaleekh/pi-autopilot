@@ -65,6 +65,10 @@ name = "planning_phases"
 path = "../tests/planning_phases.rs"
 
 [[test]]
+name = "task_path_classification"
+path = "../tests/task_path_classification.rs"
+
+[[test]]
 name = "context_budget"
 path = "../tests/context_budget.rs"
 
@@ -95,6 +99,10 @@ path = "../tests/allocation_validation.rs"
 [[test]]
 name = "lane_delivery"
 path = "../tests/lane_delivery.rs"
+
+[[test]]
+name = "runner_child"
+path = "../tests/runner_child.rs"
 
 [[test]]
 name = "checkpoint_resume"
@@ -159,6 +167,10 @@ path = "../tests/multiprocess_race.rs"
 [[test]]
 name = "command_routing"
 path = "../tests/command_routing.rs"
+
+[[test]]
+name = "evidence_security"
+path = "../tests/evidence_security.rs"
 
 [[test]]
 name = "packed_install"

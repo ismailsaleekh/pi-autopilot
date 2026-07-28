@@ -209,13 +209,29 @@ fn clean(path: PathBuf) -> PathBuf {
     out
 }
 fn allowed_ref(name: &str) -> bool {
-    if let Some(rest) = name.strip_prefix("refs/autopilot/results/") { let parts = rest.split('/').collect::<Vec<_>>(); return parts.len() == 2 && parts.iter().all(|part| !part.is_empty()); }
-    let Some(rest) = name.strip_prefix("refs/heads/autopilot/run/") else { return false; };
+    if let Some(rest) = name.strip_prefix("refs/autopilot/results/") {
+        let parts = rest.split('/').collect::<Vec<_>>();
+        return parts.len() == 2 && parts.iter().all(|part| !part.is_empty());
+    }
+    let Some(rest) = name.strip_prefix("refs/heads/autopilot/run/") else {
+        return false;
+    };
     let parts = rest.split('/').collect::<Vec<_>>();
-    match parts.as_slice() { [run, "main"] => !run.is_empty(), [run, "lane", item, attempt] | [run, "repair", item, attempt] => !run.is_empty() && !item.is_empty() && valid_attempt(attempt), [run, "integration", item] => !run.is_empty() && !item.is_empty(), _ => false }
+    match parts.as_slice() {
+        [run, "main"] => !run.is_empty(),
+        [run, "lane", item, attempt] | [run, "repair", item, attempt] => {
+            !run.is_empty() && !item.is_empty() && valid_attempt(attempt)
+        }
+        [run, "integration", item] => !run.is_empty() && !item.is_empty(),
+        _ => false,
+    }
 }
 
-fn valid_attempt(value: &str) -> bool { value.strip_prefix('a').is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())) }
+fn valid_attempt(value: &str) -> bool {
+    value
+        .strip_prefix('a')
+        .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+}
 
 fn guard_fragment(item: &str) -> Result<(), Failure> {
     let path = Path::new(item);

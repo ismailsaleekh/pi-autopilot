@@ -7,7 +7,10 @@ use drivers::conflict::{
 #[test]
 fn symmetric_bundle_contains_both_sides_and_high_risk_gets_focused_review_not_full_suite() {
     let bundle = bundle(ConflictClass::SemanticHighRisk);
-    assert!(bundle.symmetric(), "bundle contains current and incoming authority");
+    assert!(
+        bundle.symmetric(),
+        "bundle contains current and incoming authority"
+    );
 
     let plan = validate_resolution(&bundle, &clean_candidate(), &good_resolution())
         .expect("combined behavior resolution is accepted");

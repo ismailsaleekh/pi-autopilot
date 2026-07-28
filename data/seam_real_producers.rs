@@ -1,7 +1,7 @@
 struct TaskFiles(Vec<PathBuf>);
-impl TaskAuthority for TaskFiles { fn documents(&self) -> Result<Vec<TaskDocument>, planning::PlanningError> { let mut out = Vec::new(); for path in &self.0 { let body = fs::read_to_string(path).map_err(|error| planning::PlanningError::ContextGap(format!("task-file:{}:{error}", path.display())))?; out.push(TaskDocument { id: path.display().to_string(), body }); } Ok(out) } }
+impl TaskAuthority for TaskFiles { fn input_set(&self) -> Result<planning::TaskInputSet, planning::PlanningError> { let cwd = std::env::current_dir().map_err(|error| planning::PlanningError::ContextGap(format!("cwd:{error}")))?; planning::classify_task_file_pack(&cwd, &self.0) } }
 struct InlineTask(String);
-impl TaskAuthority for InlineTask { fn documents(&self) -> Result<Vec<TaskDocument>, planning::PlanningError> { Ok(vec![TaskDocument { id: "operator-request".to_owned(), body: self.0.clone() }]) } }
+impl TaskAuthority for InlineTask { fn input_set(&self) -> Result<planning::TaskInputSet, planning::PlanningError> { planning::inline_task_input(self.0.clone()) } }
 
 struct RepoGrounding { repo: PathBuf }
 impl planning::RepositoryEvidence for RepoGrounding {
@@ -23,53 +23,111 @@ impl planning::RepositoryEvidence for RepoGrounding {
 #[derive(Clone, Debug)]
 struct AgentAssignment { assignment_id: String, role: String, mode: String, boundary_id: Option<String> }
 #[derive(Debug, Deserialize)]
-struct AgentCarrier { workstream: String, boundary_id: String, raw_output: String }
+struct AgentCarrier {
+    schema: String,
+    action_id: String,
+    assignment_id: String,
+    run_revision: u64,
+    workstream: String,
+    role_id: String,
+    mode: String,
+    boundary_id: String,
+    result_contract: String,
+    prompt_path: String,
+    prompt_digest: String,
+    boundary_digest: String,
+    result_contract_digest: String,
+    settings_digest: String,
+    context_digest: String,
+    skills_digest: String,
+    subscription_digest: String,
+    spec_digest: String,
+    spec_path: String,
+    carrier_path: String,
+    raw_output: String,
+}
 #[derive(Debug, Deserialize, Serialize)]
 struct ApprovedPlanArtifact { units: Vec<ApprovedUnit> }
 
 fn planning_assignments(workstream: &str, plan: &planning::AssignmentPlan) -> Vec<AgentAssignment> {
     let mut out = Vec::new();
-    push_assignments(&mut out, workstream, "extractor", "planning-extract", Some("planning.task-atoms.v1"), plan.task_extractors);
-    push_assignments(&mut out, workstream, "scout", "planning-ground", Some("planning.scout-dossier.v1"), plan.scout_and_compiler_first_pass / 2);
-    push_assignments(&mut out, workstream, "compiler", "planning-compile", Some("planning.work-map.v1"), plan.scout_and_compiler_first_pass - (plan.scout_and_compiler_first_pass / 2));
-    push_assignments(&mut out, workstream, "curator", "planning-curate", Some("planning.scout-dossier.v1"), plan.context_curator);
-    push_assignments(&mut out, workstream, "synthesizer", "planning-synthesize", Some("planning.work-map.v1"), plan.synthesizers);
-    push_assignments(&mut out, workstream, "reviewer", "planning-review", Some("planning.plan-review.v1"), plan.reviewer);
-    push_assignments(&mut out, workstream, "resolver", "planning-resolve", Some("planning.questions.v1"), plan.reserved_resolution);
+    push_assignments(&mut out, workstream, "task-extractor", "inventory", Some("planning.task-atoms.v1"), plan.task_extractors);
+    push_assignments(&mut out, workstream, "repository-scout", "initial-grounding", Some("planning.scout-dossier.v1"), plan.scout_and_compiler_first_pass / 2);
+    push_assignments(&mut out, workstream, "plan-compiler", "initial-plan", Some("planning.work-map.v1"), plan.scout_and_compiler_first_pass - (plan.scout_and_compiler_first_pass / 2));
+    push_assignments(&mut out, workstream, "context-curator", "planning-context", Some("planning.scout-dossier.v1"), plan.context_curator);
+    push_assignments(&mut out, workstream, "plan-synthesizer", "initial-plan", Some("planning.work-map.v1"), plan.synthesizers);
+    push_assignments(&mut out, workstream, "plan-reviewer", "full-review", Some("planning.plan-review.v1"), plan.reviewer);
+    push_assignments(&mut out, workstream, "contradiction-resolver", "fact-resolution", Some("planning.questions.v1"), plan.reserved_resolution);
     out
 }
 fn push_assignments(out: &mut Vec<AgentAssignment>, workstream: &str, role: &str, mode: &str, boundary_id: Option<&str>, count: u8) {
     for index in 1..=count { out.push(AgentAssignment { assignment_id: format!("planning-{workstream}-{role}-{index:02}"), role: role.to_owned(), mode: mode.to_owned(), boundary_id: boundary_id.map(str::to_owned) }); }
 }
-fn planning_bg_action(assignment: &AgentAssignment, run_revision: u64) -> BackgroundAction {
-    let boundary = assignment.boundary_id.as_deref().unwrap_or("none");
-    BackgroundAction { action_id: idv(&format!("action-{}", assignment.assignment_id)), assignment_id: idv(&assignment.assignment_id), kind: kernel::generated::ActionKind::LaunchBackground, command_bytes: kernel::generated::Bytes(format!("autopilot-agent-run --assignment {} --session .pi/autopilot/planning/{}.json --no-auto-compact --role {} --mode {} --boundary {} --roster openai-codex/gpt-subscription", assignment.assignment_id, assignment.assignment_id, assignment.role, assignment.mode, boundary)), display_name: "autopilot-agent-run".to_owned(), is_agent: true, timeout: None, notify_on_completion: true, trigger_on_completion: true, run_revision, expires_at: None, supersession_state: kernel::generated::SupersessionState("live".to_owned()) }
+fn planning_bg_action(workstream: &str, assignment: &AgentAssignment, run_revision: u64, input_set: &planning::TaskInputSet) -> Result<runner::IssuedRunnerAction, runner::RunnerError> {
+    let context = input_set.context_documents.first().ok_or_else(|| runner::RunnerError::InvalidSpec("missing planning context".to_owned()))?;
+    runner::planning_issue(&runner::PlanningRunnerRequest {
+        workstream: workstream.to_owned(),
+        action_id: idv(&format!("action-{}", assignment.assignment_id)),
+        assignment_id: idv(&assignment.assignment_id),
+        role_id: idv(&assignment.role),
+        mode: ModeId(assignment.mode.clone()),
+        boundary_id: kernel::generated::ContractId(assignment.boundary_id.clone().unwrap_or_else(|| "planning.questions.v1".to_owned())),
+        run_revision,
+        authority_set_id: input_set.authority_set_id.clone(),
+        authority_documents: input_set.authority_documents.iter().map(runner_doc_from_task).collect(),
+        context_document: runner_doc_from_task(context),
+    })
 }
-fn append_agent_invocation(state: &mut CoreState, workstream: &str, assignment: &AgentAssignment) -> Result<(), AnyError> {
-    let mut refs = vec![Ref(workstream.to_owned()), Ref(assignment.assignment_id.clone()), Ref(assignment.role.clone()), Ref(assignment.mode.clone())];
-    if let Some(boundary) = &assignment.boundary_id { refs.push(Ref(boundary.clone())); }
+fn append_runner_invocation(state: &mut CoreState, binding: &runner::IssuedRunnerBinding) -> Result<(), AnyError> {
+    let mut refs = vec![
+        Ref(binding.workstream.0.clone()),
+        Ref(binding.assignment_id.0.clone()),
+        Ref(binding.action_id.0.clone()),
+        Ref(binding.role_id.0.clone()),
+        Ref(binding.mode.0.clone()),
+        Ref(binding.boundary_id.0.clone()),
+        Ref(format!("action-assignment:{}:{}:{}", binding.action_id.0, binding.assignment_id.0, binding.run_revision)),
+        runner::binding_ref(binding)?,
+    ];
+    if let Some(lane_id) = &binding.lane_id { refs.push(Ref(format!("lane:{}", lane_id.0))); }
     state.append(EventKind("agent:spawn".to_owned()), refs)
+}
+fn runner_doc_from_task(document: &planning::TaskDocument) -> runner::RunnerTaskDocument {
+    let class = match document.class {
+        planning::TaskDocumentClass::Authority => "authority",
+        planning::TaskDocumentClass::ContextNonAuthority => "context/non-authority",
+        planning::TaskDocumentClass::HistoricalNonAuthority => "historical/non-authority",
+        planning::TaskDocumentClass::IndexNonAuthority => "index/non-authority",
+        planning::TaskDocumentClass::InlineTask => "inline-task",
+    };
+    runner::RunnerTaskDocument::new(document.path.clone(), class.to_owned(), document.digest.clone(), document.body.clone())
 }
 fn next_planning_assignment(workstream: &str, state: &CoreState) -> Option<AgentAssignment> {
     planning_assignments(workstream, &planning::AssignmentPlan::d72_default()).into_iter().find(|assignment| !state.state.refs.contains_key(&Ref(assignment.assignment_id.clone())))
 }
-fn validate_agent_output(boundary: &str, raw: &str) -> Result<String, Rejection> {
-    let mut runtime = planning::boundary_runtime(match boundary { "planning.task-atoms.v1" => "planning.task-atoms.v1", "planning.scout-dossier.v1" => "planning.scout-dossier.v1", "planning.questions.v1" => "planning.questions.v1", "planning.work-map.v1" => "planning.work-map.v1", "planning.plan-review.v1" => "planning.plan-review.v1", _ => "planning.questions.v1" });
-    runtime.flip_to_enforce();
-    match boundary {
-        "planning.task-atoms.v1" => planning::accept_task_atoms(raw, &runtime),
-        "planning.scout-dossier.v1" => planning::accept_scout_dossier(raw, &runtime),
-        "planning.questions.v1" => planning::accept_questions(raw, &runtime),
-        "planning.work-map.v1" => planning::accept_work_map(raw, &runtime),
-        "planning.plan-review.v1" => planning::accept_plan_review(raw, &runtime),
-        other => { runtime.reject(format!("unknown-boundary:{other}"))?; Ok(raw.to_owned()) },
-    }
-}
-fn write_planning_manifest(workstream: &str, inventory: &planning::Inventory, dossier: &planning::Dossier, assignments: &[AgentAssignment]) -> Result<(), AnyError> {
+fn validate_agent_output(boundary: &str, raw: &str) -> Result<String, Rejection> { runner::validate_child_boundary(boundary, raw) }
+fn write_planning_manifest(workstream: &str, input_set: &planning::TaskInputSet, inventory: &planning::Inventory, dossier: &planning::Dossier, assignments: &[AgentAssignment]) -> Result<(), AnyError> {
     let dir = workstream_dir(workstream); fs::create_dir_all(&dir)?;
-    let body = serde_json::json!({"workstream":workstream,"atoms":inventory.atoms.len(),"verified_facts":dossier.verified_facts,"assignments":assignments.iter().map(|item| &item.assignment_id).collect::<Vec<_>>()});
+    let context = input_set.context_documents.first().ok_or("missing context document")?;
+    let authority_docs = input_set.authority_documents.iter().map(runner_doc_from_task).map(|doc| serde_json::to_value(doc).expect("runner doc json")).collect::<Vec<_>>();
+    let context_doc = runner_doc_from_task(context);
+    let body = serde_json::json!({"workstream":workstream,"authority_set_id":input_set.authority_set_id,"authority_paths":input_set.authority_documents.iter().map(|item| &item.path).collect::<Vec<_>>(),"authority_documents":authority_docs,"context":{"path":context.path,"class":"context/non-authority","digest":context.digest},"context_document":context_doc,"file_digests":input_set.authority_documents.iter().chain(input_set.context_documents.iter()).map(|item| serde_json::json!({"path":item.path,"class":format!("{:?}", item.class),"digest":item.digest})).collect::<Vec<_>>(),"atoms":inventory.atoms.len(),"verified_facts":dossier.verified_facts,"assignments":assignments.iter().map(|item| &item.assignment_id).collect::<Vec<_>>()});
     fs::write(dir.join("planning-manifest.json"), serde_json::to_vec_pretty(&body)?)?;
     Ok(())
+}
+fn read_planning_input_set(workstream: &str) -> Result<planning::TaskInputSet, String> {
+    let text = fs::read_to_string(workstream_dir(workstream).join("planning-manifest.json")).map_err(|error| error.to_string())?;
+    let value: serde_json::Value = serde_json::from_str(&text).map_err(|error| error.to_string())?;
+    let authority_set_id = value["authority_set_id"].as_str().ok_or_else(|| "missing authority_set_id".to_owned())?.to_owned();
+    let authority_documents = value["authority_documents"].as_array().ok_or_else(|| "missing authority_documents".to_owned())?.iter().enumerate().map(|(index, item)| task_doc_from_manifest(item, planning::TaskDocumentClass::Authority, &authority_set_id, index)).collect::<Result<Vec<_>, _>>()?;
+    let context_document = task_doc_from_manifest(&value["context_document"], planning::TaskDocumentClass::ContextNonAuthority, &authority_set_id, 3)?;
+    Ok(planning::TaskInputSet { authority_set_id, authority_documents, context_documents: vec![context_document] })
+}
+fn task_doc_from_manifest(value: &serde_json::Value, class: planning::TaskDocumentClass, authority_set_id: &str, index: usize) -> Result<planning::TaskDocument, String> {
+    let path = value["path"].as_str().ok_or_else(|| format!("manifest doc {index} missing path"))?.to_owned();
+    let digest = value["digest"].as_str().ok_or_else(|| format!("manifest doc {index} missing digest"))?.to_owned();
+    let body = value["body"].as_str().ok_or_else(|| format!("manifest doc {index} missing body"))?.to_owned();
+    Ok(planning::TaskDocument { id: path.clone(), path, class, authority_set_id: authority_set_id.to_owned(), body, digest })
 }
 fn write_work_map(workstream: &str, raw: &str) -> Result<(), AnyError> { let path = work_map_path(workstream); if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; } fs::write(path, raw)?; Ok(()) }
 fn read_work_map(workstream: &str) -> Result<String, String> { fs::read_to_string(work_map_path(workstream)).map_err(|error| error.to_string()) }
@@ -98,12 +156,57 @@ fn allocation_submission_from_plan(workstream: &str, approved: &[ApprovedUnit]) 
     Ok(AllocationSubmission { lanes, future_units: approved.iter().skip(6).map(|unit| FutureUnit { unit_id: unit.id.clone(), reason: "parallel cap lane limit; retained for future allocation".to_owned() }).collect(), authority_echo: approved.to_vec(), ownership_claims: Vec::new(), overlap_blocks: Vec::new() })
 }
 fn lane_readiness_from_events(lanes: &[AllocationLaneProposal], approved: &[ApprovedUnit], state: &CoreState) -> Vec<LaneReadiness> {
-    lanes.iter().map(|lane| { let units = lane.ordered_unit_ids.iter().filter_map(|id| approved.iter().find(|unit| unit.id == *id)).collect::<Vec<_>>(); LaneReadiness { lane_id: lane.lane_id.clone(), predecessor_gates_met: units.iter().flat_map(|unit| &unit.predecessor_forward_criteria).all(|gate| state.state.refs.contains_key(&Ref(format!("gate:{}", gate.0))) || unit_has_no_predecessor(gate, approved)), blockers_clear: !state.state.refs.contains_key(&Ref(format!("blocker:{}", lane.lane_id.0))), unit_free: lane.ordered_unit_ids.iter().all(|unit| !state.state.refs.contains_key(&Ref(format!("unit-active:{}", unit.0)))), route_ready: plan_path_from_lane(lane).is_some_and(|path| path.exists()), preflight_passed: git_stdout(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")), &["rev-parse", "--verify", "HEAD"]).is_ok(), pressure_delay: false } }).collect()
+    lanes.iter().map(|lane| { let units = lane.ordered_unit_ids.iter().filter_map(|id| approved.iter().find(|unit| unit.id == *id)).collect::<Vec<_>>(); LaneReadiness { lane_id: lane.lane_id.clone(), predecessor_gates_met: units.iter().flat_map(|unit| &unit.predecessor_forward_criteria).all(|gate| state.state.refs.contains_key(&Ref(format!("gate:{}", gate.0))) || unit_has_no_predecessor(gate, approved)), blockers_clear: !state.state.refs.contains_key(&Ref(format!("blocker:{}", lane.lane_id.0))), unit_free: lane.ordered_unit_ids.iter().all(|unit| !state.state.refs.contains_key(&Ref(format!("unit-active:{}", unit.0)))), route_ready: true, preflight_passed: git_stdout(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")), &["rev-parse", "--verify", "HEAD"]).is_ok(), pressure_delay: false } }).collect()
 }
 fn unit_has_no_predecessor(_gate: &Id, _approved: &[ApprovedUnit]) -> bool { false }
-fn plan_path_from_lane(lane: &AllocationLaneProposal) -> Option<PathBuf> { let workstream_ref = lane.context_family_id.0.strip_prefix("approved-plan:")?; Some(plan_path(workstream_ref)) }
 fn active_implementers(state: &CoreState) -> usize { state.state.refs.keys().filter(|reference| reference.0.starts_with("unit-active:")).count() }
-fn assignment(workstream: &str, lane_id: &Id) -> Result<RunnerAssignment, AnyError> { let cwd = std::env::current_dir()?; let base = git_stdout(&cwd, &["rev-parse", "--verify", "HEAD"]).map_err(|error| format!("CONTEXT_GAP:base-commit:{error}"))?; Ok(RunnerAssignment { action_id: idv(&format!("action-{workstream}-{}", lane_id.0)), assignment_id: idv(&format!("assignment-{workstream}-{}", lane_id.0)), role_id: idv("implementer"), mode: ModeId("lane-delivery".to_owned()), run_revision: 1, lane_id: lane_id.clone(), attempt: 1, base_commit: Sha(base.trim().to_owned()), worktree: PathBuf::from(format!(".pi/autopilot/{workstream}/worktrees/{}", lane_id.0)), session_file: PathBuf::from(format!(".pi/autopilot/{workstream}/session.json")), roster_assignment: "openai-codex/gpt-subscription".to_owned() }) }
+fn assignment(workstream: &str, lane_id: &Id) -> Result<RunnerAssignment, AnyError> {
+    let cwd = fs::canonicalize(std::env::current_dir()?)?;
+    let base = git_stdout(&cwd, &["rev-parse", "--verify", "HEAD^{commit}"]).map_err(|error| format!("CONTEXT_GAP:base-commit:{error}"))?;
+    let base = Sha(base.trim().to_owned());
+    let worktree = prepare_delivery_worktree(&cwd, workstream, lane_id, &base).map_err(|error| format!("CONTEXT_GAP:worktree:{error}"))?;
+    Ok(RunnerAssignment {
+        workstream: idv(workstream),
+        action_id: idv(&format!("action-{workstream}-{}", lane_id.0)),
+        assignment_id: idv(&format!("assignment-{workstream}-{}", lane_id.0)),
+        role_id: idv("implementer"),
+        mode: ModeId("lane-delivery".to_owned()),
+        run_revision: 1,
+        lane_id: lane_id.clone(),
+        attempt: 1,
+        base_commit: base,
+        worktree,
+        session_file: PathBuf::from(format!(".pi/autopilot/{workstream}/session.json")),
+        roster_assignment: "openai-codex/gpt-subscription".to_owned(),
+    })
+}
+fn prepare_delivery_worktree(repo: &Path, workstream: &str, lane_id: &Id, base: &Sha) -> Result<PathBuf, String> {
+    let worktree = repo.join(".pi/autopilot").join(workstream).join("worktrees").join(&lane_id.0);
+    runner::reject_link_components_for_path(&worktree).map_err(|error| error.to_string())?;
+    if !worktree.exists() {
+        if let Some(parent) = worktree.parent() { fs::create_dir_all(parent).map_err(|error| error.to_string())?; }
+        let output = Command::new("git")
+            .current_dir(repo)
+            .args(["worktree", "add", "--detach"])
+            .arg(&worktree)
+            .arg(&base.0)
+            .output()
+            .map_err(|error| error.to_string())?;
+        if !output.status.success() { return Err(format!("git worktree add failed: {}", String::from_utf8_lossy(&output.stderr))); }
+    }
+    let canonical = fs::canonicalize(&worktree).map_err(|error| error.to_string())?;
+    let repo = fs::canonicalize(repo).map_err(|error| error.to_string())?;
+    if canonical == repo { return Err("delivery worktree must be distinct from operator checkout".to_owned()); }
+    let marker = canonical.join(".git");
+    runner::reject_link_components_for_path(&marker).map_err(|error| error.to_string())?;
+    let marker_metadata = fs::symlink_metadata(&marker).map_err(|error| error.to_string())?;
+    if !marker_metadata.file_type().is_file() { return Err("delivery path is not a linked git worktree".to_owned()); }
+    let head = git_stdout(&canonical, &["rev-parse", "--verify", "HEAD^{commit}"])?;
+    if head.trim() != base.0 { return Err(format!("delivery worktree head drift: expected {}, got {}", base.0, head.trim())); }
+    let status = git_stdout(&canonical, &["status", "--porcelain"])?;
+    if !status.trim().is_empty() { return Err("delivery worktree is dirty before launch".to_owned()); }
+    Ok(canonical)
+}
 fn host_resource_facts() -> Result<ResourceFacts, String> { Ok(ResourceFacts { free_storage_bytes: df_available_bytes(std::env::current_dir().map_err(|error| error.to_string())?)?, projected_storage_bytes: 1, available_memory_bytes: available_memory_bytes()?, physical_memory_bytes: physical_memory_bytes()? }) }
 fn df_available_bytes(path: PathBuf) -> Result<u64, String> { let output = Command::new("df").arg("-k").arg(path).output().map_err(|error| error.to_string())?; if !output.status.success() { return Err("df failed".to_owned()); } let text = String::from_utf8(output.stdout).map_err(|error| error.to_string())?; let line = text.lines().nth(1).ok_or_else(|| "df missing data".to_owned())?; let blocks = line.split_whitespace().nth(3).ok_or_else(|| "df missing available column".to_owned())?.parse::<u64>().map_err(|error| error.to_string())?; Ok(blocks.saturating_mul(1024)) }
 fn physical_memory_bytes() -> Result<u64, String> { if let Ok(text) = fs::read_to_string("/proc/meminfo") { for line in text.lines() { if let Some(value) = line.strip_prefix("MemTotal:") { return value.split_whitespace().next().ok_or_else(|| "MemTotal missing".to_owned())?.parse::<u64>().map(|kb| kb.saturating_mul(1024)).map_err(|error| error.to_string()); } } } let output = Command::new("sysctl").args(["-n", "hw.memsize"]).output().map_err(|error| error.to_string())?; if !output.status.success() { return Err("sysctl hw.memsize failed".to_owned()); } String::from_utf8(output.stdout).map_err(|error| error.to_string())?.trim().parse::<u64>().map_err(|error| error.to_string()) }

@@ -54,8 +54,10 @@ test("H10 binary missing at extension load notifies exactly once", () => {
   const root = fixturePackage("darwin", "arm64", false);
   const messages: string[] = [];
   const pi = {
+    events: { on() { return () => {}; }, emit() {} },
+    on() {},
     registerCommand() {},
-    sendMessage(message: string) { messages.push(message); },
+    sendMessage(message: { content?: string } | string) { messages.push(typeof message === "string" ? message : String(message.content)); },
   };
   try {
     autopilotExtension(pi, { packageJsonPath: root + "/package.json", platform: "darwin", arch: "arm64" });

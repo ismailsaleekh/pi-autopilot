@@ -234,11 +234,11 @@ dispositions:
     replacement_consumer: data/roster.kdl
   - path: "bin/autopilot-agent-run.mjs"
     kind: exact
-    disposition: delete
+    disposition: rewrite
     loc: 32
-    reason: "D76 §11 — deleted legacy agent-run wrapper is replaced by drivers/src/runner, which emits the autopilot-agent-run background descriptor."
+    reason: "D78 runtime repair — legacy agent-run wrapper is replaced by a thin package-contained wrapper that delegates only to sibling bin/autopilot-core.mjs agent-run mode."
     replacement_slice: slice-3
-    replacement_consumer: drivers/src/runner
+    replacement_consumer: drivers/src/runner/child.rs
   - path: "bin/autopilot-s2-corpus-rehearsal.mjs"
     kind: exact
     disposition: delete

@@ -137,14 +137,14 @@ function packageMetadata() {
 function npmPackDryRun() {
   const cache = mkdtempSync(join(tmpdir(), 'pi-autopilot-pack-cache.'));
   try {
-    const result = spawnSync('npm', ['pack', '--dry-run', '--json'], {
+    const result = spawnSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], {
       cwd: PACKAGE_ROOT,
       encoding: 'utf8',
       maxBuffer: 64 * 1024 * 1024,
       env: { ...process.env, npm_config_cache: cache, npm_config_audit: 'false', npm_config_fund: 'false', npm_config_update_notifier: 'false' },
     });
     if (result.error) throw new Error(`npm pack failed before exit: ${result.error.message}`);
-    if (result.status !== 0) throw new Error(`npm pack --dry-run --json failed with exit ${result.status}: ${result.stderr.trim()}`);
+    if (result.status !== 0) throw new Error(`npm pack --dry-run --json --ignore-scripts failed with exit ${result.status}: ${result.stderr.trim()}`);
     let parsed;
     try { parsed = JSON.parse(result.stdout); } catch (error) { throw new Error(`npm pack returned non-JSON output: ${error.message}`); }
     if (!Array.isArray(parsed) || parsed.length !== 1 || typeof parsed[0] !== 'object' || parsed[0] === null) throw new Error('npm pack returned unexpected metadata shape');
@@ -168,11 +168,14 @@ function runtimeInputsFromSource(filePath) {
   return inputs;
 }
 
-function allowedRuntimePath(path, binEntry) {
+function allowedRuntimePath(path, binEntries) {
   if (path === 'package.json' || path === 'README.md' || path === 'LICENSE' || path === 'logo.png' || path === 'AUTOPILOT-INSTRUCTIONS.md') return true;
-  if (path === binEntry) return true;
+  if (binEntries.has(path)) return true;
   if (path.startsWith('src/') && path.endsWith('.ts')) return true;
   if (path.startsWith('docs/generated/') && path.endsWith('.md')) return true;
+  if (path === 'binaries/MANIFEST.json') return true;
+  if (/^binaries\/(darwin-arm64|darwin-x64|linux-arm64|linux-x64)\/autopilot-core$/u.test(path)) return true;
+  if (path === 'binaries/win32-x64/autopilot-core.exe') return true;
   return false;
 }
 
@@ -183,8 +186,11 @@ function main() {
     failUsage(`unknown argument: ${args[0]}`);
   }
   const pkg = packageMetadata();
-  const binEntry = pkg.bin?.['autopilot-core'];
-  if (typeof binEntry !== 'string' || binEntry.length === 0) throw new Error('package.json bin.autopilot-core must be a non-empty string');
+  const coreBinEntry = pkg.bin?.['autopilot-core'];
+  const runnerBinEntry = pkg.bin?.['autopilot-agent-run'];
+  if (typeof coreBinEntry !== 'string' || coreBinEntry.length === 0) throw new Error('package.json bin.autopilot-core must be a non-empty string');
+  if (typeof runnerBinEntry !== 'string' || runnerBinEntry !== 'bin/autopilot-agent-run.mjs') throw new Error('package.json bin.autopilot-agent-run must be bin/autopilot-agent-run.mjs');
+  const binEntries = new Set([coreBinEntry, runnerBinEntry]);
   const manifestPath = resolve(PACKAGE_ROOT, MANIFEST);
   if (!existsSync(manifestPath)) throw new Error(`${MANIFEST} is missing`);
   const manifest = parseDispositionManifest(readFileSync(manifestPath, 'utf8'));
@@ -193,9 +199,10 @@ function main() {
   const files = new Set(packFiles.map((entry) => entry.path));
   const errors = [];
   const requireFile = (path, reason) => { if (!files.has(path)) errors.push(`missing required payload path ${path} (${reason})`); };
-  const hostRuntimeSources = ['src/extension.ts', 'src/commands.ts', 'src/effects.ts', 'src/guard.ts', 'src/resolve-core.ts', 'src/transport.ts'];
+  const hostRuntimeSources = ['src/extension.ts', 'src/commands.ts', 'src/effects.ts', 'src/background-tasks.ts', 'src/guard.ts', 'src/resolve-core.ts', 'src/resolve-runner.ts', 'src/transport.ts'];
   const runtimeInputs = [
-    { path: binEntry, reason: 'package.json bin.autopilot-core' },
+    { path: coreBinEntry, reason: 'package.json bin.autopilot-core' },
+    { path: runnerBinEntry, reason: 'package.json bin.autopilot-agent-run' },
     { path: 'src/generated/index.ts', reason: 'generated seam types and guard timeout' },
     ...hostRuntimeSources.map((path) => ({ path, reason: 'Host runtime source' })),
     ...hostRuntimeSources.flatMap(runtimeInputsFromSource),
@@ -205,11 +212,11 @@ function main() {
   for (const path of files) {
     const disposition = winningDisposition(manifest.dispositions, path);
     if (disposition?.disposition === 'delete') errors.push(`delete-dispositioned payload path ${path} matched ${disposition.kind} ${disposition.path}`);
-    if (path !== binEntry && (path === 'target' || path.startsWith('target/'))) errors.push(`development target artifact shipped: ${path}`);
+    if (!binEntries.has(path) && (path === 'target' || path.startsWith('target/'))) errors.push(`development target artifact shipped: ${path}`);
     if (path === 'tests/transcripts' || path.startsWith('tests/transcripts/')) errors.push(`development transcript shipped: ${path}`);
     if (path === 'plans' || path.startsWith('plans/')) errors.push(`private plan material shipped: ${path}`);
     if (path === '.pi' || path.startsWith('.pi/') || path.includes('/.pi/')) errors.push(`private .pi material shipped: ${path}`);
-    if (!allowedRuntimePath(path, binEntry)) errors.push(`non-runtime payload path shipped: ${path}`);
+    if (!allowedRuntimePath(path, binEntries)) errors.push(`non-runtime payload path shipped: ${path}`);
   }
 
   if (errors.length > 0) {
@@ -218,7 +225,7 @@ function main() {
     process.exitCode = 1;
     return;
   }
-  process.stdout.write(`payload:check passed: ${files.size} files, bin=${binEntry}, package size=${packed.size} bytes, unpacked=${packed.unpackedSize} bytes.\n`);
+  process.stdout.write(`payload:check passed: ${files.size} files, bins=${[...binEntries].join(',')}, package size=${packed.size} bytes, unpacked=${packed.unpackedSize} bytes.\n`);
 }
 
 try {

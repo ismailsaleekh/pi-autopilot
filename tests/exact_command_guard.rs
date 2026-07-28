@@ -1,8 +1,10 @@
-use drivers::control::{BgRunCall, BgRunGuard, GuardOutcome, GuardRejection};
+use drivers::control::{BgRunGuard, GuardOutcome, GuardRejection};
 use kernel::{
     effect::Effect,
     failure::{Failure, HardBoundary},
-    generated::{ActionKind, BackgroundAction, Bytes, Duration, Id, SupersessionState},
+    generated::{
+        ActionKind, BackgroundAction, BackgroundActionBgRun, Bytes, Id, SupersessionState,
+    },
 };
 
 #[test]
@@ -93,12 +95,12 @@ impl FakeProcess {
     }
 }
 
-fn call(command: &str) -> BgRunCall {
-    BgRunCall {
-        command_bytes: Bytes(command.to_owned()),
-        display_name: "demo".to_owned(),
+fn call(command: &str) -> BackgroundActionBgRun {
+    BackgroundActionBgRun {
+        name: "demo".to_owned(),
+        command: Bytes(command.to_owned()),
         is_agent: false,
-        timeout: Some(Duration("30m".to_owned())),
+        timeout_seconds: Some(1800),
         notify_on_completion: true,
         trigger_on_completion: true,
     }
@@ -109,12 +111,14 @@ fn action(action_id: &str, assignment_id: &str, command: &str) -> BackgroundActi
         action_id: Id(action_id.to_owned()),
         assignment_id: Id(assignment_id.to_owned()),
         kind: ActionKind::LaunchBackground,
-        command_bytes: Bytes(command.to_owned()),
-        display_name: "demo".to_owned(),
-        is_agent: false,
-        timeout: Some(Duration("30m".to_owned())),
-        notify_on_completion: true,
-        trigger_on_completion: true,
+        bg_run: BackgroundActionBgRun {
+            name: "demo".to_owned(),
+            command: Bytes(command.to_owned()),
+            is_agent: false,
+            timeout_seconds: Some(1800),
+            notify_on_completion: true,
+            trigger_on_completion: true,
+        },
         run_revision: 42,
         expires_at: None,
         supersession_state: SupersessionState("live".to_owned()),

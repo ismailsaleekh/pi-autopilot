@@ -3,8 +3,9 @@ use std::{cell::Cell, fs};
 use drivers::planning::{
     AssignmentPlan, Atom, AtomKind, Backlink, Disposition, MaterialPlanElement,
     PlanningDeclarations, PlanningError, QuestionClass, QuestionNomination, RepositoryEvidence,
-    TaskAuthority, TaskDocument, accept_questions, admit_question, boundary_runtime, p1_inventory,
-    p2_ground, question_class_from_d72, require_material_backlinks, require_total_dispositions,
+    TaskAuthority, accept_questions, admit_question, boundary_runtime, inline_task_input,
+    p1_inventory, p2_ground, question_class_from_d72, require_material_backlinks,
+    require_total_dispositions,
 };
 
 struct TaskOnly {
@@ -12,12 +13,9 @@ struct TaskOnly {
 }
 
 impl TaskAuthority for TaskOnly {
-    fn documents(&self) -> Result<Vec<TaskDocument>, PlanningError> {
+    fn input_set(&self) -> Result<drivers::planning::TaskInputSet, PlanningError> {
         self.reads.set(self.reads.get() + 1);
-        Ok(vec![TaskDocument {
-            id: "task".to_owned(),
-            body: "deliver the requested planning pipeline".to_owned(),
-        }])
+        inline_task_input("deliver the requested planning pipeline".to_owned())
     }
 }
 

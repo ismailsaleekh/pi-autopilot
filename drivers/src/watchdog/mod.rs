@@ -1,6 +1,8 @@
 use kernel::{
     effect::Effect,
-    generated::{ActionKind, BackgroundAction, Bytes, Duration, Id, SupersessionState},
+    generated::{
+        ActionKind, BackgroundAction, BackgroundActionBgRun, Bytes, Id, SupersessionState,
+    },
 };
 
 use crate::control::{data_blocks, one};
@@ -60,12 +62,14 @@ impl WatchdogConfig {
             assignment_id: Id("watchdog-heartbeat".to_owned()),
             action_id,
             kind: ActionKind::LaunchBackground,
-            command_bytes: Bytes(self.command.clone()),
-            display_name: self.display_name.clone(),
-            is_agent: self.is_agent,
-            timeout: Some(Duration(format!("{}m", self.minutes))),
-            notify_on_completion: self.notify_on_completion,
-            trigger_on_completion: self.trigger_on_completion,
+            bg_run: BackgroundActionBgRun {
+                name: self.display_name.clone(),
+                command: Bytes(self.command.clone()),
+                is_agent: self.is_agent,
+                timeout_seconds: Some(self.minutes.saturating_mul(60)),
+                notify_on_completion: self.notify_on_completion,
+                trigger_on_completion: self.trigger_on_completion,
+            },
             run_revision,
             expires_at: None,
             supersession_state: SupersessionState("live".to_owned()),

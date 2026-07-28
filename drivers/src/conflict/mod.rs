@@ -51,7 +51,12 @@ impl ConflictBundle {
 
     pub fn overlap_tests(&self) -> Vec<String> {
         let mut out = BTreeSet::new();
-        for test in self.current.focused_tests.iter().chain(&self.incoming.focused_tests) {
+        for test in self
+            .current
+            .focused_tests
+            .iter()
+            .chain(&self.incoming.focused_tests)
+        {
             out.insert(test.clone());
         }
         out.into_iter().collect()

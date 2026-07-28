@@ -99,6 +99,9 @@ fn coverage(id: &str, paths: &[&str], surfaces: &[&str]) -> CriterionCoverage {
         criterion_id: id.to_owned(),
         witness_id: format!("witness-{id}"),
         paths: paths.iter().map(|path| (*path).to_owned()).collect(),
-        surfaces: surfaces.iter().map(|surface| (*surface).to_owned()).collect(),
+        surfaces: surfaces
+            .iter()
+            .map(|surface| (*surface).to_owned())
+            .collect(),
     }
 }

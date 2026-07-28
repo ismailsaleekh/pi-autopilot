@@ -26,14 +26,21 @@ pub struct ResumeLaunch {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum HandoffAction {
-    PauseRequest { assignment_id: Id },
+    PauseRequest {
+        assignment_id: Id,
+    },
     WaitForCheckpoint {
         assignment_id: Id,
         max_seconds: u64,
         checkpoint_ref: Option<Ref>,
     },
-    BgKill { task_id: Id },
-    BgRun { assignment_id: Id, previous_task_id: Id },
+    BgKill {
+        task_id: Id,
+    },
+    BgRun {
+        assignment_id: Id,
+        previous_task_id: Id,
+    },
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]

@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { accessSync, constants, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -13,8 +14,12 @@ const PACKAGE_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const CORE_BINARY_NAME = process.platform === "win32" ? "autopilot-core.exe" : "autopilot-core";
 const CORE_BINARY = join(PACKAGE_ROOT, "target", "release", CORE_BINARY_NAME);
 
+const PLAN_ARGS = "main TASK-A.md TASK-B.md TASK-C.md CONTEXT.md";
+
+let activeEffects;
+
 const VALID_COMMAND_ARGS = Object.freeze({
-  "autopilot-plan": "main TASK.md",
+  "autopilot-plan": PLAN_ARGS,
   autopilot: "main",
   "autopilot-onboard": "make this task concrete",
   "autopilot-inject": "main",
@@ -37,7 +42,8 @@ test("registered Pi slash handlers reach the real compiled autopilot-core over s
 
   const transport = new CoreTransport({ binaryPath: CORE_BINARY });
   const pi = registrationHarness();
-  registerAutopilotCommands(pi, { transport });
+  const backgroundTasks = fakeBackgroundTasks();
+  registerAutopilotCommands(pi, { transport, backgroundTasks, operatorMessage: recordingOperatorMessage });
 
   try {
     for (const command of AUTOPILOT_COMMANDS) {
@@ -48,7 +54,7 @@ test("registered Pi slash handlers reach the real compiled autopilot-core over s
       if (command === "autopilot-plan") {
         assertPlanningSpawn(effects, "autopilot-plan");
         assertPlanningManifestGrounded(root);
-        assertAgentSpawnRecorded(eventLog, "planning-main-extractor-01");
+        assertAgentSpawnRecorded(eventLog, "planning-main-task-extractor-01");
       }
     }
 
@@ -61,7 +67,7 @@ test("registered Pi slash handlers reach the real compiled autopilot-core over s
       `Core did not echo byte-identical raw command. status=${JSON.stringify(byteStatus)}`,
     );
 
-    const invalid = await transport.request("command", { raw: "not-a-real-autopilot-command main" }, 5000);
+    const invalid = await transport.request("command", commandPayload("not-a-real-autopilot-command main"), 5000);
     assert.equal(invalid.kind, "done");
     const invalidStatus = invalid.payload.status;
     assert.equal(typeof invalidStatus, "string");
@@ -81,7 +87,9 @@ test("planning rejects a bare directory with typed CONTEXT_GAP instead of fabric
   assertCoreBinaryPresent();
 
   const root = mkdtempSync(join(tmpdir(), "autopilot-host-core-bare-"));
-  writeFileSync(join(root, "TASK.md"), "Mission\nDefinition of Done\n", "utf8");
+  writeTaskPack(root, "set-host-bare");
+  execFileSync("rm", ["-f", join(root, "CONTEXT.md")]);
+  mkdirSync(join(root, "CONTEXT.md"));
 
   const eventLog = join(root, "events.jsonl");
   const previousCwd = process.cwd();
@@ -91,11 +99,12 @@ test("planning rejects a bare directory with typed CONTEXT_GAP instead of fabric
 
   const transport = new CoreTransport({ binaryPath: CORE_BINARY });
   const pi = registrationHarness();
-  registerAutopilotCommands(pi, { transport });
+  const backgroundTasks = fakeBackgroundTasks();
+  registerAutopilotCommands(pi, { transport, backgroundTasks, operatorMessage: recordingOperatorMessage });
 
   try {
-    const effects = await dispatchRegistered(pi, "autopilot-plan", "main TASK.md");
-    assert.equal(doneStatus(effects, "autopilot-plan bare directory"), 'rejection:driver-error:CONTEXT_GAP:planning:git ["rev-parse", "--verify", "HEAD"] failed');
+    const effects = await dispatchRegistered(pi, "autopilot-plan", PLAN_ARGS);
+    assert.match(doneStatus(effects, "autopilot-plan bare directory"), /planning:TaskPath\("read:CONTEXT\.md:Is a directory/u);
     assert.equal(effects.some((effect) => effect.kind === "spawn"), false, "bare directory must not synthesize an agent launch");
     assert.deepEqual(readEventsIfPresent(eventLog), [], "bare directory must not append agent:spawn evidence");
   } finally {
@@ -117,32 +126,19 @@ test("successful run route uses recorded model transcripts and records agent spa
 
   const transport = new CoreTransport({ binaryPath: CORE_BINARY });
   const pi = registrationHarness();
-  registerAutopilotCommands(pi, { transport });
+  const backgroundTasks = fakeBackgroundTasks();
+  registerAutopilotCommands(pi, { transport, backgroundTasks, operatorMessage: recordingOperatorMessage });
 
   try {
-    assertPlanningSpawn(await dispatchRegistered(pi, "autopilot-plan", "main TASK.md"), "autopilot-plan");
-    assertAgentSpawnRecorded(eventLog, "planning-main-extractor-01");
-
-    const workMap = transcript("planning.work-map.v1");
-    const accepted = await transport.request("agent-result", {
-      assignment_id: "planning-main-compiler-01",
-      carrier: { workstream: "main", boundary_id: "planning.work-map.v1", raw_output: workMap },
-    }, 5000);
-    assert.equal(accepted.kind, "spawn");
-
-    const review = transcript("planning.plan-review.v1");
-    const ready = await transport.request("agent-result", {
-      assignment_id: "planning-main-reviewer-01",
-      carrier: { workstream: "main", boundary_id: "planning.plan-review.v1", raw_output: review },
-    }, 5000);
-    assert.equal(ready.kind, "done");
-    assert.match(ready.payload.status, /ready-to-execute:workstream=main/u);
+    const planEffects = await dispatchRegistered(pi, "autopilot-plan", PLAN_ARGS);
+    assertPlanningSpawn(planEffects, "autopilot-plan");
+    assertAgentSpawnRecorded(eventLog, "planning-main-task-extractor-01");
+    await completePlanningFromSpawn(transport, spawnAction(planEffects, "autopilot-plan"));
 
     const runEffects = await dispatchRegistered(pi, "autopilot", "main");
     const runSpawn = spawnAction(runEffects, "autopilot run");
-    assert.equal(runSpawn.display_name, "autopilot-agent-run");
-    assert.equal(runSpawn.isAgent, true);
-    assert.match(runSpawn.command_bytes, /autopilot-agent-run --assignment assignment-main-L1/u);
+    assert.equal(runSpawn.bg_run.isAgent, true);
+    assert.match(runSpawn.bg_run.command, / --spec /u);
     assertAgentSpawnRecorded(eventLog, "assignment-main-L1");
   } finally {
     transport.close();
@@ -161,15 +157,27 @@ function assertCoreBinaryPresent() {
   }
 }
 
+function writeTaskPack(root, authoritySetId) {
+  const entries = [
+    ["TASK-A.md", "[authority]", "Implement authority A\n"],
+    ["TASK-B.md", "[authority]", "Implement authority B\n"],
+    ["TASK-C.md", "[authority]", "Implement authority C\n"],
+    ["CONTEXT.md", "[context/non-authority]", "context sentinel should not become work\n"],
+  ];
+  for (const [name, marker, body] of entries) {
+    writeFileSync(join(root, name), `${marker}\nauthority_set_id: ${authoritySetId}\n\n${body}`, "utf8");
+  }
+}
+
 function makeEvidenceRepo(prefix) {
   const root = mkdtempSync(join(tmpdir(), prefix));
   mkdirSync(join(root, "src"));
-  writeFileSync(join(root, "TASK.md"), "Mission\nImplement the autopilot fixture from real repository evidence.\nDefinition of Done\n", "utf8");
+  writeTaskPack(root, "set-host-core");
   writeFileSync(join(root, "src", "fixture.ts"), "export function autopilotFixture() { return 'real repository evidence'; }\n", "utf8");
   git(root, ["init"]);
   git(root, ["config", "user.email", "autopilot-test@example.invalid"]);
   git(root, ["config", "user.name", "Autopilot Test"]);
-  git(root, ["add", "TASK.md", "src/fixture.ts"]);
+  git(root, ["add", "TASK-A.md", "TASK-B.md", "TASK-C.md", "CONTEXT.md", "src/fixture.ts"]);
   git(root, ["commit", "-m", "seed real repository evidence"]);
   return root;
 }
@@ -182,24 +190,47 @@ async function dispatchRegistered(pi, command, rawArgs) {
   const registration = pi.registrations.get(command);
   assert.ok(registration, `${command} was not registered`);
   const effects = [];
-  await registration.handler(rawArgs, recordingContext(effects));
+  activeEffects = effects;
+  try {
+    await registration.handler(rawArgs, recordingContext(effects));
+  } finally {
+    activeEffects = undefined;
+  }
   return effects;
 }
 
 function recordingContext(effects) {
   return {
-    bg_run(action) {
-      effects.push({ kind: "spawn", action });
-    },
-    done(status) {
-      effects.push({ kind: "done", status });
-    },
+    hasUI: false,
+    mode: "json",
     ui: {
-      text(content) {
-        effects.push({ kind: "ui", ui_kind: "text", content });
+      notify(message, level) {
+        effects.push({ kind: "notify", level, message });
       },
     },
   };
+}
+
+async function recordingOperatorMessage(message, level) {
+  activeEffects?.push({ kind: "operator-message", level, message });
+}
+
+function fakeBackgroundTasks() {
+  return {
+    async capabilities() { return completeCapabilities(); },
+    async run(descriptor) {
+      activeEffects?.push({ kind: "spawn", action: { bg_run: descriptor, assignment_id: descriptor.name.includes("planning-main-task-extractor-01") ? "planning-main-task-extractor-01" : "assignment-main-L1" } });
+      return { id: `task-${Date.now()}`, command: descriptor.command, status: "running", outputPath: join(tmpdir(), "autopilot-bg.out") };
+    },
+  };
+}
+
+function completeCapabilities() {
+  return { api_version: 1, run: true, run_is_agent: true, run_completion_trigger: true, status: true, logs: true, logs_bounded: true, kill: true };
+}
+
+function commandPayload(raw) {
+  return { raw, background_capabilities: completeCapabilities() };
 }
 
 function registrationHarness() {
@@ -213,10 +244,10 @@ function registrationHarness() {
 }
 
 function doneStatus(effects, label) {
-  const effect = effects.find((item) => item.kind === "done");
-  assert.ok(effect, `${label} did not produce a done effect: ${JSON.stringify(effects)}`);
-  assert.equal(typeof effect.status, "string");
-  return effect.status;
+  const effect = effects.find((item) => item.kind === "operator-message" && item.message.startsWith("Autopilot done: "));
+  assert.ok(effect, `${label} did not produce an operator-visible done effect: ${JSON.stringify(effects)}`);
+  assert.equal(typeof effect.message, "string");
+  return effect.message.slice("Autopilot done: ".length);
 }
 
 function spawnAction(effects, label) {
@@ -229,20 +260,17 @@ function spawnAction(effects, label) {
 
 function assertPlanningSpawn(effects, label) {
   const action = spawnAction(effects, label);
-  assert.equal(action.display_name, "autopilot-agent-run");
-  assert.equal(action.isAgent, true);
-  assert.equal(action.assignment_id, "planning-main-extractor-01");
-  assert.match(action.command_bytes, /autopilot-agent-run --assignment planning-main-extractor-01/u);
-  assert.match(action.command_bytes, /--role extractor/u);
-  assert.match(action.command_bytes, /--mode planning-extract/u);
-  assert.match(action.command_bytes, /--boundary planning\.task-atoms\.v1/u);
+  assert.equal(action.bg_run.isAgent, true);
+  assert.equal(action.assignment_id, "planning-main-task-extractor-01");
+  assert.match(action.bg_run.command, / --spec /u);
+  assert.doesNotMatch(action.bg_run.command, /autopilot-agent-run --assignment/u);
 }
 
 function assertPlanningManifestGrounded(root) {
   const manifest = JSON.parse(readFileSync(join(root, ".pi", "autopilot", "main", "planning-manifest.json"), "utf8"));
   const head = gitHead(root);
   assert.equal(manifest.workstream, "main");
-  assert.equal(manifest.atoms, 1);
+  assert.equal(manifest.atoms, 3);
   assert.equal(manifest.assignments.length, 25, "D72 P1-P6 assignment plan should be complete, not stubbed");
   assert.ok(
     manifest.verified_facts.some((fact) => fact === `repo-file:src/fixture.ts:head=${head}:line=export function autopilotFixture() { return 'real repository evidence'; }`),
@@ -254,12 +282,68 @@ function gitHead(cwd) {
   return execFileSync("git", ["rev-parse", "--verify", "HEAD"], { cwd, encoding: "utf8" }).trim();
 }
 
+function sha256(data) {
+  return createHash("sha256").update(data).digest("hex");
+}
+
 function assertAgentSpawnRecorded(eventLog, assignmentId) {
   const events = readEventsIfPresent(eventLog);
   assert.ok(
     events.some((event) => event.kind === "agent:spawn" && event.artifact_refs.includes(assignmentId)),
     `event log did not record agent:spawn for ${assignmentId}: ${JSON.stringify(events)}`,
   );
+}
+
+async function completePlanningFromSpawn(transport, firstAction) {
+  let action = firstAction;
+  for (let index = 0; index < 40; index += 1) {
+    const frame = await transport.request("agent-result", {
+      assignment_id: action.assignment_id,
+      carrier: planningCarrierForAction(action),
+    }, 5000);
+    if (frame.kind === "spawn") {
+      action = frame.payload.action;
+      continue;
+    }
+    assert.equal(frame.kind, "done");
+    assert.match(frame.payload.status, /ready-to-execute:workstream=main/u);
+    return;
+  }
+  assert.fail("planning did not reach ready-to-execute within 40 carrier acceptances");
+}
+
+function planningCarrierForAction(action) {
+  const specPath = specPathFromCommand(action.bg_run.command);
+  const specBytes = readFileSync(specPath);
+  const spec = JSON.parse(specBytes.toString("utf8"));
+  const carrier = {
+    schema: "autopilot.planning_carrier.v1",
+    action_id: spec.action_id,
+    assignment_id: spec.assignment_id,
+    run_revision: spec.run_revision,
+    workstream: spec.workstream,
+    role_id: spec.role_id,
+    mode: spec.mode,
+    boundary_id: spec.boundary_id,
+    result_contract: spec.result_contract,
+    prompt_path: spec.prompt_path,
+    prompt_digest: spec.prompt_digest,
+    spec_digest: sha256(specBytes),
+    spec_path: specPath,
+    carrier_path: spec.carrier_path,
+    raw_output: transcript(spec.boundary_id),
+  };
+  for (const key of ["boundary_digest", "result_contract_digest", "settings_digest", "context_digest", "skills_digest", "subscription_digest"]) {
+    if (typeof spec[key] === "string") carrier[key] = spec[key];
+  }
+  return carrier;
+}
+
+function specPathFromCommand(command) {
+  const match = command.match(/ --spec ('(?:'\\''|[^'])*'|\S+)$/u);
+  assert.ok(match, `runner command did not contain terminal --spec path: ${command}`);
+  const token = match[1];
+  return token.startsWith("'") ? token.slice(1, -1).replace(/'\\''/gu, "'") : token;
 }
 
 function readEventsIfPresent(eventLog) {

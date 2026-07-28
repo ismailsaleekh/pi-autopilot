@@ -1,7 +1,10 @@
 use std::path::{Path, PathBuf};
 
 use crate::{
-    integration::{CandidateKind, CandidateRequest, CheckCommand, IntegrationError, PreparedCandidate, ReleaseIntegrator},
+    integration::{
+        CandidateKind, CandidateRequest, CheckCommand, IntegrationError, PreparedCandidate,
+        ReleaseIntegrator,
+    },
     vcs::GitVcs,
 };
 
@@ -48,7 +51,10 @@ impl TargetSyncer {
             .read_tip(&self.source, &self.target_ref)
             .map_err(|_| IntegrationError::Git)?;
         if target_tip == recorded_target_base {
-            return Ok(TargetSyncOutcome { target_tip, integrated: None });
+            return Ok(TargetSyncOutcome {
+                target_tip,
+                integrated: None,
+            });
         }
         let prepared = self.integrator.merge_and_cas(
             CandidateRequest {
@@ -67,7 +73,10 @@ impl TargetSyncer {
         if after != target_tip {
             return Err(IntegrationError::Git);
         }
-        Ok(TargetSyncOutcome { target_tip, integrated: Some(prepared) })
+        Ok(TargetSyncOutcome {
+            target_tip,
+            integrated: Some(prepared),
+        })
     }
 }
 
@@ -174,13 +183,34 @@ pub fn finalization_data_covers_gate() -> bool {
 
 pub fn verify_final_gate(input: &FinalGateInput) -> Result<FinalVerificationPass, FinalCondition> {
     require(input.every_unit_closed, FinalCondition::UnitsClosed)?;
-    require(input.no_mandatory_findings, FinalCondition::MandatoryFindings)?;
-    require(input.no_stale_required_proof, FinalCondition::RequiredProofFresh)?;
-    require(input.no_active_or_unknown_jobs, FinalCondition::JobsTerminal)?;
-    require(input.attributable_integrated_diff, FinalCondition::AttributableDiff)?;
-    require(evidence_current(&input.final_commands, &input.final_tip), FinalCondition::FinalCommands)?;
-    require(evidence_current(&input.full_suite, &input.final_tip), FinalCondition::FullSuite)?;
-    require(evidence_current(&input.final_validator, &input.final_tip), FinalCondition::FinalValidator)?;
+    require(
+        input.no_mandatory_findings,
+        FinalCondition::MandatoryFindings,
+    )?;
+    require(
+        input.no_stale_required_proof,
+        FinalCondition::RequiredProofFresh,
+    )?;
+    require(
+        input.no_active_or_unknown_jobs,
+        FinalCondition::JobsTerminal,
+    )?;
+    require(
+        input.attributable_integrated_diff,
+        FinalCondition::AttributableDiff,
+    )?;
+    require(
+        evidence_current(&input.final_commands, &input.final_tip),
+        FinalCondition::FinalCommands,
+    )?;
+    require(
+        evidence_current(&input.full_suite, &input.final_tip),
+        FinalCondition::FullSuite,
+    )?;
+    require(
+        evidence_current(&input.final_validator, &input.final_tip),
+        FinalCondition::FinalValidator,
+    )?;
     let bughunter_required = input.triggers.required();
     if bughunter_required {
         let current = input
@@ -189,7 +219,10 @@ pub fn verify_final_gate(input: &FinalGateInput) -> Result<FinalVerificationPass
             .is_some_and(|evidence| evidence_current(evidence, &input.final_tip));
         require(current, FinalCondition::RequiredBughunter)?;
     }
-    Ok(FinalVerificationPass { tip: input.final_tip.clone(), bughunter_required })
+    Ok(FinalVerificationPass {
+        tip: input.final_tip.clone(),
+        bughunter_required,
+    })
 }
 
 fn require(value: bool, condition: FinalCondition) -> Result<(), FinalCondition> {

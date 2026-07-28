@@ -73,7 +73,11 @@ pub fn compute_staleness(records: &[ValidationRecord], change: &MergeChange) -> 
     }
     let mut successor_edges = Vec::new();
     for edge_id in &change.affected_forward_edges {
-        if change.closed_forward_edges.iter().any(|closed| closed == edge_id) {
+        if change
+            .closed_forward_edges
+            .iter()
+            .any(|closed| closed == edge_id)
+        {
             successor_edges.push(SuccessorEdgeAction::Close {
                 edge_id: edge_id.clone(),
             });
@@ -121,7 +125,8 @@ fn stale_coverage(record: &ValidationRecord, change: &MergeChange) -> AffectedCo
 }
 
 fn overlap(left: &[String], right: &[String]) -> bool {
-    left.iter().any(|item| right.iter().any(|other| item == other))
+    left.iter()
+        .any(|item| right.iter().any(|other| item == other))
 }
 
 fn intersection(left: &[String], right: &[String]) -> Vec<String> {

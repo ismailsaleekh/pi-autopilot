@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use drivers::{
     handoff::{
-        AssignmentHandle, CooperativeCheckpoint, HandoffAction, COOPERATIVE_WAIT_SECONDS,
+        AssignmentHandle, COOPERATIVE_WAIT_SECONDS, CooperativeCheckpoint, HandoffAction,
         claims_cross_session_reattachment, intentional_handoff,
     },
     recovery::{

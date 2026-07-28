@@ -17,6 +17,10 @@ type "ref" doc="Durable artifact reference, bounded before inclusion in model co
 type "timestamp" doc="Timestamp string; nullable only where the field says <timestamp|null>."
 type "id" doc="Package stable identifier string."
 type "bytes" doc="Exact command bytes encoded losslessly for transport."
+type "task-document-class" doc="Closed task-pack document class string carried into child runner specs."
+type "unix-ms" doc="JSON integer Unix epoch milliseconds in 0..=9007199254740991."
+type "git-oid" doc="Git object id string for the repository object format."
+type "json" doc="Closed JSON value serialized with AP-CJ1 canonical JSON."
 
 artifact "role_frontmatter" schema="autopilot.role.v1" producer="Package" model_produced=#false {
     doc "Strict package-authored YAML frontmatter for role definitions (D76 §2.2)."
@@ -131,20 +135,345 @@ artifact "control_frame" schema="autopilot.control_frame.v1" producer="Package" 
     field "return_to_idle" type="bool" required=#true
 }
 
+artifact "background_capabilities" schema="autopilot.background_capabilities.v1" producer="Host" model_produced=#false {
+    doc "Exact pi-background-tasks extension API capability fact object observed by Host and consumed by Core before any planning/run mutation. v1 generic bg_run fields remain for compatibility; v2 attested fields are required for evidence-backed planning review."
+    field "api_version" type="u32" required=#true doc="The paired pi-background-tasks extension API version; 2 is required for attested evidence launch."
+    field "run" type="bool" required=#true
+    field "run_is_agent" type="bool" required=#true
+    field "run_completion_trigger" type="bool" required=#true
+    field "status" type="bool" required=#true
+    field "logs" type="bool" required=#true
+    field "logs_bounded" type="bool" required=#true
+    field "kill" type="bool" required=#true
+    field "run_attested_pi" type="bool" required=#false doc="v2: exact run-attested-pi operation is available."
+    field "attested_idempotency" type="bool" required=#false doc="v2: same idempotency key replays and conflicts loudly."
+    field "attested_status_by_idempotency_key" type="bool" required=#false doc="v2: status/reconcile uses the full idempotency key."
+    field "attested_terminal_artifacts" type="bool" required=#false doc="v2: terminal observations carry report and sidecar source paths."
+    field "report_schema" type="string" required=#false doc="v2 literal phase2.pi_task_report.v1."
+    field "attestation_schema" type="string" required=#false doc="v2 literal phase2.pi_task_attestation.v2."
+}
+
+
 artifact "background_action" schema="autopilot.background_action.v1" producer="Package" model_produced=#false {
-    doc "Exact background launch/reconcile/stop action descriptor (D76 §6.2 and D74 §4.5)."
+    doc "Exact background launch/reconcile/stop action descriptor (D76 §6.2 and D74 §4.5). Core-owned authority metadata wraps the public pi-background-tasks bg_run object without Host renaming or synthesis."
     field "action_id" type="id" required=#true
     field "assignment_id" type="id" required=#true
     field "kind" type="action_kind" required=#true
-    field "command_bytes" type="bytes" required=#true doc="Byte-fixed command; the tool_call guard accepts only an exact live descriptor."
-    field "display_name" type="string" required=#true
-    field "isAgent" type="bool" required=#true doc="Exact bg_run field spelling from Pi background tasks."
-    field "timeout" type="duration" required=#false nullable=#true doc="Agent tasks may omit arbitrary wall timeout; focused commands default 30m, integration 30m, final suite 4h, cooperative handoff 2m unless overridden."
-    field "notifyOnCompletion" type="bool" required=#true doc="Notification posture."
-    field "triggerOnCompletion" type="bool" required=#true doc="Completion-trigger posture."
+    group "bg_run" required=#true {
+        field "name" type="string" required=#true doc="Exact bg_run.name passed to pi-background-tasks."
+        field "command" type="bytes" required=#true doc="Byte-fixed bg_run.command; the Host relays this string without PATH lookup or token rewriting."
+        field "isAgent" type="bool" required=#true doc="Exact bg_run.isAgent field spelling from Pi background tasks."
+        field "timeoutSeconds" type="u32" required=#false doc="Exact optional bg_run.timeoutSeconds selected by Core; omitted when Core selects no timeout; Host rejects null."
+        field "notifyOnCompletion" type="bool" required=#true doc="Exact bg_run.notifyOnCompletion field."
+        field "triggerOnCompletion" type="bool" required=#true doc="Exact bg_run.triggerOnCompletion field."
+    }
     field "run_revision" type="u64" required=#true doc="Expected run revision."
     field "expires_at" type="timestamp" required=#false nullable=#true doc="Expiry for one-time issued action."
     field "supersession_state" type="supersession-state" required=#true doc="Live, superseded, expired, or consumed posture."
+}
+
+artifact "autopilot_content_ref" schema="autopilot.content_ref.v1" producer="Package" model_produced=#false {
+    doc "Create-once package content reference for evidence artifacts. Paths are package-run-root-relative POSIX paths and hashes cover exact bytes."
+    field "schema_version" type="schema-id" required=#true
+    field "kind" type="evidence_content_kind" required=#true
+    field "path" type="path" required=#true
+    field "byte_length" type="unix-ms" required=#true
+    field "sha256" type="digest" required=#true
+}
+
+artifact "autopilot_event_ref" schema="autopilot.event_ref.v1" producer="Package" model_produced=#false {
+    doc "Digest-bound reference to an authoritative EventRow v1 row."
+    field "schema_version" type="schema-id" required=#true
+    field "sequence" type="u64" required=#true
+    field "kind" type="event-kind" required=#true
+    field "row_sha256" type="digest" required=#true
+}
+
+artifact "autopilot_evidence_conflict_policy" schema="autopilot.evidence_conflict_policy.v1" producer="Package" model_produced=#false {
+    doc "Package-authored conflict policy for an attested evidence assignment."
+    field "schema_version" type="schema-id" required=#true
+    list "distinct_from_receipt_refs" item="autopilot_content_ref" required=#true
+    field "forbid_same_assignment" type="bool" required=#true
+    field "forbid_same_action" type="bool" required=#true
+    field "forbid_same_session" type="bool" required=#true
+    field "require_subject_current" type="bool" required=#true
+    field "policy_sha256" type="digest" required=#true
+}
+
+artifact "phase2_pi_consumer_binding" schema="phase2.pi_consumer_binding.v1" producer="Package" model_produced=#false {
+    doc "Closed consumer binding echoed by the paired background producer request, report, and sidecar."
+    field "schema_version" type="schema-id" required=#true
+    field "consumer" type="string" required=#true
+    field "run_id" type="uuidv7" required=#true
+    field "repo_key" type="base32" required=#true
+    field "workstream" type="id" required=#true
+    field "purpose_id" type="id" required=#true
+    field "action_id" type="id" required=#true
+    field "assignment_id" type="id" required=#true
+    field "assignment_revision" type="u32" required=#true
+    field "run_revision" type="u64" required=#true
+    field "boundary_id" type="contract-id" required=#true
+    field "subject_digest" type="digest" required=#true
+    field "binding_sha256" type="digest" required=#true
+}
+
+artifact "phase2_pi_attested_run_request" schema="phase2.pi_attested_run_request.v2" producer="Package" model_produced=#false {
+    doc "Closed EventBus v2 request for paired pi-background-tasks run-attested-pi."
+    field "schema_version" type="schema-id" required=#true
+    field "name" type="string" required=#true
+    field "provider" type="string" required=#true
+    field "model" type="string" required=#true
+    field "thinking" type="thinking-level" required=#true
+    field "system_prompt_utf8" type="string" required=#true
+    field "prompt_utf8" type="string" required=#true
+    field "report_path" type="path" required=#true
+    field "timeout_seconds" type="u32" required=#true
+    field "idempotency_key" type="id" required=#true
+    field "consumer_binding" type="phase2_pi_consumer_binding" required=#true
+    field "request_sha256" type="digest" required=#true
+}
+
+artifact "autopilot_attested_assignment" schema="autopilot.attested_assignment.v1" producer="Package" model_produced=#false {
+    doc "Core-issued attested evidence assignment. Only Core creates this object and its action."
+    field "schema_version" type="schema-id" required=#true
+    field "run_id" type="uuidv7" required=#true
+    field "repo_key" type="base32" required=#true
+    field "workstream" type="id" required=#true
+    field "purpose_id" type="id" required=#true
+    field "assignment_id" type="id" required=#true
+    field "assignment_revision" type="u32" required=#true
+    field "run_revision" type="u64" required=#true
+    field "action_id" type="id" required=#true
+    field "issue_idempotency_key" type="id" required=#true
+    field "import_idempotency_key" type="id" required=#true
+    field "subject_digest" type="digest" required=#true
+    field "boundary_id" type="contract-id" required=#true
+    field "provider" type="string" required=#true
+    field "model" type="string" required=#true
+    field "thinking" type="thinking-level" required=#true
+    field "required_channel" type="string" required=#true
+    field "prompt_ref" type="autopilot_content_ref" required=#true
+    field "system_prompt_sha256" type="digest" required=#true
+    field "report_staging_path" type="path" required=#true
+    field "producer_request_sha256" type="digest" required=#true
+    field "conflict_policy" type="autopilot_evidence_conflict_policy" required=#true
+    field "issued_at_unix_ms" type="unix-ms" required=#true
+    field "supersedes_assignment_id" type="id" required=#false
+    field "assignment_sha256" type="digest" required=#true
+}
+
+artifact "autopilot_attested_action" schema="autopilot.attested_action.v1" producer="Package" model_produced=#false {
+    doc "Core-issued exact attested action. Host may only relay this object through EventBus v2."
+    field "schema_version" type="schema-id" required=#true
+    field "action_id" type="id" required=#true
+    field "assignment_id" type="id" required=#true
+    field "assignment_revision" type="u32" required=#true
+    field "run_revision" type="u64" required=#true
+    field "assignment_ref" type="autopilot_content_ref" required=#true
+    field "producer_request" type="phase2_pi_attested_run_request" required=#true
+    field "expires_at_unix_ms" type="unix-ms" required=#true
+    field "supersession_state" type="string" required=#true
+    field "action_sha256" type="digest" required=#true
+}
+
+artifact "autopilot_producer_binding" schema="autopilot.producer_binding.v1" producer="Package" model_produced=#false {
+    doc "Core binding between an issued attested action and the producer task/report/sidecar locators returned by EventBus v2."
+    field "schema_version" type="schema-id" required=#true
+    field "run_id" type="uuidv7" required=#true
+    field "workstream" type="id" required=#true
+    field "action_id" type="id" required=#true
+    field "assignment_id" type="id" required=#true
+    field "assignment_revision" type="u32" required=#true
+    field "run_revision" type="u64" required=#true
+    field "assignment_ref" type="autopilot_content_ref" required=#true
+    field "action_ref" type="autopilot_content_ref" required=#true
+    field "producer_task_id" type="id" required=#true
+    field "producer_request_sha256" type="digest" required=#true
+    field "report_source_path" type="path" required=#true
+    field "sidecar_source_path" type="path" required=#true
+    field "bound_at_unix_ms" type="unix-ms" required=#true
+    field "binding_sha256" type="digest" required=#true
+}
+
+artifact "autopilot_evidence_conflict_check" schema="autopilot.evidence_conflict_check.v1" producer="Package" model_produced=#false {
+    doc "Folded package conflict check over authoritative accepted receipts. All conflict tuples must be empty for acceptance."
+    field "schema_version" type="schema-id" required=#true
+    list "compared_receipt_refs" item="autopilot_content_ref" required=#true
+    list "assignment_conflicts" item="id" required=#true
+    list "action_conflicts" item="id" required=#true
+    list "session_conflicts" item="id" required=#true
+    list "subject_conflicts" item="digest" required=#true
+    list "provider_channel_conflicts" item="string" required=#true
+    field "status" type="string" required=#true
+    field "check_sha256" type="digest" required=#true
+}
+
+artifact "autopilot_evidence_acceptance_receipt" schema="autopilot.evidence_acceptance_receipt.v1" producer="Package" model_produced=#false {
+    doc "Versioned immutable acceptance receipt for an imported attested report and sidecar."
+    field "schema_version" type="schema-id" required=#true
+    field "receipt_id" type="id" required=#true
+    field "run_id" type="uuidv7" required=#true
+    field "repo_key" type="base32" required=#true
+    field "workstream" type="id" required=#true
+    field "purpose_id" type="id" required=#true
+    field "assignment_id" type="id" required=#true
+    field "action_id" type="id" required=#true
+    field "assignment_revision" type="u32" required=#true
+    field "run_revision" type="u64" required=#true
+    field "subject_digest" type="digest" required=#true
+    field "boundary_id" type="contract-id" required=#true
+    field "assignment_ref" type="autopilot_content_ref" required=#true
+    field "action_ref" type="autopilot_content_ref" required=#true
+    field "producer_binding_ref" type="autopilot_content_ref" required=#true
+    field "report_ref" type="autopilot_content_ref" required=#true
+    field "producer_sidecar_ref" type="autopilot_content_ref" required=#true
+    field "producer_task_id" type="id" required=#true
+    field "producer_request_sha256" type="digest" required=#true
+    field "prompt_sha256" type="digest" required=#true
+    field "system_prompt_sha256" type="digest" required=#true
+    field "payload_sha256" type="digest" required=#true
+    field "provider" type="string" required=#true
+    field "model" type="string" required=#true
+    field "channel" type="string" required=#true
+    field "auth_class" type="string" required=#true
+    field "credential_kind" type="string" required=#true
+    field "direct_api_key" type="bool" required=#true
+    field "pi_session_id" type="id" required=#true
+    field "conflict_check" type="autopilot_evidence_conflict_check" required=#true
+    field "issue_idempotency_key" type="id" required=#true
+    field "import_idempotency_key" type="id" required=#true
+    field "issue_event_ref" type="autopilot_event_ref" required=#true
+    field "binding_event_ref" type="autopilot_event_ref" required=#true
+    field "supersession_state_at_acceptance" type="string" required=#true
+    field "accepted_at_unix_ms" type="unix-ms" required=#true
+    field "receipt_sha256" type="digest" required=#true
+}
+
+artifact "autopilot_evidence_failure_receipt" schema="autopilot.evidence_failure_receipt.v1" producer="Package" model_produced=#false {
+    doc "Immutable failure/rejection/conflict receipt. Rejected bytes are not imported."
+    field "schema_version" type="schema-id" required=#true
+    field "run_id" type="uuidv7" required=#true
+    field "workstream" type="id" required=#true
+    field "purpose_id" type="id" required=#true
+    field "assignment_id" type="id" required=#true
+    field "action_id" type="id" required=#true
+    field "assignment_revision" type="u32" required=#true
+    field "run_revision" type="u64" required=#true
+    field "state" type="string" required=#true
+    field "code" type="evidence_error_code" required=#true
+    list "expected_refs" item="autopilot_content_ref" required=#true
+    list "observed_hashes" item="digest" required=#true
+    field "occurred_at_unix_ms" type="unix-ms" required=#true
+    field "failure_sha256" type="digest" required=#true
+}
+
+artifact "autopilot_evidence_supersession_receipt" schema="autopilot.evidence_supersession_receipt.v1" producer="Package" model_produced=#false {
+    doc "Immutable supersession receipt. Acceptance receipts are never rewritten."
+    field "schema_version" type="schema-id" required=#true
+    field "run_id" type="uuidv7" required=#true
+    field "workstream" type="id" required=#true
+    field "purpose_id" type="id" required=#true
+    field "old_assignment_ref" type="autopilot_content_ref" required=#true
+    field "new_assignment_ref" type="autopilot_content_ref" required=#true
+    field "old_acceptance_receipt_ref" type="autopilot_content_ref" required=#false
+    field "old_assignment_revision" type="u32" required=#true
+    field "new_assignment_revision" type="u32" required=#true
+    field "reason" type="string" required=#true
+    field "superseded_at_event_revision" type="u64" required=#true
+    field "supersession_idempotency_key" type="id" required=#true
+    field "supersession_sha256" type="digest" required=#true
+}
+
+artifact "autopilot_transcript_v2" schema="autopilot.transcript.v2" producer="Package" model_produced=#false {
+    doc "Receipt-backed non-authoritative replay transcript fixture. V1 transcripts remain compatibility-only."
+    field "schema_version" type="schema-id" required=#true
+    field "boundary_id" type="contract-id" required=#true
+    field "payload_utf8" type="string" required=#true
+    field "payload_sha256" type="digest" required=#true
+    field "acceptance_receipt_ref" type="autopilot_content_ref" required=#true
+    field "producer_sidecar_ref" type="autopilot_content_ref" required=#true
+    field "transcript_sha256" type="digest" required=#true
+}
+
+artifact "autopilot_evidence_envelope_manifest" schema="autopilot.evidence_envelope_manifest.v1" producer="Package" model_produced=#false {
+    doc "Closed evidence envelope manifest. Members are exactly refs reachable from authoritative evidence events; scans/globs/prefixes are forbidden."
+    field "schema_version" type="schema-id" required=#true
+    field "manifest_id" type="id" required=#true
+    field "run_id" type="uuidv7" required=#true
+    field "repo_key" type="base32" required=#true
+    field "workstream" type="id" required=#true
+    field "scope" type="string" required=#true
+    field "manifest_revision" type="u32" required=#true
+    field "subject_digest" type="digest" required=#true
+    field "previous_manifest_ref" type="autopilot_content_ref" required=#false
+    field "closed_through_event_sequence" type="u64" required=#true
+    field "event_prefix_sha256" type="digest" required=#true
+    list "members" item="autopilot_content_ref" required=#true
+    list "active_acceptance_receipt_refs" item="autopilot_content_ref" required=#true
+    list "supersession_receipt_refs" item="autopilot_content_ref" required=#true
+    list "failure_receipt_refs" item="autopilot_content_ref" required=#true
+    field "excluded_self" type="bool" required=#true
+    field "closed_at_unix_ms" type="unix-ms" required=#true
+    field "manifest_sha256" type="digest" required=#true
+}
+
+
+artifact "task_document" schema="autopilot.task_document.v1" producer="Package" model_produced=#false {
+    doc "Core-classified task-pack document copied into child runner specs. The digest is over the exact admitted file bytes; body_digest is over the model-visible body only."
+    field "path" type="path" required=#true
+    field "class" type="task-document-class" required=#true
+    field "digest" type="digest" required=#true
+    field "body_digest" type="digest" required=#true
+    field "body" type="string" required=#true
+}
+
+artifact "agent_run_spec" schema="autopilot.agent_run_spec.v1" producer="Package" model_produced=#false {
+    doc "Strict parent-Core written child runner specification for the package-contained autopilot-agent-run wrapper and Rust agent-run mode."
+    field "schema" type="schema-id" required=#true constant="autopilot.agent_run_spec.v1"
+    field "assignment_kind" type="validation_assignment_kind" required=#true doc="Explicit assignment class; no runner infers planning/delivery/validation from result_contract."
+    field "action_id" type="id" required=#true
+    field "assignment_id" type="id" required=#true
+    field "run_revision" type="u64" required=#true
+    field "workstream" type="id" required=#true
+    field "role_id" type="id" required=#true
+    field "mode" type="mode-id" required=#true
+    field "provider" type="string" required=#true
+    field "model" type="string" required=#true
+    field "thinking" type="thinking-level" required=#true
+    field "route" type="string" required=#true
+    field "cwd" type="path" required=#true
+    list "allowed_tools" item="tool-name" required=#true
+    field "spec_path" type="path" required=#true
+    field "prompt_path" type="path" required=#true
+    field "prompt_digest" type="digest" required=#true
+    field "boundary_id" type="contract-id" required=#true
+    field "boundary_digest" type="digest" required=#true
+    field "result_contract" type="contract-id" required=#true
+    field "result_contract_digest" type="digest" required=#true
+    field "carrier_path" type="path" required=#true
+    field "settings_digest" type="digest" required=#true
+    field "context_digest" type="digest" required=#true
+    field "skills_digest" type="digest" required=#true
+    field "subscription_digest" type="digest" required=#true
+    field "lane_id" type="id" required=#false nullable=#true
+    field "attempt" type="u32" required=#false nullable=#true
+    field "base_commit" type="sha" required=#false nullable=#true
+    field "worktree" type="path" required=#false nullable=#true
+    field "required_focused_evidence" type="u32" required=#false nullable=#true
+    field "authority_set_id" type="string" required=#false nullable=#true
+    list "authority_documents" item="task_document" required=#false nullable=#true
+    field "context_document" type="task_document" required=#false nullable=#true
+    field "assignment_path" type="path" required=#false nullable=#true
+    field "assignment_digest" type="digest" required=#false nullable=#true
+    field "context_manifest_path" type="path" required=#false nullable=#true
+    field "context_manifest_digest" type="digest" required=#false nullable=#true
+    field "runtime_extension_path" type="path" required=#false nullable=#true
+    field "runtime_extension_digest" type="digest" required=#false nullable=#true
+    list "producer_assignment_ids" item="id" required=#false nullable=#true
+    field "validation_id" type="id" required=#false nullable=#true
+    field "validation_attempt" type="u32" required=#false nullable=#true
+    field "semantic_round" type="u32" required=#false nullable=#true
+    field "model_submission_path" type="path" required=#false nullable=#true
 }
 
 artifact "run_identity" schema="autopilot.run_identity.v1" producer="Package" model_produced=#false {
@@ -200,6 +529,18 @@ artifact "delivery_result" schema="autopilot.delivery_result.v1" producer="Model
     field "attempt" type="u32" required=#true
     field "base_commit" type="sha" required=#true
     field "worktree" type="path" required=#true
+    field "action_id" type="id" required=#false nullable=#true
+    field "prompt_path" type="path" required=#false nullable=#true
+    field "prompt_digest" type="digest" required=#false nullable=#true
+    field "spec_path" type="path" required=#false nullable=#true
+    field "spec_digest" type="digest" required=#false nullable=#true
+    field "carrier_path" type="path" required=#false nullable=#true
+    field "boundary_digest" type="digest" required=#false nullable=#true
+    field "result_contract_digest" type="digest" required=#false nullable=#true
+    field "settings_digest" type="digest" required=#false nullable=#true
+    field "context_digest" type="digest" required=#false nullable=#true
+    field "skills_digest" type="digest" required=#false nullable=#true
+    field "subscription_digest" type="digest" required=#false nullable=#true
     field "package_commit" type="sha" required=#false nullable=#true
     field "package_tree" type="sha" required=#false nullable=#true
     list "actual_changed_paths" item="path" required=#true
@@ -245,6 +586,168 @@ artifact "finding" schema="autopilot.finding.v1" producer="Model" model_produced
     list "semantic_surface_ids" item="id" required=#true
 }
 
+artifact "validation_assignment_v2" schema="autopilot.validation_assignment.v1" producer="Package" model_produced=#false {
+    doc "Package-produced independent Validator assignment. Production validation uses v2 submissions/results; v1 verdicts remain historical."
+    field "schema" type="schema-id" required=#true
+    field "validation_id" type="id" required=#true
+    field "validation_key" type="digest" required=#true
+    field "workstream" type="id" required=#true
+    field "run_revision" type="u64" required=#true
+    field "role_id" type="id" required=#true
+    field "mode" type="mode-id" required=#true
+    field "assignment_id" type="id" required=#true
+    field "action_id" type="id" required=#true
+    field "validation_attempt" type="u32" required=#true
+    field "semantic_round" type="u32" required=#true
+    field "scope" type="validation_scope_v2" required=#true
+    field "subject_kind" type="validation_subject_kind" required=#true
+    list "producer_assignment_ids" item="id" required=#true
+    list "producer_result_refs" item="ref" required=#true
+    field "lane_id" type="id" required=#false
+    field "candidate_id" type="id" required=#false
+    field "exact_commit" type="git-oid" required=#true
+    field "exact_tree" type="git-oid" required=#true
+    field "candidate_root" type="path" required=#true
+    field "forward_round" type="u32" required=#false
+    field "criteria_manifest_ref" type="ref" required=#true
+    field "criteria_manifest_digest" type="digest" required=#true
+    field "evidence_manifest_ref" type="ref" required=#true
+    field "evidence_manifest_digest" type="digest" required=#true
+    field "diff_ref" type="ref" required=#true
+    field "diff_digest" type="digest" required=#true
+    field "prior_result_ref" type="ref" required=#false
+    list "prior_finding_refs" item="ref" required=#true
+    list "allowed_read_roots" item="path" required=#true
+    list "allowed_command_ids" item="id" required=#true
+    field "max_transport_attempts" type="u32" required=#true
+}
+
+artifact "finding_v2" schema="autopilot.finding.v2" producer="Model" model_produced=#true {
+    doc "Embedded v2 validation finding with deterministic validation-id ordinal identifier."
+    admits "For each material issue, emit one deterministic finding id, classify kind/effect honestly, tie it to declared criteria/edges/evidence, and never hide a required blocker as advisory."
+    field "finding_id" type="id" required=#true
+    field "kind" type="finding_kind_v2" required=#true
+    field "effect" type="finding_effect" required=#true
+    field "summary" type="string" required=#true
+    field "detail" type="string" required=#true
+    list "criterion_ids" item="id" required=#true
+    list "edge_ids" item="id" required=#true
+    list "evidence_refs" item="ref" required=#true
+    list "covered_paths" item="path" required=#true
+    list "semantic_surface_ids" item="id" required=#true
+}
+
+artifact "validation_context_v2" schema="autopilot.validation_context.v1" producer="Package" model_produced=#false {
+    doc "Canonical fact-only Validator context. Forbidden producer reasoning/session classes are listed explicitly."
+    field "schema" type="schema-id" required=#true
+    field "context_id" type="id" required=#true
+    field "revision" type="u32" required=#true
+    field "validation_id" type="id" required=#true
+    field "assignment_id" type="id" required=#true
+    field "exact_commit" type="git-oid" required=#true
+    field "exact_tree" type="git-oid" required=#true
+    group "candidate" required=#true {
+        field "source_root" type="path" required=#true
+        field "diff_ref" type="ref" required=#true
+        field "diff_digest" type="digest" required=#true
+        list "actual_changed_paths" item="path" required=#true
+        field "execution_audit_ref" type="ref" required=#true
+    }
+    list "criteria" item="validation_context_criterion" required=#true
+    list "evidence" item="validation_context_evidence" required=#true
+    list "prior_findings" item="finding_v2" required=#true
+    list "applicable_decision_refs" item="ref" required=#true
+    list "applicable_constraint_refs" item="ref" required=#true
+    list "included_context_classes" item="string" required=#true
+    list "forbidden_context_classes" item="string" required=#true
+    list "allowed_read_roots" item="path" required=#true
+    list "excluded_refs" item="validation_excluded_ref" required=#true
+    record "validation_context_criterion" {
+        field "criterion_id" type="id" required=#true
+        field "mandatory" type="bool" required=#true
+        list "covered_paths" item="path" required=#true
+        list "semantic_surface_ids" item="id" required=#true
+        list "forward_edge_ids" item="id" required=#true
+        list "witness_ids" item="id" required=#true
+    }
+    record "validation_context_evidence" {
+        field "evidence_ref" type="ref" required=#true
+        field "digest" type="digest" required=#true
+        field "kind" type="string" required=#true
+        field "exact_commit" type="git-oid" required=#true
+        field "exact_tree" type="git-oid" required=#true
+        field "command_id" type="id" required=#false
+    }
+    record "validation_excluded_ref" {
+        field "ref" type="ref" required=#true
+        field "reason" type="string" required=#true
+    }
+}
+
+artifact "validation_submission_v2" schema="autopilot.validation_submission.v2" producer="Model" model_produced=#true {
+    doc "Only payload accepted by the Validator terminal tool. Assistant-text JSON without the terminal tool is not a carrier."
+    admits "Call autopilot_emit_status exactly once with this closed JSON object. Verdict every required criterion exactly once, cite only declared evidence refs, embed every finding, and do not claim PASS/READY when Core would compute a material blocker."
+    field "schema" type="schema-id" required=#true
+    field "validation_id" type="id" required=#true
+    field "assignment_id" type="id" required=#true
+    field "scope" type="validation_scope_v2" required=#true
+    field "exact_commit" type="git-oid" required=#true
+    field "exact_tree" type="git-oid" required=#true
+    field "outcome" type="validation_outcome_v2" required=#true
+    list "criterion_results" item="criterion_result_v2" required=#true
+    list "findings" item="finding_v2" required=#true
+    record "criterion_result_v2" {
+        field "criterion_id" type="id" required=#true
+        field "verdict" type="criterion_verdict" required=#true
+        field "blocker_kind" type="validation_blocker_kind" required=#false
+        list "evidence_refs" item="ref" required=#true
+        list "finding_ids" item="id" required=#true
+        list "covered_paths" item="path" required=#true
+        list "semantic_surface_ids" item="id" required=#true
+        list "forward_edge_ids" item="id" required=#true
+    }
+}
+
+artifact "validation_result_v2" schema="autopilot.validation_result.v2" producer="Package" model_produced=#false {
+    doc "Package-bound Validator carrier written create-once after validating model submission and immutable runner binding."
+    field "schema" type="schema-id" required=#true
+    field "action_id" type="id" required=#true
+    field "assignment_id" type="id" required=#true
+    field "validation_id" type="id" required=#true
+    field "validation_key" type="digest" required=#true
+    field "validation_attempt" type="u32" required=#true
+    field "semantic_round" type="u32" required=#true
+    field "run_revision" type="u64" required=#true
+    field "workstream" type="id" required=#true
+    field "role_id" type="id" required=#true
+    field "mode" type="mode-id" required=#true
+    list "producer_assignment_ids" item="id" required=#true
+    field "exact_commit" type="git-oid" required=#true
+    field "exact_tree" type="git-oid" required=#true
+    field "assignment_path" type="path" required=#true
+    field "assignment_digest" type="digest" required=#true
+    field "context_manifest_path" type="path" required=#true
+    field "context_manifest_digest" type="digest" required=#true
+    field "prompt_path" type="path" required=#true
+    field "prompt_digest" type="digest" required=#true
+    field "spec_path" type="path" required=#true
+    field "spec_digest" type="digest" required=#true
+    field "carrier_path" type="path" required=#true
+    field "boundary_id" type="contract-id" required=#true
+    field "boundary_digest" type="digest" required=#true
+    field "result_contract" type="contract-id" required=#true
+    field "result_contract_digest" type="digest" required=#true
+    field "settings_digest" type="digest" required=#true
+    field "skills_digest" type="digest" required=#true
+    field "subscription_digest" type="digest" required=#true
+    field "runtime_extension_digest" type="digest" required=#true
+    field "tool_audit_ref" type="ref" required=#true
+    field "tool_audit_digest" type="digest" required=#true
+    field "submission_digest" type="digest" required=#true
+    field "submission" type="validation_submission_v2" required=#true
+}
+
+
 artifact "seam_envelope" schema="autopilot.seam_envelope.v1" producer="Host" model_produced=#false {
     doc "D78 §3.1 newline-delimited JSON frame envelope over stdio."
     field "v" type="u32" required=#true constant="1"
@@ -254,6 +757,216 @@ artifact "seam_envelope" schema="autopilot.seam_envelope.v1" producer="Host" mod
 }
 
 constant "guard_timeout_default" value="5s" doc="D78 §3.3 default guard-query timeout. On timeout or Core unavailability the Host denies fail-closed."
+
+artifact "artifact_link" schema="autopilot.artifact_link.v1" producer="Package" model_produced=#false {
+    doc "Digest-bound run-root artifact link used by finalization assemblies and archive manifests."
+    field "schema_version" type="schema-id" required=#true
+    field "path" type="path" required=#true
+    field "artifact_schema" type="string" required=#true
+    field "byte_length" type="u64" required=#true
+    field "sha256" type="digest" required=#true
+}
+
+artifact "accepted_evidence_envelope" schema="autopilot.accepted_evidence_envelope.v1" producer="Package" model_produced=#false {
+    doc "Authoritative accepted evidence envelope. External-attested advisory origin is archived but cannot satisfy final conditions."
+    field "schema_version" type="schema-id" required=#true
+    field "repo_key" type="base32" required=#true
+    field "run_id" type="uuidv7" required=#true
+    field "workstream" type="id" required=#true
+    field "evidence_id" type="id" required=#true
+    field "evidence_kind" type="final_evidence_kind" required=#true
+    field "subject_id" type="id" required=#true
+    field "origin" type="evidence_origin" required=#true
+    field "artifact" type="artifact_link" required=#true
+    field "acceptance_receipt" type="artifact_link" required=#true
+    field "boundary_id" type="contract-id" required=#true
+    field "assignment_id" type="id" required=#false
+    field "action_id" type="id" required=#false
+    field "role_id" type="id" required=#false
+    field "mode" type="mode-id" required=#false
+    field "accepted_run_revision" type="u64" required=#true
+    field "exact_commit" type="git-oid" required=#false
+    field "exact_tree" type="git-oid" required=#false
+    field "provider" type="string" required=#false
+    field "model" type="string" required=#false
+    field "thinking" type="thinking-level" required=#false
+    field "route" type="string" required=#false
+    field "pi_session_id" type="id" required=#false
+    field "envelope_sha256" type="digest" required=#true
+}
+
+artifact "command_receipt" schema="autopilot.command_receipt.v1" producer="Package" model_produced=#false {
+    doc "Exact-tip command receipt for final commands, full suite, or focused checks."
+    field "schema_version" type="schema-id" required=#true
+    field "receipt_id" type="id" required=#true
+    field "command_kind" type="command_receipt_kind" required=#true
+    field "command_bytes" type="bytes" required=#true
+    field "cwd_realpath" type="path" required=#true
+    field "env_profile_id" type="id" required=#true
+    field "started_at_ms" type="u64" required=#true
+    field "ended_at_ms" type="u64" required=#true
+    field "timeout_ms" type="u64" required=#true
+    field "timed_out" type="bool" required=#true
+    field "exit_code" type="u32" required=#true
+    field "commit" type="git-oid" required=#true
+    field "tree" type="git-oid" required=#true
+    field "bounded_output" type="artifact_link" required=#true
+    field "full_output" type="artifact_link" required=#true
+    field "receipt_sha256" type="digest" required=#true
+}
+
+artifact "final_gate_assembly" schema="autopilot.final_gate_assembly.v1" producer="Package" model_produced=#false {
+    doc "Authoritative derived final gate input; never accepted from Host, operator, or model."
+    field "schema_version" type="schema-id" required=#true
+    field "repo_key" type="base32" required=#true
+    field "run_id" type="uuidv7" required=#true
+    field "workstream" type="id" required=#true
+    field "basis_event_sequence" type="u64" required=#true
+    field "basis_run_revision" type="u64" required=#true
+    field "basis_event_log_sha256" type="digest" required=#true
+    field "basis_state_hash" type="digest" required=#true
+    field "plan_envelope" type="artifact_link" required=#true
+    field "final_commit" type="git-oid" required=#true
+    field "final_tree" type="git-oid" required=#true
+    field "target_ref" type="ref" required=#true
+    field "recorded_target_base" type="git-oid" required=#true
+    field "observed_target_tip" type="git-oid" required=#true
+    list "conditions" item="final_condition_evidence" required=#true
+    field "triggers" type="bughunter_triggers_v1" required=#true
+    list "accepted_envelopes" item="artifact_link" required=#true
+    field "assembly_sha256" type="digest" required=#true
+    record "final_condition_evidence" {
+        field "condition_id" type="id" required=#true
+        field "satisfied" type="bool" required=#true
+        list "evidence_envelopes" item="artifact_link" required=#true
+    }
+    record "bughunter_triggers_v1" {
+        field "implementation_lanes" type="u32" required=#true
+        field "risk" type="string" required=#true
+        field "protected_security_data_or_migration" type="bool" required=#true
+        field "semantic_conflict_resolution" type="bool" required=#true
+        field "operator_required" type="bool" required=#true
+    }
+}
+
+artifact "final_verification_pass" schema="autopilot.final_verification_pass.v1" producer="Package" model_produced=#false {
+    doc "Digest-bound final gate pass written only after verify_final_gate succeeds."
+    field "schema_version" type="schema-id" required=#true
+    field "repo_key" type="base32" required=#true
+    field "run_id" type="uuidv7" required=#true
+    field "workstream" type="id" required=#true
+    field "basis_event_sequence" type="u64" required=#true
+    field "basis_run_revision" type="u64" required=#true
+    field "final_commit" type="git-oid" required=#true
+    field "final_tree" type="git-oid" required=#true
+    field "assembly" type="artifact_link" required=#true
+    field "assembly_sha256" type="digest" required=#true
+    field "bughunter_required" type="bool" required=#true
+    field "pass_sha256" type="digest" required=#true
+}
+
+artifact "close_request" schema="autopilot.close_request.v1" producer="Operator" model_produced=#false {
+    doc "Exact close command request. No force, nonce, dry-run, missing, duplicate, or reordered positional spellings are accepted."
+    field "schema_version" type="schema-id" required=#true
+    field "repo_key" type="base32" required=#true
+    field "run_id" type="uuidv7" required=#true
+    field "workstream" type="id" required=#true
+    field "expected_run_revision" type="u64" required=#true
+    field "expected_event_log_sha256" type="digest" required=#true
+    field "expected_final_commit" type="git-oid" required=#true
+    field "expected_final_tree" type="git-oid" required=#true
+    field "expected_final_digest" type="digest" required=#true
+    field "request_sha256" type="digest" required=#true
+}
+
+artifact "close_archive_manifest" schema="autopilot.close_archive_manifest.v1" producer="Package" model_produced=#false {
+    doc "Create-once close archive manifest excluding close receipt/publication to avoid digest cycles."
+    field "schema_version" type="schema-id" required=#true
+    field "repo_key" type="base32" required=#true
+    field "run_id" type="uuidv7" required=#true
+    field "workstream" type="id" required=#true
+    field "request" type="artifact_link" required=#true
+    field "final_pass" type="artifact_link" required=#true
+    field "close_intent_event_sequence" type="u64" required=#true
+    field "result_ref" type="ref" required=#true
+    field "final_commit" type="git-oid" required=#true
+    field "final_tree" type="git-oid" required=#true
+    field "event_prefix" type="artifact_link" required=#true
+    list "entries" item="archive_entry" required=#true
+    field "manifest_sha256" type="digest" required=#true
+    record "archive_entry" {
+        field "archive_path" type="path" required=#true
+        field "source" type="artifact_link" required=#true
+        field "class" type="archive_entry_class" required=#true
+        field "archived_byte_length" type="u64" required=#true
+        field "archived_sha256" type="digest" required=#true
+    }
+}
+
+artifact "close_receipt" schema="autopilot.close_receipt.v1" producer="Package" model_produced=#false {
+    doc "Close receipt binding result ref, manifest, watchdog receipt, cleanup receipts, and target observation."
+    field "schema_version" type="schema-id" required=#true
+    field "repo_key" type="base32" required=#true
+    field "run_id" type="uuidv7" required=#true
+    field "workstream" type="id" required=#true
+    field "request_sha256" type="digest" required=#true
+    field "final_pass_sha256" type="digest" required=#true
+    field "result_ref" type="ref" required=#true
+    field "final_commit" type="git-oid" required=#true
+    field "final_tree" type="git-oid" required=#true
+    field "archive_manifest_sha256" type="digest" required=#true
+    field "watchdog_receipt" type="artifact_link" required=#true
+    list "cleanup_receipts" item="artifact_link" required=#true
+    field "target_ref" type="ref" required=#true
+    field "target_tip_observed_before_cas" type="git-oid" required=#true
+    field "ready_event_sequence" type="u64" required=#true
+    field "close_receipt_sha256" type="digest" required=#true
+}
+
+artifact "archive_publication" schema="autopilot.close_archive_publication.v1" producer="Package" model_produced=#false {
+    doc "Create-once publication marker that makes a close archive visible."
+    field "schema_version" type="schema-id" required=#true
+    field "request_sha256" type="digest" required=#true
+    field "archive_manifest_sha256" type="digest" required=#true
+    field "close_receipt_sha256" type="digest" required=#true
+    field "publication_sha256" type="digest" required=#true
+}
+
+artifact "external_attested_evidence_import" schema="autopilot.external_attested_evidence_import.v1" producer="BackgroundTask" model_produced=#false {
+    doc "Strict import request for existing phase2.pi_task_attestation.v1 bytes. The result is external-attested-advisory only and cannot satisfy final conditions."
+    field "schema_version" type="schema-id" required=#true
+    field "repo_key" type="base32" required=#true
+    field "run_id" type="uuidv7" required=#true
+    field "workstream" type="id" required=#true
+    field "evidence_kind" type="string" required=#true
+    field "assignment_id" type="id" required=#true
+    field "role_id" type="id" required=#true
+    field "mode" type="mode-id" required=#true
+    field "expected_final_commit" type="git-oid" required=#true
+    field "expected_final_tree" type="git-oid" required=#true
+    field "expected_provider" type="string" required=#true
+    field "expected_model" type="string" required=#true
+    field "expected_thinking" type="thinking-level" required=#true
+    field "expected_prompt" type="artifact_link" required=#true
+    list "expected_argv" item="string" required=#true
+    field "report" type="artifact_link" required=#true
+    field "attestation" type="artifact_link" required=#true
+    field "import_sha256" type="digest" required=#true
+}
+
+artifact "lifecycle_report" schema="autopilot.lifecycle_report.v1" producer="Package" model_produced=#false {
+    doc "Close lifecycle report returned only after the terminal result-ref-archived event is durable."
+    field "schema_version" type="schema-id" required=#true
+    field "request_sha256" type="digest" required=#true
+    field "result_ref" type="ref" required=#true
+    field "final_commit" type="git-oid" required=#true
+    field "final_tree" type="git-oid" required=#true
+    field "archive_manifest" type="artifact_link" required=#true
+    field "close_receipt" type="artifact_link" required=#true
+    list "cleanup_receipts" item="artifact_link" required=#true
+    field "disposition" type="string" required=#true
+}
+
 
 artifact_category "run-files" path="runs/<repo-key>/<run-id>/" doc="run.json / state.json / events.jsonl."
 artifact_category "plan" path="runs/<repo-key>/<run-id>/plan.json" doc="plan.json and approved planning artifacts."
@@ -371,6 +1084,146 @@ enum "finding_effect" {
     value "advisory"
 }
 
+
+enum "evidence_content_kind" {
+    value "prompt"
+    value "assignment"
+    value "action"
+    value "producer-binding"
+    value "report"
+    value "producer-sidecar"
+    value "acceptance-receipt"
+    value "failure-receipt"
+    value "supersession-receipt"
+    value "transcript"
+    value "envelope-manifest"
+}
+
+enum "evidence_error_code" {
+    value "EVIDENCE_PRODUCER_UNAVAILABLE"
+    value "EVIDENCE_ASSIGNMENT_CONFLICT"
+    value "EVIDENCE_ACTION_NOT_ISSUED"
+    value "EVIDENCE_ACTION_EXPIRED"
+    value "EVIDENCE_ACTION_SUPERSEDED"
+    value "EVIDENCE_TASK_BINDING_CONFLICT"
+    value "EVIDENCE_TERMINAL_NOT_COMPLETED"
+    value "EVIDENCE_SOURCE_PATH_INVALID"
+    value "EVIDENCE_SOURCE_MISSING"
+    value "EVIDENCE_SOURCE_NOT_REGULAR"
+    value "EVIDENCE_SOURCE_SYMLINK"
+    value "EVIDENCE_SCHEMA_UNSUPPORTED"
+    value "EVIDENCE_PROSE_NOT_CONTRACT"
+    value "EVIDENCE_HASH_MISMATCH"
+    value "EVIDENCE_PRODUCER_REQUEST_MISMATCH"
+    value "EVIDENCE_PROVIDER_MISMATCH"
+    value "EVIDENCE_MODEL_MISMATCH"
+    value "EVIDENCE_CHANNEL_FORBIDDEN"
+    value "EVIDENCE_METERED_USAGE_OBSERVED"
+    value "EVIDENCE_SESSION_CONFLICT"
+    value "EVIDENCE_IDEMPOTENCY_CONFLICT"
+    value "EVIDENCE_SUBJECT_STALE"
+    value "EVIDENCE_BOUNDARY_REJECTED"
+    value "EVIDENCE_SUPERSESSION_INVALID"
+    value "EVIDENCE_EVENT_LOG_CORRUPT"
+    value "EVIDENCE_STORE_IO"
+    value "EVIDENCE_ENVELOPE_OPEN"
+    value "EVIDENCE_ENVELOPE_MEMBER_MISMATCH"
+    value "EVIDENCE_UNDECLARED_INPUT"
+}
+
+enum "validation_scope_v2" {
+    value "forward"
+    value "closure"
+    value "delta"
+    value "conflict"
+    value "final"
+}
+
+enum "validation_outcome_v2" {
+    value "FORWARD_READY"
+    value "FORWARD_BLOCKED"
+    value "PASS"
+    value "NEEDS_FIX"
+    value "BLOCKED"
+}
+
+enum "validation_subject_kind" {
+    value "lane-delivery"
+    value "repair"
+    value "conflict-candidate"
+    value "run-final-tip"
+}
+
+enum "validation_blocker_kind" {
+    value "missing-evidence"
+    value "stale-evidence"
+    value "context-gap"
+    value "external-prerequisite"
+    value "unsafe-boundary"
+}
+
+enum "finding_kind_v2" {
+    value "source-defect"
+    value "test-defect"
+    value "contract-defect"
+    value "evidence-gap"
+    value "context-gap"
+    value "unsafe-boundary"
+    value "advisory"
+}
+
+enum "validation_assignment_kind" {
+    value "planning-review"
+    value "delivery"
+    value "validation"
+}
+
+enum "attested_action_kind" {
+    value "launch-attested-pi"
+    value "reconcile-attested-pi"
+}
+
+enum "final_evidence_kind" {
+    value "plan-approved"
+    value "allocation-accepted"
+    value "unit-closed"
+    value "finding-disposition"
+    value "candidate-accepted"
+    value "integrated-diff-attribution"
+    value "staleness-snapshot"
+    value "background-terminal"
+    value "command-batch"
+    value "validation-verdict"
+    value "bughunter-verdict"
+    value "conflict-resolution"
+    value "conflict-review"
+    value "target-sync"
+    value "watchdog-stopped"
+    value "cleanup-proof"
+}
+
+enum "evidence_origin" {
+    value "package"
+    value "ordinary-bg-run"
+    value "external-attested-advisory"
+}
+
+enum "command_receipt_kind" {
+    value "final-command"
+    value "full-suite"
+    value "focused"
+}
+
+enum "archive_entry_class" {
+    value "receipt"
+    value "protected-evidence"
+    value "background-reference"
+    value "cleanup-receipt"
+    value "watchdog-receipt"
+    value "plan"
+    value "finalization"
+}
+
 enum "action_kind" {
     doc "D76 §6.2 action kinds."
     value "launch-background"
@@ -412,9 +1265,35 @@ enum "context_anchor_form" {
     value "json"
 }
 
+
+frame direction="core-to-host" kind="spawn-attested" {
+    doc "Launch an exact Core-issued attested action through pi-background-tasks EventBus v2 run-attested-pi."
+    field "action" type="autopilot_attested_action" required=#true
+}
+
+frame direction="core-to-host" kind="reconcile-attested" {
+    doc "Reconcile an exact Core-issued attested action by idempotency key through pi-background-tasks EventBus v2."
+    field "action" type="autopilot_attested_action" required=#true
+}
+
+frame direction="host-to-core" kind="attested-task-observation" {
+    doc "Host observation derived only from an EventBus v2 attested response or terminal object for an exact issued action."
+    field "action_id" type="id" required=#true
+    field "assignment_id" type="id" required=#true
+    field "assignment_revision" type="u32" required=#true
+    field "run_revision" type="u64" required=#true
+    field "producer_task_id" type="id" required=#true
+    field "producer_request_sha256" type="digest" required=#true
+    field "status" type="string" required=#true
+    field "report_source_path" type="path" required=#true
+    field "sidecar_source_path" type="path" required=#true
+}
+
 frame direction="host-to-core" kind="command" {
-    doc "D78 §3.2 — an operator slash command with its raw argument string."
+    doc "D78 §3.2 — an operator slash command with its raw argument string and Host-observed background-task capability facts. Core alone decides whether those facts admit mutation."
     field "raw" type="string" required=#true
+    field "background_capabilities" type="background_capabilities" required=#true
+    field "background_capability_diagnostic" type="string" required=#false nullable=#true
 }
 
 frame direction="host-to-core" kind="guard-query" {
@@ -424,8 +1303,10 @@ frame direction="host-to-core" kind="guard-query" {
 }
 
 frame direction="host-to-core" kind="task-completed" {
-    doc "D78 §3.2 — a pi-background-tasks completion/failure notification."
+    doc "D78 §3.2 — a pi-background-tasks terminal notification correlated by Host to a Core-issued action/task binding. Core validates the binding and decides the next effect."
     field "task_id" type="id" required=#true
+    field "action_id" type="id" required=#true
+    field "assignment_id" type="id" required=#true
     field "status" type="string" required=#true
 }
 

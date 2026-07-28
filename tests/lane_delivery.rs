@@ -8,7 +8,8 @@ use drivers::allocation::{
 };
 use drivers::dispatch::{DispatchInput, LaneReadiness, launch_lanes, select_ready_lanes};
 use drivers::runner::{
-    DeliveryExpectation, DeliveryRejection, RunnerAssignment, accept_delivery,
+    DeliveryExpectation, DeliveryRejection, RunnerAssignment, RunnerTransportFacts,
+    accept_delivery, delivery_bg_action_with_facts, delivery_issue_with_facts,
     package_delivery_commit, refuse_agent_git_mutation,
 };
 use drivers::{sim::SimPlatform, vcs::GitVcs};
@@ -65,10 +66,9 @@ fn lane_launch_uses_recorded_tip_at_dispatch_and_package_owned_commit_delivers()
     fs::write(launches[0].worktree.join("keep.txt"), "lane edit\n").expect("lane edit");
     let package_commit = package_delivery_commit(&vcs, &launches[0].worktree, "package delivery")
         .expect("package commit");
-    let package_tree = Sha(
-        vcs.read_tip(&launches[0].worktree, "HEAD^{tree}")
-            .expect("read package tree"),
-    );
+    let package_tree = Sha(vcs
+        .read_tip(&launches[0].worktree, "HEAD^{tree}")
+        .expect("read package tree"));
     assert_eq!(
         vcs.read_tip(&launches[0].worktree, "HEAD")
             .expect("read package tip"),
@@ -88,6 +88,22 @@ fn lane_launch_uses_recorded_tip_at_dispatch_and_package_owned_commit_delivers()
     assert_eq!(accepted.package_commit, package_commit);
     assert_eq!(accepted.package_tree, package_tree);
     assert_eq!(accepted.changed_paths, vec!["keep.txt".to_owned()]);
+
+    let mut forged_tree = delivery(
+        &expected,
+        Some(package_commit.clone()),
+        Some(Sha("0000000000000000000000000000000000000000".to_owned())),
+    );
+    assert_eq!(
+        accept_delivery(&[forged_tree.clone()], &expected),
+        Err(DeliveryRejection::GitState)
+    );
+    forged_tree.package_tree = Some(package_tree);
+    forged_tree.actual_changed_paths = vec![ContractPath("forged.rs".to_owned())];
+    assert_eq!(
+        accept_delivery(&[forged_tree], &expected),
+        Err(DeliveryRejection::GitState)
+    );
 }
 
 #[test]
@@ -136,23 +152,47 @@ fn agent_git_mutation_and_incomplete_delivery_are_refused_without_side_effects()
         "incomplete evidence mutated nothing"
     );
 
+    vcs.prepare(&worktree, &source, &tip.0, &["keep.txt"])
+        .expect("runner delivery worktree");
+    let worktree = fs::canonicalize(&worktree).expect("canonical runner worktree");
     let runner = RunnerAssignment {
-        action_id: id("action"),
-        assignment_id: expected.assignment_id.clone(),
+        workstream: id("main"),
+        action_id: id("action-main-l1"),
+        assignment_id: id("assignment-main-l1"),
         role_id: expected.role_id.clone(),
         mode: expected.mode.clone(),
         run_revision: expected.run_revision,
-        lane_id: expected.lane_id.clone(),
+        lane_id: id("l1"),
         attempt: expected.attempt,
         base_commit: expected.base_commit.clone(),
-        worktree,
+        worktree: worktree.clone(),
         session_file: fixture.root.join("session.json"),
         roster_assignment: "openai-codex/gpt-subscription".to_owned(),
     };
-    let action = drivers::runner::bg_action(&runner);
-    assert!(action.command_bytes.0.contains("autopilot-agent-run"));
-    assert!(action.command_bytes.0.contains("--no-auto-compact"));
-    assert!(action.is_agent);
+    let node = fixture.root.join("node");
+    let wrapper = fixture.root.join("bin/autopilot-agent-run.mjs");
+    fs::write(&node, "node\n").expect("fake node");
+    fs::create_dir_all(wrapper.parent().expect("wrapper parent")).expect("wrapper dir");
+    fs::write(&wrapper, "runner\n").expect("fake wrapper");
+    let facts = RunnerTransportFacts::new(node, wrapper).expect("facts");
+    let issue = delivery_issue_with_facts(&runner, &facts).expect("runner issue");
+    let action = delivery_bg_action_with_facts(&runner, &facts).expect("runner action");
+    assert!(action.bg_run.command.0.contains(" --spec "));
+    assert!(action.bg_run.is_agent);
+    assert_eq!(issue.binding.worktree.as_deref(), runner.worktree.to_str());
+    let spec: serde_json::Value =
+        serde_json::from_slice(&fs::read(&issue.binding.spec_path).expect("runner spec"))
+            .expect("spec json");
+    assert_eq!(
+        spec["cwd"].as_str().expect("cwd"),
+        runner.worktree.to_str().expect("worktree utf8")
+    );
+    assert_eq!(
+        spec["worktree"].as_str().expect("worktree"),
+        runner.worktree.to_str().expect("worktree utf8")
+    );
+    assert_eq!(spec["lane_id"], "l1");
+    assert_eq!(spec["attempt"], expected.attempt);
 }
 
 fn delivery(
@@ -169,6 +209,18 @@ fn delivery(
         attempt: expected.attempt,
         base_commit: expected.base_commit.clone(),
         worktree: ContractPath(expected.worktree.display().to_string()),
+        action_id: None,
+        prompt_path: None,
+        prompt_digest: None,
+        spec_path: None,
+        spec_digest: None,
+        carrier_path: None,
+        boundary_digest: None,
+        result_contract_digest: None,
+        settings_digest: None,
+        context_digest: None,
+        skills_digest: None,
+        subscription_digest: None,
         package_commit: commit,
         package_tree: tree,
         actual_changed_paths: vec![ContractPath("keep.txt".to_owned())],
@@ -194,6 +246,7 @@ fn expectation(
         base_commit: base.clone(),
         worktree: worktree.to_path_buf(),
         required_focused_evidence,
+        binding: None,
     }
 }
 
@@ -308,5 +361,7 @@ fn fixture(name: &str) -> Fixture {
         fs::remove_dir_all(&root).expect("clean fixture root");
     }
     fs::create_dir_all(&root).expect("fixture root");
-    Fixture { root }
+    Fixture {
+        root: fs::canonicalize(root).expect("canonical fixture root"),
+    }
 }

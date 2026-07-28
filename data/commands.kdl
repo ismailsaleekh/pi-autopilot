@@ -4,7 +4,7 @@ version 1
 command "autopilot-plan" driver="planning" args="workstream task-paths..." expects="/autopilot-plan <workstream> <task-paths...>"
 command "autopilot" driver="allocation-dispatch-runner" args="workstream" expects="/autopilot <workstream>"
 command "autopilot-status" driver="state" args="none" expects="/autopilot-status"
-command "autopilot-close" driver="lifecycle-close" args="workstream" expects="/autopilot-close <workstream>"
+command "autopilot-close" driver="lifecycle-close" args="close-request-v1" expects="/autopilot-close <workstream> --run <run-id> --expected-revision <u64> --expected-event-tip <sha256:...> --expected-tip <git-oid> --expected-tree <git-oid> --expected-final-digest <sha256:...>"
 command "autopilot-abort" driver="lifecycle-abort" args="workstream" expects="/autopilot-abort <workstream>"
 command "autopilot-config" driver="roster-config" args="show|parallel-cap" expects="/autopilot-config show OR /autopilot-config parallel-cap <n>"
 command "autopilot-handoff" driver="handoff" args="none" expects="/autopilot-handoff"

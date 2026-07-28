@@ -7,7 +7,10 @@ use std::{
 use drivers::{
     finalize::TargetSyncer,
     integration::{CandidateKind, CheckCommand},
-    lifecycle::{AbortRequest, CleanupArtifact, CleanupProof, CloseRequest, LocalLifecycle, ProtectedEvidence},
+    lifecycle::{
+        AbortRequest, CleanupArtifact, CleanupProof, CloseRequest, LocalLifecycle,
+        ProtectedEvidence,
+    },
     sim::SimPlatform,
     vcs::GitVcs,
 };
@@ -48,15 +51,26 @@ fn r13_walkthroughs_are_complete_live_or_explicitly_pending() {
         );
         match seed.status {
             SeedStatus::Live { steps } => {
-                assert!(!steps.is_empty(), "live seed {} cannot be vacuous", seed.number);
                 assert!(
-                    RECOVERY_KDL.contains(&format!("number={} name=\"{}\" status=\"live\"", seed.number, seed.name)),
+                    !steps.is_empty(),
+                    "live seed {} cannot be vacuous",
+                    seed.number
+                );
+                assert!(
+                    RECOVERY_KDL.contains(&format!(
+                        "number={} name=\"{}\" status=\"live\"",
+                        seed.number, seed.name
+                    )),
                     "live seed {} must be data-declared",
                     seed.number
                 );
                 let first = replay(seed.number, steps);
                 let second = replay(seed.number, steps);
-                assert_eq!(first, second, "seed {} replay must be deterministic", seed.number);
+                assert_eq!(
+                    first, second,
+                    "seed {} replay must be deterministic",
+                    seed.number
+                );
                 assert_eq!(first.accepted, steps.len() as u64);
             }
             SeedStatus::Pending { surface } => assert_pending_declared(seed, surface, RECOVERY_KDL),
@@ -67,7 +81,8 @@ fn r13_walkthroughs_are_complete_live_or_explicitly_pending() {
 #[test]
 fn pending_status_remains_constructible_and_requires_named_surface() {
     let future = pending(99, "future wave", "future explicit surface");
-    let declarations = "r13 number=99 name=\"future wave\" status=\"pending\" needs=\"future explicit surface\"";
+    let declarations =
+        "r13 number=99 name=\"future wave\" status=\"pending\" needs=\"future explicit surface\"";
     match future.status {
         SeedStatus::Pending { surface } => assert_pending_declared(future, surface, declarations),
         SeedStatus::Live { .. } => unreachable!("pending helper must construct Pending"),
@@ -119,10 +134,18 @@ fn seed_11_target_movement() -> SurfaceOutcome {
     let recorded_base = fixture.base.clone();
     fixture
         .vcs
-        .swap(&fixture.source, "refs/heads/autopilot/run/run-main/main", &fixture.base, ZERO)
+        .swap(
+            &fixture.source,
+            "refs/heads/autopilot/run/run-main/main",
+            &fixture.base,
+            ZERO,
+        )
         .expect("run-main ref");
     fs::write(fixture.source.join("keep.txt"), "target moved\n").expect("target edit");
-    fixture.vcs.stage_all(&fixture.source).expect("stage target");
+    fixture
+        .vcs
+        .stage_all(&fixture.source)
+        .expect("stage target");
     let target_tip = fixture
         .vcs
         .snapshot(&fixture.source, "operator target move")
@@ -140,7 +163,11 @@ fn seed_11_target_movement() -> SurfaceOutcome {
         "refs/heads/main",
     );
     let outcome = syncer
-        .reconcile(&recorded_base, &fixture.owner.join("integration/target-sync"), &[true_check()])
+        .reconcile(
+            &recorded_base,
+            &fixture.owner.join("integration/target-sync"),
+            &[true_check()],
+        )
         .expect("target sync through release integrator");
 
     let integrated = outcome.integrated.expect("moved target creates candidate");
@@ -152,13 +179,19 @@ fn seed_11_target_movement() -> SurfaceOutcome {
         .vcs
         .read_tip(&fixture.source, "refs/heads/main")
         .expect("target after sync");
-    assert_ne!(target_tip, recorded_base, "seed 11 starts from a genuinely moved target");
+    assert_ne!(
+        target_tip, recorded_base,
+        "seed 11 starts from a genuinely moved target"
+    );
     assert_eq!(outcome.target_tip, target_tip);
     assert_eq!(integrated.request.kind, CandidateKind::FinalTargetSync);
     assert_eq!(integrated.request.candidate_id, "target-sync");
     assert_eq!(integrated.request.candidate_tip, target_tip);
     assert_ne!(integrated.old_tip, integrated.new_tip);
-    assert_eq!(run_main_after, integrated.new_tip, "ordinary CAS path advances only the integration ref");
+    assert_eq!(
+        run_main_after, integrated.new_tip,
+        "ordinary CAS path advances only the integration ref"
+    );
     assert_eq!(
         operator_target_after, operator_target_before,
         "seed 11 negative: operator target ref is unchanged after target sync"
@@ -177,15 +210,27 @@ fn seed_13_abort() -> SurfaceOutcome {
     let run_main_before = fixture.base.clone();
     fixture
         .vcs
-        .swap(&fixture.source, "refs/heads/autopilot/run/run-main/main", &fixture.base, ZERO)
+        .swap(
+            &fixture.source,
+            "refs/heads/autopilot/run/run-main/main",
+            &fixture.base,
+            ZERO,
+        )
         .expect("run-main");
     let lane_ref = "refs/heads/autopilot/run/run-r13/lane/lane-preserve/a1";
-    fixture.vcs.swap(&fixture.source, lane_ref, &fixture.base, ZERO).expect("D76 lane ref");
+    fixture
+        .vcs
+        .swap(&fixture.source, lane_ref, &fixture.base, ZERO)
+        .expect("D76 lane ref");
     let dirty = fixture.owner.join("worktrees/dirty");
     fs::create_dir_all(&dirty).expect("dirty dir");
     fs::write(dirty.join("dirty.txt"), "uncommitted\n").expect("dirty file");
 
-    let lifecycle = LocalLifecycle::new(&fixture.owner, &fixture.source, fixture.owner.join("archive"));
+    let lifecycle = LocalLifecycle::new(
+        &fixture.owner,
+        &fixture.source,
+        fixture.owner.join("archive"),
+    );
     let report = lifecycle
         .abort(AbortRequest {
             workstream: "ws".to_owned(),
@@ -204,12 +249,24 @@ fn seed_13_abort() -> SurfaceOutcome {
         .vcs
         .read_tip(&fixture.source, "refs/heads/autopilot/run/run-main/main")
         .expect("run-main preserved");
-    assert!(report.watchdog_stopped, "seed 13 stops the background watchdog");
-    assert_eq!(report.result_ref, None, "seed 13 negative: abort creates no merge/result ref");
-    assert!(report.removed.is_empty(), "seed 13 negative: abort deletes nothing");
+    assert!(
+        report.watchdog_stopped,
+        "seed 13 stops the background watchdog"
+    );
+    assert_eq!(
+        report.result_ref, None,
+        "seed 13 negative: abort creates no merge/result ref"
+    );
+    assert!(
+        report.removed.is_empty(),
+        "seed 13 negative: abort deletes nothing"
+    );
     assert_eq!(dirty_after, "uncommitted\n", "seed 13 preserves dirty work");
     assert_eq!(temp_ref_after, fixture.base, "seed 13 preserves refs");
-    assert_eq!(run_main_after, run_main_before, "seed 13 preserves run-main");
+    assert_eq!(
+        run_main_after, run_main_before,
+        "seed 13 preserves run-main"
+    );
     assert_eq!(
         fs::read_to_string(report.archive_dir.join("kept.txt")).expect("evidence archived"),
         "kept\n"
@@ -232,7 +289,12 @@ fn seed_14_close() -> SurfaceOutcome {
     let fixture = Fixture::new("r13-close");
     fixture
         .vcs
-        .swap(&fixture.source, "refs/heads/autopilot/run/run-main/main", &fixture.base, ZERO)
+        .swap(
+            &fixture.source,
+            "refs/heads/autopilot/run/run-main/main",
+            &fixture.base,
+            ZERO,
+        )
         .expect("run-main ref");
     let target_before = fixture
         .vcs
@@ -252,11 +314,18 @@ fn seed_14_close() -> SurfaceOutcome {
         .expect("final worktree");
     fs::write(final_tree.join("keep.txt"), "closed result\n").expect("final edit");
     fixture.vcs.stage_all(&final_tree).expect("stage final");
-    let final_tip = fixture.vcs.snapshot(&final_tree, "final closed result").expect("final tip");
+    let final_tip = fixture
+        .vcs
+        .snapshot(&final_tree, "final closed result")
+        .expect("final tip");
     let safe_tree = fixture.owner.join("worktrees/safe-terminal");
     fs::create_dir_all(&safe_tree).expect("safe tree");
     fs::write(safe_tree.join("done.txt"), "done\n").expect("safe content");
-    let lifecycle = LocalLifecycle::new(&fixture.owner, &fixture.source, fixture.owner.join("archive"));
+    let lifecycle = LocalLifecycle::new(
+        &fixture.owner,
+        &fixture.source,
+        fixture.owner.join("archive"),
+    );
     let report = lifecycle
         .close(CloseRequest {
             workstream: "ws".to_owned(),
@@ -269,8 +338,14 @@ fn seed_14_close() -> SurfaceOutcome {
                 evidence("review.txt", "review passed\n"),
             ],
             cleanup: vec![
-                CleanupProof { artifact: CleanupArtifact::PackageWorktree(safe_tree.clone()), proven_safe: true },
-                CleanupProof { artifact: CleanupArtifact::TempRef("refs/autopilot/tmp/close".to_owned()), proven_safe: true },
+                CleanupProof {
+                    artifact: CleanupArtifact::PackageWorktree(safe_tree.clone()),
+                    proven_safe: true,
+                },
+                CleanupProof {
+                    artifact: CleanupArtifact::TempRef("refs/autopilot/tmp/close".to_owned()),
+                    proven_safe: true,
+                },
             ],
         })
         .expect("close succeeds");
@@ -286,25 +361,43 @@ fn seed_14_close() -> SurfaceOutcome {
         .expect("run-main after");
     let push_refused = matches!(
         fixture.vcs.push(),
-        Err(Failure::Unsafe { boundary: HardBoundary::RemoteOrDestructiveNetwork })
+        Err(Failure::Unsafe {
+            boundary: HardBoundary::RemoteOrDestructiveNetwork
+        })
     );
-    assert_ne!(final_tip, target_before, "seed 14 final result is not already landed");
+    assert_ne!(
+        final_tip, target_before,
+        "seed 14 final result is not already landed"
+    );
     assert_eq!(result_ref, "refs/autopilot/results/ws/run-14");
     assert_eq!(
-        fixture.vcs.read_tip(&fixture.source, &result_ref).expect("retained result ref"),
+        fixture
+            .vcs
+            .read_tip(&fixture.source, &result_ref)
+            .expect("retained result ref"),
         final_tip,
         "seed 14 creates an immutable local result ref"
     );
     assert!(report.watchdog_stopped);
     assert_eq!(report.removed.len(), 2);
-    assert!(!safe_tree.exists(), "proven-safe package worktree was removed");
-    assert!(fixture.vcs.read_tip(&fixture.source, "refs/autopilot/tmp/close").is_err());
+    assert!(
+        !safe_tree.exists(),
+        "proven-safe package worktree was removed"
+    );
+    assert!(
+        fixture
+            .vcs
+            .read_tip(&fixture.source, "refs/autopilot/tmp/close")
+            .is_err()
+    );
     assert_eq!(
-        fs::read_to_string(report.archive_dir.join("closure-proof.txt")).expect("closure proof archived"),
+        fs::read_to_string(report.archive_dir.join("closure-proof.txt"))
+            .expect("closure proof archived"),
         "closed\n"
     );
     assert_eq!(
-        fs::read_to_string(report.archive_dir.join("final-suite.txt")).expect("suite proof archived"),
+        fs::read_to_string(report.archive_dir.join("final-suite.txt"))
+            .expect("suite proof archived"),
         "suite passed\n"
     );
     assert_eq!(
@@ -312,7 +405,8 @@ fn seed_14_close() -> SurfaceOutcome {
         "review passed\n"
     );
     assert_eq!(
-        fs::read_to_string(operator_checkout.join("sentinel.txt")).expect("operator sentinel after"),
+        fs::read_to_string(operator_checkout.join("sentinel.txt"))
+            .expect("operator sentinel after"),
         "operator\n",
         "seed 14 negative: close does not mutate the operator checkout"
     );
@@ -335,14 +429,23 @@ fn seed_14_close() -> SurfaceOutcome {
         no_push: push_refused,
         no_land: run_main_after == run_main_before,
         no_target_move: target_after == target_before,
-        operator_checkout_unchanged: fs::read_to_string(operator_checkout.join("sentinel.txt")).expect("operator sentinel final") == "operator\n",
+        operator_checkout_unchanged: fs::read_to_string(operator_checkout.join("sentinel.txt"))
+            .expect("operator sentinel final")
+            == "operator\n",
     }
 }
 
 fn assert_pending_declared(seed: Seed, surface: &str, declarations: &str) {
-    assert!(!surface.is_empty(), "pending seed {} must name missing surface", seed.number);
     assert!(
-        declarations.contains(&format!("number={} name=\"{}\" status=\"pending\"", seed.number, seed.name)),
+        !surface.is_empty(),
+        "pending seed {} must name missing surface",
+        seed.number
+    );
+    assert!(
+        declarations.contains(&format!(
+            "number={} name=\"{}\" status=\"pending\"",
+            seed.number, seed.name
+        )),
         "pending seed {} must be data-declared",
         seed.number
     );
@@ -404,19 +507,64 @@ enum SeedStatus {
 fn seeds() -> [Seed; 14] {
     [
         live(1, "planning", &["inventory", "scouts", "approval"]),
-        live(2, "normal execution", &["control-frame", "allocator", "delivery"]),
+        live(
+            2,
+            "normal execution",
+            &["control-frame", "allocator", "delivery"],
+        ),
         live(3, "forward release", &["round-pass", "cas", "successor"]),
         live(4, "two-round blocker", &["blocker", "fixer", "round-two"]),
-        live(5, "outside-cap quality", &["eight-implementers", "validators-outside-cap"]),
-        live(6, "context continuation", &["checkpoint", "compact", "resume"]),
-        live(7, "post-release repair", &["finding", "repair", "delta-proof"]),
+        live(
+            5,
+            "outside-cap quality",
+            &["eight-implementers", "validators-outside-cap"],
+        ),
+        live(
+            6,
+            "context continuation",
+            &["checkpoint", "compact", "resume"],
+        ),
+        live(
+            7,
+            "post-release repair",
+            &["finding", "repair", "delta-proof"],
+        ),
         live(8, "conflict", &["bundle", "resolution", "overlap-proof"]),
         live(9, "background shutdown", &["pause", "kill", "new-bg-run"]),
-        live(10, "integration crash", &["intent", "postcondition", "one-acceptance"]),
-        live(11, "target movement", &["target-moved", "target-sync-candidate", "operator-target-unchanged"]),
-        live(12, "unsafe operation", &["guard", "evidence", "isolated-continue"]),
-        live(13, "abort", &["background-stop", "abort-archive", "preserve-dirty-refs"]),
-        live(14, "close", &["closure-proof", "final-suite-review", "local-result-ref", "safe-cleanup"]),
+        live(
+            10,
+            "integration crash",
+            &["intent", "postcondition", "one-acceptance"],
+        ),
+        live(
+            11,
+            "target movement",
+            &[
+                "target-moved",
+                "target-sync-candidate",
+                "operator-target-unchanged",
+            ],
+        ),
+        live(
+            12,
+            "unsafe operation",
+            &["guard", "evidence", "isolated-continue"],
+        ),
+        live(
+            13,
+            "abort",
+            &["background-stop", "abort-archive", "preserve-dirty-refs"],
+        ),
+        live(
+            14,
+            "close",
+            &[
+                "closure-proof",
+                "final-suite-review",
+                "local-result-ref",
+                "safe-cleanup",
+            ],
+        ),
     ]
 }
 
@@ -452,16 +600,28 @@ impl Fixture {
         let source = owner.join("repo");
         let vcs = GitVcs::new(&owner);
         let base = vcs.init_fixture(&source).expect("seed repo");
-        Self { root, owner, source, base, vcs }
+        Self {
+            root,
+            owner,
+            source,
+            base,
+            vcs,
+        }
     }
 }
 
 fn true_check() -> CheckCommand {
-    CheckCommand { program: "true".to_owned(), args: Vec::new() }
+    CheckCommand {
+        program: "true".to_owned(),
+        args: Vec::new(),
+    }
 }
 
 fn evidence(name: &str, bytes: &str) -> ProtectedEvidence {
-    ProtectedEvidence { name: name.to_owned(), bytes: bytes.to_owned() }
+    ProtectedEvidence {
+        name: name.to_owned(),
+        bytes: bytes.to_owned(),
+    }
 }
 
 fn temp_root(name: &str) -> PathBuf {

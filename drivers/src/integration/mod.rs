@@ -168,16 +168,23 @@ impl ReleaseIntegrator {
             os(&["merge", "--no-ff", "--no-commit", &request.candidate_tip]),
         )?;
         self.vcs
-            .snapshot(&root, &format!("autopilot release {}", request.candidate_id))
+            .snapshot(
+                &root,
+                &format!("autopilot release {}", request.candidate_id),
+            )
             .map_err(map_failure)?;
         run_focused_checks(&root, checks)?;
-        let new_tip = self.git(&root, os(&["rev-parse", "HEAD"]))?.trim().to_owned();
+        let new_tip = self
+            .git(&root, os(&["rev-parse", "HEAD"]))?
+            .trim()
+            .to_owned();
         let tree = self
             .git(&root, os(&["rev-parse", "HEAD^{tree}"]))?
             .trim()
             .to_owned();
         self.verify_merge(&root, &old_tip, &request.candidate_tip, &new_tip, &tree)?;
-        let changed_paths = diff_paths(&self.git(&root, os(&["diff", "--name-only", &old_tip, &new_tip]))?);
+        let changed_paths =
+            diff_paths(&self.git(&root, os(&["diff", "--name-only", &old_tip, &new_tip]))?);
         if changed_paths.is_empty() {
             return Err(IntegrationError::Diff);
         }
@@ -286,7 +293,9 @@ impl ReleaseIntegrator {
 fn run_focused_checks(root: &Path, checks: &[CheckCommand]) -> Result<(), IntegrationError> {
     for check in checks {
         if check.program.is_empty() {
-            return Err(IntegrationError::FocusedCheckFailed("empty-program".to_owned()));
+            return Err(IntegrationError::FocusedCheckFailed(
+                "empty-program".to_owned(),
+            ));
         }
         let output = Command::new(&check.program)
             .current_dir(root)

@@ -44,11 +44,19 @@ pub struct EventKind(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
+pub struct GitOid(pub String);
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct GuardDecision(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Id(pub String);
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Json(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -88,6 +96,10 @@ pub struct SupersessionState(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
+pub struct TaskDocumentClass(pub String);
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct TestId(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -109,6 +121,10 @@ pub struct TriggerKind(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct UiKind(pub String);
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct UnixMs(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -139,6 +155,24 @@ pub enum ActionKind {
     StopBackground,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ArchiveEntryClass {
+    #[serde(rename = "background-reference")]
+    BackgroundReference,
+    #[serde(rename = "cleanup-receipt")]
+    CleanupReceipt,
+    #[serde(rename = "finalization")]
+    Finalization,
+    #[serde(rename = "plan")]
+    Plan,
+    #[serde(rename = "protected-evidence")]
+    ProtectedEvidence,
+    #[serde(rename = "receipt")]
+    Receipt,
+    #[serde(rename = "watchdog-receipt")]
+    WatchdogReceipt,
+}
+
 /// D76 §5.3 explicitly distinguishes these from lane states.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AttemptAttribute {
@@ -148,6 +182,14 @@ pub enum AttemptAttribute {
     Interrupted,
     #[serde(rename = "superseded")]
     Superseded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AttestedActionKind {
+    #[serde(rename = "launch-attested-pi")]
+    LaunchAttestedPi,
+    #[serde(rename = "reconcile-attested-pi")]
+    ReconcileAttestedPi,
 }
 
 /// D76 §5.3 candidate states.
@@ -186,6 +228,16 @@ pub enum ClosureVerdict {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CommandReceiptKind {
+    #[serde(rename = "final-command")]
+    FinalCommand,
+    #[serde(rename = "focused")]
+    Focused,
+    #[serde(rename = "full-suite")]
+    FullSuite,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContextAnchorForm {
     #[serde(rename = "dossier")]
     Dossier,
@@ -214,6 +266,140 @@ pub enum CriterionVerdict {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EvidenceContentKind {
+    #[serde(rename = "acceptance-receipt")]
+    AcceptanceReceipt,
+    #[serde(rename = "action")]
+    Action,
+    #[serde(rename = "assignment")]
+    Assignment,
+    #[serde(rename = "envelope-manifest")]
+    EnvelopeManifest,
+    #[serde(rename = "failure-receipt")]
+    FailureReceipt,
+    #[serde(rename = "producer-binding")]
+    ProducerBinding,
+    #[serde(rename = "producer-sidecar")]
+    ProducerSidecar,
+    #[serde(rename = "prompt")]
+    Prompt,
+    #[serde(rename = "report")]
+    Report,
+    #[serde(rename = "supersession-receipt")]
+    SupersessionReceipt,
+    #[serde(rename = "transcript")]
+    Transcript,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EvidenceErrorCode {
+    #[serde(rename = "EVIDENCE_ACTION_EXPIRED")]
+    EVIDENCEACTIONEXPIRED,
+    #[serde(rename = "EVIDENCE_ACTION_NOT_ISSUED")]
+    EVIDENCEACTIONNOTISSUED,
+    #[serde(rename = "EVIDENCE_ACTION_SUPERSEDED")]
+    EVIDENCEACTIONSUPERSEDED,
+    #[serde(rename = "EVIDENCE_ASSIGNMENT_CONFLICT")]
+    EVIDENCEASSIGNMENTCONFLICT,
+    #[serde(rename = "EVIDENCE_BOUNDARY_REJECTED")]
+    EVIDENCEBOUNDARYREJECTED,
+    #[serde(rename = "EVIDENCE_CHANNEL_FORBIDDEN")]
+    EVIDENCECHANNELFORBIDDEN,
+    #[serde(rename = "EVIDENCE_ENVELOPE_MEMBER_MISMATCH")]
+    EVIDENCEENVELOPEMEMBERMISMATCH,
+    #[serde(rename = "EVIDENCE_ENVELOPE_OPEN")]
+    EVIDENCEENVELOPEOPEN,
+    #[serde(rename = "EVIDENCE_EVENT_LOG_CORRUPT")]
+    EVIDENCEEVENTLOGCORRUPT,
+    #[serde(rename = "EVIDENCE_HASH_MISMATCH")]
+    EVIDENCEHASHMISMATCH,
+    #[serde(rename = "EVIDENCE_IDEMPOTENCY_CONFLICT")]
+    EVIDENCEIDEMPOTENCYCONFLICT,
+    #[serde(rename = "EVIDENCE_METERED_USAGE_OBSERVED")]
+    EVIDENCEMETEREDUSAGEOBSERVED,
+    #[serde(rename = "EVIDENCE_MODEL_MISMATCH")]
+    EVIDENCEMODELMISMATCH,
+    #[serde(rename = "EVIDENCE_PRODUCER_REQUEST_MISMATCH")]
+    EVIDENCEPRODUCERREQUESTMISMATCH,
+    #[serde(rename = "EVIDENCE_PRODUCER_UNAVAILABLE")]
+    EVIDENCEPRODUCERUNAVAILABLE,
+    #[serde(rename = "EVIDENCE_PROSE_NOT_CONTRACT")]
+    EVIDENCEPROSENOTCONTRACT,
+    #[serde(rename = "EVIDENCE_PROVIDER_MISMATCH")]
+    EVIDENCEPROVIDERMISMATCH,
+    #[serde(rename = "EVIDENCE_SCHEMA_UNSUPPORTED")]
+    EVIDENCESCHEMAUNSUPPORTED,
+    #[serde(rename = "EVIDENCE_SESSION_CONFLICT")]
+    EVIDENCESESSIONCONFLICT,
+    #[serde(rename = "EVIDENCE_SOURCE_MISSING")]
+    EVIDENCESOURCEMISSING,
+    #[serde(rename = "EVIDENCE_SOURCE_NOT_REGULAR")]
+    EVIDENCESOURCENOTREGULAR,
+    #[serde(rename = "EVIDENCE_SOURCE_PATH_INVALID")]
+    EVIDENCESOURCEPATHINVALID,
+    #[serde(rename = "EVIDENCE_SOURCE_SYMLINK")]
+    EVIDENCESOURCESYMLINK,
+    #[serde(rename = "EVIDENCE_STORE_IO")]
+    EVIDENCESTOREIO,
+    #[serde(rename = "EVIDENCE_SUBJECT_STALE")]
+    EVIDENCESUBJECTSTALE,
+    #[serde(rename = "EVIDENCE_SUPERSESSION_INVALID")]
+    EVIDENCESUPERSESSIONINVALID,
+    #[serde(rename = "EVIDENCE_TASK_BINDING_CONFLICT")]
+    EVIDENCETASKBINDINGCONFLICT,
+    #[serde(rename = "EVIDENCE_TERMINAL_NOT_COMPLETED")]
+    EVIDENCETERMINALNOTCOMPLETED,
+    #[serde(rename = "EVIDENCE_UNDECLARED_INPUT")]
+    EVIDENCEUNDECLAREDINPUT,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EvidenceOrigin {
+    #[serde(rename = "external-attested-advisory")]
+    ExternalAttestedAdvisory,
+    #[serde(rename = "ordinary-bg-run")]
+    OrdinaryBgRun,
+    #[serde(rename = "package")]
+    Package,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FinalEvidenceKind {
+    #[serde(rename = "allocation-accepted")]
+    AllocationAccepted,
+    #[serde(rename = "background-terminal")]
+    BackgroundTerminal,
+    #[serde(rename = "bughunter-verdict")]
+    BughunterVerdict,
+    #[serde(rename = "candidate-accepted")]
+    CandidateAccepted,
+    #[serde(rename = "cleanup-proof")]
+    CleanupProof,
+    #[serde(rename = "command-batch")]
+    CommandBatch,
+    #[serde(rename = "conflict-resolution")]
+    ConflictResolution,
+    #[serde(rename = "conflict-review")]
+    ConflictReview,
+    #[serde(rename = "finding-disposition")]
+    FindingDisposition,
+    #[serde(rename = "integrated-diff-attribution")]
+    IntegratedDiffAttribution,
+    #[serde(rename = "plan-approved")]
+    PlanApproved,
+    #[serde(rename = "staleness-snapshot")]
+    StalenessSnapshot,
+    #[serde(rename = "target-sync")]
+    TargetSync,
+    #[serde(rename = "unit-closed")]
+    UnitClosed,
+    #[serde(rename = "validation-verdict")]
+    ValidationVerdict,
+    #[serde(rename = "watchdog-stopped")]
+    WatchdogStopped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FindingEffect {
     #[serde(rename = "advisory")]
     Advisory,
@@ -221,6 +407,24 @@ pub enum FindingEffect {
     ClosureBlockingForwardSafe,
     #[serde(rename = "forward-blocking")]
     ForwardBlocking,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FindingKindV2 {
+    #[serde(rename = "advisory")]
+    Advisory,
+    #[serde(rename = "context-gap")]
+    ContextGap,
+    #[serde(rename = "contract-defect")]
+    ContractDefect,
+    #[serde(rename = "evidence-gap")]
+    EvidenceGap,
+    #[serde(rename = "source-defect")]
+    SourceDefect,
+    #[serde(rename = "test-defect")]
+    TestDefect,
+    #[serde(rename = "unsafe-boundary")]
+    UnsafeBoundary,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -341,8 +545,254 @@ pub enum RunPhase {
     Terminal,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ValidationAssignmentKind {
+    #[serde(rename = "delivery")]
+    Delivery,
+    #[serde(rename = "planning-review")]
+    PlanningReview,
+    #[serde(rename = "validation")]
+    Validation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ValidationBlockerKind {
+    #[serde(rename = "context-gap")]
+    ContextGap,
+    #[serde(rename = "external-prerequisite")]
+    ExternalPrerequisite,
+    #[serde(rename = "missing-evidence")]
+    MissingEvidence,
+    #[serde(rename = "stale-evidence")]
+    StaleEvidence,
+    #[serde(rename = "unsafe-boundary")]
+    UnsafeBoundary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ValidationOutcomeV2 {
+    #[serde(rename = "BLOCKED")]
+    BLOCKED,
+    #[serde(rename = "FORWARD_BLOCKED")]
+    FORWARDBLOCKED,
+    #[serde(rename = "FORWARD_READY")]
+    FORWARDREADY,
+    #[serde(rename = "NEEDS_FIX")]
+    NEEDSFIX,
+    #[serde(rename = "PASS")]
+    PASS,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ValidationScopeV2 {
+    #[serde(rename = "closure")]
+    Closure,
+    #[serde(rename = "conflict")]
+    Conflict,
+    #[serde(rename = "delta")]
+    Delta,
+    #[serde(rename = "final")]
+    Final,
+    #[serde(rename = "forward")]
+    Forward,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ValidationSubjectKind {
+    #[serde(rename = "conflict-candidate")]
+    ConflictCandidate,
+    #[serde(rename = "lane-delivery")]
+    LaneDelivery,
+    #[serde(rename = "repair")]
+    Repair,
+    #[serde(rename = "run-final-tip")]
+    RunFinalTip,
+}
+
+/// Authoritative accepted evidence envelope. External-attested advisory origin is archived but cannot satisfy final conditions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptedEvidenceEnvelope {
+    #[serde(rename = "schema_version")]
+    pub schema_version: SchemaId,
+    #[serde(rename = "repo_key")]
+    pub repo_key: Base32,
+    #[serde(rename = "run_id")]
+    pub run_id: Uuidv7,
+    #[serde(rename = "workstream")]
+    pub workstream: Id,
+    #[serde(rename = "evidence_id")]
+    pub evidence_id: Id,
+    #[serde(rename = "evidence_kind")]
+    pub evidence_kind: FinalEvidenceKind,
+    #[serde(rename = "subject_id")]
+    pub subject_id: Id,
+    #[serde(rename = "origin")]
+    pub origin: EvidenceOrigin,
+    #[serde(rename = "artifact")]
+    pub artifact: ArtifactLink,
+    #[serde(rename = "acceptance_receipt")]
+    pub acceptance_receipt: ArtifactLink,
+    #[serde(rename = "boundary_id")]
+    pub boundary_id: ContractId,
+    #[serde(rename = "assignment_id")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignment_id: Option<Id>,
+    #[serde(rename = "action_id")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_id: Option<Id>,
+    #[serde(rename = "role_id")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role_id: Option<Id>,
+    #[serde(rename = "mode")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<ModeId>,
+    #[serde(rename = "accepted_run_revision")]
+    pub accepted_run_revision: u64,
+    #[serde(rename = "exact_commit")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exact_commit: Option<GitOid>,
+    #[serde(rename = "exact_tree")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exact_tree: Option<GitOid>,
+    #[serde(rename = "provider")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(rename = "model")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(rename = "thinking")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingLevel>,
+    #[serde(rename = "route")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route: Option<String>,
+    #[serde(rename = "pi_session_id")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pi_session_id: Option<Id>,
+    #[serde(rename = "envelope_sha256")]
+    pub envelope_sha256: Digest,
+}
+
+/// Strict parent-Core written child runner specification for the package-contained autopilot-agent-run wrapper and Rust agent-run mode.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentRunSpec {
+    #[serde(rename = "schema")]
+    pub schema: SchemaId,
+    /// Explicit assignment class; no runner infers planning/delivery/validation from result_contract.
+    #[serde(rename = "assignment_kind")]
+    pub assignment_kind: ValidationAssignmentKind,
+    #[serde(rename = "action_id")]
+    pub action_id: Id,
+    #[serde(rename = "assignment_id")]
+    pub assignment_id: Id,
+    #[serde(rename = "run_revision")]
+    pub run_revision: u64,
+    #[serde(rename = "workstream")]
+    pub workstream: Id,
+    #[serde(rename = "role_id")]
+    pub role_id: Id,
+    #[serde(rename = "mode")]
+    pub mode: ModeId,
+    #[serde(rename = "provider")]
+    pub provider: String,
+    #[serde(rename = "model")]
+    pub model: String,
+    #[serde(rename = "thinking")]
+    pub thinking: ThinkingLevel,
+    #[serde(rename = "route")]
+    pub route: String,
+    #[serde(rename = "cwd")]
+    pub cwd: Path,
+    #[serde(rename = "allowed_tools")]
+    pub allowed_tools: Vec<ToolName>,
+    #[serde(rename = "spec_path")]
+    pub spec_path: Path,
+    #[serde(rename = "prompt_path")]
+    pub prompt_path: Path,
+    #[serde(rename = "prompt_digest")]
+    pub prompt_digest: Digest,
+    #[serde(rename = "boundary_id")]
+    pub boundary_id: ContractId,
+    #[serde(rename = "boundary_digest")]
+    pub boundary_digest: Digest,
+    #[serde(rename = "result_contract")]
+    pub result_contract: ContractId,
+    #[serde(rename = "result_contract_digest")]
+    pub result_contract_digest: Digest,
+    #[serde(rename = "carrier_path")]
+    pub carrier_path: Path,
+    #[serde(rename = "settings_digest")]
+    pub settings_digest: Digest,
+    #[serde(rename = "context_digest")]
+    pub context_digest: Digest,
+    #[serde(rename = "skills_digest")]
+    pub skills_digest: Digest,
+    #[serde(rename = "subscription_digest")]
+    pub subscription_digest: Digest,
+    #[serde(rename = "lane_id")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lane_id: Option<Id>,
+    #[serde(rename = "attempt")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u32>,
+    #[serde(rename = "base_commit")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_commit: Option<Sha>,
+    #[serde(rename = "worktree")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<Path>,
+    #[serde(rename = "required_focused_evidence")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required_focused_evidence: Option<u32>,
+    #[serde(rename = "authority_set_id")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authority_set_id: Option<String>,
+    #[serde(rename = "authority_documents")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authority_documents: Option<Vec<TaskDocument>>,
+    #[serde(rename = "context_document")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_document: Option<TaskDocument>,
+    #[serde(rename = "assignment_path")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignment_path: Option<Path>,
+    #[serde(rename = "assignment_digest")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignment_digest: Option<Digest>,
+    #[serde(rename = "context_manifest_path")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_manifest_path: Option<Path>,
+    #[serde(rename = "context_manifest_digest")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_manifest_digest: Option<Digest>,
+    #[serde(rename = "runtime_extension_path")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_extension_path: Option<Path>,
+    #[serde(rename = "runtime_extension_digest")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_extension_digest: Option<Digest>,
+    #[serde(rename = "producer_assignment_ids")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub producer_assignment_ids: Option<Vec<Id>>,
+    #[serde(rename = "validation_id")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validation_id: Option<Id>,
+    #[serde(rename = "validation_attempt")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validation_attempt: Option<u32>,
+    #[serde(rename = "semantic_round")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub semantic_round: Option<u32>,
+    #[serde(rename = "model_submission_path")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_submission_path: Option<Path>,
+}
+
 /// Allocator model proposal; package validates totality, dependencies, cap, and no invented ownership (D76 §7).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AllocationLaneProposal {
     #[serde(rename = "lane_id")]
     pub lane_id: Id,
@@ -372,8 +822,444 @@ pub struct AllocationLaneProposal {
     pub continue_existing_logical_lane: Option<bool>,
 }
 
-/// Exact background launch/reconcile/stop action descriptor (D76 §6.2 and D74 §4.5).
+/// Create-once publication marker that makes a close archive visible.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArchivePublication {
+    #[serde(rename = "schema_version")]
+    pub schema_version: SchemaId,
+    #[serde(rename = "request_sha256")]
+    pub request_sha256: Digest,
+    #[serde(rename = "archive_manifest_sha256")]
+    pub archive_manifest_sha256: Digest,
+    #[serde(rename = "close_receipt_sha256")]
+    pub close_receipt_sha256: Digest,
+    #[serde(rename = "publication_sha256")]
+    pub publication_sha256: Digest,
+}
+
+/// Digest-bound run-root artifact link used by finalization assemblies and archive manifests.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactLink {
+    #[serde(rename = "schema_version")]
+    pub schema_version: SchemaId,
+    #[serde(rename = "path")]
+    pub path: Path,
+    #[serde(rename = "artifact_schema")]
+    pub artifact_schema: String,
+    #[serde(rename = "byte_length")]
+    pub byte_length: u64,
+    #[serde(rename = "sha256")]
+    pub sha256: Digest,
+}
+
+/// Core-issued exact attested action. Host may only relay this object through EventBus v2.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AutopilotAttestedAction {
+    #[serde(rename = "schema_version")]
+    pub schema_version: SchemaId,
+    #[serde(rename = "action_id")]
+    pub action_id: Id,
+    #[serde(rename = "assignment_id")]
+    pub assignment_id: Id,
+    #[serde(rename = "assignment_revision")]
+    pub assignment_revision: u32,
+    #[serde(rename = "run_revision")]
+    pub run_revision: u64,
+    #[serde(rename = "assignment_ref")]
+    pub assignment_ref: AutopilotContentRef,
+    #[serde(rename = "producer_request")]
+    pub producer_request: Phase2PiAttestedRunRequest,
+    #[serde(rename = "expires_at_unix_ms")]
+    pub expires_at_unix_ms: UnixMs,
+    #[serde(rename = "supersession_state")]
+    pub supersession_state: String,
+    #[serde(rename = "action_sha256")]
+    pub action_sha256: Digest,
+}
+
+/// Core-issued attested evidence assignment. Only Core creates this object and its action.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AutopilotAttestedAssignment {
+    #[serde(rename = "schema_version")]
+    pub schema_version: SchemaId,
+    #[serde(rename = "run_id")]
+    pub run_id: Uuidv7,
+    #[serde(rename = "repo_key")]
+    pub repo_key: Base32,
+    #[serde(rename = "workstream")]
+    pub workstream: Id,
+    #[serde(rename = "purpose_id")]
+    pub purpose_id: Id,
+    #[serde(rename = "assignment_id")]
+    pub assignment_id: Id,
+    #[serde(rename = "assignment_revision")]
+    pub assignment_revision: u32,
+    #[serde(rename = "run_revision")]
+    pub run_revision: u64,
+    #[serde(rename = "action_id")]
+    pub action_id: Id,
+    #[serde(rename = "issue_idempotency_key")]
+    pub issue_idempotency_key: Id,
+    #[serde(rename = "import_idempotency_key")]
+    pub import_idempotency_key: Id,
+    #[serde(rename = "subject_digest")]
+    pub subject_digest: Digest,
+    #[serde(rename = "boundary_id")]
+    pub boundary_id: ContractId,
+    #[serde(rename = "provider")]
+    pub provider: String,
+    #[serde(rename = "model")]
+    pub model: String,
+    #[serde(rename = "thinking")]
+    pub thinking: ThinkingLevel,
+    #[serde(rename = "required_channel")]
+    pub required_channel: String,
+    #[serde(rename = "prompt_ref")]
+    pub prompt_ref: AutopilotContentRef,
+    #[serde(rename = "system_prompt_sha256")]
+    pub system_prompt_sha256: Digest,
+    #[serde(rename = "report_staging_path")]
+    pub report_staging_path: Path,
+    #[serde(rename = "producer_request_sha256")]
+    pub producer_request_sha256: Digest,
+    #[serde(rename = "conflict_policy")]
+    pub conflict_policy: AutopilotEvidenceConflictPolicy,
+    #[serde(rename = "issued_at_unix_ms")]
+    pub issued_at_unix_ms: UnixMs,
+    #[serde(rename = "supersedes_assignment_id")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supersedes_assignment_id: Option<Id>,
+    #[serde(rename = "assignment_sha256")]
+    pub assignment_sha256: Digest,
+}
+
+/// Create-once package content reference for evidence artifacts. Paths are package-run-root-relative POSIX paths and hashes cover exact bytes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AutopilotContentRef {
+    #[serde(rename = "schema_version")]
+    pub schema_version: SchemaId,
+    #[serde(rename = "kind")]
+    pub kind: EvidenceContentKind,
+    #[serde(rename = "path")]
+    pub path: Path,
+    #[serde(rename = "byte_length")]
+    pub byte_length: UnixMs,
+    #[serde(rename = "sha256")]
+    pub sha256: Digest,
+}
+
+/// Digest-bound reference to an authoritative EventRow v1 row.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AutopilotEventRef {
+    #[serde(rename = "schema_version")]
+    pub schema_version: SchemaId,
+    #[serde(rename = "sequence")]
+    pub sequence: u64,
+    #[serde(rename = "kind")]
+    pub kind: EventKind,
+    #[serde(rename = "row_sha256")]
+    pub row_sha256: Digest,
+}
+
+/// Versioned immutable acceptance receipt for an imported attested report and sidecar.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AutopilotEvidenceAcceptanceReceipt {
+    #[serde(rename = "schema_version")]
+    pub schema_version: SchemaId,
+    #[serde(rename = "receipt_id")]
+    pub receipt_id: Id,
+    #[serde(rename = "run_id")]
+    pub run_id: Uuidv7,
+    #[serde(rename = "repo_key")]
+    pub repo_key: Base32,
+    #[serde(rename = "workstream")]
+    pub workstream: Id,
+    #[serde(rename = "purpose_id")]
+    pub purpose_id: Id,
+    #[serde(rename = "assignment_id")]
+    pub assignment_id: Id,
+    #[serde(rename = "action_id")]
+    pub action_id: Id,
+    #[serde(rename = "assignment_revision")]
+    pub assignment_revision: u32,
+    #[serde(rename = "run_revision")]
+    pub run_revision: u64,
+    #[serde(rename = "subject_digest")]
+    pub subject_digest: Digest,
+    #[serde(rename = "boundary_id")]
+    pub boundary_id: ContractId,
+    #[serde(rename = "assignment_ref")]
+    pub assignment_ref: AutopilotContentRef,
+    #[serde(rename = "action_ref")]
+    pub action_ref: AutopilotContentRef,
+    #[serde(rename = "producer_binding_ref")]
+    pub producer_binding_ref: AutopilotContentRef,
+    #[serde(rename = "report_ref")]
+    pub report_ref: AutopilotContentRef,
+    #[serde(rename = "producer_sidecar_ref")]
+    pub producer_sidecar_ref: AutopilotContentRef,
+    #[serde(rename = "producer_task_id")]
+    pub producer_task_id: Id,
+    #[serde(rename = "producer_request_sha256")]
+    pub producer_request_sha256: Digest,
+    #[serde(rename = "prompt_sha256")]
+    pub prompt_sha256: Digest,
+    #[serde(rename = "system_prompt_sha256")]
+    pub system_prompt_sha256: Digest,
+    #[serde(rename = "payload_sha256")]
+    pub payload_sha256: Digest,
+    #[serde(rename = "provider")]
+    pub provider: String,
+    #[serde(rename = "model")]
+    pub model: String,
+    #[serde(rename = "channel")]
+    pub channel: String,
+    #[serde(rename = "auth_class")]
+    pub auth_class: String,
+    #[serde(rename = "credential_kind")]
+    pub credential_kind: String,
+    #[serde(rename = "direct_api_key")]
+    pub direct_api_key: bool,
+    #[serde(rename = "pi_session_id")]
+    pub pi_session_id: Id,
+    #[serde(rename = "conflict_check")]
+    pub conflict_check: AutopilotEvidenceConflictCheck,
+    #[serde(rename = "issue_idempotency_key")]
+    pub issue_idempotency_key: Id,
+    #[serde(rename = "import_idempotency_key")]
+    pub import_idempotency_key: Id,
+    #[serde(rename = "issue_event_ref")]
+    pub issue_event_ref: AutopilotEventRef,
+    #[serde(rename = "binding_event_ref")]
+    pub binding_event_ref: AutopilotEventRef,
+    #[serde(rename = "supersession_state_at_acceptance")]
+    pub supersession_state_at_acceptance: String,
+    #[serde(rename = "accepted_at_unix_ms")]
+    pub accepted_at_unix_ms: UnixMs,
+    #[serde(rename = "receipt_sha256")]
+    pub receipt_sha256: Digest,
+}
+
+/// Folded package conflict check over authoritative accepted receipts. All conflict tuples must be empty for acceptance.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AutopilotEvidenceConflictCheck {
+    #[serde(rename = "schema_version")]
+    pub schema_version: SchemaId,
+    #[serde(rename = "compared_receipt_refs")]
+    pub compared_receipt_refs: Vec<AutopilotContentRef>,
+    #[serde(rename = "assignment_conflicts")]
+    pub assignment_conflicts: Vec<Id>,
+    #[serde(rename = "action_conflicts")]
+    pub action_conflicts: Vec<Id>,
+    #[serde(rename = "session_conflicts")]
+    pub session_conflicts: Vec<Id>,
+    #[serde(rename = "subject_conflicts")]
+    pub subject_conflicts: Vec<Digest>,
+    #[serde(rename = "provider_channel_conflicts")]
+    pub provider_channel_conflicts: Vec<String>,
+    #[serde(rename = "status")]
+    pub status: String,
+    #[serde(rename = "check_sha256")]
+    pub check_sha256: Digest,
+}
+
+/// Package-authored conflict policy for an attested evidence assignment.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AutopilotEvidenceConflictPolicy {
+    #[serde(rename = "schema_version")]
+    pub schema_version: SchemaId,
+    #[serde(rename = "distinct_from_receipt_refs")]
+    pub distinct_from_receipt_refs: Vec<AutopilotContentRef>,
+    #[serde(rename = "forbid_same_assignment")]
+    pub forbid_same_assignment: bool,
+    #[serde(rename = "forbid_same_action")]
+    pub forbid_same_action: bool,
+    #[serde(rename = "forbid_same_session")]
+    pub forbid_same_session: bool,
+    #[serde(rename = "require_subject_current")]
+    pub require_subject_current: bool,
+    #[serde(rename = "policy_sha256")]
+    pub policy_sha256: Digest,
+}
+
+/// Closed evidence envelope manifest. Members are exactly refs reachable from authoritative evidence events; scans/globs/prefixes are forbidden.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AutopilotEvidenceEnvelopeManifest {
+    #[serde(rename = "schema_version")]
+    pub schema_version: SchemaId,
+    #[serde(rename = "manifest_id")]
+    pub manifest_id: Id,
+    #[serde(rename = "run_id")]
+    pub run_id: Uuidv7,
+    #[serde(rename = "repo_key")]
+    pub repo_key: Base32,
+    #[serde(rename = "workstream")]
+    pub workstream: Id,
+    #[serde(rename = "scope")]
+    pub scope: String,
+    #[serde(rename = "manifest_revision")]
+    pub manifest_revision: u32,
+    #[serde(rename = "subject_digest")]
+    pub subject_digest: Digest,
+    #[serde(rename = "previous_manifest_ref")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_manifest_ref: Option<AutopilotContentRef>,
+    #[serde(rename = "closed_through_event_sequence")]
+    pub closed_through_event_sequence: u64,
+    #[serde(rename = "event_prefix_sha256")]
+    pub event_prefix_sha256: Digest,
+    #[serde(rename = "members")]
+    pub members: Vec<AutopilotContentRef>,
+    #[serde(rename = "active_acceptance_receipt_refs")]
+    pub active_acceptance_receipt_refs: Vec<AutopilotContentRef>,
+    #[serde(rename = "supersession_receipt_refs")]
+    pub supersession_receipt_refs: Vec<AutopilotContentRef>,
+    #[serde(rename = "failure_receipt_refs")]
+    pub failure_receipt_refs: Vec<AutopilotContentRef>,
+    #[serde(rename = "excluded_self")]
+    pub excluded_self: bool,
+    #[serde(rename = "closed_at_unix_ms")]
+    pub closed_at_unix_ms: UnixMs,
+    #[serde(rename = "manifest_sha256")]
+    pub manifest_sha256: Digest,
+}
+
+/// Immutable failure/rejection/conflict receipt. Rejected bytes are not imported.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AutopilotEvidenceFailureReceipt {
+    #[serde(rename = "schema_version")]
+    pub schema_version: SchemaId,
+    #[serde(rename = "run_id")]
+    pub run_id: Uuidv7,
+    #[serde(rename = "workstream")]
+    pub workstream: Id,
+    #[serde(rename = "purpose_id")]
+    pub purpose_id: Id,
+    #[serde(rename = "assignment_id")]
+    pub assignment_id: Id,
+    #[serde(rename = "action_id")]
+    pub action_id: Id,
+    #[serde(rename = "assignment_revision")]
+    pub assignment_revision: u32,
+    #[serde(rename = "run_revision")]
+    pub run_revision: u64,
+    #[serde(rename = "state")]
+    pub state: String,
+    #[serde(rename = "code")]
+    pub code: EvidenceErrorCode,
+    #[serde(rename = "expected_refs")]
+    pub expected_refs: Vec<AutopilotContentRef>,
+    #[serde(rename = "observed_hashes")]
+    pub observed_hashes: Vec<Digest>,
+    #[serde(rename = "occurred_at_unix_ms")]
+    pub occurred_at_unix_ms: UnixMs,
+    #[serde(rename = "failure_sha256")]
+    pub failure_sha256: Digest,
+}
+
+/// Immutable supersession receipt. Acceptance receipts are never rewritten.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AutopilotEvidenceSupersessionReceipt {
+    #[serde(rename = "schema_version")]
+    pub schema_version: SchemaId,
+    #[serde(rename = "run_id")]
+    pub run_id: Uuidv7,
+    #[serde(rename = "workstream")]
+    pub workstream: Id,
+    #[serde(rename = "purpose_id")]
+    pub purpose_id: Id,
+    #[serde(rename = "old_assignment_ref")]
+    pub old_assignment_ref: AutopilotContentRef,
+    #[serde(rename = "new_assignment_ref")]
+    pub new_assignment_ref: AutopilotContentRef,
+    #[serde(rename = "old_acceptance_receipt_ref")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_acceptance_receipt_ref: Option<AutopilotContentRef>,
+    #[serde(rename = "old_assignment_revision")]
+    pub old_assignment_revision: u32,
+    #[serde(rename = "new_assignment_revision")]
+    pub new_assignment_revision: u32,
+    #[serde(rename = "reason")]
+    pub reason: String,
+    #[serde(rename = "superseded_at_event_revision")]
+    pub superseded_at_event_revision: u64,
+    #[serde(rename = "supersession_idempotency_key")]
+    pub supersession_idempotency_key: Id,
+    #[serde(rename = "supersession_sha256")]
+    pub supersession_sha256: Digest,
+}
+
+/// Core binding between an issued attested action and the producer task/report/sidecar locators returned by EventBus v2.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AutopilotProducerBinding {
+    #[serde(rename = "schema_version")]
+    pub schema_version: SchemaId,
+    #[serde(rename = "run_id")]
+    pub run_id: Uuidv7,
+    #[serde(rename = "workstream")]
+    pub workstream: Id,
+    #[serde(rename = "action_id")]
+    pub action_id: Id,
+    #[serde(rename = "assignment_id")]
+    pub assignment_id: Id,
+    #[serde(rename = "assignment_revision")]
+    pub assignment_revision: u32,
+    #[serde(rename = "run_revision")]
+    pub run_revision: u64,
+    #[serde(rename = "assignment_ref")]
+    pub assignment_ref: AutopilotContentRef,
+    #[serde(rename = "action_ref")]
+    pub action_ref: AutopilotContentRef,
+    #[serde(rename = "producer_task_id")]
+    pub producer_task_id: Id,
+    #[serde(rename = "producer_request_sha256")]
+    pub producer_request_sha256: Digest,
+    #[serde(rename = "report_source_path")]
+    pub report_source_path: Path,
+    #[serde(rename = "sidecar_source_path")]
+    pub sidecar_source_path: Path,
+    #[serde(rename = "bound_at_unix_ms")]
+    pub bound_at_unix_ms: UnixMs,
+    #[serde(rename = "binding_sha256")]
+    pub binding_sha256: Digest,
+}
+
+/// Receipt-backed non-authoritative replay transcript fixture. V1 transcripts remain compatibility-only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AutopilotTranscriptV2 {
+    #[serde(rename = "schema_version")]
+    pub schema_version: SchemaId,
+    #[serde(rename = "boundary_id")]
+    pub boundary_id: ContractId,
+    #[serde(rename = "payload_utf8")]
+    pub payload_utf8: String,
+    #[serde(rename = "payload_sha256")]
+    pub payload_sha256: Digest,
+    #[serde(rename = "acceptance_receipt_ref")]
+    pub acceptance_receipt_ref: AutopilotContentRef,
+    #[serde(rename = "producer_sidecar_ref")]
+    pub producer_sidecar_ref: AutopilotContentRef,
+    #[serde(rename = "transcript_sha256")]
+    pub transcript_sha256: Digest,
+}
+
+/// Exact background launch/reconcile/stop action descriptor (D76 §6.2 and D74 §4.5). Core-owned authority metadata wraps the public pi-background-tasks bg_run object without Host renaming or synthesis.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BackgroundAction {
     #[serde(rename = "action_id")]
     pub action_id: Id,
@@ -381,24 +1267,8 @@ pub struct BackgroundAction {
     pub assignment_id: Id,
     #[serde(rename = "kind")]
     pub kind: ActionKind,
-    /// Byte-fixed command; the tool_call guard accepts only an exact live descriptor.
-    #[serde(rename = "command_bytes")]
-    pub command_bytes: Bytes,
-    #[serde(rename = "display_name")]
-    pub display_name: String,
-    /// Exact bg_run field spelling from Pi background tasks.
-    #[serde(rename = "isAgent")]
-    pub is_agent: bool,
-    /// Agent tasks may omit arbitrary wall timeout; focused commands default 30m, integration 30m, final suite 4h, cooperative handoff 2m unless overridden.
-    #[serde(rename = "timeout")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub timeout: Option<Duration>,
-    /// Notification posture.
-    #[serde(rename = "notifyOnCompletion")]
-    pub notify_on_completion: bool,
-    /// Completion-trigger posture.
-    #[serde(rename = "triggerOnCompletion")]
-    pub trigger_on_completion: bool,
+    #[serde(rename = "bg_run")]
+    pub bg_run: BackgroundActionBgRun,
     /// Expected run revision.
     #[serde(rename = "run_revision")]
     pub run_revision: u64,
@@ -411,8 +1281,231 @@ pub struct BackgroundAction {
     pub supersession_state: SupersessionState,
 }
 
+/// Nested generated object.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BackgroundActionBgRun {
+    /// Exact bg_run.name passed to pi-background-tasks.
+    #[serde(rename = "name")]
+    pub name: String,
+    /// Byte-fixed bg_run.command; the Host relays this string without PATH lookup or token rewriting.
+    #[serde(rename = "command")]
+    pub command: Bytes,
+    /// Exact bg_run.isAgent field spelling from Pi background tasks.
+    #[serde(rename = "isAgent")]
+    pub is_agent: bool,
+    /// Exact optional bg_run.timeoutSeconds selected by Core; omitted when Core selects no timeout; Host rejects null.
+    #[serde(rename = "timeoutSeconds")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u32>,
+    /// Exact bg_run.notifyOnCompletion field.
+    #[serde(rename = "notifyOnCompletion")]
+    pub notify_on_completion: bool,
+    /// Exact bg_run.triggerOnCompletion field.
+    #[serde(rename = "triggerOnCompletion")]
+    pub trigger_on_completion: bool,
+}
+
+/// Exact pi-background-tasks extension API capability fact object observed by Host and consumed by Core before any planning/run mutation. v1 generic bg_run fields remain for compatibility; v2 attested fields are required for evidence-backed planning review.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BackgroundCapabilities {
+    /// The paired pi-background-tasks extension API version; 2 is required for attested evidence launch.
+    #[serde(rename = "api_version")]
+    pub api_version: u32,
+    #[serde(rename = "run")]
+    pub run: bool,
+    #[serde(rename = "run_is_agent")]
+    pub run_is_agent: bool,
+    #[serde(rename = "run_completion_trigger")]
+    pub run_completion_trigger: bool,
+    #[serde(rename = "status")]
+    pub status: bool,
+    #[serde(rename = "logs")]
+    pub logs: bool,
+    #[serde(rename = "logs_bounded")]
+    pub logs_bounded: bool,
+    #[serde(rename = "kill")]
+    pub kill: bool,
+    /// v2: exact run-attested-pi operation is available.
+    #[serde(rename = "run_attested_pi")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_attested_pi: Option<bool>,
+    /// v2: same idempotency key replays and conflicts loudly.
+    #[serde(rename = "attested_idempotency")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attested_idempotency: Option<bool>,
+    /// v2: status/reconcile uses the full idempotency key.
+    #[serde(rename = "attested_status_by_idempotency_key")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attested_status_by_idempotency_key: Option<bool>,
+    /// v2: terminal observations carry report and sidecar source paths.
+    #[serde(rename = "attested_terminal_artifacts")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attested_terminal_artifacts: Option<bool>,
+    /// v2 literal phase2.pi_task_report.v1.
+    #[serde(rename = "report_schema")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub report_schema: Option<String>,
+    /// v2 literal phase2.pi_task_attestation.v2.
+    #[serde(rename = "attestation_schema")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attestation_schema: Option<String>,
+}
+
+/// Create-once close archive manifest excluding close receipt/publication to avoid digest cycles.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloseArchiveManifest {
+    #[serde(rename = "schema_version")]
+    pub schema_version: SchemaId,
+    #[serde(rename = "repo_key")]
+    pub repo_key: Base32,
+    #[serde(rename = "run_id")]
+    pub run_id: Uuidv7,
+    #[serde(rename = "workstream")]
+    pub workstream: Id,
+    #[serde(rename = "request")]
+    pub request: ArtifactLink,
+    #[serde(rename = "final_pass")]
+    pub final_pass: ArtifactLink,
+    #[serde(rename = "close_intent_event_sequence")]
+    pub close_intent_event_sequence: u64,
+    #[serde(rename = "result_ref")]
+    pub result_ref: Ref,
+    #[serde(rename = "final_commit")]
+    pub final_commit: GitOid,
+    #[serde(rename = "final_tree")]
+    pub final_tree: GitOid,
+    #[serde(rename = "event_prefix")]
+    pub event_prefix: ArtifactLink,
+    #[serde(rename = "entries")]
+    pub entries: Vec<ArchiveEntry>,
+    #[serde(rename = "manifest_sha256")]
+    pub manifest_sha256: Digest,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArchiveEntry {
+    #[serde(rename = "archive_path")]
+    pub archive_path: Path,
+    #[serde(rename = "source")]
+    pub source: ArtifactLink,
+    #[serde(rename = "class")]
+    pub class: ArchiveEntryClass,
+    #[serde(rename = "archived_byte_length")]
+    pub archived_byte_length: u64,
+    #[serde(rename = "archived_sha256")]
+    pub archived_sha256: Digest,
+}
+
+/// Close receipt binding result ref, manifest, watchdog receipt, cleanup receipts, and target observation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloseReceipt {
+    #[serde(rename = "schema_version")]
+    pub schema_version: SchemaId,
+    #[serde(rename = "repo_key")]
+    pub repo_key: Base32,
+    #[serde(rename = "run_id")]
+    pub run_id: Uuidv7,
+    #[serde(rename = "workstream")]
+    pub workstream: Id,
+    #[serde(rename = "request_sha256")]
+    pub request_sha256: Digest,
+    #[serde(rename = "final_pass_sha256")]
+    pub final_pass_sha256: Digest,
+    #[serde(rename = "result_ref")]
+    pub result_ref: Ref,
+    #[serde(rename = "final_commit")]
+    pub final_commit: GitOid,
+    #[serde(rename = "final_tree")]
+    pub final_tree: GitOid,
+    #[serde(rename = "archive_manifest_sha256")]
+    pub archive_manifest_sha256: Digest,
+    #[serde(rename = "watchdog_receipt")]
+    pub watchdog_receipt: ArtifactLink,
+    #[serde(rename = "cleanup_receipts")]
+    pub cleanup_receipts: Vec<ArtifactLink>,
+    #[serde(rename = "target_ref")]
+    pub target_ref: Ref,
+    #[serde(rename = "target_tip_observed_before_cas")]
+    pub target_tip_observed_before_cas: GitOid,
+    #[serde(rename = "ready_event_sequence")]
+    pub ready_event_sequence: u64,
+    #[serde(rename = "close_receipt_sha256")]
+    pub close_receipt_sha256: Digest,
+}
+
+/// Exact close command request. No force, nonce, dry-run, missing, duplicate, or reordered positional spellings are accepted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloseRequest {
+    #[serde(rename = "schema_version")]
+    pub schema_version: SchemaId,
+    #[serde(rename = "repo_key")]
+    pub repo_key: Base32,
+    #[serde(rename = "run_id")]
+    pub run_id: Uuidv7,
+    #[serde(rename = "workstream")]
+    pub workstream: Id,
+    #[serde(rename = "expected_run_revision")]
+    pub expected_run_revision: u64,
+    #[serde(rename = "expected_event_log_sha256")]
+    pub expected_event_log_sha256: Digest,
+    #[serde(rename = "expected_final_commit")]
+    pub expected_final_commit: GitOid,
+    #[serde(rename = "expected_final_tree")]
+    pub expected_final_tree: GitOid,
+    #[serde(rename = "expected_final_digest")]
+    pub expected_final_digest: Digest,
+    #[serde(rename = "request_sha256")]
+    pub request_sha256: Digest,
+}
+
+/// Exact-tip command receipt for final commands, full suite, or focused checks.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommandReceipt {
+    #[serde(rename = "schema_version")]
+    pub schema_version: SchemaId,
+    #[serde(rename = "receipt_id")]
+    pub receipt_id: Id,
+    #[serde(rename = "command_kind")]
+    pub command_kind: CommandReceiptKind,
+    #[serde(rename = "command_bytes")]
+    pub command_bytes: Bytes,
+    #[serde(rename = "cwd_realpath")]
+    pub cwd_realpath: Path,
+    #[serde(rename = "env_profile_id")]
+    pub env_profile_id: Id,
+    #[serde(rename = "started_at_ms")]
+    pub started_at_ms: u64,
+    #[serde(rename = "ended_at_ms")]
+    pub ended_at_ms: u64,
+    #[serde(rename = "timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(rename = "timed_out")]
+    pub timed_out: bool,
+    #[serde(rename = "exit_code")]
+    pub exit_code: u32,
+    #[serde(rename = "commit")]
+    pub commit: GitOid,
+    #[serde(rename = "tree")]
+    pub tree: GitOid,
+    #[serde(rename = "bounded_output")]
+    pub bounded_output: ArtifactLink,
+    #[serde(rename = "full_output")]
+    pub full_output: ArtifactLink,
+    #[serde(rename = "receipt_sha256")]
+    pub receipt_sha256: Digest,
+}
+
 /// Validated context anchor pattern set from D76 §4.1. The discriminating field is anchor_form so generated kernel source can avoid embedding domain substrings; literal forms remain data.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContextAnchor {
     /// Do not name this field after any concrete backend; generated kernel code should use generic names.
     #[serde(rename = "anchor_form")]
@@ -423,6 +1516,7 @@ pub struct ContextAnchor {
 
 /// Canonical package-written context manifest (D76 §4.1).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContextManifest {
     #[serde(rename = "schema")]
     pub schema: SchemaId,
@@ -462,6 +1556,7 @@ pub struct ContextManifest {
 
 /// Nested generated object.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContextManifestRole {
     #[serde(rename = "id")]
     pub id: Id,
@@ -475,6 +1570,7 @@ pub struct ContextManifestRole {
 
 /// Nested generated object.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContextManifestFreshness {
     #[serde(rename = "task_revision")]
     pub task_revision: Digest,
@@ -490,6 +1586,7 @@ pub struct ContextManifestFreshness {
 
 /// Nested generated object.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContextManifestBudget {
     #[serde(rename = "context_window")]
     pub context_window: u32,
@@ -504,6 +1601,7 @@ pub struct ContextManifestBudget {
 
 /// Generated record item.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContextItem {
     #[serde(rename = "id")]
     pub id: Id,
@@ -536,6 +1634,7 @@ pub struct ContextItem {
 
 /// Generated record item.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContextGap {
     #[serde(rename = "id")]
     pub id: Id,
@@ -556,6 +1655,7 @@ pub struct ContextGap {
 
 /// Bounded package-generated Control Frame (D76 §6.1).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ControlFrame {
     #[serde(rename = "schema")]
     pub schema: SchemaId,
@@ -583,6 +1683,7 @@ pub struct ControlFrame {
 
 /// Nested generated object.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ControlFrameTrigger {
     /// Example from D76: background-completed.
     #[serde(rename = "kind")]
@@ -594,6 +1695,7 @@ pub struct ControlFrameTrigger {
 
 /// Nested generated object.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ControlFrameCounts {
     #[serde(rename = "implementers")]
     pub implementers: u32,
@@ -609,6 +1711,7 @@ pub struct ControlFrameCounts {
 
 /// Implementer/Fixer terminal delivery carrier pending package acceptance (D76 §8.2).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeliveryResult {
     #[serde(rename = "assignment_id")]
     pub assignment_id: Id,
@@ -626,6 +1729,42 @@ pub struct DeliveryResult {
     pub base_commit: Sha,
     #[serde(rename = "worktree")]
     pub worktree: Path,
+    #[serde(rename = "action_id")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_id: Option<Id>,
+    #[serde(rename = "prompt_path")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_path: Option<Path>,
+    #[serde(rename = "prompt_digest")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_digest: Option<Digest>,
+    #[serde(rename = "spec_path")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spec_path: Option<Path>,
+    #[serde(rename = "spec_digest")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spec_digest: Option<Digest>,
+    #[serde(rename = "carrier_path")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub carrier_path: Option<Path>,
+    #[serde(rename = "boundary_digest")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub boundary_digest: Option<Digest>,
+    #[serde(rename = "result_contract_digest")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_contract_digest: Option<Digest>,
+    #[serde(rename = "settings_digest")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settings_digest: Option<Digest>,
+    #[serde(rename = "context_digest")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_digest: Option<Digest>,
+    #[serde(rename = "skills_digest")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skills_digest: Option<Digest>,
+    #[serde(rename = "subscription_digest")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subscription_digest: Option<Digest>,
     #[serde(rename = "package_commit")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub package_commit: Option<Sha>,
@@ -646,6 +1785,7 @@ pub struct DeliveryResult {
 
 /// Append-only event row; events.jsonl is the sole state authority (D76 §5.4 + D77 Closure B).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EventRow {
     /// Monotonic sequence.
     #[serde(rename = "sequence")]
@@ -661,8 +1801,151 @@ pub struct EventRow {
     pub artifact_refs: Vec<Ref>,
 }
 
+/// Strict import request for existing phase2.pi_task_attestation.v1 bytes. The result is external-attested-advisory only and cannot satisfy final conditions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalAttestedEvidenceImport {
+    #[serde(rename = "schema_version")]
+    pub schema_version: SchemaId,
+    #[serde(rename = "repo_key")]
+    pub repo_key: Base32,
+    #[serde(rename = "run_id")]
+    pub run_id: Uuidv7,
+    #[serde(rename = "workstream")]
+    pub workstream: Id,
+    #[serde(rename = "evidence_kind")]
+    pub evidence_kind: String,
+    #[serde(rename = "assignment_id")]
+    pub assignment_id: Id,
+    #[serde(rename = "role_id")]
+    pub role_id: Id,
+    #[serde(rename = "mode")]
+    pub mode: ModeId,
+    #[serde(rename = "expected_final_commit")]
+    pub expected_final_commit: GitOid,
+    #[serde(rename = "expected_final_tree")]
+    pub expected_final_tree: GitOid,
+    #[serde(rename = "expected_provider")]
+    pub expected_provider: String,
+    #[serde(rename = "expected_model")]
+    pub expected_model: String,
+    #[serde(rename = "expected_thinking")]
+    pub expected_thinking: ThinkingLevel,
+    #[serde(rename = "expected_prompt")]
+    pub expected_prompt: ArtifactLink,
+    #[serde(rename = "expected_argv")]
+    pub expected_argv: Vec<String>,
+    #[serde(rename = "report")]
+    pub report: ArtifactLink,
+    #[serde(rename = "attestation")]
+    pub attestation: ArtifactLink,
+    #[serde(rename = "import_sha256")]
+    pub import_sha256: Digest,
+}
+
+/// Authoritative derived final gate input; never accepted from Host, operator, or model.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FinalGateAssembly {
+    #[serde(rename = "schema_version")]
+    pub schema_version: SchemaId,
+    #[serde(rename = "repo_key")]
+    pub repo_key: Base32,
+    #[serde(rename = "run_id")]
+    pub run_id: Uuidv7,
+    #[serde(rename = "workstream")]
+    pub workstream: Id,
+    #[serde(rename = "basis_event_sequence")]
+    pub basis_event_sequence: u64,
+    #[serde(rename = "basis_run_revision")]
+    pub basis_run_revision: u64,
+    #[serde(rename = "basis_event_log_sha256")]
+    pub basis_event_log_sha256: Digest,
+    #[serde(rename = "basis_state_hash")]
+    pub basis_state_hash: Digest,
+    #[serde(rename = "plan_envelope")]
+    pub plan_envelope: ArtifactLink,
+    #[serde(rename = "final_commit")]
+    pub final_commit: GitOid,
+    #[serde(rename = "final_tree")]
+    pub final_tree: GitOid,
+    #[serde(rename = "target_ref")]
+    pub target_ref: Ref,
+    #[serde(rename = "recorded_target_base")]
+    pub recorded_target_base: GitOid,
+    #[serde(rename = "observed_target_tip")]
+    pub observed_target_tip: GitOid,
+    #[serde(rename = "conditions")]
+    pub conditions: Vec<FinalConditionEvidence>,
+    #[serde(rename = "triggers")]
+    pub triggers: BughunterTriggersV1,
+    #[serde(rename = "accepted_envelopes")]
+    pub accepted_envelopes: Vec<ArtifactLink>,
+    #[serde(rename = "assembly_sha256")]
+    pub assembly_sha256: Digest,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FinalConditionEvidence {
+    #[serde(rename = "condition_id")]
+    pub condition_id: Id,
+    #[serde(rename = "satisfied")]
+    pub satisfied: bool,
+    #[serde(rename = "evidence_envelopes")]
+    pub evidence_envelopes: Vec<ArtifactLink>,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BughunterTriggersV1 {
+    #[serde(rename = "implementation_lanes")]
+    pub implementation_lanes: u32,
+    #[serde(rename = "risk")]
+    pub risk: String,
+    #[serde(rename = "protected_security_data_or_migration")]
+    pub protected_security_data_or_migration: bool,
+    #[serde(rename = "semantic_conflict_resolution")]
+    pub semantic_conflict_resolution: bool,
+    #[serde(rename = "operator_required")]
+    pub operator_required: bool,
+}
+
+/// Digest-bound final gate pass written only after verify_final_gate succeeds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FinalVerificationPass {
+    #[serde(rename = "schema_version")]
+    pub schema_version: SchemaId,
+    #[serde(rename = "repo_key")]
+    pub repo_key: Base32,
+    #[serde(rename = "run_id")]
+    pub run_id: Uuidv7,
+    #[serde(rename = "workstream")]
+    pub workstream: Id,
+    #[serde(rename = "basis_event_sequence")]
+    pub basis_event_sequence: u64,
+    #[serde(rename = "basis_run_revision")]
+    pub basis_run_revision: u64,
+    #[serde(rename = "final_commit")]
+    pub final_commit: GitOid,
+    #[serde(rename = "final_tree")]
+    pub final_tree: GitOid,
+    #[serde(rename = "assembly")]
+    pub assembly: ArtifactLink,
+    #[serde(rename = "assembly_sha256")]
+    pub assembly_sha256: Digest,
+    #[serde(rename = "bughunter_required")]
+    pub bughunter_required: bool,
+    #[serde(rename = "pass_sha256")]
+    pub pass_sha256: Digest,
+}
+
 /// Validator/Bughunter/Fixer finding with semantic scheduling effect (D76 §5.3 and D74 §11.2).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Finding {
     #[serde(rename = "finding_id")]
     pub finding_id: Id,
@@ -684,8 +1967,121 @@ pub struct Finding {
     pub semantic_surface_ids: Vec<Id>,
 }
 
+/// Embedded v2 validation finding with deterministic validation-id ordinal identifier.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FindingV2 {
+    #[serde(rename = "finding_id")]
+    pub finding_id: Id,
+    #[serde(rename = "kind")]
+    pub kind: FindingKindV2,
+    #[serde(rename = "effect")]
+    pub effect: FindingEffect,
+    #[serde(rename = "summary")]
+    pub summary: String,
+    #[serde(rename = "detail")]
+    pub detail: String,
+    #[serde(rename = "criterion_ids")]
+    pub criterion_ids: Vec<Id>,
+    #[serde(rename = "edge_ids")]
+    pub edge_ids: Vec<Id>,
+    #[serde(rename = "evidence_refs")]
+    pub evidence_refs: Vec<Ref>,
+    #[serde(rename = "covered_paths")]
+    pub covered_paths: Vec<Path>,
+    #[serde(rename = "semantic_surface_ids")]
+    pub semantic_surface_ids: Vec<Id>,
+}
+
+/// Close lifecycle report returned only after the terminal result-ref-archived event is durable.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LifecycleReport {
+    #[serde(rename = "schema_version")]
+    pub schema_version: SchemaId,
+    #[serde(rename = "request_sha256")]
+    pub request_sha256: Digest,
+    #[serde(rename = "result_ref")]
+    pub result_ref: Ref,
+    #[serde(rename = "final_commit")]
+    pub final_commit: GitOid,
+    #[serde(rename = "final_tree")]
+    pub final_tree: GitOid,
+    #[serde(rename = "archive_manifest")]
+    pub archive_manifest: ArtifactLink,
+    #[serde(rename = "close_receipt")]
+    pub close_receipt: ArtifactLink,
+    #[serde(rename = "cleanup_receipts")]
+    pub cleanup_receipts: Vec<ArtifactLink>,
+    #[serde(rename = "disposition")]
+    pub disposition: String,
+}
+
+/// Closed EventBus v2 request for paired pi-background-tasks run-attested-pi.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Phase2PiAttestedRunRequest {
+    #[serde(rename = "schema_version")]
+    pub schema_version: SchemaId,
+    #[serde(rename = "name")]
+    pub name: String,
+    #[serde(rename = "provider")]
+    pub provider: String,
+    #[serde(rename = "model")]
+    pub model: String,
+    #[serde(rename = "thinking")]
+    pub thinking: ThinkingLevel,
+    #[serde(rename = "system_prompt_utf8")]
+    pub system_prompt_utf8: String,
+    #[serde(rename = "prompt_utf8")]
+    pub prompt_utf8: String,
+    #[serde(rename = "report_path")]
+    pub report_path: Path,
+    #[serde(rename = "timeout_seconds")]
+    pub timeout_seconds: u32,
+    #[serde(rename = "idempotency_key")]
+    pub idempotency_key: Id,
+    #[serde(rename = "consumer_binding")]
+    pub consumer_binding: Phase2PiConsumerBinding,
+    #[serde(rename = "request_sha256")]
+    pub request_sha256: Digest,
+}
+
+/// Closed consumer binding echoed by the paired background producer request, report, and sidecar.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Phase2PiConsumerBinding {
+    #[serde(rename = "schema_version")]
+    pub schema_version: SchemaId,
+    #[serde(rename = "consumer")]
+    pub consumer: String,
+    #[serde(rename = "run_id")]
+    pub run_id: Uuidv7,
+    #[serde(rename = "repo_key")]
+    pub repo_key: Base32,
+    #[serde(rename = "workstream")]
+    pub workstream: Id,
+    #[serde(rename = "purpose_id")]
+    pub purpose_id: Id,
+    #[serde(rename = "action_id")]
+    pub action_id: Id,
+    #[serde(rename = "assignment_id")]
+    pub assignment_id: Id,
+    #[serde(rename = "assignment_revision")]
+    pub assignment_revision: u32,
+    #[serde(rename = "run_revision")]
+    pub run_revision: u64,
+    #[serde(rename = "boundary_id")]
+    pub boundary_id: ContractId,
+    #[serde(rename = "subject_digest")]
+    pub subject_digest: Digest,
+    #[serde(rename = "binding_sha256")]
+    pub binding_sha256: Digest,
+}
+
 /// Strict package-authored YAML frontmatter for role definitions (D76 §2.2).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RoleFrontmatter {
     #[serde(rename = "schema")]
     pub schema: SchemaId,
@@ -717,6 +2113,7 @@ pub struct RoleFrontmatter {
 
 /// Nested generated object.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RoleFrontmatterPermissions {
     #[serde(rename = "repository")]
     pub repository: Permission,
@@ -732,6 +2129,7 @@ pub struct RoleFrontmatterPermissions {
 
 /// Clean v2 runtime identity namespace (D76 §5.1).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RunIdentity {
     /// lowercase-base32(sha256("autopilot-repo-v1\0" + realpath(git-common-dir)))
     #[serde(rename = "repo_key")]
@@ -745,6 +2143,7 @@ pub struct RunIdentity {
 
 /// D78 §3.1 newline-delimited JSON frame envelope over stdio.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SeamEnvelope {
     #[serde(rename = "v")]
     pub v: u32,
@@ -758,6 +2157,7 @@ pub struct SeamEnvelope {
 
 /// Disposable cache only, never an authority. State is fold(events); this cache may be deleted at any instant with zero semantic loss and any mismatch forces full replay (D77 Closure B).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StateCache {
     #[serde(rename = "sequence")]
     pub sequence: u64,
@@ -765,8 +2165,325 @@ pub struct StateCache {
     pub state_hash: Digest,
 }
 
+/// Core-classified task-pack document copied into child runner specs. The digest is over the exact admitted file bytes; body_digest is over the model-visible body only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskDocument {
+    #[serde(rename = "path")]
+    pub path: Path,
+    #[serde(rename = "class")]
+    pub class: TaskDocumentClass,
+    #[serde(rename = "digest")]
+    pub digest: Digest,
+    #[serde(rename = "body_digest")]
+    pub body_digest: Digest,
+    #[serde(rename = "body")]
+    pub body: String,
+}
+
+/// Package-produced independent Validator assignment. Production validation uses v2 submissions/results; v1 verdicts remain historical.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidationAssignmentV2 {
+    #[serde(rename = "schema")]
+    pub schema: SchemaId,
+    #[serde(rename = "validation_id")]
+    pub validation_id: Id,
+    #[serde(rename = "validation_key")]
+    pub validation_key: Digest,
+    #[serde(rename = "workstream")]
+    pub workstream: Id,
+    #[serde(rename = "run_revision")]
+    pub run_revision: u64,
+    #[serde(rename = "role_id")]
+    pub role_id: Id,
+    #[serde(rename = "mode")]
+    pub mode: ModeId,
+    #[serde(rename = "assignment_id")]
+    pub assignment_id: Id,
+    #[serde(rename = "action_id")]
+    pub action_id: Id,
+    #[serde(rename = "validation_attempt")]
+    pub validation_attempt: u32,
+    #[serde(rename = "semantic_round")]
+    pub semantic_round: u32,
+    #[serde(rename = "scope")]
+    pub scope: ValidationScopeV2,
+    #[serde(rename = "subject_kind")]
+    pub subject_kind: ValidationSubjectKind,
+    #[serde(rename = "producer_assignment_ids")]
+    pub producer_assignment_ids: Vec<Id>,
+    #[serde(rename = "producer_result_refs")]
+    pub producer_result_refs: Vec<Ref>,
+    #[serde(rename = "lane_id")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lane_id: Option<Id>,
+    #[serde(rename = "candidate_id")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_id: Option<Id>,
+    #[serde(rename = "exact_commit")]
+    pub exact_commit: GitOid,
+    #[serde(rename = "exact_tree")]
+    pub exact_tree: GitOid,
+    #[serde(rename = "candidate_root")]
+    pub candidate_root: Path,
+    #[serde(rename = "forward_round")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forward_round: Option<u32>,
+    #[serde(rename = "criteria_manifest_ref")]
+    pub criteria_manifest_ref: Ref,
+    #[serde(rename = "criteria_manifest_digest")]
+    pub criteria_manifest_digest: Digest,
+    #[serde(rename = "evidence_manifest_ref")]
+    pub evidence_manifest_ref: Ref,
+    #[serde(rename = "evidence_manifest_digest")]
+    pub evidence_manifest_digest: Digest,
+    #[serde(rename = "diff_ref")]
+    pub diff_ref: Ref,
+    #[serde(rename = "diff_digest")]
+    pub diff_digest: Digest,
+    #[serde(rename = "prior_result_ref")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prior_result_ref: Option<Ref>,
+    #[serde(rename = "prior_finding_refs")]
+    pub prior_finding_refs: Vec<Ref>,
+    #[serde(rename = "allowed_read_roots")]
+    pub allowed_read_roots: Vec<Path>,
+    #[serde(rename = "allowed_command_ids")]
+    pub allowed_command_ids: Vec<Id>,
+    #[serde(rename = "max_transport_attempts")]
+    pub max_transport_attempts: u32,
+}
+
+/// Canonical fact-only Validator context. Forbidden producer reasoning/session classes are listed explicitly.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidationContextV2 {
+    #[serde(rename = "schema")]
+    pub schema: SchemaId,
+    #[serde(rename = "context_id")]
+    pub context_id: Id,
+    #[serde(rename = "revision")]
+    pub revision: u32,
+    #[serde(rename = "validation_id")]
+    pub validation_id: Id,
+    #[serde(rename = "assignment_id")]
+    pub assignment_id: Id,
+    #[serde(rename = "exact_commit")]
+    pub exact_commit: GitOid,
+    #[serde(rename = "exact_tree")]
+    pub exact_tree: GitOid,
+    #[serde(rename = "candidate")]
+    pub candidate: ValidationContextV2Candidate,
+    #[serde(rename = "criteria")]
+    pub criteria: Vec<ValidationContextCriterion>,
+    #[serde(rename = "evidence")]
+    pub evidence: Vec<ValidationContextEvidence>,
+    #[serde(rename = "prior_findings")]
+    pub prior_findings: Vec<FindingV2>,
+    #[serde(rename = "applicable_decision_refs")]
+    pub applicable_decision_refs: Vec<Ref>,
+    #[serde(rename = "applicable_constraint_refs")]
+    pub applicable_constraint_refs: Vec<Ref>,
+    #[serde(rename = "included_context_classes")]
+    pub included_context_classes: Vec<String>,
+    #[serde(rename = "forbidden_context_classes")]
+    pub forbidden_context_classes: Vec<String>,
+    #[serde(rename = "allowed_read_roots")]
+    pub allowed_read_roots: Vec<Path>,
+    #[serde(rename = "excluded_refs")]
+    pub excluded_refs: Vec<ValidationExcludedRef>,
+}
+
+/// Nested generated object.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidationContextV2Candidate {
+    #[serde(rename = "source_root")]
+    pub source_root: Path,
+    #[serde(rename = "diff_ref")]
+    pub diff_ref: Ref,
+    #[serde(rename = "diff_digest")]
+    pub diff_digest: Digest,
+    #[serde(rename = "actual_changed_paths")]
+    pub actual_changed_paths: Vec<Path>,
+    #[serde(rename = "execution_audit_ref")]
+    pub execution_audit_ref: Ref,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidationContextCriterion {
+    #[serde(rename = "criterion_id")]
+    pub criterion_id: Id,
+    #[serde(rename = "mandatory")]
+    pub mandatory: bool,
+    #[serde(rename = "covered_paths")]
+    pub covered_paths: Vec<Path>,
+    #[serde(rename = "semantic_surface_ids")]
+    pub semantic_surface_ids: Vec<Id>,
+    #[serde(rename = "forward_edge_ids")]
+    pub forward_edge_ids: Vec<Id>,
+    #[serde(rename = "witness_ids")]
+    pub witness_ids: Vec<Id>,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidationContextEvidence {
+    #[serde(rename = "evidence_ref")]
+    pub evidence_ref: Ref,
+    #[serde(rename = "digest")]
+    pub digest: Digest,
+    #[serde(rename = "kind")]
+    pub kind: String,
+    #[serde(rename = "exact_commit")]
+    pub exact_commit: GitOid,
+    #[serde(rename = "exact_tree")]
+    pub exact_tree: GitOid,
+    #[serde(rename = "command_id")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command_id: Option<Id>,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidationExcludedRef {
+    #[serde(rename = "ref")]
+    pub ref_: Ref,
+    #[serde(rename = "reason")]
+    pub reason: String,
+}
+
+/// Package-bound Validator carrier written create-once after validating model submission and immutable runner binding.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidationResultV2 {
+    #[serde(rename = "schema")]
+    pub schema: SchemaId,
+    #[serde(rename = "action_id")]
+    pub action_id: Id,
+    #[serde(rename = "assignment_id")]
+    pub assignment_id: Id,
+    #[serde(rename = "validation_id")]
+    pub validation_id: Id,
+    #[serde(rename = "validation_key")]
+    pub validation_key: Digest,
+    #[serde(rename = "validation_attempt")]
+    pub validation_attempt: u32,
+    #[serde(rename = "semantic_round")]
+    pub semantic_round: u32,
+    #[serde(rename = "run_revision")]
+    pub run_revision: u64,
+    #[serde(rename = "workstream")]
+    pub workstream: Id,
+    #[serde(rename = "role_id")]
+    pub role_id: Id,
+    #[serde(rename = "mode")]
+    pub mode: ModeId,
+    #[serde(rename = "producer_assignment_ids")]
+    pub producer_assignment_ids: Vec<Id>,
+    #[serde(rename = "exact_commit")]
+    pub exact_commit: GitOid,
+    #[serde(rename = "exact_tree")]
+    pub exact_tree: GitOid,
+    #[serde(rename = "assignment_path")]
+    pub assignment_path: Path,
+    #[serde(rename = "assignment_digest")]
+    pub assignment_digest: Digest,
+    #[serde(rename = "context_manifest_path")]
+    pub context_manifest_path: Path,
+    #[serde(rename = "context_manifest_digest")]
+    pub context_manifest_digest: Digest,
+    #[serde(rename = "prompt_path")]
+    pub prompt_path: Path,
+    #[serde(rename = "prompt_digest")]
+    pub prompt_digest: Digest,
+    #[serde(rename = "spec_path")]
+    pub spec_path: Path,
+    #[serde(rename = "spec_digest")]
+    pub spec_digest: Digest,
+    #[serde(rename = "carrier_path")]
+    pub carrier_path: Path,
+    #[serde(rename = "boundary_id")]
+    pub boundary_id: ContractId,
+    #[serde(rename = "boundary_digest")]
+    pub boundary_digest: Digest,
+    #[serde(rename = "result_contract")]
+    pub result_contract: ContractId,
+    #[serde(rename = "result_contract_digest")]
+    pub result_contract_digest: Digest,
+    #[serde(rename = "settings_digest")]
+    pub settings_digest: Digest,
+    #[serde(rename = "skills_digest")]
+    pub skills_digest: Digest,
+    #[serde(rename = "subscription_digest")]
+    pub subscription_digest: Digest,
+    #[serde(rename = "runtime_extension_digest")]
+    pub runtime_extension_digest: Digest,
+    #[serde(rename = "tool_audit_ref")]
+    pub tool_audit_ref: Ref,
+    #[serde(rename = "tool_audit_digest")]
+    pub tool_audit_digest: Digest,
+    #[serde(rename = "submission_digest")]
+    pub submission_digest: Digest,
+    #[serde(rename = "submission")]
+    pub submission: ValidationSubmissionV2,
+}
+
+/// Only payload accepted by the Validator terminal tool. Assistant-text JSON without the terminal tool is not a carrier.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidationSubmissionV2 {
+    #[serde(rename = "schema")]
+    pub schema: SchemaId,
+    #[serde(rename = "validation_id")]
+    pub validation_id: Id,
+    #[serde(rename = "assignment_id")]
+    pub assignment_id: Id,
+    #[serde(rename = "scope")]
+    pub scope: ValidationScopeV2,
+    #[serde(rename = "exact_commit")]
+    pub exact_commit: GitOid,
+    #[serde(rename = "exact_tree")]
+    pub exact_tree: GitOid,
+    #[serde(rename = "outcome")]
+    pub outcome: ValidationOutcomeV2,
+    #[serde(rename = "criterion_results")]
+    pub criterion_results: Vec<CriterionResultV2>,
+    #[serde(rename = "findings")]
+    pub findings: Vec<FindingV2>,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CriterionResultV2 {
+    #[serde(rename = "criterion_id")]
+    pub criterion_id: Id,
+    #[serde(rename = "verdict")]
+    pub verdict: CriterionVerdict,
+    #[serde(rename = "blocker_kind")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocker_kind: Option<ValidationBlockerKind>,
+    #[serde(rename = "evidence_refs")]
+    pub evidence_refs: Vec<Ref>,
+    #[serde(rename = "finding_ids")]
+    pub finding_ids: Vec<Id>,
+    #[serde(rename = "covered_paths")]
+    pub covered_paths: Vec<Path>,
+    #[serde(rename = "semantic_surface_ids")]
+    pub semantic_surface_ids: Vec<Id>,
+    #[serde(rename = "forward_edge_ids")]
+    pub forward_edge_ids: Vec<Id>,
+}
+
 /// Independent validation verdict bundle for forward, closure, conflict, delta, or final review (D76 §9.2).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ValidationVerdict {
     #[serde(rename = "assignment_id")]
     pub assignment_id: Id,
@@ -790,6 +2507,7 @@ pub struct ValidationVerdict {
 
 /// Generated record item.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CriterionResult {
     #[serde(rename = "criterion_id")]
     pub criterion_id: Id,
@@ -809,6 +2527,7 @@ pub struct CriterionResult {
 
 /// D78 §3.2 — command complete; Host returns to idle.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CoreToHostDonePayload {
     #[serde(rename = "status")]
     pub status: String,
@@ -816,6 +2535,7 @@ pub struct CoreToHostDonePayload {
 
 /// D78 §3.2 — allow / deny + reason, answers guard-query.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CoreToHostGuardDecisionPayload {
     #[serde(rename = "decision")]
     pub decision: GuardDecision,
@@ -825,13 +2545,23 @@ pub struct CoreToHostGuardDecisionPayload {
 
 /// D78 §3.2 — diagnostic line for the TUI.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CoreToHostLogPayload {
     #[serde(rename = "line")]
     pub line: String,
 }
 
+/// Reconcile an exact Core-issued attested action by idempotency key through pi-background-tasks EventBus v2.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoreToHostReconcileAttestedPayload {
+    #[serde(rename = "action")]
+    pub action: AutopilotAttestedAction,
+}
+
 /// D78 §3.2 — create/prompt/compact/close a Pi SDK child session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CoreToHostSessionPayload {
     #[serde(rename = "session_action")]
     pub session_action: SessionAction,
@@ -841,13 +2571,23 @@ pub struct CoreToHostSessionPayload {
 
 /// D78 §3.2 — launch an exact bg_run descriptor, byte-fixed by D76 §6.2.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CoreToHostSpawnPayload {
     #[serde(rename = "action")]
     pub action: BackgroundAction,
 }
 
+/// Launch an exact Core-issued attested action through pi-background-tasks EventBus v2 run-attested-pi.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoreToHostSpawnAttestedPayload {
+    #[serde(rename = "action")]
+    pub action: AutopilotAttestedAction,
+}
+
 /// D78 §3.2 — render text/select/confirm/input through ctx.ui.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CoreToHostUiPayload {
     #[serde(rename = "ui_kind")]
     pub ui_kind: UiKind,
@@ -857,6 +2597,7 @@ pub struct CoreToHostUiPayload {
 
 /// D78 §3.2 — a child agent terminal/checkpoint carrier.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HostToCoreAgentResultPayload {
     #[serde(rename = "assignment_id")]
     pub assignment_id: Id,
@@ -864,15 +2605,46 @@ pub struct HostToCoreAgentResultPayload {
     pub carrier: serde_json::Value,
 }
 
-/// D78 §3.2 — an operator slash command with its raw argument string.
+/// Host observation derived only from an EventBus v2 attested response or terminal object for an exact issued action.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostToCoreAttestedTaskObservationPayload {
+    #[serde(rename = "action_id")]
+    pub action_id: Id,
+    #[serde(rename = "assignment_id")]
+    pub assignment_id: Id,
+    #[serde(rename = "assignment_revision")]
+    pub assignment_revision: u32,
+    #[serde(rename = "run_revision")]
+    pub run_revision: u64,
+    #[serde(rename = "producer_task_id")]
+    pub producer_task_id: Id,
+    #[serde(rename = "producer_request_sha256")]
+    pub producer_request_sha256: Digest,
+    #[serde(rename = "status")]
+    pub status: String,
+    #[serde(rename = "report_source_path")]
+    pub report_source_path: Path,
+    #[serde(rename = "sidecar_source_path")]
+    pub sidecar_source_path: Path,
+}
+
+/// D78 §3.2 — an operator slash command with its raw argument string and Host-observed background-task capability facts. Core alone decides whether those facts admit mutation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HostToCoreCommandPayload {
     #[serde(rename = "raw")]
     pub raw: String,
+    #[serde(rename = "background_capabilities")]
+    pub background_capabilities: BackgroundCapabilities,
+    #[serde(rename = "background_capability_diagnostic")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background_capability_diagnostic: Option<String>,
 }
 
 /// D78 §3.2 — a Pi tool_call needing an allow/deny decision.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HostToCoreGuardQueryPayload {
     #[serde(rename = "tool_name")]
     pub tool_name: String,
@@ -882,6 +2654,7 @@ pub struct HostToCoreGuardQueryPayload {
 
 /// D78 §3.2 — a response to a Question Gate or approval prompt.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HostToCoreOperatorAnswerPayload {
     #[serde(rename = "question_id")]
     pub question_id: Id,
@@ -891,17 +2664,23 @@ pub struct HostToCoreOperatorAnswerPayload {
 
 /// D78 §3.2 — Pi is exiting; checkpoint and settle.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HostToCoreShutdownPayload {
     #[serde(rename = "reason")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
 
-/// D78 §3.2 — a pi-background-tasks completion/failure notification.
+/// D78 §3.2 — a pi-background-tasks terminal notification correlated by Host to a Core-issued action/task binding. Core validates the binding and decides the next effect.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HostToCoreTaskCompletedPayload {
     #[serde(rename = "task_id")]
     pub task_id: Id,
+    #[serde(rename = "action_id")]
+    pub action_id: Id,
+    #[serde(rename = "assignment_id")]
+    pub assignment_id: Id,
     #[serde(rename = "status")]
     pub status: String,
 }
@@ -912,4 +2691,6 @@ pub const CONTRACT_VERSION: u64 = 1;
 pub const ALLOCATION_LANE_PROPOSAL_ADMITS: &str = "Return a lane proposal that groups only approved plan units. Preserve every unit id, dependency, predecessor forward criterion, downstream release edge, and verification obligation exactly as supplied. Do not invent file ownership or modify plan authority. Include ordered unit ids, one delivery boundary, context family id and estimate, focused tests, and launch wave.";
 pub const DELIVERY_RESULT_ADMITS: &str = "Submit exactly one terminal delivery carrier for your assigned role, mode, assignment, attempt, and run revision. Report the exact base, worktree, resulting commit/tree or preservation checkpoint as applicable, actual changed paths, execution audit reference, and required focused evidence. Do not claim validation, merge, package state mutation, or success hidden behind missing evidence. If any hard boundary was violated or required evidence is missing, say so instead of reporting DONE.";
 pub const FINDING_ADMITS: &str = "For each material issue, record one effect: forward-blocking, closure-blocking-forward-safe, or advisory. Tie the finding to exact criteria or forward edges and evidence. Do not use severity alone to decide scheduling, do not hide a mandatory blocker as advisory, and do not report a source repair requirement without the evidence that makes it mandatory.";
+pub const FINDING_V2_ADMITS: &str = "For each material issue, emit one deterministic finding id, classify kind/effect honestly, tie it to declared criteria/edges/evidence, and never hide a required blocker as advisory.";
+pub const VALIDATION_SUBMISSION_V2_ADMITS: &str = "Call autopilot_emit_status exactly once with this closed JSON object. Verdict every required criterion exactly once, cite only declared evidence refs, embed every finding, and do not claim PASS/READY when Core would compute a material blocker.";
 pub const VALIDATION_VERDICT_ADMITS: &str = "Verdict every required criterion independently as PASS, FAIL, or BLOCKED, and attach evidence refs, finding refs, covered paths, semantic surfaces, and forward-edge ids. Do not issue an overall PASS while any required criterion is unverdicted, stale, failed, or blocked. Use FORWARD_READY, FORWARD_BLOCKED, or BLOCKED only for forward validation, and PASS, NEEDS_FIX, or BLOCKED only for closure/final validation.";

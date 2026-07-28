@@ -2,8 +2,8 @@ use drivers::control::{
     ControlFrameDocument, ControlObservation, ControlPolicy, FrameInput, TaskStatus,
 };
 use kernel::generated::{
-    ActionKind, BackgroundAction, Bytes, ControlFrameCounts, Duration, Id, Nullable, Ref,
-    SupersessionState, TriggerKind, Uuidv7,
+    ActionKind, BackgroundAction, BackgroundActionBgRun, Bytes, ControlFrameCounts, Id, Nullable,
+    Ref, SupersessionState, TriggerKind, Uuidv7,
 };
 use serde_json::Value;
 
@@ -144,12 +144,14 @@ fn action(action_id: &str, assignment_id: &str, command: &str) -> BackgroundActi
         action_id: Id(action_id.to_owned()),
         assignment_id: Id(assignment_id.to_owned()),
         kind: ActionKind::LaunchBackground,
-        command_bytes: Bytes(command.to_owned()),
-        display_name: "demo".to_owned(),
-        is_agent: false,
-        timeout: Some(Duration("30m".to_owned())),
-        notify_on_completion: true,
-        trigger_on_completion: true,
+        bg_run: BackgroundActionBgRun {
+            name: "demo".to_owned(),
+            command: Bytes(command.to_owned()),
+            is_agent: false,
+            timeout_seconds: Some(1800),
+            notify_on_completion: true,
+            trigger_on_completion: true,
+        },
         run_revision: 42,
         expires_at: None,
         supersession_state: SupersessionState("live".to_owned()),

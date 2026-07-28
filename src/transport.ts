@@ -2,7 +2,9 @@ import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 
 import type { CoreToHostFrame, HostToCoreFrame } from "./generated/index.ts";
+import { validateCoreToHostFrame } from "./frame-validation.ts";
 import { resolveCoreBinary } from "./resolve-core.ts";
+import { resolveRunnerTransport } from "./resolve-runner.ts";
 
 export interface CoreTransportOptions {
   binaryPath?: string;
@@ -101,7 +103,15 @@ export class CoreTransport {
       return this.child;
     }
     const binary = this.options.binaryPath ?? resolveCoreBinary({ packageJsonPath: this.options.packageJsonPath });
-    const child = spawn(binary, [], { stdio: "pipe" });
+    const runner = resolveRunnerTransport({ packageJsonPath: this.options.packageJsonPath });
+    const child = spawn(binary, [], {
+      stdio: "pipe",
+      env: {
+        ...process.env,
+        AUTOPILOT_NODE_EXECUTABLE: runner.nodeExecutable,
+        AUTOPILOT_AGENT_RUNNER_WRAPPER: runner.runnerWrapper,
+      },
+    });
     this.child = child;
     this.stdout = "";
     child.stdout.setEncoding("utf8");
@@ -133,13 +143,9 @@ export class CoreTransport {
   private receiveLine(line: string): void {
     let frame: CoreToHostFrame;
     try {
-      frame = JSON.parse(line) as CoreToHostFrame;
+      frame = validateCoreToHostFrame(JSON.parse(line));
     } catch (error) {
-      this.failPending(new CoreUnavailableError(`autopilot-core emitted malformed JSON: ${errorMessage(error)}`));
-      return;
-    }
-    if (frame.v !== 1 || typeof frame.id !== "number" || typeof frame.kind !== "string") {
-      this.failPending(new CoreUnavailableError("autopilot-core emitted malformed frame envelope"));
+      this.failPending(new CoreUnavailableError(`autopilot-core emitted malformed frame: ${errorMessage(error)}`));
       return;
     }
     const pending = this.pending.get(frame.id);

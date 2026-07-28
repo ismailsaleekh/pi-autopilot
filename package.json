@@ -1,6 +1,6 @@
 {
   "name": "pi-autopilot",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "Standalone Autopilot Host backed by the Rust autopilot-core binary.",
   "type": "module",
   "license": "ISC",
@@ -22,6 +22,7 @@
   ],
   "files": [
     "src/",
+    "extensions/",
     "bin/",
     "binaries/",
     "docs/generated/",
@@ -31,7 +32,8 @@
     "LICENSE"
   ],
   "bin": {
-    "autopilot-core": "bin/autopilot-core.mjs"
+    "autopilot-core": "bin/autopilot-core.mjs",
+    "autopilot-agent-run": "bin/autopilot-agent-run.mjs"
   },
   "scripts": {
     "build": "cargo build --release --workspace",
@@ -39,6 +41,7 @@
     "test:rust": "cargo test -q",
     "test:host": "node --experimental-strip-types --test host/tests/*.test.ts",
     "test:packed-consumer": "node scripts/test-packed-consumer.mjs",
+    "test:runtime-integration": "node --experimental-strip-types --test host/integration-tests/four-path-background-runtime.test.ts",
     "test": "npm run typecheck && node scripts/gates/real-producers.mjs && npm run gate:binary-parity && npm run test:rust && npm run test:host",
     "docs:generate": "node scripts/docs-generate.mjs",
     "docs:verify": "node scripts/docs-verify.mjs",
@@ -61,12 +64,12 @@
   },
   "pi": {
     "extensions": [
-      "./src/extension.ts"
+      "./extensions/autopilot.ts"
     ],
     "image": "https://raw.githubusercontent.com/ismailsaleekh/pi-autopilot/main/logo.png"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.81.1"
+    "@earendil-works/pi-coding-agent": "^0.81.1 || ^0.82.1"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "^0.81.1",

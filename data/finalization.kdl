@@ -11,6 +11,8 @@ gate "final-verification" {
     condition "full-suite-exact-tip" evidence="tip-bound" doc="The full suite passed only at the exact final tip."
     condition "final-validator-exact-tip" evidence="tip-bound" doc="The final independent Validator passed at the exact final tip."
     condition "required-bughunter-exact-tip" evidence="tip-bound" doc="Bughunter passed at the exact final tip when mandatory."
+    condition "active-evidence-receipts" evidence="autopilot.evidence_acceptance_receipt.v1" doc="Every finalization-selected evidence receipt is active and non-superseded."
+    condition "closed-evidence-envelope" evidence="autopilot.evidence_envelope_manifest.v1" doc="The finalization evidence envelope is closed and current."
 }
 
 bughunter "mandatory" {

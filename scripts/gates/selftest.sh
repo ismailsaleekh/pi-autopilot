@@ -88,14 +88,18 @@ RS
   cat > "$root/drivers/src/lib.rs" <<'RS'
 pub fn driver_state() -> u8 { 2 }
 RS
+  mkdir -p "$root/data"
   cat > "$root/codegen/src/main.rs" <<'RS'
 fn main() {}
+RS
+  cat > "$root/data/seam_real_producers.rs" <<'RS'
+pub fn seam_fixture() -> u8 { 4 }
 RS
 
   printf '#!/bin/sh\necho autopilot-core fixture\n' > "$root/binaries/darwin-arm64/autopilot-core"
   chmod +x "$root/binaries/darwin-arm64/autopilot-core"
 
-  touch -t 202607280101.00 "$root/kernel/src/lib.rs" "$root/drivers/src/lib.rs" "$root/codegen/src/main.rs"
+  touch -t 202607280101.00 "$root/kernel/src/lib.rs" "$root/drivers/src/lib.rs" "$root/codegen/src/main.rs" "$root/data/seam_real_producers.rs"
   touch -t 202607280102.00 "$root/binaries/darwin-arm64/autopilot-core"
 
   python3 - "$root" <<'PY'
@@ -105,7 +109,7 @@ import sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
-source_files = ["codegen/src/main.rs", "drivers/src/lib.rs", "kernel/src/lib.rs"]
+source_files = ["codegen/src/main.rs", "data/seam_real_producers.rs", "drivers/src/lib.rs", "kernel/src/lib.rs"]
 h = hashlib.sha256()
 newest = max(source_files, key=lambda rel: (root / rel).stat().st_mtime_ns)
 for rel in sorted(source_files):
@@ -119,7 +123,7 @@ binary_hash = hashlib.sha256((root / binary_rel).read_bytes()).hexdigest()
 manifest = {
     "schema": 1,
     "source": {
-        "directories": ["kernel", "drivers", "codegen"],
+        "directories": ["kernel", "drivers", "codegen", "data"],
         "hash": source_hash,
         "newestTrackedSource": newest,
     },
@@ -138,7 +142,7 @@ PY
   git -C "$root" init -q
   git -C "$root" config user.email selftest@example.invalid
   git -C "$root" config user.name 'Gate Selftest'
-  git -C "$root" add bin kernel drivers codegen binaries
+  git -C "$root" add bin kernel drivers codegen data binaries
 
   if [ "$mode" = "stale" ]; then
     printf '\npub fn repaired_source() -> u8 { 3 }\n' >> "$root/drivers/src/lib.rs"

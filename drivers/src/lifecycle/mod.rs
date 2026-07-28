@@ -1,4 +1,9 @@
-use std::{ffi::OsString, fs, path::{Component, Path, PathBuf}, process::Command};
+use std::{
+    ffi::OsString,
+    fs,
+    path::{Component, Path, PathBuf},
+    process::Command,
+};
 
 use kernel::failure::{Failure, HardBoundary};
 
@@ -73,42 +78,96 @@ impl LocalLifecycle {
         archive_root: impl Into<PathBuf>,
     ) -> Self {
         let owner = clean(owner.into());
-        Self { source: clean(source.into()), archive_root: clean(archive_root.into()), vcs: GitVcs::new(owner.clone()), owner }
+        Self {
+            source: clean(source.into()),
+            archive_root: clean(archive_root.into()),
+            vcs: GitVcs::new(owner.clone()),
+            owner,
+        }
     }
 
     pub fn close(&self, request: CloseRequest) -> Result<LifecycleReport, LifecycleError> {
-        let target_before = self.vcs.read_tip(&self.source, &request.target_ref).map_err(map_failure)?;
-        let result_ref = format!("refs/autopilot/results/{}/{}", request.workstream, request.run_id);
+        let target_before = self
+            .vcs
+            .read_tip(&self.source, &request.target_ref)
+            .map_err(map_failure)?;
+        let result_ref = format!(
+            "refs/autopilot/results/{}/{}",
+            request.workstream, request.run_id
+        );
         let mut cleanup = Vec::new();
         for proof in request.cleanup {
-            if !proof.proven_safe { return Err(LifecycleError::UnsafeCleanup); }
+            if !proof.proven_safe {
+                return Err(LifecycleError::UnsafeCleanup);
+            }
             cleanup.push(match proof.artifact {
-                CleanupArtifact::PackageWorktree(path) => CleanupArtifact::PackageWorktree(self.owned(&path)?),
-                CleanupArtifact::TempRef(name) if name.strip_prefix("refs/autopilot/tmp/").is_some() => CleanupArtifact::TempRef(name),
+                CleanupArtifact::PackageWorktree(path) => {
+                    CleanupArtifact::PackageWorktree(self.owned(&path)?)
+                }
+                CleanupArtifact::TempRef(name)
+                    if name.strip_prefix("refs/autopilot/tmp/").is_some() =>
+                {
+                    CleanupArtifact::TempRef(name)
+                }
                 CleanupArtifact::TempRef(_) => return Err(LifecycleError::UnsafeCleanup),
             });
         }
         let mut removed = Vec::new();
         for artifact in cleanup {
             match artifact {
-                CleanupArtifact::PackageWorktree(path) => { fs::remove_dir_all(&path).map_err(|_| LifecycleError::Io)?; removed.push(path.display().to_string()); }
-                CleanupArtifact::TempRef(name) => { self.git(os(&["update-ref", "-d", &name]))?; removed.push(name); }
+                CleanupArtifact::PackageWorktree(path) => {
+                    fs::remove_dir_all(&path).map_err(|_| LifecycleError::Io)?;
+                    removed.push(path.display().to_string());
+                }
+                CleanupArtifact::TempRef(name) => {
+                    self.git(os(&["update-ref", "-d", &name]))?;
+                    removed.push(name);
+                }
             }
         }
-        let target_after = self.vcs.read_tip(&self.source, &request.target_ref).map_err(map_failure)?;
-        if target_after != target_before { return Err(LifecycleError::TargetMoved); }
-        let archive_dir = self.archive(&request.workstream, &request.run_id, "closed", &request.evidence)?;
-        if let Err(error) = self.vcs.swap(&self.source, &result_ref, &request.final_tip, ZERO) {
+        let target_after = self
+            .vcs
+            .read_tip(&self.source, &request.target_ref)
+            .map_err(map_failure)?;
+        if target_after != target_before {
+            return Err(LifecycleError::TargetMoved);
+        }
+        let archive_dir = self.archive(
+            &request.workstream,
+            &request.run_id,
+            "closed",
+            &request.evidence,
+        )?;
+        if let Err(error) = self
+            .vcs
+            .swap(&self.source, &result_ref, &request.final_tip, ZERO)
+        {
             fs::remove_dir_all(&archive_dir).map_err(|_| LifecycleError::Io)?;
             return Err(map_failure(error));
         }
-        Ok(LifecycleReport { result_ref: Some(result_ref), archive_dir, watchdog_stopped: true, removed })
+        Ok(LifecycleReport {
+            result_ref: Some(result_ref),
+            archive_dir,
+            watchdog_stopped: true,
+            removed,
+        })
     }
 
     pub fn abort(&self, request: AbortRequest) -> Result<LifecycleReport, LifecycleError> {
-        let archive_dir = self.archive(&request.workstream, &request.run_id, "aborted", &request.evidence)?;
-        fs::write(archive_dir.join("abort-reason.txt"), request.reason).map_err(|_| LifecycleError::Io)?;
-        Ok(LifecycleReport { result_ref: None, archive_dir, watchdog_stopped: true, removed: Vec::new() })
+        let archive_dir = self.archive(
+            &request.workstream,
+            &request.run_id,
+            "aborted",
+            &request.evidence,
+        )?;
+        fs::write(archive_dir.join("abort-reason.txt"), request.reason)
+            .map_err(|_| LifecycleError::Io)?;
+        Ok(LifecycleReport {
+            result_ref: None,
+            archive_dir,
+            watchdog_stopped: true,
+            removed: Vec::new(),
+        })
     }
 
     fn archive(
@@ -130,8 +189,14 @@ impl LocalLifecycle {
     }
 
     fn owned(&self, path: &Path) -> Result<PathBuf, LifecycleError> {
-        let candidate = if path.is_absolute() { clean(path.to_path_buf()) } else { clean(self.owner.join(path)) };
-        candidate.strip_prefix(&self.owner).map_err(|_| LifecycleError::UnsafePath)?;
+        let candidate = if path.is_absolute() {
+            clean(path.to_path_buf())
+        } else {
+            clean(self.owner.join(path))
+        };
+        candidate
+            .strip_prefix(&self.owner)
+            .map_err(|_| LifecycleError::UnsafePath)?;
         Ok(candidate)
     }
 
@@ -150,7 +215,9 @@ impl LocalLifecycle {
 
 fn map_failure(error: Failure) -> LifecycleError {
     match error {
-        Failure::Unsafe { boundary: HardBoundary::OutOfScopeWrite } => LifecycleError::UnsafePath,
+        Failure::Unsafe {
+            boundary: HardBoundary::OutOfScopeWrite,
+        } => LifecycleError::UnsafePath,
         _ => LifecycleError::Git,
     }
 }

@@ -12,8 +12,10 @@ export type DeliveryTerminalStatus = string;
 export type Digest = string;
 export type Duration = string;
 export type EventKind = string;
+export type GitOid = string;
 export type GuardDecision = string;
 export type Id = string;
+export type Json = string;
 export type ModeId = string;
 export type Path = string;
 export type Permission = string;
@@ -23,23 +25,33 @@ export type SchemaId = string;
 export type SessionAction = string;
 export type Sha = string;
 export type SupersessionState = string;
+export type TaskDocumentClass = string;
 export type TestId = string;
 export type ThinkingLevel = string;
 export type Timestamp = string;
 export type ToolName = string;
 export type TriggerKind = string;
 export type UiKind = string;
+export type UnixMs = string;
 export type Uri = string;
 export type Uuidv7 = string;
 export type ValidationScope = string;
 
 export type ActionKind = "launch-background" | "reconcile-background" | "read-failure-log" | "stop-background" | "request-operator" | "return-idle";
+export type ArchiveEntryClass = "receipt" | "protected-evidence" | "background-reference" | "cleanup-receipt" | "watchdog-receipt" | "plan" | "finalization";
 export type AttemptAttribute = "interrupted" | "checkpointed" | "superseded";
+export type AttestedActionKind = "launch-attested-pi" | "reconcile-attested-pi";
 export type CandidateState = "queued" | "preparing" | "conflicted" | "resolving" | "focused-checking" | "ready-to-commit" | "committed" | "needs-fix" | "failed" | "superseded";
 export type ClosureVerdict = "PASS" | "NEEDS_FIX" | "BLOCKED";
+export type CommandReceiptKind = "final-command" | "full-suite" | "focused";
 export type ContextAnchorForm = "task" | "plan" | "dossier" | "run" | "version-control-lines" | "version-control-whole-file" | "json";
 export type CriterionVerdict = "PASS" | "FAIL" | "BLOCKED";
+export type EvidenceContentKind = "prompt" | "assignment" | "action" | "producer-binding" | "report" | "producer-sidecar" | "acceptance-receipt" | "failure-receipt" | "supersession-receipt" | "transcript" | "envelope-manifest";
+export type EvidenceErrorCode = "EVIDENCE_PRODUCER_UNAVAILABLE" | "EVIDENCE_ASSIGNMENT_CONFLICT" | "EVIDENCE_ACTION_NOT_ISSUED" | "EVIDENCE_ACTION_EXPIRED" | "EVIDENCE_ACTION_SUPERSEDED" | "EVIDENCE_TASK_BINDING_CONFLICT" | "EVIDENCE_TERMINAL_NOT_COMPLETED" | "EVIDENCE_SOURCE_PATH_INVALID" | "EVIDENCE_SOURCE_MISSING" | "EVIDENCE_SOURCE_NOT_REGULAR" | "EVIDENCE_SOURCE_SYMLINK" | "EVIDENCE_SCHEMA_UNSUPPORTED" | "EVIDENCE_PROSE_NOT_CONTRACT" | "EVIDENCE_HASH_MISMATCH" | "EVIDENCE_PRODUCER_REQUEST_MISMATCH" | "EVIDENCE_PROVIDER_MISMATCH" | "EVIDENCE_MODEL_MISMATCH" | "EVIDENCE_CHANNEL_FORBIDDEN" | "EVIDENCE_METERED_USAGE_OBSERVED" | "EVIDENCE_SESSION_CONFLICT" | "EVIDENCE_IDEMPOTENCY_CONFLICT" | "EVIDENCE_SUBJECT_STALE" | "EVIDENCE_BOUNDARY_REJECTED" | "EVIDENCE_SUPERSESSION_INVALID" | "EVIDENCE_EVENT_LOG_CORRUPT" | "EVIDENCE_STORE_IO" | "EVIDENCE_ENVELOPE_OPEN" | "EVIDENCE_ENVELOPE_MEMBER_MISMATCH" | "EVIDENCE_UNDECLARED_INPUT";
+export type EvidenceOrigin = "package" | "ordinary-bg-run" | "external-attested-advisory";
+export type FinalEvidenceKind = "plan-approved" | "allocation-accepted" | "unit-closed" | "finding-disposition" | "candidate-accepted" | "integrated-diff-attribution" | "staleness-snapshot" | "background-terminal" | "command-batch" | "validation-verdict" | "bughunter-verdict" | "conflict-resolution" | "conflict-review" | "target-sync" | "watchdog-stopped" | "cleanup-proof";
 export type FindingEffect = "forward-blocking" | "closure-blocking-forward-safe" | "advisory";
+export type FindingKindV2 = "source-defect" | "test-defect" | "contract-defect" | "evidence-gap" | "context-gap" | "unsafe-boundary" | "advisory";
 export type ForwardVerdict = "FORWARD_READY" | "FORWARD_BLOCKED" | "BLOCKED";
 export type LaneState = "allocated" | "implementing" | "forward-validating-1" | "forward-fixing" | "forward-validating-2" | "forward-ready" | "release-queued" | "forward-integrated" | "deep-validating" | "closure-needs-fix" | "repair-queued" | "closed";
 export type Producer = "Model" | "Git" | "Operator" | "Filesystem" | "Provider" | "BackgroundTask" | "Package" | "Host";
@@ -47,6 +59,86 @@ export type RosterSlot = "control" | "reasoning" | "extraction" | "coding" | "re
 export type RunHealth = "healthy" | "degraded" | "paused" | "unsafe-halt";
 export type RunOutcome = "null" | "closed" | "aborted";
 export type RunPhase = "planning" | "ready-to-execute" | "allocating" | "executing" | "final-verification" | "ready-to-close" | "terminal";
+export type ValidationAssignmentKind = "planning-review" | "delivery" | "validation";
+export type ValidationBlockerKind = "missing-evidence" | "stale-evidence" | "context-gap" | "external-prerequisite" | "unsafe-boundary";
+export type ValidationOutcomeV2 = "FORWARD_READY" | "FORWARD_BLOCKED" | "PASS" | "NEEDS_FIX" | "BLOCKED";
+export type ValidationScopeV2 = "forward" | "closure" | "delta" | "conflict" | "final";
+export type ValidationSubjectKind = "lane-delivery" | "repair" | "conflict-candidate" | "run-final-tip";
+
+export interface AcceptedEvidenceEnvelope {
+  schema_version: SchemaId;
+  repo_key: Base32;
+  run_id: Uuidv7;
+  workstream: Id;
+  evidence_id: Id;
+  evidence_kind: FinalEvidenceKind;
+  subject_id: Id;
+  origin: EvidenceOrigin;
+  artifact: ArtifactLink;
+  acceptance_receipt: ArtifactLink;
+  boundary_id: ContractId;
+  assignment_id?: Id;
+  action_id?: Id;
+  role_id?: Id;
+  mode?: ModeId;
+  accepted_run_revision: number;
+  exact_commit?: GitOid;
+  exact_tree?: GitOid;
+  provider?: string;
+  model?: string;
+  thinking?: ThinkingLevel;
+  route?: string;
+  pi_session_id?: Id;
+  envelope_sha256: Digest;
+}
+
+export interface AgentRunSpec {
+  schema: SchemaId;
+  assignment_kind: ValidationAssignmentKind;
+  action_id: Id;
+  assignment_id: Id;
+  run_revision: number;
+  workstream: Id;
+  role_id: Id;
+  mode: ModeId;
+  provider: string;
+  model: string;
+  thinking: ThinkingLevel;
+  route: string;
+  cwd: Path;
+  allowed_tools: ToolName[];
+  spec_path: Path;
+  prompt_path: Path;
+  prompt_digest: Digest;
+  boundary_id: ContractId;
+  boundary_digest: Digest;
+  result_contract: ContractId;
+  result_contract_digest: Digest;
+  carrier_path: Path;
+  settings_digest: Digest;
+  context_digest: Digest;
+  skills_digest: Digest;
+  subscription_digest: Digest;
+  lane_id?: Id | null;
+  attempt?: number | null;
+  base_commit?: Sha | null;
+  worktree?: Path | null;
+  required_focused_evidence?: number | null;
+  authority_set_id?: string | null;
+  authority_documents?: TaskDocument[] | null;
+  context_document?: TaskDocument | null;
+  assignment_path?: Path | null;
+  assignment_digest?: Digest | null;
+  context_manifest_path?: Path | null;
+  context_manifest_digest?: Digest | null;
+  runtime_extension_path?: Path | null;
+  runtime_extension_digest?: Digest | null;
+  producer_assignment_ids?: Id[] | null;
+  validation_id?: Id | null;
+  validation_attempt?: number | null;
+  semantic_round?: number | null;
+  model_submission_path?: Path | null;
+}
 
 export interface AllocationLaneProposal {
   lane_id: Id;
@@ -63,19 +155,331 @@ export interface AllocationLaneProposal {
   continue_existing_logical_lane?: boolean | null;
 }
 
+export interface ArchivePublication {
+  schema_version: SchemaId;
+  request_sha256: Digest;
+  archive_manifest_sha256: Digest;
+  close_receipt_sha256: Digest;
+  publication_sha256: Digest;
+}
+
+export interface ArtifactLink {
+  schema_version: SchemaId;
+  path: Path;
+  artifact_schema: string;
+  byte_length: number;
+  sha256: Digest;
+}
+
+export interface AutopilotAttestedAction {
+  schema_version: SchemaId;
+  action_id: Id;
+  assignment_id: Id;
+  assignment_revision: number;
+  run_revision: number;
+  assignment_ref: AutopilotContentRef;
+  producer_request: Phase2PiAttestedRunRequest;
+  expires_at_unix_ms: UnixMs;
+  supersession_state: string;
+  action_sha256: Digest;
+}
+
+export interface AutopilotAttestedAssignment {
+  schema_version: SchemaId;
+  run_id: Uuidv7;
+  repo_key: Base32;
+  workstream: Id;
+  purpose_id: Id;
+  assignment_id: Id;
+  assignment_revision: number;
+  run_revision: number;
+  action_id: Id;
+  issue_idempotency_key: Id;
+  import_idempotency_key: Id;
+  subject_digest: Digest;
+  boundary_id: ContractId;
+  provider: string;
+  model: string;
+  thinking: ThinkingLevel;
+  required_channel: string;
+  prompt_ref: AutopilotContentRef;
+  system_prompt_sha256: Digest;
+  report_staging_path: Path;
+  producer_request_sha256: Digest;
+  conflict_policy: AutopilotEvidenceConflictPolicy;
+  issued_at_unix_ms: UnixMs;
+  supersedes_assignment_id?: Id;
+  assignment_sha256: Digest;
+}
+
+export interface AutopilotContentRef {
+  schema_version: SchemaId;
+  kind: EvidenceContentKind;
+  path: Path;
+  byte_length: UnixMs;
+  sha256: Digest;
+}
+
+export interface AutopilotEventRef {
+  schema_version: SchemaId;
+  sequence: number;
+  kind: EventKind;
+  row_sha256: Digest;
+}
+
+export interface AutopilotEvidenceAcceptanceReceipt {
+  schema_version: SchemaId;
+  receipt_id: Id;
+  run_id: Uuidv7;
+  repo_key: Base32;
+  workstream: Id;
+  purpose_id: Id;
+  assignment_id: Id;
+  action_id: Id;
+  assignment_revision: number;
+  run_revision: number;
+  subject_digest: Digest;
+  boundary_id: ContractId;
+  assignment_ref: AutopilotContentRef;
+  action_ref: AutopilotContentRef;
+  producer_binding_ref: AutopilotContentRef;
+  report_ref: AutopilotContentRef;
+  producer_sidecar_ref: AutopilotContentRef;
+  producer_task_id: Id;
+  producer_request_sha256: Digest;
+  prompt_sha256: Digest;
+  system_prompt_sha256: Digest;
+  payload_sha256: Digest;
+  provider: string;
+  model: string;
+  channel: string;
+  auth_class: string;
+  credential_kind: string;
+  direct_api_key: boolean;
+  pi_session_id: Id;
+  conflict_check: AutopilotEvidenceConflictCheck;
+  issue_idempotency_key: Id;
+  import_idempotency_key: Id;
+  issue_event_ref: AutopilotEventRef;
+  binding_event_ref: AutopilotEventRef;
+  supersession_state_at_acceptance: string;
+  accepted_at_unix_ms: UnixMs;
+  receipt_sha256: Digest;
+}
+
+export interface AutopilotEvidenceConflictCheck {
+  schema_version: SchemaId;
+  compared_receipt_refs: AutopilotContentRef[];
+  assignment_conflicts: Id[];
+  action_conflicts: Id[];
+  session_conflicts: Id[];
+  subject_conflicts: Digest[];
+  provider_channel_conflicts: string[];
+  status: string;
+  check_sha256: Digest;
+}
+
+export interface AutopilotEvidenceConflictPolicy {
+  schema_version: SchemaId;
+  distinct_from_receipt_refs: AutopilotContentRef[];
+  forbid_same_assignment: boolean;
+  forbid_same_action: boolean;
+  forbid_same_session: boolean;
+  require_subject_current: boolean;
+  policy_sha256: Digest;
+}
+
+export interface AutopilotEvidenceEnvelopeManifest {
+  schema_version: SchemaId;
+  manifest_id: Id;
+  run_id: Uuidv7;
+  repo_key: Base32;
+  workstream: Id;
+  scope: string;
+  manifest_revision: number;
+  subject_digest: Digest;
+  previous_manifest_ref?: AutopilotContentRef;
+  closed_through_event_sequence: number;
+  event_prefix_sha256: Digest;
+  members: AutopilotContentRef[];
+  active_acceptance_receipt_refs: AutopilotContentRef[];
+  supersession_receipt_refs: AutopilotContentRef[];
+  failure_receipt_refs: AutopilotContentRef[];
+  excluded_self: boolean;
+  closed_at_unix_ms: UnixMs;
+  manifest_sha256: Digest;
+}
+
+export interface AutopilotEvidenceFailureReceipt {
+  schema_version: SchemaId;
+  run_id: Uuidv7;
+  workstream: Id;
+  purpose_id: Id;
+  assignment_id: Id;
+  action_id: Id;
+  assignment_revision: number;
+  run_revision: number;
+  state: string;
+  code: EvidenceErrorCode;
+  expected_refs: AutopilotContentRef[];
+  observed_hashes: Digest[];
+  occurred_at_unix_ms: UnixMs;
+  failure_sha256: Digest;
+}
+
+export interface AutopilotEvidenceSupersessionReceipt {
+  schema_version: SchemaId;
+  run_id: Uuidv7;
+  workstream: Id;
+  purpose_id: Id;
+  old_assignment_ref: AutopilotContentRef;
+  new_assignment_ref: AutopilotContentRef;
+  old_acceptance_receipt_ref?: AutopilotContentRef;
+  old_assignment_revision: number;
+  new_assignment_revision: number;
+  reason: string;
+  superseded_at_event_revision: number;
+  supersession_idempotency_key: Id;
+  supersession_sha256: Digest;
+}
+
+export interface AutopilotProducerBinding {
+  schema_version: SchemaId;
+  run_id: Uuidv7;
+  workstream: Id;
+  action_id: Id;
+  assignment_id: Id;
+  assignment_revision: number;
+  run_revision: number;
+  assignment_ref: AutopilotContentRef;
+  action_ref: AutopilotContentRef;
+  producer_task_id: Id;
+  producer_request_sha256: Digest;
+  report_source_path: Path;
+  sidecar_source_path: Path;
+  bound_at_unix_ms: UnixMs;
+  binding_sha256: Digest;
+}
+
+export interface AutopilotTranscriptV2 {
+  schema_version: SchemaId;
+  boundary_id: ContractId;
+  payload_utf8: string;
+  payload_sha256: Digest;
+  acceptance_receipt_ref: AutopilotContentRef;
+  producer_sidecar_ref: AutopilotContentRef;
+  transcript_sha256: Digest;
+}
+
 export interface BackgroundAction {
   action_id: Id;
   assignment_id: Id;
   kind: ActionKind;
-  command_bytes: Bytes;
-  display_name: string;
-  isAgent: boolean;
-  timeout?: Duration | null;
-  notifyOnCompletion: boolean;
-  triggerOnCompletion: boolean;
+  bg_run: BackgroundActionBgRun;
   run_revision: number;
   expires_at?: Timestamp | null;
   supersession_state: SupersessionState;
+}
+
+export interface BackgroundActionBgRun {
+  name: string;
+  command: Bytes;
+  isAgent: boolean;
+  timeoutSeconds?: number;
+  notifyOnCompletion: boolean;
+  triggerOnCompletion: boolean;
+}
+
+export interface BackgroundCapabilities {
+  api_version: number;
+  run: boolean;
+  run_is_agent: boolean;
+  run_completion_trigger: boolean;
+  status: boolean;
+  logs: boolean;
+  logs_bounded: boolean;
+  kill: boolean;
+  run_attested_pi?: boolean;
+  attested_idempotency?: boolean;
+  attested_status_by_idempotency_key?: boolean;
+  attested_terminal_artifacts?: boolean;
+  report_schema?: string;
+  attestation_schema?: string;
+}
+
+export interface CloseArchiveManifest {
+  schema_version: SchemaId;
+  repo_key: Base32;
+  run_id: Uuidv7;
+  workstream: Id;
+  request: ArtifactLink;
+  final_pass: ArtifactLink;
+  close_intent_event_sequence: number;
+  result_ref: Ref;
+  final_commit: GitOid;
+  final_tree: GitOid;
+  event_prefix: ArtifactLink;
+  entries: ArchiveEntry[];
+  manifest_sha256: Digest;
+}
+
+export interface ArchiveEntry {
+  archive_path: Path;
+  source: ArtifactLink;
+  class: ArchiveEntryClass;
+  archived_byte_length: number;
+  archived_sha256: Digest;
+}
+
+export interface CloseReceipt {
+  schema_version: SchemaId;
+  repo_key: Base32;
+  run_id: Uuidv7;
+  workstream: Id;
+  request_sha256: Digest;
+  final_pass_sha256: Digest;
+  result_ref: Ref;
+  final_commit: GitOid;
+  final_tree: GitOid;
+  archive_manifest_sha256: Digest;
+  watchdog_receipt: ArtifactLink;
+  cleanup_receipts: ArtifactLink[];
+  target_ref: Ref;
+  target_tip_observed_before_cas: GitOid;
+  ready_event_sequence: number;
+  close_receipt_sha256: Digest;
+}
+
+export interface CloseRequest {
+  schema_version: SchemaId;
+  repo_key: Base32;
+  run_id: Uuidv7;
+  workstream: Id;
+  expected_run_revision: number;
+  expected_event_log_sha256: Digest;
+  expected_final_commit: GitOid;
+  expected_final_tree: GitOid;
+  expected_final_digest: Digest;
+  request_sha256: Digest;
+}
+
+export interface CommandReceipt {
+  schema_version: SchemaId;
+  receipt_id: Id;
+  command_kind: CommandReceiptKind;
+  command_bytes: Bytes;
+  cwd_realpath: Path;
+  env_profile_id: Id;
+  started_at_ms: number;
+  ended_at_ms: number;
+  timeout_ms: number;
+  timed_out: boolean;
+  exit_code: number;
+  commit: GitOid;
+  tree: GitOid;
+  bounded_output: ArtifactLink;
+  full_output: ArtifactLink;
+  receipt_sha256: Digest;
 }
 
 export interface ContextAnchor {
@@ -181,6 +585,18 @@ export interface DeliveryResult {
   attempt: number;
   base_commit: Sha;
   worktree: Path;
+  action_id?: Id | null;
+  prompt_path?: Path | null;
+  prompt_digest?: Digest | null;
+  spec_path?: Path | null;
+  spec_digest?: Digest | null;
+  carrier_path?: Path | null;
+  boundary_digest?: Digest | null;
+  result_contract_digest?: Digest | null;
+  settings_digest?: Digest | null;
+  context_digest?: Digest | null;
+  skills_digest?: Digest | null;
+  subscription_digest?: Digest | null;
   package_commit?: Sha | null;
   package_tree?: Sha | null;
   actual_changed_paths: Path[];
@@ -198,6 +614,77 @@ export interface EventRow {
   artifact_refs: Ref[];
 }
 
+export interface ExternalAttestedEvidenceImport {
+  schema_version: SchemaId;
+  repo_key: Base32;
+  run_id: Uuidv7;
+  workstream: Id;
+  evidence_kind: string;
+  assignment_id: Id;
+  role_id: Id;
+  mode: ModeId;
+  expected_final_commit: GitOid;
+  expected_final_tree: GitOid;
+  expected_provider: string;
+  expected_model: string;
+  expected_thinking: ThinkingLevel;
+  expected_prompt: ArtifactLink;
+  expected_argv: string[];
+  report: ArtifactLink;
+  attestation: ArtifactLink;
+  import_sha256: Digest;
+}
+
+export interface FinalGateAssembly {
+  schema_version: SchemaId;
+  repo_key: Base32;
+  run_id: Uuidv7;
+  workstream: Id;
+  basis_event_sequence: number;
+  basis_run_revision: number;
+  basis_event_log_sha256: Digest;
+  basis_state_hash: Digest;
+  plan_envelope: ArtifactLink;
+  final_commit: GitOid;
+  final_tree: GitOid;
+  target_ref: Ref;
+  recorded_target_base: GitOid;
+  observed_target_tip: GitOid;
+  conditions: FinalConditionEvidence[];
+  triggers: BughunterTriggersV1;
+  accepted_envelopes: ArtifactLink[];
+  assembly_sha256: Digest;
+}
+
+export interface FinalConditionEvidence {
+  condition_id: Id;
+  satisfied: boolean;
+  evidence_envelopes: ArtifactLink[];
+}
+
+export interface BughunterTriggersV1 {
+  implementation_lanes: number;
+  risk: string;
+  protected_security_data_or_migration: boolean;
+  semantic_conflict_resolution: boolean;
+  operator_required: boolean;
+}
+
+export interface FinalVerificationPass {
+  schema_version: SchemaId;
+  repo_key: Base32;
+  run_id: Uuidv7;
+  workstream: Id;
+  basis_event_sequence: number;
+  basis_run_revision: number;
+  final_commit: GitOid;
+  final_tree: GitOid;
+  assembly: ArtifactLink;
+  assembly_sha256: Digest;
+  bughunter_required: boolean;
+  pass_sha256: Digest;
+}
+
 export interface Finding {
   finding_id: Id;
   effect: FindingEffect;
@@ -208,6 +695,62 @@ export interface Finding {
   evidence_refs: Ref[];
   covered_paths: Path[];
   semantic_surface_ids: Id[];
+}
+
+export interface FindingV2 {
+  finding_id: Id;
+  kind: FindingKindV2;
+  effect: FindingEffect;
+  summary: string;
+  detail: string;
+  criterion_ids: Id[];
+  edge_ids: Id[];
+  evidence_refs: Ref[];
+  covered_paths: Path[];
+  semantic_surface_ids: Id[];
+}
+
+export interface LifecycleReport {
+  schema_version: SchemaId;
+  request_sha256: Digest;
+  result_ref: Ref;
+  final_commit: GitOid;
+  final_tree: GitOid;
+  archive_manifest: ArtifactLink;
+  close_receipt: ArtifactLink;
+  cleanup_receipts: ArtifactLink[];
+  disposition: string;
+}
+
+export interface Phase2PiAttestedRunRequest {
+  schema_version: SchemaId;
+  name: string;
+  provider: string;
+  model: string;
+  thinking: ThinkingLevel;
+  system_prompt_utf8: string;
+  prompt_utf8: string;
+  report_path: Path;
+  timeout_seconds: number;
+  idempotency_key: Id;
+  consumer_binding: Phase2PiConsumerBinding;
+  request_sha256: Digest;
+}
+
+export interface Phase2PiConsumerBinding {
+  schema_version: SchemaId;
+  consumer: string;
+  run_id: Uuidv7;
+  repo_key: Base32;
+  workstream: Id;
+  purpose_id: Id;
+  action_id: Id;
+  assignment_id: Id;
+  assignment_revision: number;
+  run_revision: number;
+  boundary_id: ContractId;
+  subject_digest: Digest;
+  binding_sha256: Digest;
 }
 
 export interface RoleFrontmatter {
@@ -250,6 +793,161 @@ export interface StateCache {
   state_hash: Digest;
 }
 
+export interface TaskDocument {
+  path: Path;
+  class: TaskDocumentClass;
+  digest: Digest;
+  body_digest: Digest;
+  body: string;
+}
+
+export interface ValidationAssignmentV2 {
+  schema: SchemaId;
+  validation_id: Id;
+  validation_key: Digest;
+  workstream: Id;
+  run_revision: number;
+  role_id: Id;
+  mode: ModeId;
+  assignment_id: Id;
+  action_id: Id;
+  validation_attempt: number;
+  semantic_round: number;
+  scope: ValidationScopeV2;
+  subject_kind: ValidationSubjectKind;
+  producer_assignment_ids: Id[];
+  producer_result_refs: Ref[];
+  lane_id?: Id;
+  candidate_id?: Id;
+  exact_commit: GitOid;
+  exact_tree: GitOid;
+  candidate_root: Path;
+  forward_round?: number;
+  criteria_manifest_ref: Ref;
+  criteria_manifest_digest: Digest;
+  evidence_manifest_ref: Ref;
+  evidence_manifest_digest: Digest;
+  diff_ref: Ref;
+  diff_digest: Digest;
+  prior_result_ref?: Ref;
+  prior_finding_refs: Ref[];
+  allowed_read_roots: Path[];
+  allowed_command_ids: Id[];
+  max_transport_attempts: number;
+}
+
+export interface ValidationContextV2 {
+  schema: SchemaId;
+  context_id: Id;
+  revision: number;
+  validation_id: Id;
+  assignment_id: Id;
+  exact_commit: GitOid;
+  exact_tree: GitOid;
+  candidate: ValidationContextV2Candidate;
+  criteria: ValidationContextCriterion[];
+  evidence: ValidationContextEvidence[];
+  prior_findings: FindingV2[];
+  applicable_decision_refs: Ref[];
+  applicable_constraint_refs: Ref[];
+  included_context_classes: string[];
+  forbidden_context_classes: string[];
+  allowed_read_roots: Path[];
+  excluded_refs: ValidationExcludedRef[];
+}
+
+export interface ValidationContextV2Candidate {
+  source_root: Path;
+  diff_ref: Ref;
+  diff_digest: Digest;
+  actual_changed_paths: Path[];
+  execution_audit_ref: Ref;
+}
+
+export interface ValidationContextCriterion {
+  criterion_id: Id;
+  mandatory: boolean;
+  covered_paths: Path[];
+  semantic_surface_ids: Id[];
+  forward_edge_ids: Id[];
+  witness_ids: Id[];
+}
+
+export interface ValidationContextEvidence {
+  evidence_ref: Ref;
+  digest: Digest;
+  kind: string;
+  exact_commit: GitOid;
+  exact_tree: GitOid;
+  command_id?: Id;
+}
+
+export interface ValidationExcludedRef {
+  ref: Ref;
+  reason: string;
+}
+
+export interface ValidationResultV2 {
+  schema: SchemaId;
+  action_id: Id;
+  assignment_id: Id;
+  validation_id: Id;
+  validation_key: Digest;
+  validation_attempt: number;
+  semantic_round: number;
+  run_revision: number;
+  workstream: Id;
+  role_id: Id;
+  mode: ModeId;
+  producer_assignment_ids: Id[];
+  exact_commit: GitOid;
+  exact_tree: GitOid;
+  assignment_path: Path;
+  assignment_digest: Digest;
+  context_manifest_path: Path;
+  context_manifest_digest: Digest;
+  prompt_path: Path;
+  prompt_digest: Digest;
+  spec_path: Path;
+  spec_digest: Digest;
+  carrier_path: Path;
+  boundary_id: ContractId;
+  boundary_digest: Digest;
+  result_contract: ContractId;
+  result_contract_digest: Digest;
+  settings_digest: Digest;
+  skills_digest: Digest;
+  subscription_digest: Digest;
+  runtime_extension_digest: Digest;
+  tool_audit_ref: Ref;
+  tool_audit_digest: Digest;
+  submission_digest: Digest;
+  submission: ValidationSubmissionV2;
+}
+
+export interface ValidationSubmissionV2 {
+  schema: SchemaId;
+  validation_id: Id;
+  assignment_id: Id;
+  scope: ValidationScopeV2;
+  exact_commit: GitOid;
+  exact_tree: GitOid;
+  outcome: ValidationOutcomeV2;
+  criterion_results: CriterionResultV2[];
+  findings: FindingV2[];
+}
+
+export interface CriterionResultV2 {
+  criterion_id: Id;
+  verdict: CriterionVerdict;
+  blocker_kind?: ValidationBlockerKind;
+  evidence_refs: Ref[];
+  finding_ids: Id[];
+  covered_paths: Path[];
+  semantic_surface_ids: Id[];
+  forward_edge_ids: Id[];
+}
+
 export interface ValidationVerdict {
   assignment_id: Id;
   validation_scope: ValidationScope;
@@ -284,6 +982,10 @@ export interface CoreToHostLogPayload {
   line: string;
 }
 
+export interface CoreToHostReconcileAttestedPayload {
+  action: AutopilotAttestedAction;
+}
+
 export interface CoreToHostSessionPayload {
   session_action: SessionAction;
   payload: JsonObject;
@@ -291,6 +993,10 @@ export interface CoreToHostSessionPayload {
 
 export interface CoreToHostSpawnPayload {
   action: BackgroundAction;
+}
+
+export interface CoreToHostSpawnAttestedPayload {
+  action: AutopilotAttestedAction;
 }
 
 export interface CoreToHostUiPayload {
@@ -303,8 +1009,22 @@ export interface HostToCoreAgentResultPayload {
   carrier: JsonObject;
 }
 
+export interface HostToCoreAttestedTaskObservationPayload {
+  action_id: Id;
+  assignment_id: Id;
+  assignment_revision: number;
+  run_revision: number;
+  producer_task_id: Id;
+  producer_request_sha256: Digest;
+  status: string;
+  report_source_path: Path;
+  sidecar_source_path: Path;
+}
+
 export interface HostToCoreCommandPayload {
   raw: string;
+  background_capabilities: BackgroundCapabilities;
+  background_capability_diagnostic?: string | null;
 }
 
 export interface HostToCoreGuardQueryPayload {
@@ -323,8 +1043,10 @@ export interface HostToCoreShutdownPayload {
 
 export interface HostToCoreTaskCompletedPayload {
   task_id: Id;
+  action_id: Id;
+  assignment_id: Id;
   status: string;
 }
 
-export type HostToCoreFrame = { v: 1; id: number; kind: "agent-result"; payload: HostToCoreAgentResultPayload } | { v: 1; id: number; kind: "command"; payload: HostToCoreCommandPayload } | { v: 1; id: number; kind: "guard-query"; payload: HostToCoreGuardQueryPayload } | { v: 1; id: number; kind: "operator-answer"; payload: HostToCoreOperatorAnswerPayload } | { v: 1; id: number; kind: "shutdown"; payload: HostToCoreShutdownPayload } | { v: 1; id: number; kind: "task-completed"; payload: HostToCoreTaskCompletedPayload };
-export type CoreToHostFrame = { v: 1; id: number; kind: "done"; payload: CoreToHostDonePayload } | { v: 1; id: number; kind: "guard-decision"; payload: CoreToHostGuardDecisionPayload } | { v: 1; id: number; kind: "log"; payload: CoreToHostLogPayload } | { v: 1; id: number; kind: "session"; payload: CoreToHostSessionPayload } | { v: 1; id: number; kind: "spawn"; payload: CoreToHostSpawnPayload } | { v: 1; id: number; kind: "ui"; payload: CoreToHostUiPayload };
+export type HostToCoreFrame = { v: 1; id: number; kind: "agent-result"; payload: HostToCoreAgentResultPayload } | { v: 1; id: number; kind: "attested-task-observation"; payload: HostToCoreAttestedTaskObservationPayload } | { v: 1; id: number; kind: "command"; payload: HostToCoreCommandPayload } | { v: 1; id: number; kind: "guard-query"; payload: HostToCoreGuardQueryPayload } | { v: 1; id: number; kind: "operator-answer"; payload: HostToCoreOperatorAnswerPayload } | { v: 1; id: number; kind: "shutdown"; payload: HostToCoreShutdownPayload } | { v: 1; id: number; kind: "task-completed"; payload: HostToCoreTaskCompletedPayload };
+export type CoreToHostFrame = { v: 1; id: number; kind: "done"; payload: CoreToHostDonePayload } | { v: 1; id: number; kind: "guard-decision"; payload: CoreToHostGuardDecisionPayload } | { v: 1; id: number; kind: "log"; payload: CoreToHostLogPayload } | { v: 1; id: number; kind: "reconcile-attested"; payload: CoreToHostReconcileAttestedPayload } | { v: 1; id: number; kind: "session"; payload: CoreToHostSessionPayload } | { v: 1; id: number; kind: "spawn"; payload: CoreToHostSpawnPayload } | { v: 1; id: number; kind: "spawn-attested"; payload: CoreToHostSpawnAttestedPayload } | { v: 1; id: number; kind: "ui"; payload: CoreToHostUiPayload };

@@ -45,13 +45,7 @@ fn c3_cycle_without_exit_fails() {
 
 #[test]
 fn c4_literal_terminal_reachability_fails() {
-    assert_fails(
-        "C4",
-        WORKFLOW.replace(
-            "    transition from=\"ready-to-commit\" to=\"failed\" evidence=\"run-main-cas-failed\" doc=\"D76 §9.1 — compare-and-swap failure is explicit; response-loss restart reconciles postconditions.\"\n",
-            "",
-        ),
-    );
+    assert_fails("C4", WORKFLOW.replace("terminal=#true", "terminal=#false"));
 }
 
 #[test]
@@ -69,7 +63,7 @@ fn c5_missing_verdict_fails() {
 fn c6_missing_evidence_fails() {
     assert_fails(
         "C6",
-        WORKFLOW.replacen("evidence=\"plan-approval\"", "evidence=\"\"", 1),
+        WORKFLOW.replacen("evidence=\"planning.ready-to-execute.v1\"", "evidence=\"\"", 1),
     );
 }
 

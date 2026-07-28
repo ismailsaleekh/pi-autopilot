@@ -5,7 +5,8 @@ review_policy: contract
 covers_surfaces:
   - autopilot-agent-run
 covers_sources:
-  - src/cli/autopilot-agent-run.ts
+  - bin/autopilot-agent-run.mjs
+  - drivers/src/runner/child.rs
 signature_hash: 'sha256:6a2b2a4d670b47bf0757d6cd542538122a0183d625023be72212d51161cfee73'
 body_hash: 'sha256:247c9228a410e7156c9762ed3b6315024520cb445f813ffb83f331a712ca5606'
 stability: stable
@@ -13,61 +14,33 @@ stability: stable
 
 # `autopilot-agent-run`
 
-The child runner CLI. The published bin launches compiled JavaScript under
-`dist/src/cli/autopilot-agent-run.js`; it does not execute TypeScript from
-`node_modules` or rely on Node type stripping.
+`autopilot-agent-run` is the package-contained child-runner wrapper shipped by `pi-autopilot@1.3.1`.
 
 ## Synopsis
 
-`autopilot-agent-run [--dry-run] [--json] [--pi-executable <path>] <unit-spec.json>`
+```bash
+autopilot-agent-run --spec /absolute/path/to/autopilot.agent_run_spec.v1.json
+```
 
-`autopilot-agent-run recover-d65-subscription --continuation <absolute-json> --probe <absolute-json> --continuation-sequence <n> --bound <repo-relative-ref> <absolute-file> [--bound <ref> <file> ...] [--json]`
+The npm bin points to `bin/autopilot-agent-run.mjs`. The wrapper resolves only the sibling `bin/autopilot-core.mjs` inside the same physical package root and invokes:
 
-## Behavior
+```bash
+node <package>/bin/autopilot-core.mjs agent-run --spec <absolute-spec>
+```
 
-Reads and validates an Autopilot unit spec, applies the deterministic Quality vNext
-spec gate before model spend, authenticates v2 roster/selection/mirror/request-profile
-identity (or byte-faithful historical v1 adapter authority), creates/resumes the
-deterministic per-unit worktree for source-changing implement/fix specs, verifies a
-clean source baseline, derives and persists the canonical repository-grounded authority
-artifact, acquires only its exact observations/edit-intentions/exclusives, renders the
-child prompt, and either dry-runs or launches Pi in RPC mode with the internal compiled
-status tool and worktree guard.
+There is no PATH, cwd, ancestor, `dist/`, `target/`, or source-checkout fallback.
 
-Live runs require the current private coordinator session context and register a child
-lease before model spend. Current-build D65 runs additionally validate the accepted
-complete semantic graph, highest signed launch policy, and governing program heartbeat
-before runner preflight, after acquisition, and immediately before child-model spawn.
-A semantic coordinator event suspends re-entry until its exact successor graph is
-published and accepted.
+## Contract
 
-The `recover-d65-subscription` mode is the bounded D65 subscription-provider recovery
-entrypoint. It reads the accepted continuation, one-use subscription probe, and exact
-bound authority files from absolute paths, then drives successor generation from the
-current coordinator environment; on unresolved coordination failure it emits
-`recovery-pending` and exits `40` without substituting provider authority.
+The Rust `agent-run` mode reads one strict `autopilot.agent_run_spec.v1` document, rejects unknown fields and identity/path drift, validates the role/mode/roster/tool allowlist, verifies deterministic prompt/spec/carrier paths, removes metered API-key route overrides, and launches `pi --mode json --no-session --no-extensions` directly.
 
-## Exit classes
+A successful child run must emit exactly one final assistant result, followed by a successful `agent_end`. Planning results are validated against the requested planning boundary before the planning carrier is written. Delivery results must parse as `autopilot.delivery_result.v1` and match the lane/attempt/base/worktree identity before Core accepts them.
 
-| Exit | Failure class |
-|---|---|
-| `0` | success / dry-run |
-| `2` | `spec-invalid` |
-| `3` | `waiting-for-peer-release` |
-| `10` | `pi-spawn-failed` |
-| `20` | `missing-structured-output` |
-| `21` | `invalid-structured-output` |
-| `30` | `status-non-success` |
-| `31` | `runtime-commit-failed` |
+## Failure behavior
 
-## State written
-
-`autopilot.execution_audit.v1` under `execution-audits/`, `autopilot.execution_commit.v1`
-evidence, status/receipt artifacts, v2 request/observed-profile identity evidence, and
-an optional rendered-prompt snapshot — all in the authoritative main runtime root.
+The wrapper exits nonzero if the contained core wrapper is missing or not a regular file. Core `agent-run` exits nonzero for malformed specs, missing prompts, stale carriers, roster drift, Pi spawn failure, Pi timeout, oversized stdout/stderr, malformed JSONL, provider/model drift, missing `agent_end`, boundary rejection, or carrier write failure.
 
 ## Related
 
-- Tool: [`../tools/autopilot_emit_status.md`](../tools/autopilot_emit_status.md)
-- Roster subsystem: [`../subsystems/roster-onboarding.md`](../subsystems/roster-onboarding.md)
-- CLI: [`autopilot-coordinator.md`](autopilot-coordinator.md)
+- Runner subsystem: [`../subsystems/runner-and-forced-output.md`](../subsystems/runner-and-forced-output.md)
+- Generated contracts: [`../generated/contracts.md`](../generated/contracts.md)

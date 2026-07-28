@@ -17,7 +17,9 @@ use kernel::{
 use serde::{Deserialize, Serialize};
 
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
-const WRITE_LOCK: &str = ".store.lock"; const LOCK_TRIES: usize = 1_000; const LOCK_SLEEP: Duration = Duration::from_millis(10);
+const WRITE_LOCK: &str = ".store.lock";
+const LOCK_TRIES: usize = 1_000;
+const LOCK_SLEEP: Duration = Duration::from_millis(10);
 
 #[derive(Debug)]
 pub struct FsStore {
@@ -58,9 +60,13 @@ impl FsStore {
         }
     }
 
-    pub fn replay_inputs(&self) -> Result<(Vec<EventRow>, CacheRead), Failure> { Ok((Store::read_events(self)?, Store::read_cache(self)?)) }
+    pub fn replay_inputs(&self) -> Result<(Vec<EventRow>, CacheRead), Failure> {
+        Ok((Store::read_events(self)?, Store::read_cache(self)?))
+    }
 
-    pub fn cache_path(&self) -> PathBuf { self.root.join(&self.cache) }
+    pub fn cache_path(&self) -> PathBuf {
+        self.root.join(&self.cache)
+    }
 
     fn target(&self, leaf: &Path) -> Result<PathBuf, Failure> {
         let path = self.root.join(leaf);
@@ -100,7 +106,9 @@ impl FsStore {
     }
 }
 
-struct WriteLock { _file: File }
+struct WriteLock {
+    _file: File,
+}
 
 impl Store for FsStore {
     fn append_event(&mut self, row: &EventRow) -> Result<(), Failure> {
@@ -159,8 +167,13 @@ impl Store for FsStore {
 }
 
 fn checked(path: &Path) -> Result<PathBuf, Failure> {
-    if path.is_absolute() { return Err(unsafe_write()); }
-    match (path.components().next(), path.components().nth(1)) { (Some(Component::Normal(value)), None) => Ok(PathBuf::from(value)), _ => Err(unsafe_write()) }
+    if path.is_absolute() {
+        return Err(unsafe_write());
+    }
+    match (path.components().next(), path.components().nth(1)) {
+        (Some(Component::Normal(value)), None) => Ok(PathBuf::from(value)),
+        _ => Err(unsafe_write()),
+    }
 }
 
 fn atomic_replace(root: &Path, leaf: &Path, bytes: &[u8]) -> Result<(), Failure> {
@@ -187,7 +200,9 @@ fn atomic_replace(root: &Path, leaf: &Path, bytes: &[u8]) -> Result<(), Failure>
     Ok(())
 }
 
-fn under(path: &Path, root: &Path) -> bool { path.strip_prefix(root).is_ok() }
+fn under(path: &Path, root: &Path) -> bool {
+    path.strip_prefix(root).is_ok()
+}
 
 #[cfg(unix)]
 fn set_dir_mode(path: &Path) -> Result<(), Failure> {
@@ -198,20 +213,39 @@ fn set_dir_mode(path: &Path) -> Result<(), Failure> {
 #[cfg(unix)]
 fn set_file_mode(file: &File) -> Result<(), Failure> {
     use std::os::unix::fs::PermissionsExt;
-    file.set_permissions(fs::Permissions::from_mode(0o600)).map_err(map_io)
+    file.set_permissions(fs::Permissions::from_mode(0o600))
+        .map_err(map_io)
 }
 
 #[cfg(not(unix))]
-fn set_dir_mode(path: &Path) -> Result<(), Failure> { let _path = path; Ok(()) }
+fn set_dir_mode(path: &Path) -> Result<(), Failure> {
+    let _path = path;
+    Ok(())
+}
 
 #[cfg(not(unix))]
-fn set_file_mode(file: &File) -> Result<(), Failure> { let _file = file; Ok(()) }
+fn set_file_mode(file: &File) -> Result<(), Failure> {
+    let _file = file;
+    Ok(())
+}
 
-fn unsafe_write() -> Failure { Failure::Unsafe { boundary: HardBoundary::OutOfScopeWrite } }
+fn unsafe_write() -> Failure {
+    Failure::Unsafe {
+        boundary: HardBoundary::OutOfScopeWrite,
+    }
+}
 
-fn corrupt() -> Failure { Failure::Recoverable { route: RecoveryRoute::Tier1 } }
+fn corrupt() -> Failure {
+    Failure::Recoverable {
+        route: RecoveryRoute::Tier1,
+    }
+}
 
-fn single_writer_busy() -> Failure { Failure::Transient { retry: RetryPolicy::Backoff } }
+fn single_writer_busy() -> Failure {
+    Failure::Transient {
+        retry: RetryPolicy::Backoff,
+    }
+}
 
 fn map_data(error: serde_json::Error) -> Failure {
     drop(error);
@@ -220,5 +254,7 @@ fn map_data(error: serde_json::Error) -> Failure {
 
 fn map_io(error: io::Error) -> Failure {
     drop(error);
-    Failure::Transient { retry: RetryPolicy::Backoff }
+    Failure::Transient {
+        retry: RetryPolicy::Backoff,
+    }
 }

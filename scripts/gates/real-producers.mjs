@@ -68,7 +68,7 @@ function functionBody(name) {
 
 for (const route of ['route_plan', 'route_run']) {
   const body = functionBody(route);
-  if (!body.includes('append_agent_invocation(')) failures.push(`${route} has no recorded agent invocation before success`);
+  if (!body.includes('append_runner_invocation(')) failures.push(`${route} has no recorded runner invocation before success`);
   if (!body.includes('spawn(')) failures.push(`${route} does not return through the spawn/bg_run seam`);
 }
 

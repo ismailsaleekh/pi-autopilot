@@ -58,17 +58,17 @@ fn missing_background_task_capability_pauses_before_any_mutation()
             BgCapability::Logs,
         ),
         (
-            "stop",
+            "kill",
             BgCapabilities {
                 stop: false,
                 ..BgCapabilities::complete()
             },
-            BgCapability::Stop,
+            BgCapability::Kill,
         ),
     ] {
         let root = temp_root(label)?;
         let target = root.join("mutation");
-        let result = require_before_mutation(&caps, || {
+        let result = require_before_mutation(&caps, None, || {
             fs::create_dir_all(&target).unwrap();
             fs::write(target.join("artifact"), b"mutated").unwrap();
         });
@@ -80,7 +80,7 @@ fn missing_background_task_capability_pauses_before_any_mutation()
                 needs: OperatorDecision::SupplyCapability
             }
         );
-        assert!(error.instruction.contains("https://pi.dev/packages"));
+        assert!(error.instruction.contains("pi-background-tasks 0.6.1"));
         assert!(error.instruction.contains("reload/restart"));
         assert!(!target.exists(), "{label} created a directory");
         assert!(!target.join("artifact").exists(), "{label} created a file");
@@ -93,7 +93,9 @@ fn missing_background_task_capability_pauses_before_any_mutation()
 fn complete_background_task_capability_allows_mutation() -> Result<(), Box<dyn std::error::Error>> {
     let root = temp_root("complete")?;
     let target = root.join("mutation");
-    match require_before_mutation(&BgCapabilities::complete(), || fs::create_dir_all(&target)) {
+    match require_before_mutation(&BgCapabilities::complete(), None, || {
+        fs::create_dir_all(&target)
+    }) {
         Ok(result) => result?,
         Err(error) => return Err(format!("unexpected pause: {error:?}").into()),
     }

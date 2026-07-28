@@ -18,25 +18,47 @@ use kernel::{
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[test]
-fn reserve_race_has_one_winner_one_active_run_and_one_marker() -> Result<(), Box<dyn std::error::Error>> {
+fn reserve_race_has_one_winner_one_active_run_and_one_marker()
+-> Result<(), Box<dyn std::error::Error>> {
     let root = temp_root("reserve")?;
     let barrier = root.join("start");
     let result_a = root.join("a.result");
     let result_b = root.join("b.result");
-    let a = spawn_child("reserve", root.clone(), "run-a".to_owned(), barrier.clone(), result_a.clone())?;
-    let b = spawn_child("reserve", root.clone(), "run-b".to_owned(), barrier.clone(), result_b.clone())?;
+    let a = spawn_child(
+        "reserve",
+        root.clone(),
+        "run-a".to_owned(),
+        barrier.clone(),
+        result_a.clone(),
+    )?;
+    let b = spawn_child(
+        "reserve",
+        root.clone(),
+        "run-b".to_owned(),
+        barrier.clone(),
+        result_b.clone(),
+    )?;
     fs::write(&barrier, b"go")?;
     assert_child_success(a)?;
     assert_child_success(b)?;
 
-    let results = [fs::read_to_string(&result_a)?, fs::read_to_string(&result_b)?];
+    let results = [
+        fs::read_to_string(&result_a)?,
+        fs::read_to_string(&result_b)?,
+    ];
     let acquired: Vec<&str> = results
         .iter()
         .filter_map(|value| value.strip_prefix("acquired:"))
         .collect();
-    let active = results.iter().filter(|value| value.as_str() == "active-run").count();
+    let active = results
+        .iter()
+        .filter(|value| value.as_str() == "active-run")
+        .count();
     assert_eq!(acquired.len(), 1, "reserve results were {results:?}");
-    assert_eq!(active, 1, "reserve loser must get typed ActiveRun: {results:?}");
+    assert_eq!(
+        active, 1,
+        "reserve loser must get typed ActiveRun: {results:?}"
+    );
 
     let marker = root
         .join("active")
@@ -50,24 +72,42 @@ fn reserve_race_has_one_winner_one_active_run_and_one_marker() -> Result<(), Box
 }
 
 #[test]
-fn append_race_rejects_or_preserves_both_rows_without_corruption() -> Result<(), Box<dyn std::error::Error>> {
+fn append_race_rejects_or_preserves_both_rows_without_corruption()
+-> Result<(), Box<dyn std::error::Error>> {
     let root = temp_root("append")?;
     let barrier = root.join("start");
     let result_a = root.join("a.result");
     let result_b = root.join("b.result");
-    let a = spawn_child("append", root.clone(), "a".to_owned(), barrier.clone(), result_a.clone())?;
-    let b = spawn_child("append", root.clone(), "b".to_owned(), barrier.clone(), result_b.clone())?;
+    let a = spawn_child(
+        "append",
+        root.clone(),
+        "a".to_owned(),
+        barrier.clone(),
+        result_a.clone(),
+    )?;
+    let b = spawn_child(
+        "append",
+        root.clone(),
+        "b".to_owned(),
+        barrier.clone(),
+        result_b.clone(),
+    )?;
     fs::write(&barrier, b"go")?;
     assert_child_success(a)?;
     assert_child_success(b)?;
 
-    let results = [fs::read_to_string(&result_a)?, fs::read_to_string(&result_b)?];
+    let results = [
+        fs::read_to_string(&result_a)?,
+        fs::read_to_string(&result_b)?,
+    ];
     let errors: Vec<&String> = results
         .iter()
         .filter(|value| value.starts_with("error:"))
         .collect();
     let store = FsStore::open(&root).map_err(|error| format!("{error:?}"))?;
-    let (events, cache) = store.replay_inputs().map_err(|error| format!("{error:?}"))?;
+    let (events, cache) = store
+        .replay_inputs()
+        .map_err(|error| format!("{error:?}"))?;
     assert!(
         matches!(cache, CacheRead::Absent | CacheRead::Present(_)),
         "cache must parse or be absent"
@@ -76,20 +116,45 @@ fn append_race_rejects_or_preserves_both_rows_without_corruption() -> Result<(),
     assert_eq!(raw.last(), Some(&b'\n'), "events.jsonl has corrupt tail");
 
     if errors.is_empty() {
-        assert_eq!(events.len(), 2, "lost update: results={results:?} events={}", event_summary(&events));
-        assert!(contains_ref(&events, "event/a"), "row a was lost: {}", event_summary(&events));
-        assert!(contains_ref(&events, "event/b"), "row b was lost: {}", event_summary(&events));
+        assert_eq!(
+            events.len(),
+            2,
+            "lost update: results={results:?} events={}",
+            event_summary(&events)
+        );
         assert!(
-            events.windows(2).all(|pair| pair[0].sequence <= pair[1].sequence),
-            "event sequence moved backwards: {}", event_summary(&events)
+            contains_ref(&events, "event/a"),
+            "row a was lost: {}",
+            event_summary(&events)
+        );
+        assert!(
+            contains_ref(&events, "event/b"),
+            "row b was lost: {}",
+            event_summary(&events)
+        );
+        assert!(
+            events
+                .windows(2)
+                .all(|pair| pair[0].sequence <= pair[1].sequence),
+            "event sequence moved backwards: {}",
+            event_summary(&events)
         );
     } else {
-        assert_eq!(errors.len(), 1, "only one writer may be rejected: {results:?}");
+        assert_eq!(
+            errors.len(),
+            1,
+            "only one writer may be rejected: {results:?}"
+        );
         assert!(
             errors[0].contains("single-writer") || errors[0].contains("ActiveRun"),
             "append rejection must identify a single-writer authority: {results:?}"
         );
-        assert_eq!(events.len(), 1, "accepted writer's row must remain: {}", event_summary(&events));
+        assert_eq!(
+            events.len(),
+            1,
+            "accepted writer's row must remain: {}",
+            event_summary(&events)
+        );
     }
 
     fs::remove_dir_all(root)?;
@@ -164,9 +229,12 @@ fn wait_for_barrier(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn contains_ref(events: &[EventRow], value: &str) -> bool {
-    events
-        .iter()
-        .any(|event| event.artifact_refs.iter().any(|artifact| artifact.0 == value))
+    events.iter().any(|event| {
+        event
+            .artifact_refs
+            .iter()
+            .any(|artifact| artifact.0 == value)
+    })
 }
 
 fn event_summary(events: &[EventRow]) -> String {
@@ -230,7 +298,11 @@ fn assert_child_success(pid: i32) -> Result<(), Box<dyn std::error::Error>> {
     if waited != pid {
         return Err(io::Error::last_os_error().into());
     }
-    assert_eq!(exit_code(status), Some(0), "child {pid} failed with status {status}");
+    assert_eq!(
+        exit_code(status),
+        Some(0),
+        "child {pid} failed with status {status}"
+    );
     Ok(())
 }
 

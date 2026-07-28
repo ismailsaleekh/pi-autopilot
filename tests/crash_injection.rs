@@ -1,4 +1,8 @@
-use std::{fs, path::PathBuf, sync::atomic::{AtomicU64, Ordering}};
+use std::{
+    fs,
+    path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use drivers::{
     integration::{CandidateKind, CandidateRequest, CheckCommand, ReleaseIntegrator},
@@ -69,7 +73,9 @@ fn integration_crash_between_merge_commit_and_ref_swap_accepts_once() {
     );
 
     let mut acceptances = 0;
-    integrator.cas_release(&prepared).expect("single CAS after restart");
+    integrator
+        .cas_release(&prepared)
+        .expect("single CAS after restart");
     acceptances += 1;
 
     let after_swap = fixture
@@ -88,7 +94,10 @@ fn integration_crash_between_merge_commit_and_ref_swap_accepts_once() {
         acceptances += 1;
     }
 
-    assert_eq!(acceptances, 1, "response-loss retry accepts neither zero nor two");
+    assert_eq!(
+        acceptances, 1,
+        "response-loss retry accepts neither zero nor two"
+    );
     assert_eq!(after_swap, prepared.new_tip);
 }
 
@@ -105,13 +114,27 @@ impl Fixture {
         let source = owner.join("repo");
         let vcs = GitVcs::new(&owner);
         let base = vcs.init_fixture(&source).expect("seed repo");
-        vcs.swap(&source, "refs/heads/autopilot/run/run-main/main", &base, ZERO)
-            .expect("run-main ref");
-        Self { owner, source, base, vcs }
+        vcs.swap(
+            &source,
+            "refs/heads/autopilot/run/run-main/main",
+            &base,
+            ZERO,
+        )
+        .expect("run-main ref");
+        Self {
+            owner,
+            source,
+            base,
+            vcs,
+        }
     }
 
     fn integrator(&self) -> ReleaseIntegrator {
-        ReleaseIntegrator::new(&self.owner, &self.source, "refs/heads/autopilot/run/run-main/main")
+        ReleaseIntegrator::new(
+            &self.owner,
+            &self.source,
+            "refs/heads/autopilot/run/run-main/main",
+        )
     }
 
     fn lane_commit(&self, body: &str, label: &str) -> String {
@@ -141,7 +164,13 @@ fn true_check() -> CheckCommand {
     }
 }
 
-fn event(sequence: u64, previous_revision: u64, new_revision: u64, kind: &str, refs: &[&str]) -> EventRow {
+fn event(
+    sequence: u64,
+    previous_revision: u64,
+    new_revision: u64,
+    kind: &str,
+    refs: &[&str],
+) -> EventRow {
     EventRow {
         sequence,
         previous_revision,
@@ -157,4 +186,3 @@ fn temp_root(name: &str) -> PathBuf {
     fs::create_dir_all(&root).expect("temp root");
     root
 }
-

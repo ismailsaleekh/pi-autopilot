@@ -1,15 +1,22 @@
-use std::{fs, path::PathBuf, sync::atomic::{AtomicU64, Ordering}};
+use std::{
+    fs,
+    path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use drivers::{
     validation::{
+        BOUNDARY_ID, CommandSpec, ForwardDecision, ForwardRound, RequiredCriterion,
         decide_forward_round, result, select_forward_commands, submit_validation_verdict,
-        CommandSpec, ForwardDecision, ForwardRound, RequiredCriterion, BOUNDARY_ID,
     },
     vcs::GitVcs,
 };
 use kernel::{
-    boundary::{boundary_by_id, BoundaryMode, Producer},
-    generated::{CriterionResult, CriterionVerdict, ForwardVerdict, Id, Path as CoveredPath, Sha, ValidationScope, ValidationVerdict},
+    boundary::{BoundaryMode, Producer, boundary_by_id},
+    generated::{
+        CriterionResult, CriterionVerdict, ForwardVerdict, Id, Path as CoveredPath, Sha,
+        ValidationScope, ValidationVerdict,
+    },
 };
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -27,8 +34,9 @@ fn validation_boundary_is_a_registered_model_boundary() {
         descriptor.mode(),
         BoundaryMode::Record | BoundaryMode::Enforce
     ));
-    let accepted = submit_validation_verdict(verdict(ForwardVerdict::FORWARDREADY, vec![pass("c1")]))
-        .expect("well-formed verdict accepted in either mode");
+    let accepted =
+        submit_validation_verdict(verdict(ForwardVerdict::FORWARDREADY, vec![pass("c1")]))
+            .expect("well-formed verdict accepted in either mode");
     assert_eq!(accepted.validation_scope.0, "forward");
 }
 
@@ -79,8 +87,13 @@ fn round_two_remaining_blocker_routes_tier23_and_ref_stays_put() {
     let source = root.join("repo");
     let vcs = GitVcs::new(&root);
     let old_tip = vcs.init_fixture(&source).expect("seed repo");
-    vcs.swap(&source, "refs/heads/autopilot/run/run-main/main", &old_tip, ZERO)
-        .expect("run-main ref");
+    vcs.swap(
+        &source,
+        "refs/heads/autopilot/run/run-main/main",
+        &old_tip,
+        ZERO,
+    )
+    .expect("run-main ref");
 
     let decision = decide_forward_round(
         ForwardRound::Two,
@@ -127,7 +140,8 @@ fn command_selection_deduplicates_by_exact_tuple() {
         env_profile: "rust".to_owned(),
         commit: "abc".to_owned(),
     };
-    let selected = select_forward_commands(&[command], &[duplicate]).expect("table-backed selection");
+    let selected =
+        select_forward_commands(&[command], &[duplicate]).expect("table-backed selection");
     assert_eq!(selected.len(), 1);
 }
 
@@ -141,18 +155,42 @@ fn required(id: &str) -> RequiredCriterion {
 }
 
 fn pass(id: &str) -> CriterionResult {
-    result(id, CriterionVerdict::PASS, "ev", &format!("src/{id}.rs"), &format!("surface-{id}"), &format!("edge-{id}"))
+    result(
+        id,
+        CriterionVerdict::PASS,
+        "ev",
+        &format!("src/{id}.rs"),
+        &format!("surface-{id}"),
+        &format!("edge-{id}"),
+    )
 }
 
 fn fail(id: &str) -> CriterionResult {
-    result(id, CriterionVerdict::FAIL, "ev", &format!("src/{id}.rs"), &format!("surface-{id}"), &format!("edge-{id}"))
+    result(
+        id,
+        CriterionVerdict::FAIL,
+        "ev",
+        &format!("src/{id}.rs"),
+        &format!("surface-{id}"),
+        &format!("edge-{id}"),
+    )
 }
 
 fn blocked(id: &str) -> CriterionResult {
-    result(id, CriterionVerdict::BLOCKED, "ev", &format!("src/{id}.rs"), &format!("surface-{id}"), &format!("edge-{id}"))
+    result(
+        id,
+        CriterionVerdict::BLOCKED,
+        "ev",
+        &format!("src/{id}.rs"),
+        &format!("surface-{id}"),
+        &format!("edge-{id}"),
+    )
 }
 
-fn verdict(forward_verdict: ForwardVerdict, criterion_results: Vec<CriterionResult>) -> ValidationVerdict {
+fn verdict(
+    forward_verdict: ForwardVerdict,
+    criterion_results: Vec<CriterionResult>,
+) -> ValidationVerdict {
     ValidationVerdict {
         assignment_id: Id("validator-a".to_owned()),
         validation_scope: ValidationScope("forward".to_owned()),

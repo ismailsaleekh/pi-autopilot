@@ -1014,15 +1014,17 @@ fn emit_rust_typescript(contracts: &Contracts) -> Result<(String, String), Codeg
 }
 
 fn required_constant<'a>(contracts: &'a Contracts, key: &str) -> Result<&'a str, CodegenError> {
-    contracts.constants.get(key).map(String::as_str).ok_or_else(|| {
-        CodegenError::Input(format!("missing required constant `{key}`"))
-    })
+    contracts
+        .constants
+        .get(key)
+        .map(String::as_str)
+        .ok_or_else(|| CodegenError::Input(format!("missing required constant `{key}`")))
 }
 
 fn duration_ms(value: &str) -> Result<u64, CodegenError> {
-    let seconds = value.strip_suffix('s').ok_or_else(|| {
-        CodegenError::Input(format!("unsupported duration constant `{value}`"))
-    })?;
+    let seconds = value
+        .strip_suffix('s')
+        .ok_or_else(|| CodegenError::Input(format!("unsupported duration constant `{value}`")))?;
     let seconds = seconds.parse::<u64>().map_err(|error| {
         CodegenError::Input(format!("invalid duration constant `{value}`: {error}"))
     })?;
@@ -1050,6 +1052,7 @@ fn emit_shape(
 ) {
     rust.push_str(&rust_doc(doc));
     rust.push_str("#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]\n");
+    rust.push_str("#[serde(deny_unknown_fields)]\n");
     rust.push_str(&format!("pub struct {type_name} {{\n"));
     typescript.push_str(&format!("export interface {type_name} {{\n"));
     for item in items {

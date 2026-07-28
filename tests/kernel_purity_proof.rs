@@ -1,6 +1,8 @@
 use drivers::sim::SimPlatform;
 use kernel::effect::{Effect, OperatorMessage};
-use kernel::generated::{ActionKind, BackgroundAction, Bytes, Duration, Id, SupersessionState};
+use kernel::generated::{
+    ActionKind, BackgroundAction, BackgroundActionBgRun, Bytes, Id, SupersessionState,
+};
 use kernel::platform::Platform;
 
 fn small_step(seed: u64) -> Vec<Effect> {
@@ -15,12 +17,14 @@ fn small_step(seed: u64) -> Vec<Effect> {
             action_id: Id(format!("action-{first:016x}")),
             assignment_id: Id("assignment-unit".to_string()),
             kind: ActionKind::LaunchBackground,
-            command_bytes: Bytes(format!("{first:016x}")),
-            display_name: "unit".to_string(),
-            is_agent: true,
-            timeout: Some(Duration("1800s".to_string())),
-            notify_on_completion: true,
-            trigger_on_completion: true,
+            bg_run: BackgroundActionBgRun {
+                name: "unit".to_string(),
+                command: Bytes(format!("{first:016x}")),
+                is_agent: true,
+                timeout_seconds: Some(1800),
+                notify_on_completion: true,
+                trigger_on_completion: true,
+            },
             run_revision: 1,
             expires_at: None,
             supersession_state: SupersessionState("live".to_string()),

@@ -10,10 +10,10 @@ fn watchdog_arms_from_data_as_one_heartbeat_wait() {
 
     assert_eq!(config.minutes, 25);
     assert_eq!(
-        action.command_bytes.0,
+        action.bg_run.command.0,
         "autopilot-heartbeat-wait --minutes 25"
     );
-    assert!(!action.is_agent);
+    assert!(!action.bg_run.is_agent);
     assert!(
         config
             .arm_action(true, true, Id("wd-2".to_owned()), 11)

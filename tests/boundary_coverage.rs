@@ -10,7 +10,9 @@ use drivers::planning::{
 use drivers::transcript::{
     BoundaryModeTable, TranscriptProvenance, TranscriptRecord, TranscriptStore,
 };
-use kernel::boundary::{BOUNDARIES, BoundaryDescriptor, BoundaryMode, BoundaryRuntime, Producer, Rejection};
+use kernel::boundary::{
+    BOUNDARIES, BoundaryDescriptor, BoundaryMode, BoundaryRuntime, Producer, Rejection,
+};
 
 #[test]
 fn model_boundaries_are_enforced_or_loudly_reported_in_record_phase() {
@@ -119,7 +121,8 @@ fn transcript_root() -> PathBuf {
 
 #[test]
 fn replay_gate_rejects_malformed_work_map() {
-    let raw = "### unit\n- **id:** U1\n- **objective:** Do it.\n- **acceptance criteria:**\n  - tested\n";
+    let raw =
+        "### unit\n- **id:** U1\n- **objective:** Do it.\n- **acceptance criteria:**\n  - tested\n";
     let mut runtime = boundary_runtime("planning.work-map.v1");
     runtime.flip_to_enforce();
     let rejection = match accept_work_map(raw, &runtime) {
@@ -183,7 +186,9 @@ fn validate_transcript_root(root: &Path) -> Result<(), String> {
 
 fn replay_records(boundary_id: &'static str, records: &[TranscriptRecord]) {
     let Some(plan) = replay_plan(boundary_id) else {
-        panic!("enforced Model boundary {boundary_id} has transcripts but no replay acceptor or declared typed-only report");
+        panic!(
+            "enforced Model boundary {boundary_id} has transcripts but no replay acceptor or declared typed-only report"
+        );
     };
     for (index, record) in records.iter().enumerate() {
         let raw = match record.replay() {
@@ -216,16 +221,30 @@ fn replay_plan(boundary_id: &str) -> Option<ReplayPlan> {
     }
 }
 
-fn replay_with(raw: &str, id: &'static str, acceptor: fn(&str, &BoundaryRuntime) -> Result<String, Rejection>) -> Result<(), Rejection> {
+fn replay_with(
+    raw: &str,
+    id: &'static str,
+    acceptor: fn(&str, &BoundaryRuntime) -> Result<String, Rejection>,
+) -> Result<(), Rejection> {
     let mut runtime = boundary_runtime(id);
     runtime.flip_to_enforce();
     acceptor(raw, &runtime).map(|_| ())
 }
-fn replay_task_atoms(raw: &str) -> Result<(), Rejection> { replay_with(raw, "planning.task-atoms.v1", accept_task_atoms) }
-fn replay_scout_dossier(raw: &str) -> Result<(), Rejection> { replay_with(raw, "planning.scout-dossier.v1", accept_scout_dossier) }
-fn replay_questions(raw: &str) -> Result<(), Rejection> { replay_with(raw, "planning.questions.v1", accept_questions) }
-fn replay_work_map(raw: &str) -> Result<(), Rejection> { replay_with(raw, "planning.work-map.v1", accept_work_map) }
-fn replay_plan_review(raw: &str) -> Result<(), Rejection> { replay_with(raw, "planning.plan-review.v1", accept_plan_review) }
+fn replay_task_atoms(raw: &str) -> Result<(), Rejection> {
+    replay_with(raw, "planning.task-atoms.v1", accept_task_atoms)
+}
+fn replay_scout_dossier(raw: &str) -> Result<(), Rejection> {
+    replay_with(raw, "planning.scout-dossier.v1", accept_scout_dossier)
+}
+fn replay_questions(raw: &str) -> Result<(), Rejection> {
+    replay_with(raw, "planning.questions.v1", accept_questions)
+}
+fn replay_work_map(raw: &str) -> Result<(), Rejection> {
+    replay_with(raw, "planning.work-map.v1", accept_work_map)
+}
+fn replay_plan_review(raw: &str) -> Result<(), Rejection> {
+    replay_with(raw, "planning.plan-review.v1", accept_plan_review)
+}
 
 fn model_boundaries() -> Vec<&'static BoundaryDescriptor> {
     BOUNDARIES

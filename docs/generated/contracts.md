@@ -12,7 +12,9 @@ Sources: `data/contracts.kdl`.
 | context_manifest | autopilot.context_manifest.v1 | Package | false | Canonical package-written context manifest (D76 §4.1). |
 | context_anchor | autopilot.context_anchor.v1 | Package | false | Validated context anchor pattern set from D76 §4.1. The discriminating field is anchor_form so generated kernel source can avoid embedding domain substrings; literal forms remain data. |
 | control_frame | autopilot.control_frame.v1 | Package | false | Bounded package-generated Control Frame (D76 §6.1). |
-| background_action | autopilot.background_action.v1 | Package | false | Exact background launch/reconcile/stop action descriptor (D76 §6.2 and D74 §4.5). |
+| background_capabilities | autopilot.background_capabilities.v1 | Host | false | Exact pi-background-tasks extension API capability fact object observed by Host and consumed by Core before any planning/run mutation. |
+| background_action | autopilot.background_action.v1 | Package | false | Exact background launch/reconcile/stop action descriptor (D76 §6.2 and D74 §4.5). Core-owned authority metadata wraps the public pi-background-tasks bg_run object without Host renaming or synthesis. |
+| agent_run_spec | autopilot.agent_run_spec.v1 | Package | false | Strict parent-Core written child runner specification for the package-contained autopilot-agent-run wrapper and Rust agent-run mode. |
 | run_identity | autopilot.run_identity.v1 | Package | false | Clean v2 runtime identity namespace (D76 §5.1). |
 | event_row | autopilot.event_row.v1 | Package | false | Append-only event row; events.jsonl is the sole state authority (D76 §5.4 + D77 Closure B). |
 | state_cache | autopilot.state_cache.v1 | Package | false | Disposable cache only, never an authority. State is fold(events); this cache may be deleted at any instant with zero semantic loss and any mismatch forces full replay (D77 Closure B). |
@@ -100,18 +102,44 @@ Sources: `data/contracts.kdl`.
 | control_frame | list | actions | background_action | true |  | Exact currently valid actions. |
 | control_frame | field | next_watchdog_at | timestamp | true | true |  |
 | control_frame | field | return_to_idle | bool | true |  |  |
+| background_capabilities | field | api_version | u32 | true |  | The paired pi-background-tasks extension API version; v1 for the event-bus protocol. |
+| background_capabilities | field | run | bool | true |  |  |
+| background_capabilities | field | run_is_agent | bool | true |  |  |
+| background_capabilities | field | run_completion_trigger | bool | true |  |  |
+| background_capabilities | field | status | bool | true |  |  |
+| background_capabilities | field | logs | bool | true |  |  |
+| background_capabilities | field | logs_bounded | bool | true |  |  |
+| background_capabilities | field | kill | bool | true |  |  |
 | background_action | field | action_id | id | true |  |  |
 | background_action | field | assignment_id | id | true |  |  |
 | background_action | field | kind | action_kind | true |  |  |
-| background_action | field | command_bytes | bytes | true |  | Byte-fixed command; the tool_call guard accepts only an exact live descriptor. |
-| background_action | field | display_name | string | true |  |  |
-| background_action | field | isAgent | bool | true |  | Exact bg_run field spelling from Pi background tasks. |
-| background_action | field | timeout | duration | false | true | Agent tasks may omit arbitrary wall timeout; focused commands default 30m, integration 30m, final suite 4h, cooperative handoff 2m unless overridden. |
-| background_action | field | notifyOnCompletion | bool | true |  | Notification posture. |
-| background_action | field | triggerOnCompletion | bool | true |  | Completion-trigger posture. |
+| background_action | field | bg_run.name | string | true |  | Exact bg_run.name passed to pi-background-tasks. |
+| background_action | field | bg_run.command | bytes | true |  | Byte-fixed bg_run.command; the Host relays this string without PATH lookup or token rewriting. |
+| background_action | field | bg_run.isAgent | bool | true |  | Exact bg_run.isAgent field spelling from Pi background tasks. |
+| background_action | field | bg_run.timeoutSeconds | u32 | false |  | Exact optional bg_run.timeoutSeconds selected by Core; omitted when Core selects no timeout; Host rejects null. |
+| background_action | field | bg_run.notifyOnCompletion | bool | true |  | Exact bg_run.notifyOnCompletion field. |
+| background_action | field | bg_run.triggerOnCompletion | bool | true |  | Exact bg_run.triggerOnCompletion field. |
 | background_action | field | run_revision | u64 | true |  | Expected run revision. |
 | background_action | field | expires_at | timestamp | false | true | Expiry for one-time issued action. |
 | background_action | field | supersession_state | supersession-state | true |  | Live, superseded, expired, or consumed posture. |
+| agent_run_spec | field | schema | schema-id | true |  |  |
+| agent_run_spec | field | action_id | id | true |  |  |
+| agent_run_spec | field | assignment_id | id | true |  |  |
+| agent_run_spec | field | run_revision | u64 | true |  |  |
+| agent_run_spec | field | workstream | id | true |  |  |
+| agent_run_spec | field | role_id | id | true |  |  |
+| agent_run_spec | field | mode | mode-id | true |  |  |
+| agent_run_spec | field | provider | string | true |  |  |
+| agent_run_spec | field | model | string | true |  |  |
+| agent_run_spec | field | thinking | thinking-level | true |  |  |
+| agent_run_spec | field | route | string | true |  |  |
+| agent_run_spec | field | cwd | path | true |  |  |
+| agent_run_spec | list | allowed_tools | tool-name | true |  |  |
+| agent_run_spec | field | prompt_path | path | true |  |  |
+| agent_run_spec | field | prompt_digest | digest | true |  |  |
+| agent_run_spec | field | boundary_id | contract-id | true |  |  |
+| agent_run_spec | field | result_contract | contract-id | true |  |  |
+| agent_run_spec | field | carrier_path | path | true |  |  |
 | run_identity | field | repo_key | base32 | true |  | lowercase-base32(sha256("autopilot-repo-v1\0" + realpath(git-common-dir))) |
 | run_identity | field | run_id | uuidv7 | true |  | UUIDv7 run-id. |
 | run_identity | field | workstream | id | true |  |  |

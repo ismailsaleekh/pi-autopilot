@@ -1,7 +1,6 @@
 use std::{
     ffi::CString,
-    fs,
-    io,
+    fs, io,
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -24,7 +23,8 @@ impl RunOutput {
 }
 
 #[test]
-fn packed_install_resolves_installed_core_and_fails_before_spawn_when_missing() -> Result<(), Box<dyn std::error::Error>> {
+fn packed_install_resolves_installed_core_and_fails_before_spawn_when_missing()
+-> Result<(), Box<dyn std::error::Error>> {
     let root = temp_root("packed-install")?;
     let package_root = package_root()?;
     let stage = root.join("stage");
@@ -64,13 +64,21 @@ fn packed_install_resolves_installed_core_and_fails_before_spawn_when_missing() 
         .get("mode")
         .and_then(Value::as_u64)
         .ok_or("packed wrapper omitted mode")?;
-    assert_ne!(wrapper_mode & 0o111, 0, "packed autopilot-core resolver wrapper is not executable");
+    assert_ne!(
+        wrapper_mode & 0o111,
+        0,
+        "packed autopilot-core resolver wrapper is not executable"
+    );
     let packed_binary = packed_file(files, &binary_entry)?;
     let binary_mode = packed_binary
         .get("mode")
         .and_then(Value::as_u64)
         .ok_or("packed platform binary omitted mode")?;
-    assert_ne!(binary_mode & 0o111, 0, "packed platform autopilot-core is not executable");
+    assert_ne!(
+        binary_mode & 0o111,
+        0,
+        "packed platform autopilot-core is not executable"
+    );
 
     let filename = packed
         .get("filename")
@@ -83,13 +91,22 @@ fn packed_install_resolves_installed_core_and_fails_before_spawn_when_missing() 
     let installed = consumer.join("node_modules").join("pi-autopilot");
     let installed_package_json = installed.join("package.json");
     let installed_wrapper = installed.join(&bin_entry);
-    assert!(installed_wrapper.is_file(), "installed bin wrapper path is absent");
+    assert!(
+        installed_wrapper.is_file(),
+        "installed bin wrapper path is absent"
+    );
     assert_executable(&installed_wrapper)?;
     let installed_binary = installed.join(&binary_entry);
-    assert!(installed_binary.is_file(), "installed platform binary path is absent");
+    assert!(
+        installed_binary.is_file(),
+        "installed platform binary path is absent"
+    );
     assert_executable(&installed_binary)?;
 
-    let resolver = package_root.join("host").join("src").join("resolve-core.ts");
+    let resolver = package_root
+        .join("host")
+        .join("src")
+        .join("resolve-core.ts");
     let resolved = run_resolver(&resolver, &installed_package_json, &installed_binary)?;
     assert_eq!(resolved, installed_binary.to_string_lossy());
     assert!(PathBuf::from(&resolved).starts_with(&installed));
@@ -98,16 +115,32 @@ fn packed_install_resolves_installed_core_and_fails_before_spawn_when_missing() 
     let missing = run_resolver_raw(&resolver, &installed_package_json, &installed_binary)?;
     assert!(!missing.success(), "missing binary unexpectedly resolved");
     let evidence = String::from_utf8_lossy(&missing.stderr);
-    assert!(evidence.len() < 1200, "missing-binary evidence is unbounded");
-    assert!(evidence.contains("autopilot-core binary missing"), "{evidence}");
-    assert!(evidence.contains(installed_binary.to_string_lossy().as_ref()), "{evidence}");
-    assert!(!evidence.contains("exited code="), "resolver spawned the core: {evidence}");
+    assert!(
+        evidence.len() < 1200,
+        "missing-binary evidence is unbounded"
+    );
+    assert!(
+        evidence.contains("autopilot-core binary missing"),
+        "{evidence}"
+    );
+    assert!(
+        evidence.contains(installed_binary.to_string_lossy().as_ref()),
+        "{evidence}"
+    );
+    assert!(
+        !evidence.contains("exited code="),
+        "resolver spawned the core: {evidence}"
+    );
 
     fs::remove_dir_all(root)?;
     Ok(())
 }
 
-fn npm_pack(stage: &Path, pack_dir: &Path, cache: &Path) -> Result<RunOutput, Box<dyn std::error::Error>> {
+fn npm_pack(
+    stage: &Path,
+    pack_dir: &Path,
+    cache: &Path,
+) -> Result<RunOutput, Box<dyn std::error::Error>> {
     let output = run_program(
         "env",
         &[
@@ -124,7 +157,11 @@ fn npm_pack(stage: &Path, pack_dir: &Path, cache: &Path) -> Result<RunOutput, Bo
     require_success("npm pack", output)
 }
 
-fn npm_install(consumer: &Path, tarball: &Path, cache: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn npm_install(
+    consumer: &Path,
+    tarball: &Path,
+    cache: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
     let output = run_program(
         "env",
         &[
@@ -172,11 +209,18 @@ fn package_platform_binary_entry() -> String {
         "x86_64" => "x64",
         other => other,
     };
-    let name = if os == "win32" { "autopilot-core.exe" } else { "autopilot-core" };
+    let name = if os == "win32" {
+        "autopilot-core.exe"
+    } else {
+        "autopilot-core"
+    };
     format!("binaries/{os}-{arch}/{name}")
 }
 
-fn packed_file<'a>(files: &'a [Value], path: &str) -> Result<&'a Value, Box<dyn std::error::Error>> {
+fn packed_file<'a>(
+    files: &'a [Value],
+    path: &str,
+) -> Result<&'a Value, Box<dyn std::error::Error>> {
     files
         .iter()
         .find(|file| file.get("path").and_then(Value::as_str) == Some(path))
@@ -230,7 +274,10 @@ try {
     )
 }
 
-fn require_success(label: &str, output: RunOutput) -> Result<RunOutput, Box<dyn std::error::Error>> {
+fn require_success(
+    label: &str,
+    output: RunOutput,
+) -> Result<RunOutput, Box<dyn std::error::Error>> {
     if !output.success() {
         return Err(format!(
             "{label} failed status={} stdout={} stderr={}",
@@ -340,10 +387,8 @@ fn assert_executable(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
 fn temp_root(label: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let n = TEMP_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let root = std::env::temp_dir().join(format!(
-        "pi-autopilot-{label}-{}-{n}",
-        std::process::id()
-    ));
+    let root =
+        std::env::temp_dir().join(format!("pi-autopilot-{label}-{}-{n}", std::process::id()));
     fs::create_dir_all(&root)?;
     Ok(root)
 }

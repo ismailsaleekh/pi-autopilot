@@ -170,7 +170,9 @@ impl DeepValidationBundle {
         let mut ledger = Vec::new();
         for observation in &observations {
             if !expected.contains(&observation.criterion_id) {
-                return Err(ClosureError::MissingCriterion(observation.criterion_id.clone()));
+                return Err(ClosureError::MissingCriterion(
+                    observation.criterion_id.clone(),
+                ));
             }
             seen.insert(observation.criterion_id.clone());
             for finding in &observation.findings {
@@ -217,7 +219,8 @@ pub fn criteria_for_delta(
 }
 
 fn intersects(left: &[String], right: &[String]) -> bool {
-    left.iter().any(|item| right.iter().any(|other| item == other))
+    left.iter()
+        .any(|item| right.iter().any(|other| item == other))
 }
 
 fn attr_u8(text: &str, key: &str) -> Result<u8, ClosureError> {

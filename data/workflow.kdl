@@ -23,12 +23,14 @@ machine "run" {
     state "ready-to-close" terminal=#false
     state "terminal" terminal=#true
 
-    transition from="planning" to="ready-to-execute" evidence="plan-approval" doc="D76 §12 walkthrough — approved planning completes the planning superphase."
+    transition from="planning" to="ready-to-execute" evidence="planning.ready-to-execute.v1" doc="D76 §12 walkthrough — approved planning now requires an active attested plan-review receipt and a closed planning envelope."
     transition from="ready-to-execute" to="allocating" evidence="execution-command" doc="D76 §12 walkthrough — /autopilot resumes the approved run for execution."
     transition from="allocating" to="executing" evidence="allocation-accepted" doc="D76 §7 and §12 — accepted Allocation Dossier/lane map enables ready lane dispatch."
     transition from="executing" to="final-verification" evidence="all-lanes-closed" doc="D76 §9.2/§10 — final verification waits until every implementation delivery is closed."
     transition from="final-verification" to="ready-to-close" evidence="final-verification-pass" doc="D76 §9.2/§10 — exact-tip final commands, full suite, final Validator, and required Bughunter passed."
-    transition from="ready-to-close" to="terminal" evidence="result-ref-archived" doc="D76 §10 — result ref and safe archive complete the run."
+    transition from="final-verification" to="executing" evidence="final-verification-invalidated" doc="D76 target/tip staleness invalidates final evidence before close."
+    transition from="ready-to-close" to="executing" evidence="final-verification-invalidated" doc="D76 target/tip staleness invalidates a ready close before terminal result archival."
+    transition from="ready-to-close" to="terminal" evidence="result-ref-archived" outcome="closed" doc="D76 §10 — result ref and safe archive complete the run."
 }
 
 machine "lane" {
@@ -118,6 +120,39 @@ machine "candidate" {
     transition from="ready-to-commit" to="committed" evidence="run-main-cas" doc="D76 §9.1/D74 §9.5 — git update-ref CAS advances run-main to the exact candidate."
     transition from="ready-to-commit" to="failed" evidence="run-main-cas-failed" doc="D76 §9.1 — compare-and-swap failure is explicit; response-loss restart reconciles postconditions."
     transition from="ready-to-commit" to="superseded" evidence="candidate-supersession" doc="D76 §9.1 — a ready candidate may be superseded by a current-main/priority change before CAS."
+}
+
+
+machine "evidence-assignment" {
+    doc "Evidence-ingress v1 assignment machine. Each assignment revision is immutable; newer revisions are separate instances."
+    initial "issued"
+
+    state "issued" terminal=#false
+    state "running" terminal=#false
+    state "terminal-observed" terminal=#false
+    state "failed" terminal=#true
+    state "accepted" terminal=#true
+    state "rejected" terminal=#true
+    state "superseded" terminal=#true
+
+    transition from="issued" to="running" evidence="evidence.task-bound.v1"
+    transition from="issued" to="failed" evidence="producer-spawn-failed"
+    transition from="running" to="terminal-observed" evidence="evidence.task-terminal.v1" status="completed"
+    transition from="running" to="failed" evidence="evidence.task-terminal.v1" status="failed|killed|interrupted"
+    transition from="terminal-observed" to="accepted" evidence="evidence.accepted.v1"
+    transition from="terminal-observed" to="rejected" evidence="evidence.rejected.v1"
+    transition from="issued" to="superseded" evidence="evidence.superseded.v1"
+    transition from="failed" to="superseded" evidence="evidence.superseded.v1"
+    transition from="rejected" to="superseded" evidence="evidence.superseded.v1"
+    transition from="accepted" to="superseded" evidence="evidence.superseded.v1"
+}
+
+machine "evidence-envelope" {
+    doc "Closed evidence envelope machine. Additional evidence creates a new manifest revision."
+    initial "open"
+    state "open" terminal=#false
+    state "closed" terminal=#true
+    transition from="open" to="closed" evidence="evidence.envelope-closed.v1"
 }
 
 axis "health" contract="run_health" {
