@@ -2070,51 +2070,8 @@ fn record_context_prompt_for_action(state: &CoreState, action: &BackgroundAction
     }
 }
 
-fn observe_checkpoint_for_action(state: &CoreState, action: &BackgroundAction) -> Vec<Ref> {
-    let Some(binding) = binding_for_action(state, action) else {
-        return Vec::new();
-    };
-    let Some(lane_id) = binding.lane_id.clone() else {
-        return Vec::new();
-    };
-    let assignment_state = crate::checkpoint::AssignmentState {
-        assignment_id: binding.assignment_id.clone(),
-        lane_id,
-        run_revision: binding.run_revision,
-        base_commit: binding
-            .base_commit
-            .clone()
-            .unwrap_or_else(|| Sha("unknown".to_owned())),
-        current_commit: binding
-            .base_commit
-            .clone()
-            .unwrap_or_else(|| Sha("unknown".to_owned())),
-        dirty_paths: Vec::new(),
-        completed: Vec::new(),
-        remaining: vec![binding.assignment_id.clone()],
-        next_action: "continue".to_owned(),
-        session_ref: Ref(format!("session:{}", binding.action_id.0)),
-    };
-    let decision = crate::checkpoint::observe_context(50, &assignment_state);
-    let restart = crate::recovery::reconcile_restart(&crate::recovery::RestartInput {
-        assignment_id: binding.assignment_id.clone(),
-        event_refs: state.state.refs.keys().cloned().collect(),
-        git_refs: binding
-            .base_commit
-            .clone()
-            .map(|sha| vec![Ref(sha.0)])
-            .unwrap_or_default(),
-        create_once_refs: Vec::new(),
-        checkpoint_refs: Vec::new(),
-        result: None,
-        lock: crate::recovery::LockState::Free,
-    });
-    vec![
-        Ref("module-wired:checkpoint".to_owned()),
-        Ref("module-wired:recovery".to_owned()),
-        Ref(format!("checkpoint-observe:{decision:?}")),
-        Ref(format!("recovery-restart:{restart:?}")),
-    ]
+fn observe_checkpoint_for_action(_state: &CoreState, _action: &BackgroundAction) -> Vec<Ref> {
+    Vec::new()
 }
 
 fn record_delivery_transcript(

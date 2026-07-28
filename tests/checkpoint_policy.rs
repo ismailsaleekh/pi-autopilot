@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 const POLICY: &str = include_str!("../data/checkpoint-policy.kdl");
 const CONTRACTS: &str = include_str!("../data/contracts.kdl");
@@ -18,6 +18,118 @@ fn checkpoint_policy_resolves_declared_roles_and_rejects_unknown() {
         declared, role_ids,
         "every data/roles.kdl role must have an explicit checkpoint interruptibility decision"
     );
+
+    let expected_roles = BTreeMap::from([
+        ("task-extractor", (true, Some("task-atom-ledger"))),
+        (
+            "repository-scout",
+            (true, Some("evidence-selection-ledger")),
+        ),
+        ("context-curator", (true, Some("evidence-selection-ledger"))),
+        ("plan-compiler", (true, Some("work-map-ledger"))),
+        ("plan-synthesizer", (true, Some("work-map-ledger"))),
+        ("plan-reviewer", (true, Some("plan-review-ledger"))),
+        ("contradiction-resolver", (true, Some("question-ledger"))),
+        ("implementer", (true, Some("delivery-ledger"))),
+        ("fixer-integrator", (true, Some("delivery-ledger"))),
+        ("onboard", (false, None)),
+        ("orchestrator", (false, None)),
+        ("context-synthesizer", (false, None)),
+        ("execution-allocator", (false, None)),
+        ("validator", (false, None)),
+        ("bughunter", (false, None)),
+    ]);
+    assert_eq!(policy.roles.len(), expected_roles.len());
+    for (role_id, (interruptible, slot_set)) in expected_roles {
+        let role = policy.role(role_id).expect("expected role resolves");
+        assert_eq!(
+            role.interruptible, interruptible,
+            "{role_id} interruptible drift"
+        );
+        assert_eq!(
+            role.slot_set.as_deref(),
+            slot_set,
+            "{role_id} slot_set drift"
+        );
+    }
+
+    let expected_slots = BTreeMap::from([
+        (
+            "task-atom-ledger",
+            vec![
+                "semantic_lens",
+                "authority_coverage",
+                "atom_ledger",
+                "duplicate_dispositions",
+                "unresolved_ambiguities",
+            ],
+        ),
+        (
+            "evidence-selection-ledger",
+            vec![
+                "scope_identity",
+                "source_ranges_considered",
+                "accepted_outputs",
+                "rejected_uncertain_outputs",
+                "unvisited_or_gap_refs",
+                "budget_identity",
+            ],
+        ),
+        (
+            "question-ledger",
+            vec![
+                "resolution_batch",
+                "claim_evidence_ledger",
+                "surviving_facts",
+                "rejected_facts",
+                "unresolved_gaps",
+                "pending_questions",
+            ],
+        ),
+        (
+            "work-map-ledger",
+            vec![
+                "input_disposition_matrix",
+                "draft_units",
+                "dependency_gate_tdd_obligations",
+                "merge_conflict_decisions",
+                "trace_gaps",
+            ],
+        ),
+        (
+            "plan-review-ledger",
+            vec![
+                "criterion_universe",
+                "verdict_ledger",
+                "evidence_rationale_refs",
+                "checked_dimensions",
+                "unreviewed_criteria",
+                "blocker_advisory_split",
+            ],
+        ),
+        (
+            "delivery-ledger",
+            vec![
+                "worktree_identity",
+                "scope_boundaries",
+                "edit_ledger",
+                "tdd_command_ledger",
+                "evidence_refs",
+                "boundary_violations",
+                "repair_decisions",
+                "draft_delivery_status",
+            ],
+        ),
+    ]);
+    for (slot_set_id, expected) in expected_slots {
+        let actual = policy.slot_sets[slot_set_id]
+            .slots
+            .iter()
+            .filter(|slot| slot.required)
+            .map(|slot| slot.key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected, "{slot_set_id} required slots drift");
+    }
 
     for (role_id, role_policy) in &policy.roles {
         let resolved = policy.role(role_id).expect("declared role resolves");

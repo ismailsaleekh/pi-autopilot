@@ -63,7 +63,11 @@ fn c5_missing_verdict_fails() {
 fn c6_missing_evidence_fails() {
     assert_fails(
         "C6",
-        WORKFLOW.replacen("evidence=\"planning.ready-to-execute.v1\"", "evidence=\"\"", 1),
+        WORKFLOW.replacen(
+            "evidence=\"planning.ready-to-execute.v1\"",
+            "evidence=\"\"",
+            1,
+        ),
     );
 }
 

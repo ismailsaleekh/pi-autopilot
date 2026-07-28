@@ -4,10 +4,10 @@ use std::path::PathBuf;
 
 use drivers::evidence::{self, EvidenceError};
 use kernel::generated::{
-    AutopilotAttestedAction, AutopilotContentRef, AutopilotEventRef, ContractId,
-    Digest, EventKind, EvidenceContentKind, HostToCoreAttestedTaskObservationPayload, Id,
+    AutopilotAttestedAction, AutopilotContentRef, AutopilotEventRef, Base32, ContractId, Digest,
+    EventKind, EvidenceContentKind, HostToCoreAttestedTaskObservationPayload, Id,
     Path as ContractPath, Phase2PiAttestedRunRequest, Phase2PiConsumerBinding, SchemaId,
-    ThinkingLevel, UnixMs, Uuidv7, Base32,
+    ThinkingLevel, UnixMs, Uuidv7,
 };
 
 #[test]
@@ -34,8 +34,14 @@ fn attested_ingress_rejects_absolute_or_unowned_source_paths_before_read() {
             producer_task_id: Id("b00000000000000000000000000000000".to_owned()),
             producer_request_sha256: action.producer_request.request_sha256.clone(),
             status: "completed".to_owned(),
-            report_source_path: ContractPath(PathBuf::from("/tmp/forged-report.json").display().to_string()),
-            sidecar_source_path: ContractPath(".pi/tasks/session/b00000000000000000000000000000000.attestation.json".to_owned()),
+            report_source_path: ContractPath(
+                PathBuf::from("/tmp/forged-report.json")
+                    .display()
+                    .to_string(),
+            ),
+            sidecar_source_path: ContractPath(
+                ".pi/tasks/session/b00000000000000000000000000000000.attestation.json".to_owned(),
+            ),
         },
     )
     .expect_err("absolute source path must reject");
@@ -54,7 +60,9 @@ fn attested_ingress_rejects_absolute_or_unowned_source_paths_before_read() {
             producer_request_sha256: action.producer_request.request_sha256.clone(),
             status: "completed".to_owned(),
             report_source_path: ContractPath("tmp/forged-report.json".to_owned()),
-            sidecar_source_path: ContractPath(".pi/tasks/session/b00000000000000000000000000000000.attestation.json".to_owned()),
+            sidecar_source_path: ContractPath(
+                ".pi/tasks/session/b00000000000000000000000000000000.attestation.json".to_owned(),
+            ),
         },
     )
     .expect_err("unowned relative source path must reject");
@@ -67,7 +75,9 @@ fn issued_action() -> AutopilotAttestedAction {
         kind: EvidenceContentKind::Assignment,
         path: ContractPath("evidence/assignments/evi-test.json".to_owned()),
         byte_length: UnixMs("2".to_owned()),
-        sha256: Digest("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned()),
+        sha256: Digest(
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+        ),
     };
     let consumer_binding = Phase2PiConsumerBinding {
         schema_version: SchemaId("phase2.pi_consumer_binding.v1".to_owned()),
@@ -81,8 +91,12 @@ fn issued_action() -> AutopilotAttestedAction {
         assignment_revision: 1,
         run_revision: 7,
         boundary_id: ContractId("planning.plan-review.v1".to_owned()),
-        subject_digest: Digest("sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned()),
-        binding_sha256: Digest("sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned()),
+        subject_digest: Digest(
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+        ),
+        binding_sha256: Digest(
+            "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned(),
+        ),
     };
     AutopilotAttestedAction {
         schema_version: SchemaId("autopilot.attested_action.v1".to_owned()),
@@ -99,15 +113,22 @@ fn issued_action() -> AutopilotAttestedAction {
             thinking: ThinkingLevel("high".to_owned()),
             system_prompt_utf8: "system".to_owned(),
             prompt_utf8: "prompt".to_owned(),
-            report_path: ContractPath(".pi/autopilot/main/evidence-staging/evi-test.report.v1.json".to_owned()),
+            report_path: ContractPath(
+                ".pi/autopilot/main/evidence-staging/evi-test.report.v1.json".to_owned(),
+            ),
             timeout_seconds: 60,
             idempotency_key: Id("evidence-issue:v1:evi-test".to_owned()),
             consumer_binding,
-            request_sha256: Digest("sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".to_owned()),
+            request_sha256: Digest(
+                "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                    .to_owned(),
+            ),
         },
         expires_at_unix_ms: UnixMs("9007199254740991".to_owned()),
         supersession_state: "live".to_owned(),
-        action_sha256: Digest("sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_owned()),
+        action_sha256: Digest(
+            "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_owned(),
+        ),
     }
 }
 
@@ -116,6 +137,8 @@ fn event_ref(sequence: u64, kind: &str) -> AutopilotEventRef {
         schema_version: SchemaId("autopilot.event_ref.v1".to_owned()),
         sequence,
         kind: EventKind(kind.to_owned()),
-        row_sha256: Digest("sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_owned()),
+        row_sha256: Digest(
+            "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_owned(),
+        ),
     }
 }

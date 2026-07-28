@@ -1,19 +1,22 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{BufRead, Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
+
+use crate::checkpoint::{self, AgentHandoff, CheckpointInput, CheckpointSource, ContextBudget};
+use crate::runner::rpc::{
+    CompactionReason, RpcClient, RpcCommand, RpcCommandKind, RpcDiagnostics, RpcEvent, RpcFrame,
+    RpcResponse, RpcSpawnConfig, TerminalMessage,
+};
 
 use kernel::failure::{Failure, OperatorDecision, RetryPolicy};
 use kernel::generated::{AgentRunSpec, DeliveryResult, TaskDocument};
-use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest as ShaDigest, Sha256};
 
 const DEFAULT_MAX_PI_STDOUT_BYTES: usize = 1024 * 1024;
 const DEFAULT_MAX_PI_STDERR_BYTES: usize = 256 * 1024;
-const DEFAULT_PI_TIMEOUT_MS: u64 = 60 * 60 * 1000;
 const MAX_VALUE_ATTEMPTS: u32 = 3;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -23,50 +26,12 @@ struct ValueRejection {
     got: String,
 }
 
-struct ChildOutput {
-    assistant: Option<String>,
-    stdout_error: Option<String>,
-    stderr_error: Option<String>,
-    stdout_tail: Vec<u8>,
-    stderr_tail: Vec<u8>,
-    status: Option<std::process::ExitStatus>,
-    timed_out: bool,
-    diagnostics: StreamDiagnostics,
-}
-
-#[derive(Debug, Clone)]
-struct StreamDiagnostics {
-    stdout_total_bytes: usize,
-    stderr_total_bytes: usize,
-    stdout_tail_bytes: usize,
-    stderr_tail_bytes: usize,
-    stdout_tail_truncated: bool,
-    stderr_tail_truncated: bool,
-    stdout_lines: usize,
-    final_event_bytes: usize,
-    peak_retained_stdout_bytes: usize,
-    peak_retained_stderr_bytes: usize,
-    stdout_limit: usize,
-    stderr_limit: usize,
-}
-
-struct StdoutRead {
-    assistant: Option<String>,
-    error: Option<String>,
-    tail: Vec<u8>,
-    total_bytes: usize,
-    lines: usize,
-    final_event_bytes: usize,
-    tail_truncated: bool,
-    peak_retained_bytes: usize,
-}
-
-struct TailRead {
-    data: Vec<u8>,
-    read_error: Option<String>,
-    total_bytes: usize,
-    tail_truncated: bool,
-    peak_retained_bytes: usize,
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct AssistantRecord {
+    text: String,
+    provider: String,
+    model: String,
+    stop_reason: String,
 }
 
 pub fn main(args: &[String]) -> Result<(), String> {
@@ -116,30 +81,1023 @@ pub fn main(args: &[String]) -> Result<(), String> {
         append_attempt_event(&spec, 0, "existing-carrier-accepted", None)?;
         return Ok(());
     }
+    let mut runner = RpcAssignment::spawn_and_configure(&spec)?;
+    let result = run_value_attempts(&mut runner, &spec_path, &spec_digest, &spec, prompt);
+    let shutdown = runner.shutdown();
+    if result.is_ok() {
+        shutdown?;
+    }
+    result
+}
+
+fn run_value_attempts(
+    runner: &mut RpcAssignment,
+    spec_path: &Path,
+    spec_digest: &str,
+    spec: &AgentRunSpec,
+    prompt: String,
+) -> Result<(), String> {
     let mut attempt_prompt = prompt;
     for attempt in 1..=MAX_VALUE_ATTEMPTS {
-        append_attempt_event(&spec, attempt, "started", None)?;
-        let output = checked_pi_output(&spec, &attempt_prompt)?;
-        let assistant = output
-            .assistant
-            .as_deref()
-            .ok_or_else(|| "agent-run Pi JSONL contained no final assistant result".to_owned())?;
-        match write_carrier(&spec_path, &spec_digest, &spec, assistant) {
+        append_attempt_event(spec, attempt, "started", None)?;
+        let assistant = runner.run_normal_prompt(spec, &attempt_prompt)?;
+        match write_carrier(spec_path, spec_digest, spec, &assistant) {
             Ok(()) => {
-                append_attempt_event(&spec, attempt, "accepted", None)?;
+                append_attempt_event(spec, attempt, "accepted", None)?;
                 return Ok(());
             }
             Err(rejection) if attempt < MAX_VALUE_ATTEMPTS => {
-                append_attempt_event(&spec, attempt, "value-rejected", Some(&rejection))?;
-                attempt_prompt = render_repair_prompt(&spec, &rejection);
+                append_attempt_event(spec, attempt, "value-rejected", Some(&rejection))?;
+                attempt_prompt = render_repair_prompt(spec, &rejection);
             }
             Err(rejection) => {
-                append_attempt_event(&spec, attempt, "paused-after-exhaustion", Some(&rejection))?;
-                return Err(paused_after_exhaustion(&spec, &rejection));
+                append_attempt_event(spec, attempt, "paused-after-exhaustion", Some(&rejection))?;
+                return Err(paused_after_exhaustion(spec, &rejection));
             }
         }
     }
     unreachable!("bounded value attempt loop must return")
+}
+
+struct RpcAssignment {
+    client: RpcClient,
+    next_command: u64,
+    policy: CheckpointPolicy,
+    last_known_percent: Option<f64>,
+    checkpoint_armed: bool,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum PromptPurpose {
+    Normal,
+    Handoff,
+    Resume,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct CycleTerminal {
+    record: AssistantRecord,
+    delivered_after_steer: bool,
+}
+
+struct CycleState {
+    purpose: PromptPurpose,
+    prompt_response_seen: bool,
+    pending_stats: BTreeSet<String>,
+    final_record: Option<CycleTerminal>,
+    terminal_count: usize,
+    tool_after_terminal: bool,
+    awaiting_handoff: bool,
+    steer_response_seen: bool,
+    steer_queue_seen: bool,
+    steer_message_started: bool,
+    handoff: Option<AgentHandoff>,
+    compacted: bool,
+}
+
+impl CycleState {
+    fn new(purpose: PromptPurpose) -> Self {
+        Self {
+            purpose,
+            prompt_response_seen: false,
+            pending_stats: BTreeSet::new(),
+            final_record: None,
+            terminal_count: 0,
+            tool_after_terminal: false,
+            awaiting_handoff: matches!(purpose, PromptPurpose::Handoff),
+            steer_response_seen: false,
+            steer_queue_seen: false,
+            steer_message_started: matches!(purpose, PromptPurpose::Handoff),
+            handoff: None,
+            compacted: false,
+        }
+    }
+}
+
+impl RpcAssignment {
+    fn spawn_and_configure(spec: &AgentRunSpec) -> Result<Self, String> {
+        let tools = spec
+            .allowed_tools
+            .iter()
+            .map(|tool| tool.0.clone())
+            .collect::<Vec<_>>();
+        let stderr_limit = env_usize(
+            "AUTOPILOT_AGENT_RUN_MAX_STDERR_BYTES",
+            DEFAULT_MAX_PI_STDERR_BYTES,
+        );
+        let stdout_limit = env_usize(
+            "AUTOPILOT_AGENT_RUN_MAX_STDOUT_BYTES",
+            DEFAULT_MAX_PI_STDOUT_BYTES,
+        );
+        let mut config = RpcSpawnConfig::new(
+            PathBuf::from(&spec.cwd.0),
+            spec.provider.clone(),
+            spec.model.clone(),
+            spec.thinking.0.clone(),
+            spec.session_id.0.clone(),
+            tools,
+        );
+        config.stderr_tail_bytes = stderr_limit;
+        config.max_terminal_bytes = stdout_limit.max(DEFAULT_MAX_PI_STDOUT_BYTES);
+        let client = RpcClient::spawn(config).map_err(|error| error.to_string())?;
+        let policy = CheckpointPolicy::parse()?;
+        let mut runner = Self {
+            client,
+            next_command: 0,
+            policy,
+            last_known_percent: None,
+            checkpoint_armed: false,
+        };
+        let auto_id = runner.next_id("auto-off");
+        let response = runner.command_response(RpcCommand::set_auto_compaction(auto_id, false))?;
+        if !response.success {
+            return Err("agent-run set_auto_compaction returned success:false".to_owned());
+        }
+        let state_id = runner.next_id("state");
+        let state = runner.command_response(RpcCommand::get_state(state_id))?;
+        runner.validate_state(spec, &state)?;
+        Ok(runner)
+    }
+
+    fn run_normal_prompt(&mut self, spec: &AgentRunSpec, prompt: &str) -> Result<String, String> {
+        self.run_prompt(spec, prompt, PromptPurpose::Normal)
+    }
+
+    fn run_prompt(
+        &mut self,
+        spec: &AgentRunSpec,
+        prompt: &str,
+        purpose: PromptPurpose,
+    ) -> Result<String, String> {
+        let prompt_id = self.next_id("prompt");
+        self.client
+            .send_command(RpcCommand::prompt(prompt_id.clone(), prompt.to_owned()))
+            .map_err(|error| error.to_string())?;
+        let mut state = CycleState::new(purpose);
+        loop {
+            let frame = self
+                .client
+                .next_frame()
+                .map_err(|error| format!("agent-run rpc stream failed: {error}"))?
+                .ok_or_else(|| "agent-run rpc stream ended before agent_settled".to_owned())?;
+            match frame {
+                RpcFrame::Response(response) => {
+                    self.handle_response(spec, &mut state, &prompt_id, response)?;
+                }
+                RpcFrame::Event(RpcEvent::AgentSettled) => {
+                    if !state.prompt_response_seen {
+                        return Err(
+                            "agent-run prompt response missing before agent_settled".to_owned()
+                        );
+                    }
+                    while !state.pending_stats.is_empty() {
+                        let frame = self
+                            .client
+                            .next_frame()
+                            .map_err(|error| format!("agent-run rpc stream failed: {error}"))?
+                            .ok_or_else(|| {
+                                "agent-run rpc stream ended before session stats response"
+                                    .to_owned()
+                            })?;
+                        match frame {
+                            RpcFrame::Response(response) => {
+                                self.handle_response(spec, &mut state, &prompt_id, response)?;
+                            }
+                            RpcFrame::Event(event) => {
+                                return Err(format!(
+                                    "agent-run rpc event after agent_settled while awaiting stats: {event:?}"
+                                ));
+                            }
+                        }
+                    }
+                    return self.finish_cycle(spec, state);
+                }
+                RpcFrame::Event(event) => self.handle_event(spec, &mut state, event)?,
+            }
+        }
+    }
+
+    fn handle_response(
+        &mut self,
+        spec: &AgentRunSpec,
+        state: &mut CycleState,
+        prompt_id: &str,
+        response: RpcResponse,
+    ) -> Result<(), String> {
+        match response.command {
+            RpcCommandKind::Prompt if response.id == prompt_id => {
+                state.prompt_response_seen = true;
+                Ok(())
+            }
+            RpcCommandKind::Steer => {
+                state.steer_response_seen = true;
+                Ok(())
+            }
+            RpcCommandKind::GetSessionStats => {
+                state.pending_stats.remove(&response.id);
+                self.handle_stats(spec, state, &response)
+            }
+            RpcCommandKind::Abort => Ok(()),
+            other => Err(format!(
+                "agent-run unexpected rpc response command during prompt: {other:?}"
+            )),
+        }
+    }
+
+    fn handle_event(
+        &mut self,
+        spec: &AgentRunSpec,
+        state: &mut CycleState,
+        event: RpcEvent,
+    ) -> Result<(), String> {
+        match event {
+            RpcEvent::MessageStart => {
+                if state.steer_queue_seen {
+                    state.steer_message_started = true;
+                }
+                Ok(())
+            }
+            RpcEvent::QueueUpdate { steering, .. } => {
+                if state.awaiting_handoff && steering > 0 {
+                    state.steer_queue_seen = true;
+                }
+                Ok(())
+            }
+            RpcEvent::MessageEnd { message } => self.handle_message_end(spec, state, message),
+            RpcEvent::ToolExecutionStart | RpcEvent::ToolExecutionEnd => {
+                if state.final_record.is_some() {
+                    state.tool_after_terminal = true;
+                }
+                if matches!(event, RpcEvent::ToolExecutionEnd) {
+                    self.request_stats(state)?;
+                }
+                Ok(())
+            }
+            RpcEvent::AgentEnd { will_retry } => {
+                let _ = will_retry;
+                Ok(())
+            }
+            RpcEvent::CompactionStart {
+                reason: CompactionReason::Threshold | CompactionReason::Overflow,
+            } => Err("agent-run Pi attempted automatic compaction".to_owned()),
+            _ => Ok(()),
+        }
+    }
+
+    fn handle_message_end(
+        &mut self,
+        spec: &AgentRunSpec,
+        state: &mut CycleState,
+        message: TerminalMessage,
+    ) -> Result<(), String> {
+        if message.role != "assistant" {
+            return Ok(());
+        }
+        let record = assistant_from_terminal(message)?;
+        if record.stop_reason == "tooluse" {
+            self.request_stats(state)?;
+            return Ok(());
+        }
+        validate_terminal_assistant(&record, &spec.provider, &spec.model)?;
+        if state.awaiting_handoff && state.steer_message_started {
+            let handoff = self
+                .policy
+                .validate_handoff(&spec.role_id.0, &record.text)?;
+            let checkpoint = self.checkpoint_record(spec, handoff.clone())?;
+            self.compact_checkpoint(&checkpoint)?;
+            state.compacted = true;
+            state.handoff = Some(handoff);
+            self.request_stats(state)?;
+            return Ok(());
+        }
+        if state.final_record.as_ref().map(|item| &item.record) != Some(&record) {
+            state.terminal_count = state.terminal_count.saturating_add(1);
+            state.final_record = Some(CycleTerminal {
+                record,
+                delivered_after_steer: state.steer_message_started,
+            });
+        }
+        self.request_stats(state)
+    }
+
+    fn handle_stats(
+        &mut self,
+        spec: &AgentRunSpec,
+        state: &mut CycleState,
+        response: &RpcResponse,
+    ) -> Result<(), String> {
+        let budget = context_budget_from_stats(response)?;
+        match budget {
+            ContextBudget::Unknown => {
+                return Err(
+                    "agent-run context budget unknown blocks new work and terminal success"
+                        .to_owned(),
+                );
+            }
+            ContextBudget::Known(percent) => {
+                let percent_value = percent.as_f64();
+                self.last_known_percent = Some(percent_value);
+                if percent_value >= 75.0 {
+                    let _ = checkpoint::observe_context(
+                        ContextBudget::Known(percent),
+                        &checkpoint::AssignmentState::<
+                            Option<kernel::generated::Id>,
+                            Option<kernel::generated::Sha>,
+                            Option<kernel::generated::Sha>,
+                        > {
+                            assignment_id: spec.assignment_id.clone(),
+                            lane_id: None,
+                            run_revision: spec.run_revision,
+                            base_commit: None,
+                            current_commit: None,
+                            dirty_paths: Vec::new(),
+                            completed: Vec::new(),
+                            remaining: vec![spec.assignment_id.clone()],
+                            next_action: "continue".to_owned(),
+                            session_ref: kernel::generated::Ref(format!(
+                                "session:{}",
+                                spec.session_id.0
+                            )),
+                        },
+                    );
+                    self.checkpoint_armed = true;
+                }
+                if percent_value >= 85.0
+                    && state.purpose == PromptPurpose::Normal
+                    && !state.awaiting_handoff
+                {
+                    self.start_checkpoint(spec, state)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn start_checkpoint(
+        &mut self,
+        spec: &AgentRunSpec,
+        state: &mut CycleState,
+    ) -> Result<(), String> {
+        let role = self.policy.role(&spec.role_id.0)?;
+        if !role.interruptible {
+            return Err(format!(
+                "agent-run role `{}` is not interruptible; checkpoint refused",
+                spec.role_id.0
+            ));
+        }
+        let prompt = self.handoff_prompt(spec)?;
+        let id = self.next_id("steer-handoff");
+        self.client
+            .send_command(RpcCommand::steer(id, prompt))
+            .map_err(|error| error.to_string())?;
+        state.awaiting_handoff = true;
+        Ok(())
+    }
+
+    fn finish_cycle(&mut self, spec: &AgentRunSpec, state: CycleState) -> Result<String, String> {
+        if state.tool_after_terminal {
+            return Err(
+                "agent-run Pi JSONL had tool activity after terminal assistant result".to_owned(),
+            );
+        }
+        if let Some(handoff) = state.handoff {
+            let checkpoint = self.checkpoint_record(spec, handoff)?;
+            if !state.compacted {
+                self.compact_checkpoint(&checkpoint)?;
+            }
+            let resume = self.resume_prompt(&checkpoint.resume_overlay)?;
+            return self.run_prompt(spec, &resume, PromptPurpose::Resume);
+        }
+        if state.awaiting_handoff {
+            if let Some(candidate) = &state.final_record {
+                if validate_assistant_value(spec, &candidate.record.text).is_ok() {
+                    return Ok(candidate.record.text.clone());
+                }
+            }
+            self.abort_stale_queue()?;
+            let handoff_prompt = self.handoff_prompt(spec)?;
+            return self.run_prompt(spec, &handoff_prompt, PromptPurpose::Handoff);
+        }
+        if state.terminal_count == 0 {
+            return Err("agent-run Pi JSONL contained no final assistant result".to_owned());
+        }
+        if state.terminal_count != 1 {
+            return Err(format!(
+                "agent-run Pi JSONL contained {} terminal assistant results; expected exactly one",
+                state.terminal_count
+            ));
+        }
+        let record = state
+            .final_record
+            .ok_or_else(|| "agent-run Pi JSONL contained no final assistant result".to_owned())?;
+        if record.record.text.trim().is_empty() {
+            return Err("agent-run Pi JSONL contained empty final assistant result".to_owned());
+        }
+        Ok(record.record.text)
+    }
+
+    fn request_stats(&mut self, state: &mut CycleState) -> Result<(), String> {
+        let id = self.next_id("stats");
+        self.client
+            .send_command(RpcCommand::get_session_stats(id.clone()))
+            .map_err(|error| error.to_string())?;
+        state.pending_stats.insert(id);
+        Ok(())
+    }
+
+    fn command_response(&mut self, command: RpcCommand) -> Result<RpcResponse, String> {
+        let expected = command.id.clone();
+        self.client
+            .send_command(command)
+            .map_err(|error| error.to_string())?;
+        loop {
+            let frame = self
+                .client
+                .next_frame()
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "agent-run rpc stream ended before command response".to_owned())?;
+            match frame {
+                RpcFrame::Response(response) if response.id == expected => return Ok(response),
+                RpcFrame::Response(response) => {
+                    return Err(format!(
+                        "agent-run unexpected rpc response id {}; expected {expected}",
+                        response.id
+                    ));
+                }
+                RpcFrame::Event(event) => {
+                    return Err(format!(
+                        "agent-run unexpected rpc event before configuration completed: {event:?}"
+                    ));
+                }
+            }
+        }
+    }
+
+    fn validate_state(&self, spec: &AgentRunSpec, response: &RpcResponse) -> Result<(), String> {
+        let data = response
+            .data
+            .as_ref()
+            .ok_or_else(|| "agent-run get_state missing data".to_owned())?;
+        let value: Value = serde_json::from_str(data)
+            .map_err(|error| format!("agent-run get_state malformed data: {error}"))?;
+        let session = value.get("sessionId").and_then(Value::as_str);
+        let thinking = value.get("thinkingLevel").and_then(Value::as_str);
+        let auto = value.get("autoCompactionEnabled").and_then(Value::as_bool);
+        let model = value
+            .get("model")
+            .and_then(Value::as_object)
+            .ok_or_else(|| "agent-run get_state missing model".to_owned())?;
+        let provider = model.get("provider").and_then(Value::as_str);
+        let model_id = model.get("id").and_then(Value::as_str);
+        if session != Some(spec.session_id.0.as_str())
+            || provider != Some(spec.provider.as_str())
+            || model_id != Some(spec.model.as_str())
+            || thinking != Some(spec.thinking.0.as_str())
+            || auto != Some(false)
+        {
+            return Err(format!(
+                "agent-run get_state drift: session={session:?} provider={provider:?} model={model_id:?} thinking={thinking:?} autoCompaction={auto:?}"
+            ));
+        }
+        Ok(())
+    }
+
+    fn checkpoint_record(
+        &self,
+        spec: &AgentRunSpec,
+        handoff: AgentHandoff,
+    ) -> Result<checkpoint::CheckpointRecord, String> {
+        let percent = self
+            .last_known_percent
+            .ok_or_else(|| "agent-run checkpoint missing known context percent".to_owned())?;
+        let input = if spec.result_contract.0 == "autopilot.delivery_result.v1" {
+            let lane_id = spec
+                .lane_id
+                .clone()
+                .ok_or_else(|| "agent-run checkpoint missing lane_id".to_owned())?;
+            let base = spec
+                .base_commit
+                .clone()
+                .ok_or_else(|| "agent-run checkpoint missing base_commit".to_owned())?;
+            CheckpointInput::execution(
+                spec.assignment_id.clone(),
+                spec.run_revision,
+                kernel::generated::Ref(format!("session:{}", spec.session_id.0)),
+                lane_id,
+                base.clone(),
+                base,
+                checkpoint::PreservationEvidence::CleanCurrentCommit {
+                    commit: spec
+                        .base_commit
+                        .clone()
+                        .ok_or_else(|| "agent-run checkpoint missing base_commit".to_owned())?,
+                },
+                handoff,
+            )
+        } else {
+            CheckpointInput::planning(
+                spec.assignment_id.clone(),
+                spec.run_revision,
+                kernel::generated::Ref(format!("session:{}", spec.session_id.0)),
+                handoff,
+            )
+        };
+        input
+            .render_checkpoint(checkpoint::ContextPercent::new(percent).map_err(|error| {
+                format!("agent-run context percent invalid during checkpoint: {error:?}")
+            })?)
+            .map_err(|error| format!("agent-run checkpoint identity error: {error:?}"))
+    }
+
+    fn compact_checkpoint(
+        &mut self,
+        checkpoint: &checkpoint::CheckpointRecord,
+    ) -> Result<(), String> {
+        self.manual_compact(checkpoint)
+            .map_err(|error| format!("agent-run manual compaction failed: {error}"))
+    }
+
+    fn handoff_prompt(&self, spec: &AgentRunSpec) -> Result<String, String> {
+        let slots = self.policy.required_slot_names(&spec.role_id.0)?;
+        Ok(format!(
+            "Checkpoint now. Return exactly one JSON object with schema autopilot.agent-handoff.v1. Required top-level fields: schema, completed, remaining, critical_state, next_action. critical_state must include these role-required slots exactly: {}. Do not include prose or a code fence.",
+            slots.join(", ")
+        ))
+    }
+
+    fn resume_prompt(&self, overlay: &checkpoint::ResumeOverlay) -> Result<String, String> {
+        let overlay = serde_json::to_string(overlay)
+            .map_err(|error| format!("agent-run resume overlay serialize failed: {error}"))?;
+        Ok(format!(
+            "Resume the same assignment from this parent-retained handoff. Treat it as authoritative preserved state and continue the original task without inventing completed work. Handoff overlay JSON: {overlay}"
+        ))
+    }
+
+    fn abort_stale_queue(&mut self) -> Result<(), String> {
+        let id = self.next_id("abort");
+        self.client
+            .send_command(RpcCommand {
+                id: id.clone(),
+                command: RpcCommandKind::Abort,
+                message: None,
+                enabled: None,
+                custom_instructions: None,
+            })
+            .map_err(|error| error.to_string())?;
+        loop {
+            let frame = self
+                .client
+                .next_frame()
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "agent-run rpc stream ended before abort response".to_owned())?;
+            if let RpcFrame::Response(response) = frame {
+                if response.id == id {
+                    return Ok(());
+                }
+                return Err(format!(
+                    "agent-run unexpected response while aborting stale queue: {}",
+                    response.id
+                ));
+            }
+        }
+    }
+
+    fn next_id(&mut self, prefix: &str) -> String {
+        self.next_command = self.next_command.saturating_add(1);
+        format!("{prefix}-{}", self.next_command)
+    }
+
+    fn shutdown(&mut self) -> Result<(), String> {
+        let shutdown = self
+            .client
+            .shutdown(Duration::from_millis(250))
+            .map_err(|error| error.to_string())?;
+        let diagnostics = self.client.diagnostics();
+        write_rpc_stats_if_requested(&diagnostics)?;
+        if shutdown.escalated {
+            return Err("agent-run rpc shutdown escalated after stdin close".to_owned());
+        }
+        if let Some(status) = shutdown.status {
+            if !status.success() {
+                return Err(format!("agent-run pi exited nonzero status={status}"));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[allow(dead_code)]
+struct RpcCompactor<'a> {
+    runner: &'a mut RpcAssignment,
+}
+
+impl checkpoint::Compactor for RpcCompactor<'_> {
+    fn compact_same_session(
+        &mut self,
+        checkpoint: &checkpoint::CheckpointRecord,
+    ) -> Result<(), Failure> {
+        self.runner
+            .manual_compact(checkpoint)
+            .map_err(|_| Failure::Transient {
+                retry: RetryPolicy::AfterRestart,
+            })
+    }
+}
+
+impl RpcAssignment {
+    fn manual_compact(&mut self, checkpoint: &checkpoint::CheckpointRecord) -> Result<(), String> {
+        let slots = self
+            .policy
+            .required_slot_names_from_handoff(&checkpoint.resume_overlay.handoff)?;
+        let instructions = format!(
+            "Manual parent-controlled autopilot checkpoint compaction. Preserve the assignment handoff exactly, especially role-required critical_state slots: {}. Do not infer completed work that is absent from the handoff.",
+            slots.join(", ")
+        );
+        let id = self.next_id("compact");
+        self.client
+            .send_command(RpcCommand::compact(id.clone(), instructions))
+            .map_err(|error| error.to_string())?;
+        let mut saw_start = false;
+        let mut saw_end = false;
+        let mut saw_response = false;
+        loop {
+            let frame = self
+                .client
+                .next_frame()
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "agent-run rpc stream ended during compaction".to_owned())?;
+            match frame {
+                RpcFrame::Response(response) if response.id == id => {
+                    saw_response = true;
+                }
+                RpcFrame::Response(response) => {
+                    return Err(format!(
+                        "agent-run unexpected response during compaction: {}",
+                        response.id
+                    ));
+                }
+                RpcFrame::Event(RpcEvent::CompactionStart {
+                    reason: CompactionReason::Manual,
+                }) => saw_start = true,
+                RpcFrame::Event(RpcEvent::CompactionEnd {
+                    reason: CompactionReason::Manual,
+                    aborted: false,
+                    ..
+                }) => saw_end = true,
+                RpcFrame::Event(RpcEvent::CompactionEnd { aborted: true, .. }) => {
+                    return Err("agent-run manual compaction aborted".to_owned());
+                }
+                RpcFrame::Event(RpcEvent::CompactionStart { reason }) => {
+                    return Err(format!(
+                        "agent-run non-manual compaction reason during manual compact: {reason:?}"
+                    ));
+                }
+                RpcFrame::Event(event) => {
+                    return Err(format!(
+                        "agent-run unexpected rpc event during manual compaction: {event:?}"
+                    ));
+                }
+            }
+            if saw_start && saw_end && saw_response {
+                return Ok(());
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CheckpointPolicy {
+    roles: BTreeMap<String, RoleCheckpointPolicy>,
+    slot_sets: BTreeMap<String, Vec<CheckpointSlot>>,
+}
+
+#[derive(Debug, Clone)]
+struct RoleCheckpointPolicy {
+    interruptible: bool,
+    slot_set: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CheckpointSlot {
+    key: String,
+    value_type: CheckpointSlotType,
+    required: bool,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum CheckpointSlotType {
+    String,
+    ArrayString,
+}
+
+impl CheckpointPolicy {
+    fn parse() -> Result<Self, String> {
+        let source = include_str!("../../../data/checkpoint-policy.kdl");
+        let mut roles = BTreeMap::new();
+        let mut slot_sets = BTreeMap::new();
+        let mut current_slot_set: Option<String> = None;
+        for raw in source.lines() {
+            let line = raw.trim();
+            if line.starts_with("slot_set ") {
+                let id = quoted_after(line, "slot_set ")?.to_owned();
+                slot_sets.insert(id.clone(), Vec::new());
+                current_slot_set = Some(id);
+                continue;
+            }
+            if line == "}" {
+                current_slot_set = None;
+                continue;
+            }
+            if line.starts_with("slot ") {
+                let set_id = current_slot_set
+                    .as_ref()
+                    .ok_or_else(|| "checkpoint slot outside slot_set".to_owned())?;
+                let key = quoted_after(line, "slot ")?.to_owned();
+                let value_type = match prop_quoted(line, "type")? {
+                    "string" => CheckpointSlotType::String,
+                    "array<string>" => CheckpointSlotType::ArrayString,
+                    other => {
+                        return Err(format!(
+                            "checkpoint slot `{key}` has unsupported type `{other}`"
+                        ));
+                    }
+                };
+                let required = prop_bool_literal(line, "required")?;
+                slot_sets
+                    .get_mut(set_id)
+                    .ok_or_else(|| format!("checkpoint slot_set `{set_id}` disappeared"))?
+                    .push(CheckpointSlot {
+                        key,
+                        value_type,
+                        required,
+                    });
+                continue;
+            }
+            if line.starts_with("role_policy ") {
+                let role_id = quoted_after(line, "role_policy ")?.to_owned();
+                let interruptible = prop_bool_literal(line, "interruptible")?;
+                let slot_set = prop_quoted_optional(line, "slot_set")?.map(str::to_owned);
+                roles.insert(
+                    role_id,
+                    RoleCheckpointPolicy {
+                        interruptible,
+                        slot_set,
+                    },
+                );
+            }
+        }
+        Ok(Self { roles, slot_sets })
+    }
+
+    fn role(&self, role_id: &str) -> Result<&RoleCheckpointPolicy, String> {
+        self.roles
+            .get(role_id)
+            .ok_or_else(|| format!("agent-run unknown checkpoint role `{role_id}`"))
+    }
+
+    fn required_slots(&self, role_id: &str) -> Result<Vec<&CheckpointSlot>, String> {
+        let role = self.role(role_id)?;
+        if !role.interruptible {
+            return Err(format!("agent-run role `{role_id}` is not interruptible"));
+        }
+        let slot_set_id = role
+            .slot_set
+            .as_ref()
+            .ok_or_else(|| format!("agent-run role `{role_id}` missing checkpoint slot_set"))?;
+        let slots = self.slot_sets.get(slot_set_id).ok_or_else(|| {
+            format!("agent-run role `{role_id}` references missing slot_set `{slot_set_id}`")
+        })?;
+        Ok(slots.iter().filter(|slot| slot.required).collect())
+    }
+
+    fn required_slot_names(&self, role_id: &str) -> Result<Vec<String>, String> {
+        Ok(self
+            .required_slots(role_id)?
+            .into_iter()
+            .map(|slot| slot.key.clone())
+            .collect())
+    }
+
+    fn required_slot_names_from_handoff(
+        &self,
+        handoff: &AgentHandoff,
+    ) -> Result<Vec<String>, String> {
+        let mut names = handoff.critical_state.keys().cloned().collect::<Vec<_>>();
+        names.sort();
+        Ok(names)
+    }
+
+    fn validate_handoff(&self, role_id: &str, text: &str) -> Result<AgentHandoff, String> {
+        let value: Value = serde_json::from_str(text)
+            .map_err(|error| format!("agent-run handoff is not strict JSON: {error}"))?;
+        let handoff: AgentHandoff = serde_json::from_value(value.clone())
+            .map_err(|error| format!("agent-run typed handoff deserialize failed: {error}"))?;
+        if handoff.completed.iter().any(|item| item.trim().is_empty())
+            || handoff.remaining.iter().any(|item| item.trim().is_empty())
+            || handoff.next_action.trim().is_empty()
+        {
+            return Err("agent-run handoff contains blank required entries".to_owned());
+        }
+        for (key, value) in &handoff.critical_state {
+            if !json_depth_two(value) {
+                return Err(format!(
+                    "agent-run handoff critical_state slot `{key}` exceeds depth 2"
+                ));
+            }
+        }
+        for slot in self.required_slots(role_id)? {
+            let value = handoff.critical_state.get(&slot.key).ok_or_else(|| {
+                format!(
+                    "agent-run role `{role_id}` missing required critical_state slot `{}`",
+                    slot.key
+                )
+            })?;
+            match slot.value_type {
+                CheckpointSlotType::String => {
+                    if value.as_str().is_none_or(|item| item.trim().is_empty()) {
+                        return Err(format!(
+                            "agent-run critical_state slot `{}` must be a non-empty string",
+                            slot.key
+                        ));
+                    }
+                }
+                CheckpointSlotType::ArrayString => {
+                    let values = value.as_array().ok_or_else(|| {
+                        format!(
+                            "agent-run critical_state slot `{}` must be an array",
+                            slot.key
+                        )
+                    })?;
+                    if values.is_empty()
+                        || values
+                            .iter()
+                            .any(|item| item.as_str().is_none_or(|text| text.trim().is_empty()))
+                    {
+                        return Err(format!(
+                            "agent-run critical_state slot `{}` must contain non-empty strings",
+                            slot.key
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(handoff)
+    }
+}
+
+fn json_depth_two(value: &Value) -> bool {
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => true,
+        Value::Array(items) => items.iter().all(|item| {
+            matches!(
+                item,
+                Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_)
+            )
+        }),
+        Value::Object(_) => false,
+    }
+}
+
+fn context_budget_from_stats(response: &RpcResponse) -> Result<ContextBudget, String> {
+    let data = response
+        .data
+        .as_ref()
+        .ok_or_else(|| "agent-run get_session_stats missing data".to_owned())?;
+    let value: Value = serde_json::from_str(data)
+        .map_err(|error| format!("agent-run get_session_stats malformed data: {error}"))?;
+    let Some(context) = value.get("contextUsage") else {
+        return Ok(ContextBudget::Unknown);
+    };
+    match context.get("percent") {
+        Some(Value::Null) | None => Ok(ContextBudget::Unknown),
+        Some(Value::Number(number)) => checkpoint::ContextBudget::known(
+            number
+                .as_f64()
+                .ok_or_else(|| "agent-run context percent was not finite f64".to_owned())?,
+        )
+        .map_err(|error| format!("agent-run context percent invalid: {error:?}")),
+        _ => Err("agent-run context percent has wrong type".to_owned()),
+    }
+}
+
+fn assistant_from_terminal(message: TerminalMessage) -> Result<AssistantRecord, String> {
+    Ok(AssistantRecord {
+        text: message
+            .text
+            .ok_or_else(|| "agent-run assistant message missing text".to_owned())?,
+        provider: message
+            .provider
+            .ok_or_else(|| "agent-run assistant message missing provider".to_owned())?,
+        model: message
+            .model
+            .ok_or_else(|| "agent-run assistant message missing model".to_owned())?,
+        stop_reason: message
+            .stop_reason
+            .ok_or_else(|| "agent-run assistant message missing stopReason".to_owned())?
+            .to_ascii_lowercase(),
+    })
+}
+
+fn validate_assistant_value(spec: &AgentRunSpec, assistant: &str) -> Result<(), ValueRejection> {
+    if spec.result_contract.0 == "autopilot.delivery_result.v1" {
+        let carrier: DeliveryResult = serde_json::from_str(assistant).map_err(|error| {
+            value_rejection(
+                "carrier",
+                "autopilot.delivery_result.v1 JSON object",
+                format!("invalid JSON: {error}"),
+            )
+        })?;
+        validate_delivery_carrier(spec, &carrier)
+    } else {
+        crate::runner::validate_child_boundary(spec, assistant)
+            .map(|_| ())
+            .map_err(|error| {
+                value_rejection(
+                    "raw_output",
+                    format!("{} admitted value", error.boundary_id()),
+                    error.actual().to_owned(),
+                )
+            })
+    }
+}
+
+fn write_rpc_stats_if_requested(diagnostics: &RpcDiagnostics) -> Result<(), String> {
+    let Some(path) = std::env::var_os("AUTOPILOT_AGENT_RUN_STATS_PATH") else {
+        return Ok(());
+    };
+    let path = PathBuf::from(path);
+    let stats = serde_json::json!({
+        "stdout_total_bytes": diagnostics.total_bytes,
+        "stderr_total_bytes": diagnostics.stderr_total_bytes,
+        "stdout_tail_bytes": diagnostics.retained_tail_bytes,
+        "stderr_tail_bytes": diagnostics.stderr_tail_bytes,
+        "stdout_tail_truncated": diagnostics.total_bytes > diagnostics.retained_tail_bytes,
+        "stderr_tail_truncated": diagnostics.stderr_tail_truncated,
+        "stdout_lines": diagnostics.frames,
+        "final_event_bytes": diagnostics.terminal_payload_bytes,
+        "peak_retained_stdout_bytes": diagnostics.retained_tail_bytes,
+        "peak_retained_stderr_bytes": diagnostics.stderr_tail_bytes,
+        "stdout_retention_limit": DEFAULT_MAX_PI_STDOUT_BYTES,
+        "stderr_retention_limit": DEFAULT_MAX_PI_STDERR_BYTES,
+        "message_update_frames": diagnostics.message_update_frames,
+        "tool_update_frames": diagnostics.tool_update_frames,
+        "bash_update_frames": diagnostics.bash_update_frames,
+        "peak_line_bytes": diagnostics.peak_line_bytes,
+        "peak_line_capacity": diagnostics.peak_line_capacity,
+    });
+    fs::write(
+        &path,
+        serde_json::to_vec_pretty(&stats)
+            .map_err(|error| format!("agent-run stats serialize failed: {error}"))?,
+    )
+    .map_err(|error| format!("agent-run stats write failed {:?}: {error}", path))
+}
+
+fn quoted_after<'a>(line: &'a str, prefix: &str) -> Result<&'a str, String> {
+    let rest = line
+        .strip_prefix(prefix)
+        .ok_or_else(|| format!("line missing prefix `{prefix}`"))?;
+    let start = rest
+        .find('"')
+        .ok_or_else(|| format!("line missing opening quote: {line}"))?
+        + 1;
+    let end = rest[start..]
+        .find('"')
+        .ok_or_else(|| format!("line missing closing quote: {line}"))?
+        + start;
+    Ok(&rest[start..end])
+}
+
+fn prop_quoted_optional<'a>(line: &'a str, key: &str) -> Result<Option<&'a str>, String> {
+    let needle = format!(" {key}=\"");
+    let Some(start) = line.find(&needle) else {
+        return Ok(None);
+    };
+    let start = start + needle.len();
+    let end = line[start..]
+        .find('"')
+        .ok_or_else(|| format!("line missing closing quote for prop `{key}`: {line}"))?
+        + start;
+    Ok(Some(&line[start..end]))
+}
+
+fn prop_quoted<'a>(line: &'a str, key: &str) -> Result<&'a str, String> {
+    prop_quoted_optional(line, key)?.ok_or_else(|| format!("line missing quoted prop `{key}`"))
+}
+
+fn prop_bool_literal(line: &str, key: &str) -> Result<bool, String> {
+    let needle = format!(" {key}=");
+    let start = line
+        .find(&needle)
+        .ok_or_else(|| format!("line missing bool prop `{key}`"))?
+        + needle.len();
+    if line[start..].starts_with("#true") {
+        Ok(true)
+    } else if line[start..].starts_with("#false") {
+        Ok(false)
+    } else {
+        Err(format!("line prop `{key}` is not #true/#false: {line}"))
+    }
 }
 
 fn parse_args(args: &[String]) -> Result<PathBuf, String> {
@@ -151,51 +1109,6 @@ fn parse_args(args: &[String]) -> Result<PathBuf, String> {
         return Err(format!("agent-run spec path must be absolute: {:?}", path));
     }
     Ok(path)
-}
-
-fn checked_pi_output(spec: &AgentRunSpec, prompt: &str) -> Result<ChildOutput, String> {
-    let output = launch_pi(spec, prompt)?;
-    write_stats_if_requested(&output)?;
-    if output.timed_out {
-        return Err(transient_with_artifact(
-            spec,
-            &output,
-            "AUTOPILOT_AGENT_RUN_TIMEOUT_MS",
-            "timeout",
-            "agent-run pi wall timeout exceeded",
-        ));
-    }
-    let status = output
-        .status
-        .ok_or_else(|| "agent-run pi status unavailable after launch".to_owned())?;
-    if !status.success() {
-        return Err(error_with_optional_artifact(
-            spec,
-            &output,
-            "AUTOPILOT_AGENT_RUN_MAX_STDERR_BYTES",
-            &format!(
-                "agent-run pi exited nonzero status={status} stderr={}",
-                String::from_utf8_lossy(&output.stderr_tail)
-            ),
-        ));
-    }
-    if let Some(error) = &output.stderr_error {
-        return Err(error_with_optional_artifact(
-            spec,
-            &output,
-            "AUTOPILOT_AGENT_RUN_MAX_STDERR_BYTES",
-            error,
-        ));
-    }
-    if let Some(error) = &output.stdout_error {
-        return Err(error_with_optional_artifact(
-            spec,
-            &output,
-            "AUTOPILOT_AGENT_RUN_MAX_STDOUT_BYTES",
-            error,
-        ));
-    }
-    Ok(output)
 }
 
 fn validate_spec(
@@ -524,528 +1437,6 @@ fn validate_doc(
     Ok(())
 }
 
-fn launch_pi(spec: &AgentRunSpec, prompt: &str) -> Result<ChildOutput, String> {
-    let tools = spec
-        .allowed_tools
-        .iter()
-        .map(|tool| tool.0.as_str())
-        .collect::<Vec<_>>()
-        .join(",");
-    let mut command = Command::new("pi");
-    command
-        .current_dir(&spec.cwd.0)
-        .arg("--mode")
-        .arg("json")
-        .arg("--session-id")
-        .arg(&spec.session_id.0)
-        .arg(format!("--no-{}s", concat!("ext", "ension")))
-        .arg("--no-skills")
-        .arg("--no-prompt-templates")
-        .arg("--no-themes")
-        .arg("--no-context-files")
-        .arg("--provider")
-        .arg(&spec.provider)
-        .arg("--model")
-        .arg(&spec.model)
-        .arg("--thinking")
-        .arg(&spec.thinking.0)
-        .arg("--tools")
-        .arg(tools)
-        .arg("-p")
-        .arg(prompt)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
-    for key in [
-        "OPENROUTER_API_KEY",
-        "OPENROUTER_BASE_URL",
-        "OPENAI_API_KEY",
-        "OPENAI_BASE_URL",
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_BASE_URL",
-        "PI_API_KEY",
-    ] {
-        command.env_remove(key);
-    }
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("agent-run failed to spawn pi: {error}"))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "agent-run missing stdout pipe".to_owned())?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "agent-run missing stderr pipe".to_owned())?;
-    // These historical knobs no longer cap bytes received from Pi. Pi JSON mode
-    // re-emits full message objects on message_update, so total transcript bytes
-    // grow with thinking depth. The knobs now cap retained diagnostic tails only;
-    // the runner streams and discards nonterminal JSONL chatter as it arrives.
-    let stdout_limit = env_usize(
-        "AUTOPILOT_AGENT_RUN_MAX_STDOUT_BYTES",
-        DEFAULT_MAX_PI_STDOUT_BYTES,
-    );
-    let stderr_limit = env_usize(
-        "AUTOPILOT_AGENT_RUN_MAX_STDERR_BYTES",
-        DEFAULT_MAX_PI_STDERR_BYTES,
-    );
-    let stdout_handle = spawn_stdout_reader(
-        stdout,
-        stdout_limit,
-        spec.provider.clone(),
-        spec.model.clone(),
-    );
-    let stderr_handle = spawn_tail_reader(stderr, stderr_limit);
-    let timeout = Duration::from_millis(env_u64(
-        "AUTOPILOT_AGENT_RUN_TIMEOUT_MS",
-        DEFAULT_PI_TIMEOUT_MS,
-    ));
-    let started = Instant::now();
-    let mut timed_out = false;
-    let status = loop {
-        if started.elapsed() > timeout {
-            timed_out = true;
-            terminate_child(&mut child);
-            break None;
-        }
-        match child
-            .try_wait()
-            .map_err(|error| format!("agent-run wait failed: {error}"))?
-        {
-            Some(status) => break Some(status),
-            None => thread::sleep(Duration::from_millis(20)),
-        }
-    };
-    let out = stdout_handle
-        .join()
-        .map_err(|_| "agent-run stdout reader panicked".to_owned())?;
-    let err = stderr_handle
-        .join()
-        .map_err(|_| "agent-run stderr reader panicked".to_owned())?;
-    let stdout_tail_bytes = out.tail.len();
-    let stderr_tail_bytes = err.data.len();
-    Ok(ChildOutput {
-        assistant: out.assistant,
-        stdout_error: out.error,
-        stderr_error: err
-            .read_error
-            .map(|error| format!("agent-run stderr read failed: {error}")),
-        stdout_tail: out.tail,
-        stderr_tail: err.data,
-        status,
-        timed_out,
-        diagnostics: StreamDiagnostics {
-            stdout_total_bytes: out.total_bytes,
-            stderr_total_bytes: err.total_bytes,
-            stdout_tail_bytes,
-            stderr_tail_bytes,
-            stdout_tail_truncated: out.tail_truncated,
-            stderr_tail_truncated: err.tail_truncated,
-            stdout_lines: out.lines,
-            final_event_bytes: out.final_event_bytes,
-            peak_retained_stdout_bytes: out.peak_retained_bytes,
-            peak_retained_stderr_bytes: err.peak_retained_bytes,
-            stdout_limit,
-            stderr_limit,
-        },
-    })
-}
-
-fn spawn_stdout_reader<R: Read + Send + 'static>(
-    reader: R,
-    limit: usize,
-    expected_provider: String,
-    expected_model: String,
-) -> thread::JoinHandle<StdoutRead> {
-    thread::spawn(move || {
-        let mut parser = PiJsonlParser::new(expected_provider, expected_model);
-        let mut tail = RetainedTail::new(limit);
-        let mut reader = std::io::BufReader::new(reader);
-        let mut line = Vec::new();
-        let mut total_bytes = 0usize;
-        let mut peak_retained_bytes = 0usize;
-        let mut read_error = None;
-        loop {
-            line.clear();
-            match reader.read_until(b'\n', &mut line) {
-                Ok(0) => break,
-                Ok(n) => {
-                    total_bytes = total_bytes.saturating_add(n);
-                    tail.push(&line);
-                    if parser.error.is_none() {
-                        parser.ingest_line(&line);
-                    }
-                    peak_retained_bytes = peak_retained_bytes
-                        .max(tail.len().saturating_add(parser.retained_result_bytes()));
-                }
-                Err(error) => {
-                    read_error = Some(format!("agent-run stdout read failed: {error}"));
-                    break;
-                }
-            }
-        }
-        if parser.error.is_none() && read_error.is_none() {
-            parser.finish();
-        }
-        let parse_error = parser.error.clone();
-        let tail_truncated = tail.truncated;
-        StdoutRead {
-            assistant: parser.final_text(),
-            error: read_error.or(parse_error),
-            tail: tail.into_vec(),
-            total_bytes,
-            lines: parser.lines,
-            final_event_bytes: parser.final_event_bytes,
-            tail_truncated,
-            peak_retained_bytes,
-        }
-    })
-}
-
-fn spawn_tail_reader<R: Read + Send + 'static>(
-    mut reader: R,
-    limit: usize,
-) -> thread::JoinHandle<TailRead> {
-    thread::spawn(move || {
-        let mut tail = RetainedTail::new(limit);
-        let mut buf = [0_u8; 8192];
-        let mut total_bytes = 0usize;
-        let mut peak_retained_bytes = 0usize;
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) => {
-                    let tail_truncated = tail.truncated;
-                    return TailRead {
-                        data: tail.into_vec(),
-                        read_error: None,
-                        total_bytes,
-                        tail_truncated,
-                        peak_retained_bytes,
-                    };
-                }
-                Ok(n) => {
-                    total_bytes = total_bytes.saturating_add(n);
-                    tail.push(&buf[..n]);
-                    peak_retained_bytes = peak_retained_bytes.max(tail.len());
-                }
-                Err(error) => {
-                    let tail_truncated = tail.truncated;
-                    return TailRead {
-                        data: tail.into_vec(),
-                        read_error: Some(error.to_string()),
-                        total_bytes,
-                        tail_truncated,
-                        peak_retained_bytes,
-                    };
-                }
-            }
-        }
-    })
-}
-
-struct RetainedTail {
-    data: Vec<u8>,
-    limit: usize,
-    truncated: bool,
-}
-
-impl RetainedTail {
-    fn new(limit: usize) -> Self {
-        Self {
-            data: Vec::new(),
-            limit,
-            truncated: false,
-        }
-    }
-
-    fn push(&mut self, bytes: &[u8]) {
-        if self.limit == 0 {
-            self.truncated |= !bytes.is_empty();
-            return;
-        }
-        if bytes.len() >= self.limit {
-            self.data.clear();
-            self.data
-                .extend_from_slice(&bytes[bytes.len().saturating_sub(self.limit)..]);
-            self.truncated = true;
-            return;
-        }
-        let overflow = self
-            .data
-            .len()
-            .saturating_add(bytes.len())
-            .saturating_sub(self.limit);
-        if overflow > 0 {
-            self.data.drain(..overflow);
-            self.truncated = true;
-        }
-        self.data.extend_from_slice(bytes);
-    }
-
-    fn len(&self) -> usize {
-        self.data.len()
-    }
-
-    fn into_vec(self) -> Vec<u8> {
-        self.data
-    }
-}
-
-fn terminate_child(child: &mut std::process::Child) {
-    #[cfg(unix)]
-    {
-        let Ok(pid) = i32::try_from(child.id()) else {
-            let _ = child.kill();
-            let _ = child.wait();
-            return;
-        };
-        unsafe {
-            let _ = kill(-pid, SIGTERM);
-        }
-        for _ in 0..50 {
-            match child.try_wait() {
-                Ok(Some(_)) => return,
-                Ok(None) => thread::sleep(Duration::from_millis(20)),
-                Err(_) => break,
-            }
-        }
-        unsafe {
-            let _ = kill(-pid, SIGKILL);
-        }
-    }
-    #[cfg(windows)]
-    {
-        let pid = child.id().to_string();
-        let _ = Command::new(concat!("task", "ki", "ll"))
-            .args(["/PID", &pid, "/T", "/F"])
-            .status();
-    }
-    let _ = child.wait();
-}
-
-#[cfg(unix)]
-const SIGTERM: i32 = 15;
-#[cfg(unix)]
-const SIGKILL: i32 = 9;
-
-#[cfg(unix)]
-unsafe extern "C" {
-    fn kill(pid: i32, sig: i32) -> i32;
-}
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-struct AssistantRecord {
-    text: String,
-    provider: String,
-    model: String,
-    stop_reason: String,
-}
-
-#[derive(Deserialize)]
-struct EventKind {
-    #[serde(rename = "type")]
-    kind: Option<String>,
-}
-
-struct PiJsonlParser {
-    expected_provider: String,
-    expected_model: String,
-    final_record: Option<AssistantRecord>,
-    assistant_count: usize,
-    tool_after_terminal: bool,
-    saw_agent_end: bool,
-    lines: usize,
-    final_event_bytes: usize,
-    error: Option<String>,
-}
-
-impl PiJsonlParser {
-    fn new(expected_provider: String, expected_model: String) -> Self {
-        Self {
-            expected_provider,
-            expected_model,
-            final_record: None,
-            assistant_count: 0,
-            tool_after_terminal: false,
-            saw_agent_end: false,
-            lines: 0,
-            final_event_bytes: 0,
-            error: None,
-        }
-    }
-
-    fn ingest_line(&mut self, line: &[u8]) {
-        if self.error.is_some() {
-            return;
-        }
-        self.lines = self.lines.saturating_add(1);
-        let line = trim_jsonl_newline(line);
-        let Ok(text) = std::str::from_utf8(line) else {
-            self.error = Some(format!(
-                "agent-run pi stdout was not UTF-8 at line {}",
-                self.lines
-            ));
-            return;
-        };
-        if text.trim().is_empty() {
-            return;
-        }
-        let kind = match serde_json::from_str::<EventKind>(text) {
-            Ok(kind) => kind.kind,
-            Err(error) => {
-                self.error = Some(format!(
-                    "agent-run malformed Pi JSONL line {}: {error}",
-                    self.lines
-                ));
-                return;
-            }
-        };
-        if self.saw_agent_end {
-            if kind.as_deref() == Some("agent_settled") {
-                return;
-            }
-            self.error = Some(format!(
-                "agent-run Pi JSONL contained events after agent_end at line {}",
-                self.lines
-            ));
-            return;
-        }
-        if kind.as_deref().is_some_and(|kind| kind.contains("tool")) {
-            if self.final_record.is_some() {
-                self.tool_after_terminal = true;
-            }
-            return;
-        }
-        match kind.as_deref() {
-            Some("final" | "message_end" | "assistant" | "turn_end" | "agent_end") => {}
-            _ => return,
-        }
-        let value: Value = match serde_json::from_str(text) {
-            Ok(value) => value,
-            Err(error) => {
-                self.error = Some(format!(
-                    "agent-run malformed Pi JSONL line {}: {error}",
-                    self.lines
-                ));
-                return;
-            }
-        };
-        self.ingest_value(&value, text.len());
-    }
-
-    fn ingest_value(&mut self, value: &Value, line_bytes: usize) {
-        match assistant_event(value) {
-            Ok(Some(record)) => {
-                if record.stop_reason == "tooluse" {
-                    return;
-                }
-                if let Err(error) = validate_terminal_assistant(
-                    &record,
-                    &self.expected_provider,
-                    &self.expected_model,
-                ) {
-                    self.error = Some(error);
-                    return;
-                }
-                if self.final_record.as_ref() == Some(&record) {
-                    return;
-                }
-                self.assistant_count = self.assistant_count.saturating_add(1);
-                self.final_record = Some(record);
-                return;
-            }
-            Ok(None) => {}
-            Err(error) => {
-                self.error = Some(error);
-                return;
-            }
-        }
-        match agent_end_record(value) {
-            Ok(Some(record)) => {
-                self.final_event_bytes = line_bytes;
-                if let Err(error) = validate_terminal_assistant(
-                    &record,
-                    &self.expected_provider,
-                    &self.expected_model,
-                ) {
-                    self.error = Some(error);
-                    return;
-                }
-                if let Some(existing) = &self.final_record {
-                    if existing != &record {
-                        self.error = Some(
-                            "agent-run Pi agent_end terminal assistant drifted from message_end"
-                                .to_owned(),
-                        );
-                        return;
-                    }
-                } else {
-                    self.assistant_count = self.assistant_count.saturating_add(1);
-                    self.final_record = Some(record);
-                }
-                self.saw_agent_end = true;
-            }
-            Ok(None) => {}
-            Err(error) => self.error = Some(error),
-        }
-    }
-
-    fn finish(&mut self) {
-        if self.error.is_some() {
-            return;
-        }
-        if !self.saw_agent_end {
-            self.error = Some("agent-run Pi JSONL lacked agent_end".to_owned());
-            return;
-        }
-        if self.tool_after_terminal {
-            self.error = Some(
-                "agent-run Pi JSONL had tool activity after terminal assistant result".to_owned(),
-            );
-            return;
-        }
-        match (&self.final_record, self.assistant_count) {
-            (Some(record), 1) if !record.text.trim().is_empty() => {}
-            (_, 0) => {
-                self.error =
-                    Some("agent-run Pi JSONL contained no final assistant result".to_owned())
-            }
-            (_, count) => {
-                self.error = Some(format!(
-                    "agent-run Pi JSONL contained {count} terminal assistant results; expected exactly one"
-                ));
-            }
-        }
-    }
-
-    fn final_text(&self) -> Option<String> {
-        self.final_record.as_ref().map(|record| record.text.clone())
-    }
-
-    fn retained_result_bytes(&self) -> usize {
-        self.final_record
-            .as_ref()
-            .map(|record| record.text.len())
-            .unwrap_or(0)
-            .saturating_add(self.final_event_bytes)
-    }
-}
-
-fn trim_jsonl_newline(mut line: &[u8]) -> &[u8] {
-    if line.ends_with(b"\n") {
-        line = &line[..line.len() - 1];
-    }
-    if line.ends_with(b"\r") {
-        line = &line[..line.len() - 1];
-    }
-    line
-}
-
 fn validate_terminal_assistant(
     record: &AssistantRecord,
     expected_provider: &str,
@@ -1064,210 +1455,6 @@ fn validate_terminal_assistant(
         ));
     }
     Ok(())
-}
-
-fn agent_end_record(value: &Value) -> Result<Option<AssistantRecord>, String> {
-    if value.get("type").and_then(Value::as_str) != Some("agent_end") {
-        return Ok(None);
-    }
-    if value.get("willRetry").and_then(Value::as_bool) == Some(true) {
-        return Err("agent-run Pi agent_end announced retry".to_owned());
-    }
-    let messages = value
-        .get("messages")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "agent-run agent_end missing messages".to_owned())?;
-    for message in messages.iter().rev() {
-        if message.get("role").and_then(Value::as_str) == Some("assistant") {
-            return assistant_from_message(message)
-                .map(Some)
-                .ok_or_else(|| "agent-run agent_end terminal assistant was malformed".to_owned());
-        }
-    }
-    Err("agent-run agent_end missing assistant message".to_owned())
-}
-
-fn assistant_event(value: &Value) -> Result<Option<AssistantRecord>, String> {
-    let object = match value.as_object() {
-        Some(object) => object,
-        None => return Ok(None),
-    };
-    match object.get("type").and_then(Value::as_str) {
-        Some("final") => {
-            return Ok(Some(AssistantRecord {
-                text: string_field(value, "content")
-                    .or_else(|| string_field(value, "text"))
-                    .ok_or_else(|| "agent-run final event missing content".to_owned())?,
-                provider: string_field(value, "provider")
-                    .ok_or_else(|| "agent-run final event missing provider".to_owned())?,
-                model: string_field(value, "model")
-                    .ok_or_else(|| "agent-run final event missing model".to_owned())?,
-                stop_reason: lower_string(value, "stopReason")
-                    .or_else(|| lower_string(value, "stop_reason"))
-                    .unwrap_or_else(|| "stop".to_owned()),
-            }));
-        }
-        Some("message_end") | Some("assistant") => {}
-        Some("turn_end") => {
-            let message = object
-                .get("message")
-                .ok_or_else(|| "agent-run turn_end missing message".to_owned())?;
-            return Ok(assistant_from_message(message));
-        }
-        _ => return Ok(None),
-    }
-    let message = object.get("message").unwrap_or(value);
-    Ok(assistant_from_message(message))
-}
-
-fn assistant_from_message(message: &Value) -> Option<AssistantRecord> {
-    if message.get("role").and_then(Value::as_str) != Some("assistant") {
-        return None;
-    }
-    Some(AssistantRecord {
-        text: content_text(message)?,
-        provider: string_field(message, "provider")?,
-        model: string_field(message, "model")?,
-        stop_reason: lower_string(message, "stopReason")
-            .or_else(|| lower_string(message, "stop_reason"))?,
-    })
-}
-
-fn content_text(value: &Value) -> Option<String> {
-    if let Some(text) = string_field(value, "content") {
-        return Some(text);
-    }
-    if let Some(text) = string_field(value, "text") {
-        return Some(text);
-    }
-    let content = value.get("content")?.as_array()?;
-    let mut out = String::new();
-    for item in content {
-        if item.get("type").and_then(Value::as_str) == Some("text")
-            && let Some(text) = item.get("text").and_then(Value::as_str)
-        {
-            out.push_str(text);
-        }
-    }
-    (!out.is_empty()).then_some(out)
-}
-
-fn string_field(value: &Value, key: &str) -> Option<String> {
-    value.get(key)?.as_str().map(str::to_owned)
-}
-
-fn lower_string(value: &Value, key: &str) -> Option<String> {
-    string_field(value, key).map(|text| text.to_ascii_lowercase())
-}
-
-fn error_with_optional_artifact(
-    spec: &AgentRunSpec,
-    output: &ChildOutput,
-    limit_name: &str,
-    detail: &str,
-) -> String {
-    if output.diagnostics.stdout_tail_truncated || output.diagnostics.stderr_tail_truncated {
-        transient_with_artifact(
-            spec,
-            output,
-            limit_name,
-            "retained diagnostic tail wrapped",
-            detail,
-        )
-    } else {
-        detail.to_owned()
-    }
-}
-
-fn transient_with_artifact(
-    spec: &AgentRunSpec,
-    output: &ChildOutput,
-    limit_name: &str,
-    reason: &str,
-    detail: &str,
-) -> String {
-    let artifact = write_diagnostic_artifact(spec, output, reason)
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|error| format!("artifact-write-failed:{error}"));
-    let failure = Failure::Transient {
-        retry: RetryPolicy::Backoff,
-    };
-    format!(
-        "agent-run transient failure taxonomy=D77 variant={failure:?} assignment={} limit={} artifact={artifact}: {detail}",
-        spec.assignment_id.0, limit_name
-    )
-}
-
-fn write_diagnostic_artifact(
-    spec: &AgentRunSpec,
-    output: &ChildOutput,
-    reason: &str,
-) -> Result<PathBuf, String> {
-    let root = Path::new(&spec.cwd.0).join(".pi/autopilot/runner/diagnostics");
-    fs::create_dir_all(&root)
-        .map_err(|error| format!("agent-run diagnostic mkdir failed {:?}: {error}", root))?;
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| error.to_string())?
-        .as_nanos();
-    let path = root.join(format!(
-        "{}-{nanos}-pi-stream-diagnostic.json",
-        spec.assignment_id.0
-    ));
-    let artifact = serde_json::json!({
-        "schema": "autopilot.agent_run_stream_diagnostic.v1",
-        "assignment_id": spec.assignment_id.0,
-        "reason": reason,
-        "diagnostics": diagnostics_json(&output.diagnostics),
-        "stdout_tail_utf8_lossy": String::from_utf8_lossy(&output.stdout_tail).to_string(),
-        "stderr_tail_utf8_lossy": String::from_utf8_lossy(&output.stderr_tail).to_string(),
-    });
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .map_err(|error| format!("agent-run diagnostic create failed {:?}: {error}", path))?;
-    file.write_all(
-        &serde_json::to_vec_pretty(&artifact)
-            .map_err(|error| format!("agent-run diagnostic serialize failed: {error}"))?,
-    )
-    .map_err(|error| format!("agent-run diagnostic write failed {:?}: {error}", path))?;
-    file.write_all(b"\n")
-        .map_err(|error| format!("agent-run diagnostic newline failed {:?}: {error}", path))?;
-    file.sync_all()
-        .map_err(|error| format!("agent-run diagnostic fsync failed {:?}: {error}", path))?;
-    Ok(path)
-}
-
-fn write_stats_if_requested(output: &ChildOutput) -> Result<(), String> {
-    let Some(path) = std::env::var_os("AUTOPILOT_AGENT_RUN_STATS_PATH") else {
-        return Ok(());
-    };
-    let path = PathBuf::from(path);
-    let stats = diagnostics_json(&output.diagnostics);
-    fs::write(
-        &path,
-        serde_json::to_vec_pretty(&stats)
-            .map_err(|error| format!("agent-run stats serialize failed: {error}"))?,
-    )
-    .map_err(|error| format!("agent-run stats write failed {:?}: {error}", path))
-}
-
-fn diagnostics_json(diagnostics: &StreamDiagnostics) -> Value {
-    serde_json::json!({
-        "stdout_total_bytes": diagnostics.stdout_total_bytes,
-        "stderr_total_bytes": diagnostics.stderr_total_bytes,
-        "stdout_tail_bytes": diagnostics.stdout_tail_bytes,
-        "stderr_tail_bytes": diagnostics.stderr_tail_bytes,
-        "stdout_tail_truncated": diagnostics.stdout_tail_truncated,
-        "stderr_tail_truncated": diagnostics.stderr_tail_truncated,
-        "stdout_lines": diagnostics.stdout_lines,
-        "final_event_bytes": diagnostics.final_event_bytes,
-        "peak_retained_stdout_bytes": diagnostics.peak_retained_stdout_bytes,
-        "peak_retained_stderr_bytes": diagnostics.peak_retained_stderr_bytes,
-        "stdout_retention_limit": diagnostics.stdout_limit,
-        "stderr_retention_limit": diagnostics.stderr_limit,
-    })
 }
 
 fn task_document_digest(class: &str, authority_set_id: &str, body: &str) -> String {
@@ -1425,15 +1612,13 @@ fn write_carrier(
             value_rejection("carrier_path", "create-once writable carrier path", error)
         })
     } else {
-        crate::runner::validate_child_boundary(spec, assistant).map_err(
-            |error| {
-                value_rejection(
-                    "raw_output",
-                    format!("{} admitted value", error.boundary_id()),
-                    error.actual().to_owned(),
-                )
-            },
-        )?;
+        crate::runner::validate_child_boundary(spec, assistant).map_err(|error| {
+            value_rejection(
+                "raw_output",
+                format!("{} admitted value", error.boundary_id()),
+                error.actual().to_owned(),
+            )
+        })?;
         let carrier = serde_json::json!({
             "schema": "autopilot.planning_carrier.v1",
             "action_id": spec.action_id.0,
@@ -1722,13 +1907,6 @@ fn env_usize(name: &str, default: usize) -> usize {
     std::env::var(name)
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(default)
-}
-
-fn env_u64(name: &str, default: u64) -> u64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(default)
 }
 

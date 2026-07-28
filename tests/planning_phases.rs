@@ -279,7 +279,8 @@ fn planning_variadic_task_file_packs_accept_two_three_seven_and_marker_order() {
 }
 
 #[test]
-fn planning_variadic_task_file_packs_reject_missing_classes_mismatch_forbidden_and_duplicate_precisely() {
+fn planning_variadic_task_file_packs_reject_missing_classes_mismatch_forbidden_and_duplicate_precisely()
+ {
     let root = temp_repo("planning-variadic-reject");
     write_doc(&root, "A1.md", "[authority]", "set-a", "authority one");
     write_doc(&root, "A2.md", "[authority]", "set-a", "authority two");

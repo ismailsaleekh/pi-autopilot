@@ -12,12 +12,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use kernel::boundary::Rejection;
 use kernel::generated::{
-    AutopilotAttestedAction, AutopilotAttestedAssignment, AutopilotContentRef,
-    AutopilotEventRef, AutopilotEvidenceAcceptanceReceipt, AutopilotEvidenceConflictCheck,
+    AutopilotAttestedAction, AutopilotAttestedAssignment, AutopilotContentRef, AutopilotEventRef,
+    AutopilotEvidenceAcceptanceReceipt, AutopilotEvidenceConflictCheck,
     AutopilotEvidenceConflictPolicy, AutopilotEvidenceEnvelopeManifest,
     AutopilotEvidenceFailureReceipt, AutopilotProducerBinding, Base32, ContractId, Digest,
-    EvidenceContentKind, EvidenceErrorCode, HostToCoreAttestedTaskObservationPayload,
-    Id, Path as ContractPath, Phase2PiAttestedRunRequest, Phase2PiConsumerBinding, Ref, SchemaId,
+    EvidenceContentKind, EvidenceErrorCode, HostToCoreAttestedTaskObservationPayload, Id,
+    Path as ContractPath, Phase2PiAttestedRunRequest, Phase2PiConsumerBinding, Ref, SchemaId,
     ThinkingLevel, UnixMs, Uuidv7,
 };
 use kernel_macros::acceptance_boundary;
@@ -334,29 +334,62 @@ pub struct BoundProducer {
 
 impl EvidenceIdentity {
     pub fn for_workstream(workstream: &str) -> Result<Self, EvidenceError> {
-        let cwd = std::env::current_dir().map_err(|error| EvidenceError::Store(error.to_string()))?;
-        let repo_key = state_root::repo_key(&cwd).map_err(|error| EvidenceError::Store(error.to_string()))?;
-        let manifest_path = PathBuf::from(".pi/autopilot").join(workstream).join("run-identity.json");
+        let cwd =
+            std::env::current_dir().map_err(|error| EvidenceError::Store(error.to_string()))?;
+        let repo_key =
+            state_root::repo_key(&cwd).map_err(|error| EvidenceError::Store(error.to_string()))?;
+        let manifest_path = PathBuf::from(".pi/autopilot")
+            .join(workstream)
+            .join("run-identity.json");
         if manifest_path.exists() {
-            let text = fs::read_to_string(&manifest_path).map_err(|error| EvidenceError::Store(error.to_string()))?;
+            let text = fs::read_to_string(&manifest_path)
+                .map_err(|error| EvidenceError::Store(error.to_string()))?;
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
-            struct DiskIdentity { repo_key: String, run_id: String, workstream: String }
-            let disk: DiskIdentity = serde_json::from_str(&text).map_err(|error| EvidenceError::Store(error.to_string()))?;
+            struct DiskIdentity {
+                repo_key: String,
+                run_id: String,
+                workstream: String,
+            }
+            let disk: DiskIdentity = serde_json::from_str(&text)
+                .map_err(|error| EvidenceError::Store(error.to_string()))?;
             if disk.repo_key != repo_key.0 || disk.workstream != workstream {
                 return Err(EvidenceError::Store("run identity mismatch".to_owned()));
             }
             let run_root = run_root_for(&repo_key, &disk.run_id)?;
-            return Ok(Self { repo_key, run_id: Uuidv7(disk.run_id), workstream: Id(workstream.to_owned()), run_root });
+            return Ok(Self {
+                repo_key,
+                run_id: Uuidv7(disk.run_id),
+                workstream: Id(workstream.to_owned()),
+                run_root,
+            });
         }
         let run_id = state_root::run_id_from_parts(now_ms()?, random10()?);
         let run_root = run_root_for(&repo_key, &run_id.0)?;
         private_dir(&run_root)?;
-        if let Some(parent) = manifest_path.parent() { fs::create_dir_all(parent).map_err(|error| EvidenceError::Store(error.to_string()))?; }
+        if let Some(parent) = manifest_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| EvidenceError::Store(error.to_string()))?;
+        }
         #[derive(Serialize)]
-        struct DiskIdentity<'a> { repo_key: &'a str, run_id: &'a str, workstream: &'a str }
-        create_once_bytes(&manifest_path, &canonical_json(&DiskIdentity { repo_key: &repo_key.0, run_id: &run_id.0, workstream })?)?;
-        Ok(Self { repo_key, run_id, workstream: Id(workstream.to_owned()), run_root })
+        struct DiskIdentity<'a> {
+            repo_key: &'a str,
+            run_id: &'a str,
+            workstream: &'a str,
+        }
+        create_once_bytes(
+            &manifest_path,
+            &canonical_json(&DiskIdentity {
+                repo_key: &repo_key.0,
+                run_id: &run_id.0,
+                workstream,
+            })?,
+        )?;
+        Ok(Self {
+            repo_key,
+            run_id,
+            workstream: Id(workstream.to_owned()),
+            run_root,
+        })
     }
 }
 
@@ -367,27 +400,52 @@ pub fn issue_planning_review(
     work_map_bytes: &[u8],
 ) -> Result<PlanningReviewIssue, EvidenceError> {
     let identity = EvidenceIdentity::for_workstream(workstream)?;
-    let roster = Roster::package().map_err(|error| EvidenceError::Store(format!("roster:{error:?}")))?;
+    let roster =
+        Roster::package().map_err(|error| EvidenceError::Store(format!("roster:{error:?}")))?;
     let slot = roster
         .slots()
         .find(|slot| slot.roles.iter().any(|role| role == "plan-reviewer"))
         .ok_or_else(|| EvidenceError::Store("roster missing plan-reviewer".to_owned()))?;
     let route = slot.route();
-    roster::guard_route(&route).map_err(|error| EvidenceError::Store(format!("roster:{error:?}")))?;
+    roster::guard_route(&route)
+        .map_err(|error| EvidenceError::Store(format!("roster:{error:?}")))?;
     if slot.provider != PROVIDER || slot.route != "subscription" {
-        return Err(EvidenceError::ChannelForbidden(format!("{} via {}", slot.provider, slot.route)));
+        return Err(EvidenceError::ChannelForbidden(format!(
+            "{} via {}",
+            slot.provider, slot.route
+        )));
     }
     let subject_digest = planning_subject_digest(planning_manifest_bytes, work_map_bytes)?;
     let assignment_revision = next_assignment_revision(&identity, PURPOSE_PLANNING_REVIEW)?;
-    let assignment_id = Id(format!("evi-{}", digest_hex(format!("autopilot.evidence-assignment-key.v1\0{}\0{}\0{}\0{}", identity.run_id.0, PURPOSE_PLANNING_REVIEW, assignment_revision, subject_digest).as_bytes())));
-    let action_id = Id(format!("eva-{}", digest_hex(format!("autopilot.evidence-action-key.v1\0{}", assignment_id.0).as_bytes())));
+    let assignment_id = Id(format!(
+        "evi-{}",
+        digest_hex(
+            format!(
+                "autopilot.evidence-assignment-key.v1\0{}\0{}\0{}\0{}",
+                identity.run_id.0, PURPOSE_PLANNING_REVIEW, assignment_revision, subject_digest
+            )
+            .as_bytes()
+        )
+    ));
+    let action_id = Id(format!(
+        "eva-{}",
+        digest_hex(format!("autopilot.evidence-action-key.v1\0{}", assignment_id.0).as_bytes())
+    ));
     let issue_idempotency_key = Id(format!("evidence-issue:v1:{}", assignment_id.0));
     let import_idempotency_key = Id(format!("evidence-import:v1:{}", assignment_id.0));
     let prompt = planning_review_prompt(workstream, planning_manifest_bytes, work_map_bytes);
     let prompt_path = format!("prompts/evidence/{}.md", assignment_id.0);
-    let prompt_ref = publish_ref(&identity.run_root, &prompt_path, prompt.as_bytes(), EvidenceContentKind::Prompt)?;
+    let prompt_ref = publish_ref(
+        &identity.run_root,
+        &prompt_path,
+        prompt.as_bytes(),
+        EvidenceContentKind::Prompt,
+    )?;
     let system_prompt_sha256 = Digest(sha256_tag(SYSTEM_PROMPT.as_bytes()));
-    let report_staging_path = format!(".pi/autopilot/{workstream}/evidence-staging/{}.report.v1.json", assignment_id.0);
+    let report_staging_path = format!(
+        ".pi/autopilot/{workstream}/evidence-staging/{}.report.v1.json",
+        assignment_id.0
+    );
     let consumer_binding = consumer_binding_without_hash(
         &identity,
         ConsumerBindingDraft {
@@ -416,7 +474,10 @@ pub fn issue_planning_review(
         request_sha256: Digest(String::new()),
     };
     let request_sha256 = canonical_sha256_self(&request_without_hash, "request_sha256")?;
-    let request = Phase2PiAttestedRunRequest { request_sha256: Digest(request_sha256.clone()), ..request_without_hash };
+    let request = Phase2PiAttestedRunRequest {
+        request_sha256: Digest(request_sha256.clone()),
+        ..request_without_hash
+    };
     let policy = conflict_policy(Vec::new())?;
     let assignment_without_hash = AutopilotAttestedAssignment {
         schema_version: SchemaId(ASSIGNMENT_SCHEMA.to_owned()),
@@ -446,9 +507,17 @@ pub fn issue_planning_review(
         assignment_sha256: Digest(String::new()),
     };
     let assignment_sha256 = canonical_sha256_self(&assignment_without_hash, "assignment_sha256")?;
-    let assignment = AutopilotAttestedAssignment { assignment_sha256: Digest(assignment_sha256), ..assignment_without_hash };
+    let assignment = AutopilotAttestedAssignment {
+        assignment_sha256: Digest(assignment_sha256),
+        ..assignment_without_hash
+    };
     let assignment_path = format!("evidence/assignments/{}.json", assignment.assignment_id.0);
-    let assignment_ref = publish_json_ref(&identity.run_root, &assignment_path, &assignment, EvidenceContentKind::Assignment)?;
+    let assignment_ref = publish_json_ref(
+        &identity.run_root,
+        &assignment_path,
+        &assignment,
+        EvidenceContentKind::Assignment,
+    )?;
     let action_without_hash = AutopilotAttestedAction {
         schema_version: SchemaId(ACTION_SCHEMA.to_owned()),
         action_id: action_id.clone(),
@@ -457,22 +526,42 @@ pub fn issue_planning_review(
         run_revision,
         assignment_ref: assignment_ref.clone(),
         producer_request: request,
-        expires_at_unix_ms: UnixMs((now_ms()? + u64::from(TIMEOUT_SECONDS) * 1000 + 60_000).to_string()),
+        expires_at_unix_ms: UnixMs(
+            (now_ms()? + u64::from(TIMEOUT_SECONDS) * 1000 + 60_000).to_string(),
+        ),
         supersession_state: "live".to_owned(),
         action_sha256: Digest(String::new()),
     };
     let action_sha256 = canonical_sha256_self(&action_without_hash, "action_sha256")?;
-    let action = AutopilotAttestedAction { action_sha256: Digest(action_sha256), ..action_without_hash };
+    let action = AutopilotAttestedAction {
+        action_sha256: Digest(action_sha256),
+        ..action_without_hash
+    };
     let action_path = format!("evidence/actions/{}.json", action.action_id.0);
-    let action_ref = publish_json_ref(&identity.run_root, &action_path, &action, EvidenceContentKind::Action)?;
-    Ok(PlanningReviewIssue { action, assignment, prompt_ref, assignment_ref, action_ref })
+    let action_ref = publish_json_ref(
+        &identity.run_root,
+        &action_path,
+        &action,
+        EvidenceContentKind::Action,
+    )?;
+    Ok(PlanningReviewIssue {
+        action,
+        assignment,
+        prompt_ref,
+        assignment_ref,
+        action_ref,
+    })
 }
 
-pub fn action_ref_for(action: &AutopilotAttestedAction) -> Result<AutopilotContentRef, EvidenceError> {
+pub fn action_ref_for(
+    action: &AutopilotAttestedAction,
+) -> Result<AutopilotContentRef, EvidenceError> {
     action_content_ref(action)
 }
 
-pub fn assignment_ref_from_action(action: &AutopilotAttestedAction) -> AutopilotContentRef { action.assignment_ref.clone() }
+pub fn assignment_ref_from_action(action: &AutopilotAttestedAction) -> AutopilotContentRef {
+    action.assignment_ref.clone()
+}
 
 pub fn issue_event_refs(issue: &PlanningReviewIssue) -> Vec<Ref> {
     vec![
@@ -484,11 +573,19 @@ pub fn issue_event_refs(issue: &PlanningReviewIssue) -> Vec<Ref> {
 }
 
 pub fn attested_action_ref(action: &AutopilotAttestedAction) -> Ref {
-    Ref(format!("attested-action:{}:{}:{}", action.action_id.0, action.assignment_id.0, action.run_revision))
+    Ref(format!(
+        "attested-action:{}:{}:{}",
+        action.action_id.0, action.assignment_id.0, action.run_revision
+    ))
 }
 
 pub fn content_ref_event(reference: &AutopilotContentRef) -> Ref {
-    Ref(format!("evidence-ref:{}:{}:{}", evidence_kind_str(&reference.kind), reference.path.0, reference.sha256.0))
+    Ref(format!(
+        "evidence-ref:{}:{}:{}",
+        evidence_kind_str(&reference.kind),
+        reference.path.0,
+        reference.sha256.0
+    ))
 }
 
 pub fn decode_attested_action_ref(reference: &Ref) -> Option<AutopilotAttestedAction> {
@@ -497,16 +594,27 @@ pub fn decode_attested_action_ref(reference: &Ref) -> Option<AutopilotAttestedAc
 }
 
 pub fn attested_action_json_ref(action: &AutopilotAttestedAction) -> Result<Ref, EvidenceError> {
-    Ok(Ref(format!("attested-action-json:{}", String::from_utf8(canonical_json(action)?).map_err(|error| EvidenceError::Store(error.to_string()))?)))
+    Ok(Ref(format!(
+        "attested-action-json:{}",
+        String::from_utf8(canonical_json(action)?)
+            .map_err(|error| EvidenceError::Store(error.to_string()))?
+    )))
 }
 
-pub fn find_action_from_refs<'a>(refs: impl Iterator<Item = &'a Ref>, action_id: &str, assignment_id: &str) -> Result<AutopilotAttestedAction, EvidenceError> {
+pub fn find_action_from_refs<'a>(
+    refs: impl Iterator<Item = &'a Ref>,
+    action_id: &str,
+    assignment_id: &str,
+) -> Result<AutopilotAttestedAction, EvidenceError> {
     let mut found = None;
     for reference in refs {
         if let Some(action) = decode_attested_action_ref(reference)
-            && action.action_id.0 == action_id && action.assignment_id.0 == assignment_id
+            && action.action_id.0 == action_id
+            && action.assignment_id.0 == assignment_id
         {
-            if found.is_some() { return Err(EvidenceError::BindingConflict); }
+            if found.is_some() {
+                return Err(EvidenceError::BindingConflict);
+            }
             found = Some(action);
         }
     }
@@ -526,7 +634,8 @@ pub fn accept_attested_observation(
     binding_event_ref: AutopilotEventRef,
     observation: &HostToCoreAttestedTaskObservationPayload,
 ) -> Result<AcceptedEvidence, Rejection> {
-    match accept_attested_observation_inner(action, issue_event_ref, binding_event_ref, observation) {
+    match accept_attested_observation_inner(action, issue_event_ref, binding_event_ref, observation)
+    {
         Ok(value) => Ok(value),
         Err(error) => match boundary_runtime(BOUNDARY_ID).reject(error.status()) {
             Err(rejection) => Err(rejection),
@@ -542,7 +651,9 @@ pub fn accept_attested_observation_inner(
     observation: &HostToCoreAttestedTaskObservationPayload,
 ) -> Result<AcceptedEvidence, EvidenceError> {
     if observation.status != "completed" {
-        return Err(EvidenceError::TerminalNotCompleted(observation.status.clone()));
+        return Err(EvidenceError::TerminalNotCompleted(
+            observation.status.clone(),
+        ));
     }
     if observation.action_id != action.action_id
         || observation.assignment_id != action.assignment_id
@@ -550,35 +661,88 @@ pub fn accept_attested_observation_inner(
         || observation.run_revision != action.run_revision
         || observation.producer_request_sha256 != action.producer_request.request_sha256
     {
-        return Err(EvidenceError::RequestMismatch("observation/action identity drift".to_owned()));
+        return Err(EvidenceError::RequestMismatch(
+            "observation/action identity drift".to_owned(),
+        ));
     }
-    let source = SourcePair { report_path: PathBuf::from(&observation.report_source_path.0), sidecar_path: PathBuf::from(&observation.sidecar_source_path.0) };
+    let source = SourcePair {
+        report_path: PathBuf::from(&observation.report_source_path.0),
+        sidecar_path: PathBuf::from(&observation.sidecar_source_path.0),
+    };
     let report_bytes = read_bound_source(&source.report_path, REPORT_LIMIT)?;
     let sidecar_bytes = read_bound_source(&source.sidecar_path, SIDECAR_LIMIT)?;
-    let report: Phase2PiTaskReportV1 = serde_json::from_slice(&report_bytes).map_err(|error| EvidenceError::Schema(format!("report:{error}")))?;
-    let sidecar: Phase2PiTaskAttestationV2 = serde_json::from_slice(&sidecar_bytes).map_err(|error| EvidenceError::Schema(format!("sidecar:{error}")))?;
+    let report: Phase2PiTaskReportV1 = serde_json::from_slice(&report_bytes)
+        .map_err(|error| EvidenceError::Schema(format!("report:{error}")))?;
+    let sidecar: Phase2PiTaskAttestationV2 = serde_json::from_slice(&sidecar_bytes)
+        .map_err(|error| EvidenceError::Schema(format!("sidecar:{error}")))?;
     validate_report(action, observation, &report, &report_bytes)?;
     validate_sidecar(action, observation, &report, &sidecar, &sidecar_bytes)?;
     let identity = EvidenceIdentity {
         repo_key: action.producer_request.consumer_binding.repo_key.clone(),
         run_id: action.producer_request.consumer_binding.run_id.clone(),
         workstream: action.producer_request.consumer_binding.workstream.clone(),
-        run_root: run_root_for(&action.producer_request.consumer_binding.repo_key, &action.producer_request.consumer_binding.run_id.0)?,
+        run_root: run_root_for(
+            &action.producer_request.consumer_binding.repo_key,
+            &action.producer_request.consumer_binding.run_id.0,
+        )?,
     };
     let binding = producer_binding(&identity, action, observation, &source)?;
-    let binding_ref = publish_json_ref(&identity.run_root, &format!("evidence/bindings/{}.json", action.assignment_id.0), &binding, EvidenceContentKind::ProducerBinding)?;
-    let report_ref = publish_ref(&identity.run_root, &format!("evidence/imports/{}/report.v1.json", action.assignment_id.0), &report_bytes, EvidenceContentKind::Report)?;
-    let sidecar_ref = publish_ref(&identity.run_root, &format!("evidence/imports/{}/producer-attestation.v2.json", action.assignment_id.0), &sidecar_bytes, EvidenceContentKind::ProducerSidecar)?;
+    let binding_ref = publish_json_ref(
+        &identity.run_root,
+        &format!("evidence/bindings/{}.json", action.assignment_id.0),
+        &binding,
+        EvidenceContentKind::ProducerBinding,
+    )?;
+    let report_ref = publish_ref(
+        &identity.run_root,
+        &format!("evidence/imports/{}/report.v1.json", action.assignment_id.0),
+        &report_bytes,
+        EvidenceContentKind::Report,
+    )?;
+    let sidecar_ref = publish_ref(
+        &identity.run_root,
+        &format!(
+            "evidence/imports/{}/producer-attestation.v2.json",
+            action.assignment_id.0
+        ),
+        &sidecar_bytes,
+        EvidenceContentKind::ProducerSidecar,
+    )?;
     let conflict_check = conflict_check(Vec::new())?;
     let receipt = acceptance_receipt(
         &identity,
         action,
-        AcceptanceReceiptRefs { producer_binding: &binding_ref, report: &report_ref, sidecar: &sidecar_ref },
-        AcceptanceReceiptArtifacts { report: &report, sidecar: &sidecar },
-        AcceptanceReceiptGate { issue_event_ref, binding_event_ref, conflict_check },
+        AcceptanceReceiptRefs {
+            producer_binding: &binding_ref,
+            report: &report_ref,
+            sidecar: &sidecar_ref,
+        },
+        AcceptanceReceiptArtifacts {
+            report: &report,
+            sidecar: &sidecar,
+        },
+        AcceptanceReceiptGate {
+            issue_event_ref,
+            binding_event_ref,
+            conflict_check,
+        },
     )?;
-    let receipt_ref = publish_json_ref(&identity.run_root, &format!("evidence/receipts/{}.acceptance.v1.json", action.assignment_id.0), &receipt, EvidenceContentKind::AcceptanceReceipt)?;
-    Ok(AcceptedEvidence { receipt, receipt_ref, report, sidecar, envelope: None })
+    let receipt_ref = publish_json_ref(
+        &identity.run_root,
+        &format!(
+            "evidence/receipts/{}.acceptance.v1.json",
+            action.assignment_id.0
+        ),
+        &receipt,
+        EvidenceContentKind::AcceptanceReceipt,
+    )?;
+    Ok(AcceptedEvidence {
+        receipt,
+        receipt_ref,
+        report,
+        sidecar,
+        envelope: None,
+    })
 }
 
 pub fn close_planning_envelope(
@@ -591,10 +755,19 @@ pub fn close_planning_envelope(
         repo_key: action.producer_request.consumer_binding.repo_key.clone(),
         run_id: action.producer_request.consumer_binding.run_id.clone(),
         workstream: action.producer_request.consumer_binding.workstream.clone(),
-        run_root: run_root_for(&action.producer_request.consumer_binding.repo_key, &action.producer_request.consumer_binding.run_id.0)?,
+        run_root: run_root_for(
+            &action.producer_request.consumer_binding.repo_key,
+            &action.producer_request.consumer_binding.run_id.0,
+        )?,
     };
     let mut members = vec![action.assignment_ref.clone(), receipt_ref.clone()];
-    members.sort_by(|a, b| (evidence_kind_str(&a.kind), &a.path.0, &a.sha256.0).cmp(&(evidence_kind_str(&b.kind), &b.path.0, &b.sha256.0)));
+    members.sort_by(|a, b| {
+        (evidence_kind_str(&a.kind), &a.path.0, &a.sha256.0).cmp(&(
+            evidence_kind_str(&b.kind),
+            &b.path.0,
+            &b.sha256.0,
+        ))
+    });
     let without_hash = AutopilotEvidenceEnvelopeManifest {
         schema_version: SchemaId("autopilot.evidence_envelope_manifest.v1".to_owned()),
         manifest_id: Id(format!("eem-planning-{}", action.assignment_id.0)),
@@ -603,7 +776,11 @@ pub fn close_planning_envelope(
         workstream: identity.workstream.clone(),
         scope: "planning".to_owned(),
         manifest_revision: 1,
-        subject_digest: action.producer_request.consumer_binding.subject_digest.clone(),
+        subject_digest: action
+            .producer_request
+            .consumer_binding
+            .subject_digest
+            .clone(),
         previous_manifest_ref: None,
         closed_through_event_sequence: through_sequence,
         event_prefix_sha256: Digest(sha256_tag(event_prefix_bytes)),
@@ -616,8 +793,16 @@ pub fn close_planning_envelope(
         manifest_sha256: Digest(String::new()),
     };
     let manifest_sha256 = canonical_sha256_self(&without_hash, "manifest_sha256")?;
-    let manifest = AutopilotEvidenceEnvelopeManifest { manifest_sha256: Digest(manifest_sha256), ..without_hash };
-    let manifest_ref = publish_json_ref(&identity.run_root, "evidence/envelopes/planning.revision-1.manifest.v1.json", &manifest, EvidenceContentKind::EnvelopeManifest)?;
+    let manifest = AutopilotEvidenceEnvelopeManifest {
+        manifest_sha256: Digest(manifest_sha256),
+        ..without_hash
+    };
+    let manifest_ref = publish_json_ref(
+        &identity.run_root,
+        "evidence/envelopes/planning.revision-1.manifest.v1.json",
+        &manifest,
+        EvidenceContentKind::EnvelopeManifest,
+    )?;
     Ok((manifest, manifest_ref))
 }
 
@@ -630,7 +815,10 @@ pub fn failure_receipt(
         repo_key: action.producer_request.consumer_binding.repo_key.clone(),
         run_id: action.producer_request.consumer_binding.run_id.clone(),
         workstream: action.producer_request.consumer_binding.workstream.clone(),
-        run_root: run_root_for(&action.producer_request.consumer_binding.repo_key, &action.producer_request.consumer_binding.run_id.0)?,
+        run_root: run_root_for(
+            &action.producer_request.consumer_binding.repo_key,
+            &action.producer_request.consumer_binding.run_id.0,
+        )?,
     };
     let without_hash = AutopilotEvidenceFailureReceipt {
         schema_version: SchemaId("autopilot.evidence_failure_receipt.v1".to_owned()),
@@ -649,47 +837,169 @@ pub fn failure_receipt(
         failure_sha256: Digest(String::new()),
     };
     let hash = canonical_sha256_self(&without_hash, "failure_sha256")?;
-    let receipt = AutopilotEvidenceFailureReceipt { failure_sha256: Digest(hash), ..without_hash };
-    let reference = publish_json_ref(&identity.run_root, &format!("evidence/failures/{}.{}.v1.json", action.assignment_id.0, evidence_code_str(&receipt.code)), &receipt, EvidenceContentKind::FailureReceipt)?;
+    let receipt = AutopilotEvidenceFailureReceipt {
+        failure_sha256: Digest(hash),
+        ..without_hash
+    };
+    let reference = publish_json_ref(
+        &identity.run_root,
+        &format!(
+            "evidence/failures/{}.{}.v1.json",
+            action.assignment_id.0,
+            evidence_code_str(&receipt.code)
+        ),
+        &receipt,
+        EvidenceContentKind::FailureReceipt,
+    )?;
     Ok((receipt, reference))
 }
 
-fn validate_report(action: &AutopilotAttestedAction, observation: &HostToCoreAttestedTaskObservationPayload, report: &Phase2PiTaskReportV1, bytes: &[u8]) -> Result<(), EvidenceError> {
-    if report.schema_version != "phase2.pi_task_report.v1" { return Err(EvidenceError::Schema(report.schema_version.clone())); }
-    if report.producer_task_id != observation.producer_task_id.0 { return Err(EvidenceError::RequestMismatch("report task id drift".to_owned())); }
-    if report.payload_utf8.is_empty() { return Err(EvidenceError::Schema("empty payload".to_owned())); }
-    if report.payload_sha256 != sha256_tag(report.payload_utf8.as_bytes()) { return Err(EvidenceError::Hash("payload hash mismatch".to_owned())); }
-    if report.report_sha256 != canonical_sha256_self(report, "report_sha256")? { return Err(EvidenceError::Hash("report self hash mismatch".to_owned())); }
-    if report.report_sha256 != sha256_tag(bytes) && report.report_sha256 != canonical_sha256_self(report, "report_sha256")? {
+fn validate_report(
+    action: &AutopilotAttestedAction,
+    observation: &HostToCoreAttestedTaskObservationPayload,
+    report: &Phase2PiTaskReportV1,
+    bytes: &[u8],
+) -> Result<(), EvidenceError> {
+    if report.schema_version != "phase2.pi_task_report.v1" {
+        return Err(EvidenceError::Schema(report.schema_version.clone()));
+    }
+    if report.producer_task_id != observation.producer_task_id.0 {
+        return Err(EvidenceError::RequestMismatch(
+            "report task id drift".to_owned(),
+        ));
+    }
+    if report.payload_utf8.is_empty() {
+        return Err(EvidenceError::Schema("empty payload".to_owned()));
+    }
+    if report.payload_sha256 != sha256_tag(report.payload_utf8.as_bytes()) {
+        return Err(EvidenceError::Hash("payload hash mismatch".to_owned()));
+    }
+    if report.report_sha256 != canonical_sha256_self(report, "report_sha256")? {
+        return Err(EvidenceError::Hash("report self hash mismatch".to_owned()));
+    }
+    if report.report_sha256 != sha256_tag(bytes)
+        && report.report_sha256 != canonical_sha256_self(report, "report_sha256")?
+    {
         return Err(EvidenceError::Hash("report hash mismatch".to_owned()));
     }
     validate_report_binding(action, &report.consumer_binding)
 }
 
-fn validate_sidecar(action: &AutopilotAttestedAction, observation: &HostToCoreAttestedTaskObservationPayload, report: &Phase2PiTaskReportV1, sidecar: &Phase2PiTaskAttestationV2, bytes: &[u8]) -> Result<(), EvidenceError> {
-    if sidecar.schema_version != "phase2.pi_task_attestation.v2" { return Err(EvidenceError::Schema(sidecar.schema_version.clone())); }
-    if sidecar.producer_request_sha256 != action.producer_request.request_sha256.0 { return Err(EvidenceError::RequestMismatch("sidecar request hash drift".to_owned())); }
-    if sidecar.locator.task_id != observation.producer_task_id.0 || sidecar.locator.task_id != report.producer_task_id { return Err(EvidenceError::RequestMismatch("sidecar task id drift".to_owned())); }
-    if sidecar.source_hashes.report_sha256 != report.report_sha256 || sidecar.artifacts.report.sha256 != report.report_sha256 { return Err(EvidenceError::Hash("sidecar/report hash mismatch".to_owned())); }
-    if sidecar.attestation_sha256 != canonical_sha256_self(sidecar, "attestation_sha256")? && sidecar.attestation_sha256 != sha256_tag(bytes) { return Err(EvidenceError::Hash("sidecar self hash mismatch".to_owned())); }
-    validate_report_binding(action, &sidecar.consumer_binding)?;
-    if sidecar.consumer_binding != report.consumer_binding { return Err(EvidenceError::RequestMismatch("report/sidecar consumer binding drift".to_owned())); }
-    if sidecar.lifecycle.status != "completed" || !sidecar.lifecycle.is_agent || sidecar.lifecycle.exit_code != 0 || sidecar.lifecycle.signal != "none" { return Err(EvidenceError::TerminalNotCompleted("sidecar lifecycle".to_owned())); }
-    if sidecar.invocation.provider != PROVIDER { return Err(EvidenceError::ProviderMismatch(sidecar.invocation.provider.clone())); }
-    if sidecar.invocation.model_id != action.producer_request.model { return Err(EvidenceError::ModelMismatch(sidecar.invocation.model_id.clone())); }
-    if sidecar.invocation.auth_class != AUTH_CLASS || sidecar.invocation.credential_kind != CREDENTIAL_KIND || sidecar.invocation.route_class != ROUTE_CLASS || sidecar.invocation.channel != CHANNEL || sidecar.invocation.direct_api_key != DIRECT_API_KEY { return Err(EvidenceError::ChannelForbidden(format!("{}/{}/{}/{}", sidecar.invocation.auth_class, sidecar.invocation.credential_kind, sidecar.invocation.route_class, sidecar.invocation.channel))); }
-    if sidecar.invocation.final_stop_reason != "stop" { return Err(EvidenceError::TerminalNotCompleted("non-stop final reason".to_owned())); }
-    if !sidecar.authority.status_unchanged || sidecar.authority.start_commit_oid != sidecar.authority.finish_commit_oid || sidecar.authority.start_tree_oid != sidecar.authority.finish_tree_oid || sidecar.authority.start_status_sha256 != sidecar.authority.finish_status_sha256 { return Err(EvidenceError::SubjectStale); }
-    if sidecar.artifacts.prompt.sha256 != action.assignment_ref.sha256.0 && sidecar.artifacts.prompt.sha256 != action.producer_request.consumer_binding.subject_digest.0 {
-        // The paired producer hashes the actual prompt; compare against the request's prompt bytes below.
-        if sidecar.artifacts.prompt.sha256 != sha256_tag(action.producer_request.prompt_utf8.as_bytes()) { return Err(EvidenceError::Hash("prompt hash mismatch".to_owned())); }
+fn validate_sidecar(
+    action: &AutopilotAttestedAction,
+    observation: &HostToCoreAttestedTaskObservationPayload,
+    report: &Phase2PiTaskReportV1,
+    sidecar: &Phase2PiTaskAttestationV2,
+    bytes: &[u8],
+) -> Result<(), EvidenceError> {
+    if sidecar.schema_version != "phase2.pi_task_attestation.v2" {
+        return Err(EvidenceError::Schema(sidecar.schema_version.clone()));
     }
-    if sidecar.artifacts.system_prompt.sha256 != sha256_tag(action.producer_request.system_prompt_utf8.as_bytes()) { return Err(EvidenceError::Hash("system prompt hash mismatch".to_owned())); }
-    if let Some(usage) = &sidecar.usage && usage.cost_total_microusd.unwrap_or(0) != 0 { return Err(EvidenceError::MeteredUsage); }
+    if sidecar.producer_request_sha256 != action.producer_request.request_sha256.0 {
+        return Err(EvidenceError::RequestMismatch(
+            "sidecar request hash drift".to_owned(),
+        ));
+    }
+    if sidecar.locator.task_id != observation.producer_task_id.0
+        || sidecar.locator.task_id != report.producer_task_id
+    {
+        return Err(EvidenceError::RequestMismatch(
+            "sidecar task id drift".to_owned(),
+        ));
+    }
+    if sidecar.source_hashes.report_sha256 != report.report_sha256
+        || sidecar.artifacts.report.sha256 != report.report_sha256
+    {
+        return Err(EvidenceError::Hash(
+            "sidecar/report hash mismatch".to_owned(),
+        ));
+    }
+    if sidecar.attestation_sha256 != canonical_sha256_self(sidecar, "attestation_sha256")?
+        && sidecar.attestation_sha256 != sha256_tag(bytes)
+    {
+        return Err(EvidenceError::Hash("sidecar self hash mismatch".to_owned()));
+    }
+    validate_report_binding(action, &sidecar.consumer_binding)?;
+    if sidecar.consumer_binding != report.consumer_binding {
+        return Err(EvidenceError::RequestMismatch(
+            "report/sidecar consumer binding drift".to_owned(),
+        ));
+    }
+    if sidecar.lifecycle.status != "completed"
+        || !sidecar.lifecycle.is_agent
+        || sidecar.lifecycle.exit_code != 0
+        || sidecar.lifecycle.signal != "none"
+    {
+        return Err(EvidenceError::TerminalNotCompleted(
+            "sidecar lifecycle".to_owned(),
+        ));
+    }
+    if sidecar.invocation.provider != PROVIDER {
+        return Err(EvidenceError::ProviderMismatch(
+            sidecar.invocation.provider.clone(),
+        ));
+    }
+    if sidecar.invocation.model_id != action.producer_request.model {
+        return Err(EvidenceError::ModelMismatch(
+            sidecar.invocation.model_id.clone(),
+        ));
+    }
+    if sidecar.invocation.auth_class != AUTH_CLASS
+        || sidecar.invocation.credential_kind != CREDENTIAL_KIND
+        || sidecar.invocation.route_class != ROUTE_CLASS
+        || sidecar.invocation.channel != CHANNEL
+        || sidecar.invocation.direct_api_key != DIRECT_API_KEY
+    {
+        return Err(EvidenceError::ChannelForbidden(format!(
+            "{}/{}/{}/{}",
+            sidecar.invocation.auth_class,
+            sidecar.invocation.credential_kind,
+            sidecar.invocation.route_class,
+            sidecar.invocation.channel
+        )));
+    }
+    if sidecar.invocation.final_stop_reason != "stop" {
+        return Err(EvidenceError::TerminalNotCompleted(
+            "non-stop final reason".to_owned(),
+        ));
+    }
+    if !sidecar.authority.status_unchanged
+        || sidecar.authority.start_commit_oid != sidecar.authority.finish_commit_oid
+        || sidecar.authority.start_tree_oid != sidecar.authority.finish_tree_oid
+        || sidecar.authority.start_status_sha256 != sidecar.authority.finish_status_sha256
+    {
+        return Err(EvidenceError::SubjectStale);
+    }
+    if sidecar.artifacts.prompt.sha256 != action.assignment_ref.sha256.0
+        && sidecar.artifacts.prompt.sha256
+            != action.producer_request.consumer_binding.subject_digest.0
+    {
+        // The paired producer hashes the actual prompt; compare against the request's prompt bytes below.
+        if sidecar.artifacts.prompt.sha256
+            != sha256_tag(action.producer_request.prompt_utf8.as_bytes())
+        {
+            return Err(EvidenceError::Hash("prompt hash mismatch".to_owned()));
+        }
+    }
+    if sidecar.artifacts.system_prompt.sha256
+        != sha256_tag(action.producer_request.system_prompt_utf8.as_bytes())
+    {
+        return Err(EvidenceError::Hash(
+            "system prompt hash mismatch".to_owned(),
+        ));
+    }
+    if let Some(usage) = &sidecar.usage
+        && usage.cost_total_microusd.unwrap_or(0) != 0
+    {
+        return Err(EvidenceError::MeteredUsage);
+    }
     Ok(())
 }
 
-fn validate_report_binding(action: &AutopilotAttestedAction, binding: &Phase2ReportConsumerBinding) -> Result<(), EvidenceError> {
+fn validate_report_binding(
+    action: &AutopilotAttestedAction,
+    binding: &Phase2ReportConsumerBinding,
+) -> Result<(), EvidenceError> {
     let expected = &action.producer_request.consumer_binding;
     if binding.schema_version != CONSUMER_BINDING_SCHEMA
         || binding.consumer != "pi-autopilot"
@@ -705,12 +1015,19 @@ fn validate_report_binding(action: &AutopilotAttestedAction, binding: &Phase2Rep
         || binding.subject_digest != expected.subject_digest.0
         || binding.binding_sha256 != expected.binding_sha256.0
     {
-        return Err(EvidenceError::RequestMismatch("consumer binding mismatch".to_owned()));
+        return Err(EvidenceError::RequestMismatch(
+            "consumer binding mismatch".to_owned(),
+        ));
     }
     Ok(())
 }
 
-fn producer_binding(identity: &EvidenceIdentity, action: &AutopilotAttestedAction, observation: &HostToCoreAttestedTaskObservationPayload, source: &SourcePair) -> Result<AutopilotProducerBinding, EvidenceError> {
+fn producer_binding(
+    identity: &EvidenceIdentity,
+    action: &AutopilotAttestedAction,
+    observation: &HostToCoreAttestedTaskObservationPayload,
+    source: &SourcePair,
+) -> Result<AutopilotProducerBinding, EvidenceError> {
     let without_hash = AutopilotProducerBinding {
         schema_version: SchemaId("autopilot.producer_binding.v1".to_owned()),
         run_id: identity.run_id.clone(),
@@ -729,7 +1046,10 @@ fn producer_binding(identity: &EvidenceIdentity, action: &AutopilotAttestedActio
         binding_sha256: Digest(String::new()),
     };
     let hash = canonical_sha256_self(&without_hash, "binding_sha256")?;
-    Ok(AutopilotProducerBinding { binding_sha256: Digest(hash), ..without_hash })
+    Ok(AutopilotProducerBinding {
+        binding_sha256: Digest(hash),
+        ..without_hash
+    })
 }
 
 struct AcceptanceReceiptRefs<'a> {
@@ -756,7 +1076,16 @@ fn acceptance_receipt(
     artifacts: AcceptanceReceiptArtifacts<'_>,
     gate: AcceptanceReceiptGate,
 ) -> Result<AutopilotEvidenceAcceptanceReceipt, EvidenceError> {
-    let receipt_id = Id(format!("ear-{}", digest_hex(format!("autopilot.evidence-acceptance.v1\0{}\0{}", action.assignment_id.0, action.producer_request.request_sha256.0).as_bytes())));
+    let receipt_id = Id(format!(
+        "ear-{}",
+        digest_hex(
+            format!(
+                "autopilot.evidence-acceptance.v1\0{}\0{}",
+                action.assignment_id.0, action.producer_request.request_sha256.0
+            )
+            .as_bytes()
+        )
+    ));
     let without_hash = AutopilotEvidenceAcceptanceReceipt {
         schema_version: SchemaId("autopilot.evidence_acceptance_receipt.v1".to_owned()),
         receipt_id,
@@ -768,7 +1097,11 @@ fn acceptance_receipt(
         action_id: action.action_id.clone(),
         assignment_revision: action.assignment_revision,
         run_revision: action.run_revision,
-        subject_digest: action.producer_request.consumer_binding.subject_digest.clone(),
+        subject_digest: action
+            .producer_request
+            .consumer_binding
+            .subject_digest
+            .clone(),
         boundary_id: action.producer_request.consumer_binding.boundary_id.clone(),
         assignment_ref: action.assignment_ref.clone(),
         action_ref: action_content_ref(action)?,
@@ -778,7 +1111,9 @@ fn acceptance_receipt(
         producer_task_id: Id(artifacts.report.producer_task_id.clone()),
         producer_request_sha256: action.producer_request.request_sha256.clone(),
         prompt_sha256: Digest(sha256_tag(action.producer_request.prompt_utf8.as_bytes())),
-        system_prompt_sha256: Digest(sha256_tag(action.producer_request.system_prompt_utf8.as_bytes())),
+        system_prompt_sha256: Digest(sha256_tag(
+            action.producer_request.system_prompt_utf8.as_bytes(),
+        )),
         payload_sha256: Digest(artifacts.report.payload_sha256.clone()),
         provider: PROVIDER.to_owned(),
         model: action.producer_request.model.clone(),
@@ -797,10 +1132,15 @@ fn acceptance_receipt(
         receipt_sha256: Digest(String::new()),
     };
     let hash = canonical_sha256_self(&without_hash, "receipt_sha256")?;
-    Ok(AutopilotEvidenceAcceptanceReceipt { receipt_sha256: Digest(hash), ..without_hash })
+    Ok(AutopilotEvidenceAcceptanceReceipt {
+        receipt_sha256: Digest(hash),
+        ..without_hash
+    })
 }
 
-fn action_content_ref(action: &AutopilotAttestedAction) -> Result<AutopilotContentRef, EvidenceError> {
+fn action_content_ref(
+    action: &AutopilotAttestedAction,
+) -> Result<AutopilotContentRef, EvidenceError> {
     let relative = format!("evidence/actions/{}.json", action.action_id.0);
     let bytes = canonical_json(action)?;
     Ok(AutopilotContentRef {
@@ -812,7 +1152,9 @@ fn action_content_ref(action: &AutopilotAttestedAction) -> Result<AutopilotConte
     })
 }
 
-fn conflict_policy(distinct: Vec<AutopilotContentRef>) -> Result<AutopilotEvidenceConflictPolicy, EvidenceError> {
+fn conflict_policy(
+    distinct: Vec<AutopilotContentRef>,
+) -> Result<AutopilotEvidenceConflictPolicy, EvidenceError> {
     let without_hash = AutopilotEvidenceConflictPolicy {
         schema_version: SchemaId("autopilot.evidence_conflict_policy.v1".to_owned()),
         distinct_from_receipt_refs: distinct,
@@ -823,10 +1165,15 @@ fn conflict_policy(distinct: Vec<AutopilotContentRef>) -> Result<AutopilotEviden
         policy_sha256: Digest(String::new()),
     };
     let hash = canonical_sha256_self(&without_hash, "policy_sha256")?;
-    Ok(AutopilotEvidenceConflictPolicy { policy_sha256: Digest(hash), ..without_hash })
+    Ok(AutopilotEvidenceConflictPolicy {
+        policy_sha256: Digest(hash),
+        ..without_hash
+    })
 }
 
-fn conflict_check(compared: Vec<AutopilotContentRef>) -> Result<AutopilotEvidenceConflictCheck, EvidenceError> {
+fn conflict_check(
+    compared: Vec<AutopilotContentRef>,
+) -> Result<AutopilotEvidenceConflictCheck, EvidenceError> {
     let without_hash = AutopilotEvidenceConflictCheck {
         schema_version: SchemaId("autopilot.evidence_conflict_check.v1".to_owned()),
         compared_receipt_refs: compared,
@@ -839,7 +1186,10 @@ fn conflict_check(compared: Vec<AutopilotContentRef>) -> Result<AutopilotEvidenc
         check_sha256: Digest(String::new()),
     };
     let hash = canonical_sha256_self(&without_hash, "check_sha256")?;
-    Ok(AutopilotEvidenceConflictCheck { check_sha256: Digest(hash), ..without_hash })
+    Ok(AutopilotEvidenceConflictCheck {
+        check_sha256: Digest(hash),
+        ..without_hash
+    })
 }
 
 struct ConsumerBindingDraft<'a> {
@@ -873,87 +1223,185 @@ fn consumer_binding_without_hash(
     }
 }
 
-fn with_binding_hash(binding: Phase2PiConsumerBinding) -> Result<Phase2PiConsumerBinding, EvidenceError> {
+fn with_binding_hash(
+    binding: Phase2PiConsumerBinding,
+) -> Result<Phase2PiConsumerBinding, EvidenceError> {
     let hash = canonical_sha256_self(&binding, "binding_sha256")?;
-    Ok(Phase2PiConsumerBinding { binding_sha256: Digest(hash), ..binding })
+    Ok(Phase2PiConsumerBinding {
+        binding_sha256: Digest(hash),
+        ..binding
+    })
 }
 
-fn planning_subject_digest(planning_manifest_bytes: &[u8], work_map_bytes: &[u8]) -> Result<String, EvidenceError> {
+fn planning_subject_digest(
+    planning_manifest_bytes: &[u8],
+    work_map_bytes: &[u8],
+) -> Result<String, EvidenceError> {
     #[derive(Serialize)]
-    struct Subject<'a> { schema_version: &'a str, authority_set_id: &'a str, planning_manifest_sha256: String, work_map_sha256: String }
-    let value = Subject { schema_version: "autopilot.planning_review_subject.v1", authority_set_id: "planning-authority", planning_manifest_sha256: sha256_tag(planning_manifest_bytes), work_map_sha256: sha256_tag(work_map_bytes) };
+    struct Subject<'a> {
+        schema_version: &'a str,
+        authority_set_id: &'a str,
+        planning_manifest_sha256: String,
+        work_map_sha256: String,
+    }
+    let value = Subject {
+        schema_version: "autopilot.planning_review_subject.v1",
+        authority_set_id: "planning-authority",
+        planning_manifest_sha256: sha256_tag(planning_manifest_bytes),
+        work_map_sha256: sha256_tag(work_map_bytes),
+    };
     Ok(sha256_tag(&canonical_json(&value)?))
 }
 
-fn planning_review_prompt(workstream: &str, planning_manifest_bytes: &[u8], work_map_bytes: &[u8]) -> String {
-    format!("Review the Autopilot plan for workstream `{workstream}`.\n\nPlanning manifest SHA-256: {}\nWork map SHA-256: {}\n\nReturn a planning.plan-review.v1 verdict. Overall PASS is required for approval; FAIL, BLOCKED, NEEDS_FIX, advisory-only prose, or unclassified output is not approval.\n\n--- planning manifest ---\n{}\n\n--- work map ---\n{}\n", sha256_tag(planning_manifest_bytes), sha256_tag(work_map_bytes), String::from_utf8_lossy(planning_manifest_bytes), String::from_utf8_lossy(work_map_bytes))
+fn planning_review_prompt(
+    workstream: &str,
+    planning_manifest_bytes: &[u8],
+    work_map_bytes: &[u8],
+) -> String {
+    format!(
+        "Review the Autopilot plan for workstream `{workstream}`.\n\nPlanning manifest SHA-256: {}\nWork map SHA-256: {}\n\nReturn a planning.plan-review.v1 verdict. Overall PASS is required for approval; FAIL, BLOCKED, NEEDS_FIX, advisory-only prose, or unclassified output is not approval.\n\n--- planning manifest ---\n{}\n\n--- work map ---\n{}\n",
+        sha256_tag(planning_manifest_bytes),
+        sha256_tag(work_map_bytes),
+        String::from_utf8_lossy(planning_manifest_bytes),
+        String::from_utf8_lossy(work_map_bytes)
+    )
 }
 
-fn next_assignment_revision(identity: &EvidenceIdentity, _purpose: &str) -> Result<u32, EvidenceError> {
+fn next_assignment_revision(
+    identity: &EvidenceIdentity,
+    _purpose: &str,
+) -> Result<u32, EvidenceError> {
     let dir = identity.run_root.join("evidence/assignments");
-    if !dir.exists() { return Ok(1); }
+    if !dir.exists() {
+        return Ok(1);
+    }
     let mut max_rev = 0_u32;
     for entry in fs::read_dir(&dir).map_err(|error| EvidenceError::Store(error.to_string()))? {
-        let path = entry.map_err(|error| EvidenceError::Store(error.to_string()))?.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("json") { continue; }
-        let text = fs::read_to_string(&path).map_err(|error| EvidenceError::Store(error.to_string()))?;
-        if let Ok(assignment) = serde_json::from_str::<AutopilotAttestedAssignment>(&text) && assignment.purpose_id.0 == PURPOSE_PLANNING_REVIEW { max_rev = max_rev.max(assignment.assignment_revision); }
+        let path = entry
+            .map_err(|error| EvidenceError::Store(error.to_string()))?
+            .path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let text =
+            fs::read_to_string(&path).map_err(|error| EvidenceError::Store(error.to_string()))?;
+        if let Ok(assignment) = serde_json::from_str::<AutopilotAttestedAssignment>(&text)
+            && assignment.purpose_id.0 == PURPOSE_PLANNING_REVIEW
+        {
+            max_rev = max_rev.max(assignment.assignment_revision);
+        }
     }
     Ok(max_rev.saturating_add(1).max(1))
 }
 
-pub fn publish_json_ref<T: Serialize>(root: &Path, relative: &str, value: &T, kind: EvidenceContentKind) -> Result<AutopilotContentRef, EvidenceError> {
+pub fn publish_json_ref<T: Serialize>(
+    root: &Path,
+    relative: &str,
+    value: &T,
+    kind: EvidenceContentKind,
+) -> Result<AutopilotContentRef, EvidenceError> {
     publish_ref(root, relative, &canonical_json(value)?, kind)
 }
 
-pub fn publish_ref(root: &Path, relative: &str, bytes: &[u8], kind: EvidenceContentKind) -> Result<AutopilotContentRef, EvidenceError> {
+pub fn publish_ref(
+    root: &Path,
+    relative: &str,
+    bytes: &[u8],
+    kind: EvidenceContentKind,
+) -> Result<AutopilotContentRef, EvidenceError> {
     validate_relative_path(relative)?;
     let target = root.join(relative);
     create_once_bytes(&target, bytes)?;
-    Ok(AutopilotContentRef { schema_version: SchemaId(CONTENT_REF_SCHEMA.to_owned()), kind, path: ContractPath(relative.to_owned()), byte_length: UnixMs(bytes.len().to_string()), sha256: Digest(sha256_tag(bytes)) })
+    Ok(AutopilotContentRef {
+        schema_version: SchemaId(CONTENT_REF_SCHEMA.to_owned()),
+        kind,
+        path: ContractPath(relative.to_owned()),
+        byte_length: UnixMs(bytes.len().to_string()),
+        sha256: Digest(sha256_tag(bytes)),
+    })
 }
 
 pub fn create_once_bytes(path: &Path, bytes: &[u8]) -> Result<(), EvidenceError> {
-    if let Some(parent) = path.parent() { private_dir(parent)?; }
-    match fs::OpenOptions::new().create_new(true).write(true).open(path) {
+    if let Some(parent) = path.parent() {
+        private_dir(parent)?;
+    }
+    match fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)
+    {
         Ok(mut file) => {
             private_handle(&file)?;
-            file.write_all(bytes).map_err(|error| EvidenceError::Store(error.to_string()))?;
-            file.sync_all().map_err(|error| EvidenceError::Store(error.to_string()))?;
-            if let Some(parent) = path.parent() { sync_dir(parent)?; }
+            file.write_all(bytes)
+                .map_err(|error| EvidenceError::Store(error.to_string()))?;
+            file.sync_all()
+                .map_err(|error| EvidenceError::Store(error.to_string()))?;
+            if let Some(parent) = path.parent() {
+                sync_dir(parent)?;
+            }
             Ok(())
         }
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            let existing = fs::read(path).map_err(|error| EvidenceError::Store(error.to_string()))?;
-            if existing == bytes { Ok(()) } else { Err(EvidenceError::Store(format!("create-once conflict: {}", path.display()))) }
+            let existing =
+                fs::read(path).map_err(|error| EvidenceError::Store(error.to_string()))?;
+            if existing == bytes {
+                Ok(())
+            } else {
+                Err(EvidenceError::Store(format!(
+                    "create-once conflict: {}",
+                    path.display()
+                )))
+            }
         }
         Err(error) => Err(EvidenceError::Store(error.to_string())),
     }
 }
 
 fn read_bound_source(path: &Path, limit: u64) -> Result<Vec<u8>, EvidenceError> {
-    if !path.is_relative() { return Err(EvidenceError::SourcePath); }
+    if !path.is_relative() {
+        return Err(EvidenceError::SourcePath);
+    }
     reject_path_components(path)?;
     let display = path.to_string_lossy();
     if !(display.starts_with(".pi/tasks/") || display.starts_with(".pi/autopilot/")) {
         return Err(EvidenceError::SourcePath);
     }
     reject_existing_link_ancestors(path)?;
-    let metadata = fs::symlink_metadata(path).map_err(|error| EvidenceError::SourceRead(error.to_string()))?;
-    if metadata.file_type().is_symlink() { return Err(EvidenceError::SourcePath); }
-    if !metadata.file_type().is_file() { return Err(EvidenceError::SourcePath); }
+    let metadata =
+        fs::symlink_metadata(path).map_err(|error| EvidenceError::SourceRead(error.to_string()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(EvidenceError::SourcePath);
+    }
+    if !metadata.file_type().is_file() {
+        return Err(EvidenceError::SourcePath);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        if metadata.nlink() != 1 { return Err(EvidenceError::SourcePath); }
+        if metadata.nlink() != 1 {
+            return Err(EvidenceError::SourcePath);
+        }
     }
-    if metadata.len() > limit { return Err(EvidenceError::SourceRead("source too large".to_owned())); }
-    let mut file = fs::File::open(path).map_err(|error| EvidenceError::SourceRead(error.to_string()))?;
+    if metadata.len() > limit {
+        return Err(EvidenceError::SourceRead("source too large".to_owned()));
+    }
+    let mut file =
+        fs::File::open(path).map_err(|error| EvidenceError::SourceRead(error.to_string()))?;
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).map_err(|error| EvidenceError::SourceRead(error.to_string()))?;
-    let after = file.metadata().map_err(|error| EvidenceError::SourceRead(error.to_string()))?;
-    if after.len() != metadata.len() { return Err(EvidenceError::SourceRead("source size drift".to_owned())); }
-    if u64::try_from(bytes.len()).map_err(|_| EvidenceError::SourceRead("source too large".to_owned()))? != metadata.len() { return Err(EvidenceError::SourceRead("source size drift".to_owned())); }
+    file.read_to_end(&mut bytes)
+        .map_err(|error| EvidenceError::SourceRead(error.to_string()))?;
+    let after = file
+        .metadata()
+        .map_err(|error| EvidenceError::SourceRead(error.to_string()))?;
+    if after.len() != metadata.len() {
+        return Err(EvidenceError::SourceRead("source size drift".to_owned()));
+    }
+    if u64::try_from(bytes.len())
+        .map_err(|_| EvidenceError::SourceRead("source too large".to_owned()))?
+        != metadata.len()
+    {
+        return Err(EvidenceError::SourceRead("source size drift".to_owned()));
+    }
     Ok(bytes)
 }
 
@@ -962,7 +1410,9 @@ fn reject_existing_link_ancestors(path: &Path) -> Result<(), EvidenceError> {
     for component in path.components() {
         current.push(component.as_os_str());
         match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => return Err(EvidenceError::SourcePath),
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(EvidenceError::SourcePath);
+            }
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(EvidenceError::SourceRead(error.to_string())),
@@ -972,8 +1422,18 @@ fn reject_existing_link_ancestors(path: &Path) -> Result<(), EvidenceError> {
 }
 
 fn validate_relative_path(relative: &str) -> Result<(), EvidenceError> {
-    if relative.is_empty() || relative.starts_with('/') || relative.contains('\\') || relative.contains('\0') { return Err(EvidenceError::SourcePath); }
-    for part in relative.split('/') { if part.is_empty() || part == "." || part == ".." { return Err(EvidenceError::SourcePath); } }
+    if relative.is_empty()
+        || relative.starts_with('/')
+        || relative.contains('\\')
+        || relative.contains('\0')
+    {
+        return Err(EvidenceError::SourcePath);
+    }
+    for part in relative.split('/') {
+        if part.is_empty() || part == "." || part == ".." {
+            return Err(EvidenceError::SourcePath);
+        }
+    }
     Ok(())
 }
 
@@ -981,7 +1441,9 @@ fn reject_path_components(path: &Path) -> Result<(), EvidenceError> {
     for component in path.components() {
         match component {
             Component::ParentDir | Component::CurDir => return Err(EvidenceError::SourcePath),
-            Component::Normal(part) if part.to_string_lossy().contains('\0') => return Err(EvidenceError::SourcePath),
+            Component::Normal(part) if part.to_string_lossy().contains('\0') => {
+                return Err(EvidenceError::SourcePath);
+            }
             _ => {}
         }
     }
@@ -989,8 +1451,12 @@ fn reject_path_components(path: &Path) -> Result<(), EvidenceError> {
 }
 
 fn run_root_for(repo_key: &Base32, run_id: &str) -> Result<PathBuf, EvidenceError> {
-    let home = std::env::var_os("HOME").ok_or_else(|| EvidenceError::Store("HOME missing".to_owned()))?;
-    Ok(PathBuf::from(home).join(".pi/agent/autopilot/v2/runs").join(&repo_key.0).join(run_id))
+    let home =
+        std::env::var_os("HOME").ok_or_else(|| EvidenceError::Store("HOME missing".to_owned()))?;
+    Ok(PathBuf::from(home)
+        .join(".pi/agent/autopilot/v2/runs")
+        .join(&repo_key.0)
+        .join(run_id))
 }
 
 fn private_dir(path: &Path) -> Result<(), EvidenceError> {
@@ -998,7 +1464,8 @@ fn private_dir(path: &Path) -> Result<(), EvidenceError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|error| EvidenceError::Store(error.to_string()))?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .map_err(|error| EvidenceError::Store(error.to_string()))?;
     }
     Ok(())
 }
@@ -1007,7 +1474,8 @@ fn private_handle(file: &fs::File) -> Result<(), EvidenceError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(fs::Permissions::from_mode(0o600)).map_err(|error| EvidenceError::Store(error.to_string()))?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|error| EvidenceError::Store(error.to_string()))?;
     }
     Ok(())
 }
@@ -1016,21 +1484,29 @@ fn sync_dir(path: &Path) -> Result<(), EvidenceError> {
     #[cfg(unix)]
     {
         let dir = fs::File::open(path).map_err(|error| EvidenceError::Store(error.to_string()))?;
-        dir.sync_all().map_err(|error| EvidenceError::Store(error.to_string()))?;
+        dir.sync_all()
+            .map_err(|error| EvidenceError::Store(error.to_string()))?;
     }
     Ok(())
 }
 
 pub fn canonical_json<T: Serialize>(value: &T) -> Result<Vec<u8>, EvidenceError> {
-    let json = serde_json::to_value(value).map_err(|error| EvidenceError::Store(error.to_string()))?;
+    let json =
+        serde_json::to_value(value).map_err(|error| EvidenceError::Store(error.to_string()))?;
     let mut out = Vec::new();
     write_canonical(&json, &mut out)?;
     Ok(out)
 }
 
-fn canonical_sha256_self<T: Serialize>(value: &T, self_field: &str) -> Result<String, EvidenceError> {
-    let mut json = serde_json::to_value(value).map_err(|error| EvidenceError::Store(error.to_string()))?;
-    if let Value::Object(map) = &mut json { map.remove(self_field); }
+fn canonical_sha256_self<T: Serialize>(
+    value: &T,
+    self_field: &str,
+) -> Result<String, EvidenceError> {
+    let mut json =
+        serde_json::to_value(value).map_err(|error| EvidenceError::Store(error.to_string()))?;
+    if let Value::Object(map) = &mut json {
+        map.remove(self_field);
+    }
     let mut out = Vec::new();
     write_canonical(&json, &mut out)?;
     Ok(sha256_tag(&out))
@@ -1041,23 +1517,39 @@ fn write_canonical(value: &Value, out: &mut Vec<u8>) -> Result<(), EvidenceError
         Value::Null => out.extend_from_slice(b"null"),
         Value::Bool(v) => out.extend_from_slice(if *v { b"true" } else { b"false" }),
         Value::Number(number) => out.extend_from_slice(number.to_string().as_bytes()),
-        Value::String(text) => serde_json::to_writer(out, text).map_err(|error| EvidenceError::Store(error.to_string()))?,
+        Value::String(text) => serde_json::to_writer(out, text)
+            .map_err(|error| EvidenceError::Store(error.to_string()))?,
         Value::Array(items) => {
             out.push(b'[');
-            for (index, item) in items.iter().enumerate() { if index > 0 { out.push(b','); } write_canonical(item, out)?; }
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    out.push(b',');
+                }
+                write_canonical(item, out)?;
+            }
             out.push(b']');
         }
         Value::Object(map) => {
             let sorted = map.iter().collect::<BTreeMap<_, _>>();
             out.push(b'{');
-            for (index, (key, item)) in sorted.iter().enumerate() { if index > 0 { out.push(b','); } serde_json::to_writer(&mut *out, key).map_err(|error| EvidenceError::Store(error.to_string()))?; out.push(b':'); write_canonical(item, out)?; }
+            for (index, (key, item)) in sorted.iter().enumerate() {
+                if index > 0 {
+                    out.push(b',');
+                }
+                serde_json::to_writer(&mut *out, key)
+                    .map_err(|error| EvidenceError::Store(error.to_string()))?;
+                out.push(b':');
+                write_canonical(item, out)?;
+            }
             out.push(b'}');
         }
     }
     Ok(())
 }
 
-pub fn sha256_tag(bytes: &[u8]) -> String { format!("sha256:{}", digest_hex(bytes)) }
+pub fn sha256_tag(bytes: &[u8]) -> String {
+    format!("sha256:{}", digest_hex(bytes))
+}
 fn digest_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     let mut out = String::with_capacity(64);
@@ -1069,22 +1561,34 @@ fn digest_hex(bytes: &[u8]) -> String {
 }
 
 fn hex(nibble: u8) -> char {
-    char::from(if nibble < 10 { b'0' + nibble } else { b'a' + (nibble - 10) })
+    char::from(if nibble < 10 {
+        b'0' + nibble
+    } else {
+        b'a' + (nibble - 10)
+    })
 }
 
 fn now_ms() -> Result<u64, EvidenceError> {
-    let ms = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| EvidenceError::Store(error.to_string()))?.as_millis();
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| EvidenceError::Store(error.to_string()))?
+        .as_millis();
     u64::try_from(ms).map_err(|_| EvidenceError::Store("time overflow".to_owned()))
 }
 
 fn random10() -> Result<[u8; 10], EvidenceError> {
     let mut bytes = [0_u8; 10];
-    fs::File::open("/dev/urandom").map_err(|error| EvidenceError::Store(error.to_string()))?.read_exact(&mut bytes).map_err(|error| EvidenceError::Store(error.to_string()))?;
+    fs::File::open("/dev/urandom")
+        .map_err(|error| EvidenceError::Store(error.to_string()))?
+        .read_exact(&mut bytes)
+        .map_err(|error| EvidenceError::Store(error.to_string()))?;
     Ok(bytes)
 }
 
 fn path_string(path: &Path) -> Result<String, EvidenceError> {
-    path.to_str().map(str::to_owned).ok_or(EvidenceError::SourcePath)
+    path.to_str()
+        .map(str::to_owned)
+        .ok_or(EvidenceError::SourcePath)
 }
 
 fn evidence_kind_str(kind: &EvidenceContentKind) -> &'static str {
@@ -1105,7 +1609,11 @@ fn evidence_kind_str(kind: &EvidenceContentKind) -> &'static str {
 
 fn bound_detail(value: &str) -> String {
     let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    if normalized.chars().count() <= 160 { normalized } else { format!("{}…", normalized.chars().take(159).collect::<String>()) }
+    if normalized.chars().count() <= 160 {
+        normalized
+    } else {
+        format!("{}…", normalized.chars().take(159).collect::<String>())
+    }
 }
 
 fn evidence_code_from(value: &str) -> EvidenceErrorCode {
@@ -1145,4 +1653,3 @@ fn evidence_code_str(code: &EvidenceErrorCode) -> &'static str {
         EvidenceErrorCode::EVIDENCEUNDECLAREDINPUT => "EVIDENCE_UNDECLARED_INPUT",
     }
 }
-

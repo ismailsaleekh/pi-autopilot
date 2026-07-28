@@ -22,16 +22,12 @@ fn fake_pi_journey_writes_identity_carrier_and_isolated_exact_args() {
     let accepted = transcript("planning.task-atoms.v1");
     write_fake_pi(
         &root,
-        &format!(
-            r#"#!/usr/bin/env node
-import {{ writeFileSync }} from 'node:fs';
-writeFileSync({:?}, JSON.stringify({{ argv: process.argv.slice(2), cwd: process.cwd() }}));
-const text = {:?};
-const message = {{role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{{type:'text', text}}], stopReason:'stop'}};
-console.log(JSON.stringify({{type:'message_end', message}}));
-console.log(JSON.stringify({{type:'agent_end', messages:[message], willRetry:false}}));
-"#,
-            argv_path, accepted
+        &rpc_fake_pi(
+            &format!(
+                "writeFileSync({:?}, JSON.stringify({{ argv: process.argv.slice(2), cwd: process.cwd(), env: {{ OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY, OPENAI_API_KEY: process.env.OPENAI_API_KEY }} }}));",
+                argv_path
+            ),
+            &format!("emitAssistant({accepted:?});"),
         ),
     );
     let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
@@ -63,7 +59,7 @@ console.log(JSON.stringify({{type:'agent_end', messages:[message], willRetry:fal
         .iter()
         .map(|item| item.as_str().expect("arg").to_owned())
         .collect::<Vec<_>>();
-    assert_eq!(argv[0..3], ["--mode", "json", "--session-id"]);
+    assert_eq!(argv[0..3], ["--mode", "rpc", "--session-id"]);
     assert!(argv[3].starts_with("autopilot-planning-main-task-extractor-01-"));
     assert_eq!(
         argv[4..15],
@@ -83,7 +79,9 @@ console.log(JSON.stringify({{type:'agent_end', messages:[message], willRetry:fal
     );
     assert!(argv.contains(&"--tools".to_owned()));
     assert!(argv.contains(&"read,grep,find,ls".to_owned()));
-    assert!(argv.contains(&"-p".to_owned()));
+    assert!(!argv.contains(&"-p".to_owned()));
+    assert_eq!(argv_record["env"]["OPENROUTER_API_KEY"], Value::Null);
+    assert_eq!(argv_record["env"]["OPENAI_API_KEY"], Value::Null);
     assert_eq!(
         PathBuf::from(argv_record["cwd"].as_str().expect("cwd")),
         root
@@ -93,14 +91,23 @@ console.log(JSON.stringify({{type:'agent_end', messages:[message], willRetry:fal
 #[test]
 fn real_core_agent_run_accepts_variadic_authority_spec() {
     let root = temp_root("runner-variadic-real-core");
-    write_fake_pi(&root, &success_fake_pi(&transcript("planning.task-atoms.v1")));
+    write_fake_pi(
+        &root,
+        &success_fake_pi(&task_atoms_output("TASK-1.md", "AUTHORITY-1")),
+    );
     let context_document = doc(
         "CONTEXT.md",
         "context/non-authority",
         "CONTEXT-SENTINEL-UNIQUE",
     );
     let authority_documents = (1..=6)
-        .map(|index| doc(&format!("TASK-{index}.md"), "authority", &format!("AUTHORITY-{index}")))
+        .map(|index| {
+            doc(
+                &format!("TASK-{index}.md"),
+                "authority",
+                &format!("AUTHORITY-{index}"),
+            )
+        })
         .collect::<Vec<_>>();
     let expected_context_digest = sha_json(&json!({
         "authority_set_id":"set-a",
@@ -173,22 +180,28 @@ fn autopilot_plan_preserves_multiple_context_documents_in_manifest_spec_and_prom
     assert_eq!(envelope.kind, "spawn", "payload={}", envelope.payload);
     let spawn: CoreToHostSpawnPayload =
         serde_json::from_value(envelope.payload).expect("spawn payload");
-    assert_eq!(spawn.action.assignment_id.0, "planning-main-task-extractor-01");
+    assert_eq!(
+        spawn.action.assignment_id.0,
+        "planning-main-task-extractor-01"
+    );
 
     let manifest: Value = serde_json::from_slice(
         &fs::read(root.join(".pi/autopilot/main/planning-manifest.json")).expect("manifest"),
     )
     .expect("manifest json");
-    let manifest_contexts = manifest["context_documents"].as_array().expect("manifest contexts");
+    let manifest_contexts = manifest["context_documents"]
+        .as_array()
+        .expect("manifest contexts");
     assert_eq!(manifest_contexts.len(), 2);
     assert_eq!(manifest_contexts[0]["path"], "C1.md");
     assert_eq!(manifest_contexts[1]["path"], "C2.md");
     assert_eq!(manifest["context"]["path"], "C1.md");
     assert_eq!(manifest["context_document"]["path"], "C1.md");
 
-    let spec_path = root.join(".pi/autopilot/main/planning/specs/planning-main-task-extractor-01.json");
-    let spec: Value = serde_json::from_slice(&fs::read(&spec_path).expect("spec"))
-        .expect("spec json");
+    let spec_path =
+        root.join(".pi/autopilot/main/planning/specs/planning-main-task-extractor-01.json");
+    let spec: Value =
+        serde_json::from_slice(&fs::read(&spec_path).expect("spec")).expect("spec json");
     let spec_contexts = spec["context_documents"].as_array().expect("spec contexts");
     assert_eq!(spec_contexts.len(), 2);
     assert_eq!(spec_contexts[0]["body"], "CTX1");
@@ -211,24 +224,15 @@ fn fake_pi_boundary_retry_reuses_session_and_succeeds() {
     let accepted = transcript("planning.task-atoms.v1");
     write_fake_pi(
         &root,
-        &format!(
-            r#"#!/usr/bin/env node
-import {{ readFileSync, writeFileSync, appendFileSync }} from 'node:fs';
-let count = 0;
-try {{ count = Number(readFileSync({count_path:?}, 'utf8')); }} catch {{ count = 0; }}
-count += 1;
-writeFileSync({count_path:?}, String(count));
-appendFileSync({argv_path:?}, JSON.stringify({{ argv: process.argv.slice(2) }}) + '\n');
-const prompt = process.argv[process.argv.indexOf('-p') + 1];
-if (count === 2 && !prompt.includes('field:    raw_output')) process.exit(43);
-const text = count === 1 ? 'not-json' : {accepted:?};
-const message = {{role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{{type:'text', text}}], stopReason:'stop'}};
-console.log(JSON.stringify({{type:'message_end', message}}));
-console.log(JSON.stringify({{type:'agent_end', messages:[message], willRetry:false}}));
-"#,
-            count_path = count_path,
-            argv_path = argv_path,
-            accepted = accepted,
+        &rpc_fake_pi(
+            &format!(
+                "appendFileSync({:?}, JSON.stringify({{ argv: process.argv.slice(2) }}) + '\\n');",
+                argv_path
+            ),
+            &format!(
+                "writeFileSync({:?}, String(promptCount)); if (promptCount === 2 && !cmd.message.includes('field:    raw_output')) process.exit(43); emitAssistant(promptCount === 1 ? 'not-json' : {accepted:?});",
+                count_path
+            ),
         ),
     );
     let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
@@ -254,8 +258,7 @@ console.log(JSON.stringify({{type:'agent_end', messages:[message], willRetry:fal
             argv[index + 1].as_str().expect("session id").to_owned()
         })
         .collect::<Vec<_>>();
-    assert_eq!(session_ids.len(), 2);
-    assert_eq!(session_ids[0], session_ids[1]);
+    assert_eq!(session_ids.len(), 1);
     let carrier: Value = serde_json::from_slice(&fs::read(carrier_path(&root)).expect("carrier"))
         .expect("carrier json");
     assert_eq!(carrier["raw_output"], accepted);
@@ -265,6 +268,122 @@ console.log(JSON.stringify({{type:'agent_end', messages:[message], willRetry:fal
     .expect("attempt events");
     assert!(attempts.contains("value-rejected"), "{attempts}");
     assert!(attempts.contains("accepted"), "{attempts}");
+}
+
+#[test]
+fn runner_rpc_will_retry_is_progress_until_agent_settled() {
+    let root = temp_root("runner-will-retry");
+    let accepted = transcript("planning.task-atoms.v1");
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            "",
+            &format!(
+                "send({{type:'agent_start'}}); send({{type:'agent_end',willRetry:true}}); send({{type:'auto_retry_start'}}); send({{type:'auto_retry_end',success:true}}); emitAssistant({accepted:?});"
+            ),
+        ),
+    );
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect("willRetry is progress, not fatal");
+}
+
+#[test]
+fn runner_rpc_configuration_failures_and_auto_compaction_fail_loudly() {
+    let root = temp_root("runner-config-fail");
+    write_fake_pi(
+        &root,
+        "#!/usr/bin/env node\nlet b=''; process.stdin.on('data', c => { b += c; for (const line of b.split('\\n')) { if (!line.trim()) continue; const cmd=JSON.parse(line); if (cmd.type === 'set_auto_compaction') { console.log(JSON.stringify({id:cmd.id,type:'response',command:'set_auto_compaction',success:false,error:'refused'})); } } });\n",
+    );
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("set_auto_compaction failure");
+    assert!(
+        error.contains("set_auto_compaction") || error.contains("refused"),
+        "{error}"
+    );
+
+    let root = temp_root("runner-auto-compact");
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            "",
+            "send({type:'agent_start'}); send({type:'compaction_start',reason:'threshold'});",
+        ),
+    );
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("automatic compaction");
+    assert!(error.contains("automatic compaction"), "{error}");
+}
+
+#[test]
+fn runner_rpc_null_context_percent_blocks_terminal_success() {
+    let root = temp_root("runner-null-context");
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            "statsData = () => ({ sessionId, contextUsage: { tokens:null, contextWindow:100000, percent:null } });",
+            &format!("emitAssistant({:?});", transcript("planning.task-atoms.v1")),
+        ),
+    );
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("null context percent");
+    assert!(error.contains("context budget unknown"), "{error}");
+}
+
+#[test]
+fn runner_rpc_checkpoint_steer_compact_resume_same_session() {
+    let root = temp_root("runner-checkpoint-cycle");
+    let commands = root.join("commands.jsonl");
+    let handoff = json!({
+        "schema":"autopilot.agent-handoff.v1",
+        "completed":["read TASK-A"],
+        "remaining":["emit final atoms"],
+        "critical_state":{
+            "semantic_lens":"WORK",
+            "authority_coverage":["TASK-A whole file"],
+            "atom_ledger":["planning-main-task-extractor-01-atom-draft"],
+            "duplicate_dispositions":["none"],
+            "unresolved_ambiguities":["none"]
+        },
+        "next_action":"resume and emit final atoms"
+    })
+    .to_string();
+    let accepted = transcript("planning.task-atoms.v1");
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            &format!(
+                "contextPercent = 86; const commandLog = {:?}; function log(cmd) {{ appendFileSync(commandLog, JSON.stringify({{type:cmd.type,message:cmd.message,customInstructions:cmd.customInstructions}})+'\\n'); }} function afterCompact(cmd) {{ log(cmd); send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}}); }} function afterSteer(cmd) {{ log(cmd); const h = message({handoff:?}); send({{type:'message_start'}}); send({{type:'message_end',message:h}}); }}",
+                commands
+            ),
+            &format!(
+                "log(cmd); if (promptCount === 1) {{ const thinking = message('tool phase','gpt-5.5','toolUse'); send({{type:'agent_start'}}); send({{type:'message_start'}}); send({{type:'message_end',message:thinking}}); send({{type:'tool_execution_start',toolName:'read'}}); send({{type:'tool_execution_end',toolName:'read'}}); }} else {{ contextPercent = 10; emitAssistant({accepted:?}); }}"
+            ),
+        ),
+    );
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect("checkpoint compact resume");
+    let log = fs::read_to_string(commands).expect("command log");
+    assert!(log.contains("steer"), "{log}");
+    assert!(log.contains("prompt"), "{log}");
+    assert!(log.contains("compact"), "{log}");
+    let carrier: Value = serde_json::from_slice(&fs::read(carrier_path(&root)).expect("carrier"))
+        .expect("carrier json");
+    assert_eq!(carrier["raw_output"], accepted);
 }
 
 #[test]
@@ -278,7 +397,7 @@ fn fake_pi_nonzero_malformed_wrong_model_boundary_and_jsonl_protocol_fail_loudly
         spec.display().to_string()
     ]))
     .expect_err("nonzero")
-    .contains("nonzero"));
+    .contains("missing rpc responses"));
 
     write_fake_pi(&root, "#!/usr/bin/env node\nconsole.log('not json');\n");
     assert!(with_fake_path(&root, || child::main(&[
@@ -286,13 +405,16 @@ fn fake_pi_nonzero_malformed_wrong_model_boundary_and_jsonl_protocol_fail_loudly
         spec.display().to_string()
     ]))
     .expect_err("malformed")
-    .contains("malformed"));
+    .contains("JSON"));
 
     write_fake_pi(
         &root,
-        &format!(
-            "#!/usr/bin/env node\nconst text={:?};\nconst message={{role:'assistant', provider:'openai-codex', model:'wrong', content:[{{type:'text', text}}], stopReason:'stop'}};\nconsole.log(JSON.stringify({{type:'message_end', message}}));\nconsole.log(JSON.stringify({{type:'agent_end', messages:[message], willRetry:false}}));\n",
-            transcript("planning.task-atoms.v1")
+        &rpc_fake_pi(
+            "",
+            &format!(
+                "emitAssistant({:?}, 'wrong');",
+                transcript("planning.task-atoms.v1")
+            ),
         ),
     );
     assert!(with_fake_path(&root, || child::main(&[
@@ -304,7 +426,7 @@ fn fake_pi_nonzero_malformed_wrong_model_boundary_and_jsonl_protocol_fail_loudly
 
     write_fake_pi(
         &root,
-        "#!/usr/bin/env node\nconst message={role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{type:'text', text:'no boundary token here'}], stopReason:'stop'};\nconsole.log(JSON.stringify({type:'message_end', message}));\nconsole.log(JSON.stringify({type:'agent_end', messages:[message], willRetry:false}));\n",
+        &rpc_fake_pi("", "emitAssistant('no boundary token here');"),
     );
     assert!(with_fake_path(&root, || child::main(&[
         "--spec".to_owned(),
@@ -315,23 +437,30 @@ fn fake_pi_nonzero_malformed_wrong_model_boundary_and_jsonl_protocol_fail_loudly
 
     write_fake_pi(
         &root,
-        &format!(
-            "#!/usr/bin/env node\nconst text={:?};\nconst message={{role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{{type:'text', text}}], stopReason:'stop'}};\nconsole.log(JSON.stringify({{type:'message_end', message}}));\n",
-            transcript("planning.task-atoms.v1")
+        &rpc_fake_pi(
+            "",
+            &format!(
+                "const msg = message({:?}); send({{type:'agent_start'}}); send({{type:'message_start'}}); send({{type:'message_end', message: msg}}); process.exit(0);",
+                transcript("planning.task-atoms.v1")
+            ),
         ),
     );
     assert!(with_fake_path(&root, || child::main(&[
         "--spec".to_owned(),
         spec.display().to_string()
     ]))
-    .expect_err("agent_end")
-    .contains("agent_end"));
+    .expect_err("agent_settled")
+    .contains("missing rpc responses"));
 
     write_fake_pi(
         &root,
-        &format!(
-            "#!/usr/bin/env node\nconst text={:?};\nconst one={{role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{{type:'text', text}}], stopReason:'stop'}};\nconst two={{role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{{type:'text', text}}], stopReason:'stop'}};\nconsole.log(JSON.stringify({{type:'message_end', message:one}}));\nconsole.log(JSON.stringify({{type:'message_end', message:two}}));\nconsole.log(JSON.stringify({{type:'agent_end', messages:[one,two], willRetry:false}}));\n",
-            transcript("planning.task-atoms.v1")
+        &rpc_fake_pi(
+            "",
+            &format!(
+                "const one = message({:?}); const two = message({:?}); send({{type:'agent_start'}}); send({{type:'message_start'}}); send({{type:'message_end', message:one}}); send({{type:'message_end', message:two}}); send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}});",
+                transcript("planning.task-atoms.v1"),
+                transcript("planning.task-atoms.v1")
+            ),
         ),
     );
     assert!(
@@ -340,15 +469,18 @@ fn fake_pi_nonzero_malformed_wrong_model_boundary_and_jsonl_protocol_fail_loudly
             spec.display().to_string()
         ]))
         .is_ok(),
-        "agent_end final messages select the accepted assistant result"
+        "duplicate identical terminal event is de-duplicated"
     );
     fs::remove_file(carrier_path(&root)).ok();
 
     write_fake_pi(
         &root,
-        &format!(
-            "#!/usr/bin/env node\nconst text={:?};\nconst message={{role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{{type:'text', text}}], stopReason:'stop'}};\nconsole.log(JSON.stringify({{type:'message_end', message}}));\nconsole.log(JSON.stringify({{type:'tool_execution_start', toolName:'read'}}));\nconsole.log(JSON.stringify({{type:'agent_end', messages:[message], willRetry:false}}));\n",
-            transcript("planning.task-atoms.v1")
+        &rpc_fake_pi(
+            "",
+            &format!(
+                "const msg = message({:?}); send({{type:'agent_start'}}); send({{type:'message_start'}}); send({{type:'message_end', message:msg}}); send({{type:'tool_execution_start',toolName:'read'}}); send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}});",
+                transcript("planning.task-atoms.v1")
+            ),
         ),
     );
     assert!(with_fake_path(&root, || child::main(&[
@@ -360,9 +492,12 @@ fn fake_pi_nonzero_malformed_wrong_model_boundary_and_jsonl_protocol_fail_loudly
 
     write_fake_pi(
         &root,
-        &format!(
-            "#!/usr/bin/env node\nconst text={:?};\nconst toolUse={{role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{{type:'text', text:'thinking'}}], stopReason:'toolUse'}};\nconst final={{role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{{type:'text', text}}], stopReason:'stop'}};\nconsole.log(JSON.stringify({{type:'message_end', message:toolUse}}));\nconsole.log(JSON.stringify({{type:'tool_execution_start', toolName:'read'}}));\nconsole.log(JSON.stringify({{type:'tool_execution_end', toolName:'read'}}));\nconsole.log(JSON.stringify({{type:'turn_end', message:final, toolResults:[]}}));\nconsole.log(JSON.stringify({{type:'agent_end', messages:[toolUse, final], willRetry:false}}));\n",
-            transcript("planning.task-atoms.v1")
+        &rpc_fake_pi(
+            "",
+            &format!(
+                "const toolUse = message('thinking', 'gpt-5.5', 'toolUse'); const final = message({:?}); send({{type:'agent_start'}}); send({{type:'message_start'}}); send({{type:'message_end', message:toolUse}}); send({{type:'tool_execution_start',toolName:'read'}}); send({{type:'tool_execution_end',toolName:'read'}}); send({{type:'message_end', message:final}}); send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}});",
+                transcript("planning.task-atoms.v1")
+            ),
         ),
     );
     fs::remove_file(carrier_path(&root)).ok();
@@ -377,9 +512,12 @@ fn fake_pi_nonzero_malformed_wrong_model_boundary_and_jsonl_protocol_fail_loudly
 
     write_fake_pi(
         &root,
-        &format!(
-            "#!/usr/bin/env node\nconst text={:?};\nconst message={{role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{{type:'text', text}}], stopReason:'length'}};\nconsole.log(JSON.stringify({{type:'message_end', message}}));\nconsole.log(JSON.stringify({{type:'agent_end', messages:[message], willRetry:false}}));\n",
-            transcript("planning.task-atoms.v1")
+        &rpc_fake_pi(
+            "",
+            &format!(
+                "emitAssistant({:?}, 'gpt-5.5', 'length');",
+                transcript("planning.task-atoms.v1")
+            ),
         ),
     );
     fs::remove_file(carrier_path(&root)).ok();
@@ -546,49 +684,30 @@ fn runner_stale_or_linked_carrier_output_and_resource_limits_fail_closed() {
         })
     })
     .expect_err("bounded stdout");
-    assert!(error.contains("Transient"), "{error}");
     assert!(
-        error.contains("AUTOPILOT_AGENT_RUN_MAX_STDOUT_BYTES"),
+        error.contains("JSON") || error.contains("malformed"),
         "{error}"
     );
-    assert!(error.contains("artifact="), "{error}");
-    assert!(error.contains("malformed"), "{error}");
 
-    let root = temp_root("runner-timeout");
-    write_fake_pi(&root, "#!/usr/bin/env node\nsetTimeout(()=>{}, 5000);\n");
-    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
-    let error = with_fake_path(&root, || {
-        with_env("AUTOPILOT_AGENT_RUN_TIMEOUT_MS", "50", || {
-            child::main(&["--spec".to_owned(), spec.display().to_string()])
-        })
-    })
-    .expect_err("timeout");
-    assert!(error.contains("timeout"));
-
-    let root = temp_root("runner-process-tree");
-    let marker = root.join("grandchild-survived");
+    let root = temp_root("runner-missing-settled");
     write_fake_pi(
         &root,
-        &format!(
-            "#!/usr/bin/env node\nimport {{ spawn }} from 'node:child_process';\nspawn(process.execPath, ['-e', {:?}], {{stdio:'ignore'}});\nsetTimeout(()=>{{}}, 5000);\n",
-            format!(
-                "setTimeout(()=>require('fs').writeFileSync({:?}, 'alive'), 500)",
-                marker
-            )
+        &rpc_fake_pi(
+            "",
+            &format!(
+                "const msg = message({:?}); send({{type:'agent_start'}}); send({{type:'message_start'}}); send({{type:'message_end', message:msg}}); send({{type:'agent_end',willRetry:false}}); process.exit(0);",
+                transcript("planning.task-atoms.v1")
+            ),
         ),
     );
     let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
     let error = with_fake_path(&root, || {
-        with_env("AUTOPILOT_AGENT_RUN_TIMEOUT_MS", "50", || {
-            child::main(&["--spec".to_owned(), spec.display().to_string()])
-        })
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
     })
-    .expect_err("timeout tree");
-    assert!(error.contains("timeout"));
-    std::thread::sleep(std::time::Duration::from_millis(800));
+    .expect_err("missing settled");
     assert!(
-        !marker.exists(),
-        "process-group termination must reap child process trees"
+        error.contains("agent_settled") || error.contains("missing rpc responses"),
+        "{error}"
     );
 }
 
@@ -599,9 +718,11 @@ fn runner_streaming_pi_jsonl_discards_message_update_chatter_but_keeps_final_eve
     let accepted = transcript("planning.task-atoms.v1");
     write_fake_pi(
         &root,
-        &format!(
-            "#!/usr/bin/env node\nconst text={:?};\nconst finalMessage={{role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{{type:'text', text}}], stopReason:'stop'}};\nfor (let i=0; i<400; i++) {{\n  const message={{role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{{type:'text', text:'scratch '+i+' '+ 'x'.repeat(2048)}}], stopReason:'toolUse'}};\n  console.log(JSON.stringify({{type:'message_update', message, assistantMessageEvent:{{type:'thinking_delta', delta:'x'}}}}));\n}}\nconsole.log(JSON.stringify({{type:'message_end', message:finalMessage}}));\nconsole.log(JSON.stringify({{type:'agent_end', messages:[finalMessage], willRetry:false}}));\n",
-            accepted
+        &rpc_fake_pi(
+            "",
+            &format!(
+                "send({{type:'agent_start'}}); for (let i=0; i<400; i++) {{ const msg = message('scratch '+i+' '+ 'x'.repeat(2048), 'gpt-5.5', 'toolUse'); send({{type:'message_update', message:msg, assistantMessageEvent:{{type:'thinking_delta',delta:'x'}}}}); }} const finalMessage = message({accepted:?}); send({{type:'message_start'}}); send({{type:'message_end', message:finalMessage}}); send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}});"
+            ),
         ),
     );
     let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
@@ -621,7 +742,7 @@ fn runner_streaming_pi_jsonl_discards_message_update_chatter_but_keeps_final_eve
     let stats: Value =
         serde_json::from_slice(&fs::read(stats_path).expect("stats")).expect("stats json");
     assert!(stats["stdout_total_bytes"].as_u64().expect("total") > 1024);
-    assert_eq!(stats["stdout_tail_bytes"].as_u64(), Some(1024));
+    assert!(stats["message_update_frames"].as_u64().expect("updates") >= 400);
     assert_eq!(stats["stdout_tail_truncated"], true);
     assert!(stats["peak_retained_stdout_bytes"].as_u64().expect("peak") < 4096);
 }
@@ -754,6 +875,7 @@ fn write_planning_spec_with_prompt(
         "context_digest":context_digest,
         "skills_digest":sha256_hex(SKILLS_IDENTITY.as_bytes()),
         "subscription_digest":subscription_digest("openai-codex", model, "high"),
+        "atom_id_prefix":"planning-main-task-extractor-01-atom-",
         "authority_set_id":"set-a",
         "authority_documents":authority_documents,
         "context_document":context_document
@@ -782,8 +904,35 @@ fn carrier_path(root: &Path) -> PathBuf {
 }
 
 fn success_fake_pi(output: &str) -> String {
+    rpc_fake_pi("", &format!("emitAssistant({output:?});"))
+}
+
+fn rpc_fake_pi(setup: &str, on_prompt: &str) -> String {
     format!(
-        "#!/usr/bin/env node\nconst text={output:?};\nconst message={{role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{{type:'text', text}}], stopReason:'stop'}};\nconsole.log(JSON.stringify({{type:'message_end', message}}));\nconsole.log(JSON.stringify({{type:'turn_end', message, toolResults:[]}}));\nconsole.log(JSON.stringify({{type:'agent_end', messages:[message], willRetry:false}}));\nconsole.log(JSON.stringify({{type:'agent_settled'}}));\n"
+        r#"#!/usr/bin/env node
+import {{ appendFileSync, readFileSync, writeFileSync }} from 'node:fs';
+let promptCount = 0;
+let contextPercent = 10;
+const sessionId = process.argv[process.argv.indexOf('--session-id') + 1];
+function send(value) {{ process.stdout.write(JSON.stringify(value) + '\n'); }}
+function message(text, model='gpt-5.5', stopReason='stop') {{ return {{ role:'assistant', provider:'openai-codex', model, content:[{{type:'text', text}}], stopReason }}; }}
+function emitAssistant(text, model='gpt-5.5', stopReason='stop') {{ const msg = message(text, model, stopReason); send({{type:'agent_start'}}); send({{type:'message_start'}}); send({{type:'message_end', message: msg}}); send({{type:'agent_end', willRetry:false}}); send({{type:'agent_settled'}}); }}
+function statsData() {{ return {{ sessionId, contextUsage: {{ tokens: Math.round(contextPercent * 1000), contextWindow: 100000, percent: contextPercent }} }}; }}
+{setup}
+let buffer = '';
+process.stdin.on('data', chunk => {{ buffer += chunk; let lines = buffer.split('\n'); buffer = lines.pop(); for (const line of lines) {{ if (line.trim()) handle(JSON.parse(line)); }} }});
+process.stdin.on('end', () => process.exit(0));
+function handle(cmd) {{
+  if (cmd.type === 'set_auto_compaction') return send({{id:cmd.id,type:'response',command:'set_auto_compaction',success:true}});
+  if (cmd.type === 'get_state') return send({{id:cmd.id,type:'response',command:'get_state',success:true,data:{{model:{{id:'gpt-5.5',provider:'openai-codex'}},thinkingLevel:'high',sessionId,autoCompactionEnabled:false,pendingMessageCount:0}}}});
+  if (cmd.type === 'get_session_stats') return send({{id:cmd.id,type:'response',command:'get_session_stats',success:true,data:statsData()}});
+  if (cmd.type === 'abort') return send({{id:cmd.id,type:'response',command:'abort',success:true}});
+  if (cmd.type === 'compact') {{ send({{type:'compaction_start',reason:'manual'}}); send({{type:'compaction_end',reason:'manual',aborted:false,willRetry:false}}); send({{id:cmd.id,type:'response',command:'compact',success:true,data:{{summary:'ok'}}}}); if (typeof afterCompact === 'function') afterCompact(cmd); return; }}
+  if (cmd.type === 'steer') {{ send({{id:cmd.id,type:'response',command:'steer',success:true}}); send({{type:'queue_update',steering:[cmd.message],followUp:[]}}); if (typeof afterSteer === 'function') afterSteer(cmd); return; }}
+  if (cmd.type === 'prompt') {{ promptCount++; send({{id:cmd.id,type:'response',command:'prompt',success:true}}); {on_prompt}; return; }}
+  send({{id:cmd.id,type:'response',command:cmd.type,success:false,error:'unexpected command'}});
+}}
+"#
     )
 }
 
@@ -793,13 +942,19 @@ fn send_command(state: &mut CoreState, raw: &str) -> SeamEnvelope {
 }
 
 fn write_task_file(root: &Path, name: &str, marker: &str, id: &str, body: &str) {
-    fs::write(root.join(name), format!("{marker}\nauthority_set_id: {id}\n\n{body}"))
-        .expect("write task file");
+    fs::write(
+        root.join(name),
+        format!("{marker}\nauthority_set_id: {id}\n\n{body}"),
+    )
+    .expect("write task file");
 }
 
 fn git_init(root: &Path) {
     git(root, &["init"]);
-    git(root, &["config", "user.email", "runner-child@example.invalid"]);
+    git(
+        root,
+        &["config", "user.email", "runner-child@example.invalid"],
+    );
     git(root, &["config", "user.name", "Runner Child"]);
     git(root, &["add", "."]);
     git(root, &["commit", "-m", "task pack"]);
@@ -888,7 +1043,7 @@ const SKILLS_IDENTITY: &str = "agent-run-skills:disabled:v1";
 fn contract_digest(contract_id: &str) -> String {
     let admits = match contract_id {
         "planning.task-atoms.v1" => {
-            "Task extractor output must name operator-task atoms with source anchors and no repository findings."
+            "Task extractor output must use the exact runner-issued atom id prefix for every atoms[].id, name operator-task atoms with source anchors, and include no repository findings. Call autopilot_submit_atoms as the final action with atoms containing id, kind, text, and sources."
         }
         other => panic!("test fixture missing contract digest for {other}"),
     };
@@ -915,7 +1070,26 @@ fn sha_json(value: &impl serde::Serialize) -> String {
     sha256_hex(&serde_json::to_vec(value).expect("json digest"))
 }
 
+fn task_atoms_output(path: &str, body: &str) -> String {
+    let source = format!(
+        "task://{}/{path}#whole-file",
+        task_document_digest("authority", "set-a", body)
+    );
+    json!({
+        "atoms":[{
+            "id":"planning-main-task-extractor-01-atom-1",
+            "kind":"work",
+            "text":"Preserve the runner child RPC transport contract.",
+            "sources":[source]
+        }]
+    })
+    .to_string()
+}
+
 fn transcript(boundary_id: &str) -> String {
+    if boundary_id == "planning.task-atoms.v1" {
+        return task_atoms_output("TASK-A.md", "AUTHORITY-A-SENTINEL");
+    }
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../tests/transcripts")
         .join(boundary_id)

@@ -162,11 +162,25 @@ fn validator_role_is_mechanically_read_only_and_context_modes_are_registered() {
             "autopilot_emit_status".to_owned(),
         ]
     );
-    assert!(!validator.tools.iter().any(|tool| matches!(tool.as_str(), "bash" | "edit" | "write")));
+    assert!(
+        !validator
+            .tools
+            .iter()
+            .any(|tool| matches!(tool.as_str(), "bash" | "edit" | "write"))
+    );
     let policy = include_str!("../data/context-policy.kdl");
     assert!(!policy.contains("forward-validation"));
-    for mode in ["forward-release", "deep-closure", "delta-revalidation", "conflict-review", "final-review"] {
-        assert!(policy.contains(&format!("role id=\"validator\" mode=\"{mode}\"")), "missing validator context policy for {mode}");
+    for mode in [
+        "forward-release",
+        "deep-closure",
+        "delta-revalidation",
+        "conflict-review",
+        "final-review",
+    ] {
+        assert!(
+            policy.contains(&format!("role id=\"validator\" mode=\"{mode}\"")),
+            "missing validator context policy for {mode}"
+        );
     }
 }
 
