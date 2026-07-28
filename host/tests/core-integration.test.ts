@@ -4,7 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { accessSync, constants, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { AUTOPILOT_COMMANDS, registerAutopilotCommands } from "../src/commands.ts";
@@ -331,12 +331,85 @@ function planningCarrierForAction(action) {
     spec_digest: sha256(specBytes),
     spec_path: specPath,
     carrier_path: spec.carrier_path,
-    raw_output: transcript(spec.boundary_id),
+    raw_output: replayOutputForSpec(spec, specPath),
   };
   for (const key of ["boundary_digest", "result_contract_digest", "settings_digest", "context_digest", "skills_digest", "subscription_digest"]) {
     if (typeof spec[key] === "string") carrier[key] = spec[key];
   }
   return carrier;
+}
+
+function replayOutputForSpec(spec, specPath) {
+  const raw = transcript(spec.boundary_id);
+  if (spec.boundary_id === "planning.task-atoms.v1") {
+    return namespaceLegacyTaskAtomIds(raw, spec);
+  }
+  if (spec.boundary_id === "planning.work-map.v1") {
+    return namespaceLegacyWorkMapLinks(raw, spec, specPath);
+  }
+  return raw;
+}
+
+function namespaceLegacyTaskAtomIds(raw, spec) {
+  const prefix = requireString(spec.atom_id_prefix, "task atom replay spec atom_id_prefix");
+  const value = JSON.parse(raw);
+  assert.ok(Array.isArray(value.atoms), "task atoms replay records must expose atoms[]");
+  for (const atom of value.atoms) {
+    const id = requireString(atom.id, "task atoms replay id");
+    assert.notEqual(id, "", "task atoms replay id must be non-empty");
+    atom.id = id.startsWith(prefix) ? id : `${prefix}${id}`;
+  }
+  return JSON.stringify(value);
+}
+
+function namespaceLegacyWorkMapLinks(raw, spec, specPath) {
+  const localToFull = atomLocalToFullIds(spec, specPath);
+  const fullIds = new Set(localToFull.values());
+  const value = JSON.parse(raw);
+  assert.ok(Array.isArray(value.units), "work-map replay records must expose units[]");
+  for (const unit of value.units) {
+    assert.ok(Array.isArray(unit.links), "work-map replay links must be arrays");
+    unit.links = unit.links.map((rawLink) => {
+      const link = requireString(rawLink, "work-map replay link");
+      const full = localToFull.get(link);
+      if (full !== undefined) return full;
+      assert.ok(fullIds.has(link), `work-map replay link ${link} is not present in the bound atom registry`);
+      return link;
+    });
+  }
+  return JSON.stringify(value);
+}
+
+function atomLocalToFullIds(spec, specPath) {
+  const registryPath = requireString(spec.atom_registry_path, "work-map replay spec atom_registry_path");
+  const registry = JSON.parse(readFileSync(registryPath, "utf8"));
+  assert.ok(Array.isArray(registry.atoms), "work-map replay registry must expose atoms[]");
+  const specsDir = dirname(specPath);
+  const prefixByAssignment = new Map();
+  const localToFull = new Map();
+  for (const atom of registry.atoms) {
+    const fullId = requireString(atom.id, "work-map replay registry atom id");
+    const producerAssignmentId = requireString(atom.producer_assignment_id, "work-map replay registry producer_assignment_id");
+    let prefix = prefixByAssignment.get(producerAssignmentId);
+    if (prefix === undefined) {
+      const producerSpecPath = join(specsDir, `${producerAssignmentId}.json`);
+      const producerSpec = JSON.parse(readFileSync(producerSpecPath, "utf8"));
+      prefix = requireString(producerSpec.atom_id_prefix, "producer atom spec atom_id_prefix");
+      prefixByAssignment.set(producerAssignmentId, prefix);
+    }
+    assert.ok(fullId.startsWith(prefix), `registry atom id ${fullId} does not match producer prefix ${prefix}`);
+    const localId = fullId.slice(prefix.length);
+    assert.notEqual(localId, "", "registry atom id must retain local suffix");
+    const previous = localToFull.get(localId);
+    assert.equal(previous, undefined, `legacy replay atom id ${localId} is ambiguous between ${previous} and ${fullId}`);
+    localToFull.set(localId, fullId);
+  }
+  return localToFull;
+}
+
+function requireString(value, label) {
+  assert.equal(typeof value, "string", label);
+  return value;
 }
 
 function specPathFromCommand(command) {
