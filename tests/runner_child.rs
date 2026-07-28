@@ -327,7 +327,7 @@ fn drifted_spec_fields_are_rejected_before_pi_launch() {
 }
 
 #[test]
-fn stale_or_linked_carrier_output_and_resource_limits_fail_closed() {
+fn runner_stale_or_linked_carrier_output_and_resource_limits_fail_closed() {
     let root = temp_root("runner-stale");
     write_fake_pi(&root, success_fake_pi());
     let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
@@ -355,7 +355,13 @@ fn stale_or_linked_carrier_output_and_resource_limits_fail_closed() {
         })
     })
     .expect_err("bounded stdout");
-    assert!(error.contains("stdout exceeded"));
+    assert!(error.contains("Transient"), "{error}");
+    assert!(
+        error.contains("AUTOPILOT_AGENT_RUN_MAX_STDOUT_BYTES"),
+        "{error}"
+    );
+    assert!(error.contains("artifact="), "{error}");
+    assert!(error.contains("malformed"), "{error}");
 
     let root = temp_root("runner-timeout");
     write_fake_pi(&root, "#!/usr/bin/env node\nsetTimeout(()=>{}, 5000);\n");
@@ -395,16 +401,111 @@ fn stale_or_linked_carrier_output_and_resource_limits_fail_closed() {
     );
 }
 
+#[test]
+fn runner_streaming_pi_jsonl_discards_message_update_chatter_but_keeps_final_event() {
+    let root = temp_root("runner-streaming");
+    let stats_path = root.join("stream-stats.json");
+    write_fake_pi(
+        &root,
+        "#!/usr/bin/env node\nconst finalMessage={role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{type:'text', text:'atom: streaming success'}], stopReason:'stop'};\nfor (let i=0; i<400; i++) {\n  const message={role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{type:'text', text:'scratch '+i+' '+ 'x'.repeat(2048)}], stopReason:'toolUse'};\n  console.log(JSON.stringify({type:'message_update', message, assistantMessageEvent:{type:'thinking_delta', delta:'x'}}));\n}\nconsole.log(JSON.stringify({type:'message_end', message:finalMessage}));\nconsole.log(JSON.stringify({type:'agent_end', messages:[finalMessage], willRetry:false}));\n",
+    );
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    with_fake_path(&root, || {
+        with_env("AUTOPILOT_AGENT_RUN_MAX_STDOUT_BYTES", "1024", || {
+            with_env(
+                "AUTOPILOT_AGENT_RUN_STATS_PATH",
+                stats_path.to_str().expect("stats path"),
+                || child::main(&["--spec".to_owned(), spec.display().to_string()]),
+            )
+        })
+    })
+    .expect("streaming chatter should not trip total stdout cap");
+    let carrier: Value = serde_json::from_slice(&fs::read(carrier_path(&root)).expect("carrier"))
+        .expect("carrier json");
+    assert_eq!(carrier["raw_output"], "atom: streaming success");
+    let stats: Value =
+        serde_json::from_slice(&fs::read(stats_path).expect("stats")).expect("stats json");
+    assert!(stats["stdout_total_bytes"].as_u64().expect("total") > 1024);
+    assert_eq!(stats["stdout_tail_bytes"].as_u64(), Some(1024));
+    assert_eq!(stats["stdout_tail_truncated"], true);
+    assert!(stats["peak_retained_stdout_bytes"].as_u64().expect("peak") < 4096);
+}
+
+#[test]
+fn runner_real_pi_high_streaming_probe_when_enabled() {
+    if std::env::var("AUTOPILOT_RUN_REAL_PI_STREAMING_PROBE")
+        .ok()
+        .as_deref()
+        != Some("1")
+    {
+        eprintln!("skipping live Pi streaming probe; set AUTOPILOT_RUN_REAL_PI_STREAMING_PROBE=1");
+        return;
+    }
+    let root = temp_root("runner-real-pi-streaming");
+    let stats_path = root.join("real-pi-stream-stats.json");
+    let prompt = "You are validating a streaming JSON runner. Think carefully about why repeated message_update events can amplify transcript bytes at high thinking depth. Then return a concise final answer containing exactly this line and no code block: atom: real pi streaming proof";
+    let spec = write_planning_spec_with_prompt(
+        &root,
+        |value| value,
+        "planning.task-atoms.v1",
+        "gpt-5.5",
+        prompt,
+    );
+    with_env("AUTOPILOT_AGENT_RUN_MAX_STDOUT_BYTES", "4096", || {
+        with_env(
+            "AUTOPILOT_AGENT_RUN_STATS_PATH",
+            stats_path.to_str().expect("stats path"),
+            || child::main(&["--spec".to_owned(), spec.display().to_string()]),
+        )
+    })
+    .expect("real pi streaming run");
+    let carrier: Value = serde_json::from_slice(&fs::read(carrier_path(&root)).expect("carrier"))
+        .expect("carrier json");
+    assert!(
+        carrier["raw_output"]
+            .as_str()
+            .expect("raw")
+            .contains("atom")
+    );
+    let stats: Value =
+        serde_json::from_slice(&fs::read(stats_path).expect("stats")).expect("stats json");
+    let total = stats["stdout_total_bytes"].as_u64().expect("total");
+    let peak = stats["peak_retained_stdout_bytes"].as_u64().expect("peak");
+    assert!(
+        total > 4096,
+        "expected substantial real Pi transcript, got {total}"
+    );
+    assert!(
+        peak < total,
+        "retained {peak} should stay below transcript {total}"
+    );
+}
+
 fn write_planning_spec(
     root: &Path,
     mutate: impl Fn(Value) -> Value,
     boundary: &str,
     model: &str,
 ) -> PathBuf {
+    write_planning_spec_with_prompt(
+        root,
+        mutate,
+        boundary,
+        model,
+        "runner prompt with AUTHORITY-A-SENTINEL AUTHORITY-B-SENTINEL AUTHORITY-C-SENTINEL CONTEXT-SENTINEL-UNIQUE",
+    )
+}
+
+fn write_planning_spec_with_prompt(
+    root: &Path,
+    mutate: impl Fn(Value) -> Value,
+    boundary: &str,
+    model: &str,
+    prompt: &str,
+) -> PathBuf {
     let assignment_id = Id("planning-main-task-extractor-01".to_owned());
     let paths = planning_paths(root, "main", &assignment_id);
     fs::create_dir_all(paths.prompt_path.parent().expect("prompt parent")).expect("prompt dir");
-    let prompt = "runner prompt with AUTHORITY-A-SENTINEL AUTHORITY-B-SENTINEL AUTHORITY-C-SENTINEL CONTEXT-SENTINEL-UNIQUE";
     fs::write(&paths.prompt_path, prompt).expect("prompt");
     let tools = role_builtin_tool_names("task-extractor").expect("tools");
     let authority_documents = vec![

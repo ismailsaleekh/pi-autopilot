@@ -1,15 +1,13 @@
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use kernel::failure::{Failure, RetryPolicy};
 use kernel::generated::{AgentRunSpec, DeliveryResult, TaskDocument};
+use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest as ShaDigest, Sha256};
 
@@ -18,14 +16,49 @@ const DEFAULT_MAX_PI_STDERR_BYTES: usize = 256 * 1024;
 const DEFAULT_PI_TIMEOUT_MS: u64 = 60 * 60 * 1000;
 
 struct ChildOutput {
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-    status: std::process::ExitStatus,
+    assistant: Option<String>,
+    stdout_error: Option<String>,
+    stderr_error: Option<String>,
+    stdout_tail: Vec<u8>,
+    stderr_tail: Vec<u8>,
+    status: Option<std::process::ExitStatus>,
+    timed_out: bool,
+    diagnostics: StreamDiagnostics,
 }
 
-struct StreamRead {
+#[derive(Debug, Clone)]
+struct StreamDiagnostics {
+    stdout_total_bytes: usize,
+    stderr_total_bytes: usize,
+    stdout_tail_bytes: usize,
+    stderr_tail_bytes: usize,
+    stdout_tail_truncated: bool,
+    stderr_tail_truncated: bool,
+    stdout_lines: usize,
+    final_event_bytes: usize,
+    peak_retained_stdout_bytes: usize,
+    peak_retained_stderr_bytes: usize,
+    stdout_limit: usize,
+    stderr_limit: usize,
+}
+
+struct StdoutRead {
+    assistant: Option<String>,
+    error: Option<String>,
+    tail: Vec<u8>,
+    total_bytes: usize,
+    lines: usize,
+    final_event_bytes: usize,
+    tail_truncated: bool,
+    peak_retained_bytes: usize,
+}
+
+struct TailRead {
     data: Vec<u8>,
     read_error: Option<String>,
+    total_bytes: usize,
+    tail_truncated: bool,
+    peak_retained_bytes: usize,
 }
 
 pub fn main(args: &[String]) -> Result<(), String> {
@@ -55,17 +88,51 @@ pub fn main(args: &[String]) -> Result<(), String> {
         ));
     }
     let output = launch_pi(&spec, &prompt)?;
-    let stdout = String::from_utf8(output.stdout)
-        .map_err(|error| format!("agent-run pi stdout was not UTF-8: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "agent-run pi exited nonzero status={} stderr={}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr)
+    write_stats_if_requested(&output)?;
+    if output.timed_out {
+        return Err(transient_with_artifact(
+            &spec,
+            &output,
+            "AUTOPILOT_AGENT_RUN_TIMEOUT_MS",
+            "timeout",
+            "agent-run pi wall timeout exceeded",
         ));
     }
-    let assistant = parse_pi_jsonl(&stdout, &spec.provider, &spec.model)?;
-    write_carrier(&spec_path, &spec_digest, &spec, &assistant)
+    let status = output
+        .status
+        .ok_or_else(|| "agent-run pi status unavailable after launch".to_owned())?;
+    if !status.success() {
+        return Err(error_with_optional_artifact(
+            &spec,
+            &output,
+            "AUTOPILOT_AGENT_RUN_MAX_STDERR_BYTES",
+            &format!(
+                "agent-run pi exited nonzero status={status} stderr={}",
+                String::from_utf8_lossy(&output.stderr_tail)
+            ),
+        ));
+    }
+    if let Some(error) = &output.stderr_error {
+        return Err(error_with_optional_artifact(
+            &spec,
+            &output,
+            "AUTOPILOT_AGENT_RUN_MAX_STDERR_BYTES",
+            error,
+        ));
+    }
+    if let Some(error) = &output.stdout_error {
+        return Err(error_with_optional_artifact(
+            &spec,
+            &output,
+            "AUTOPILOT_AGENT_RUN_MAX_STDOUT_BYTES",
+            error,
+        ));
+    }
+    let assistant = output
+        .assistant
+        .as_deref()
+        .ok_or_else(|| "agent-run Pi JSONL contained no final assistant result".to_owned())?;
+    write_carrier(&spec_path, &spec_digest, &spec, assistant)
 }
 
 fn parse_args(args: &[String]) -> Result<PathBuf, String> {
@@ -418,6 +485,10 @@ fn launch_pi(spec: &AgentRunSpec, prompt: &str) -> Result<ChildOutput, String> {
         .stderr
         .take()
         .ok_or_else(|| "agent-run missing stderr pipe".to_owned())?;
+    // These historical knobs no longer cap bytes received from Pi. Pi JSON mode
+    // re-emits full message objects on message_update, so total transcript bytes
+    // grow with thinking depth. The knobs now cap retained diagnostic tails only;
+    // the runner streams and discards nonterminal JSONL chatter as it arrives.
     let stdout_limit = env_usize(
         "AUTOPILOT_AGENT_RUN_MAX_STDOUT_BYTES",
         DEFAULT_MAX_PI_STDOUT_BYTES,
@@ -426,36 +497,30 @@ fn launch_pi(spec: &AgentRunSpec, prompt: &str) -> Result<ChildOutput, String> {
         "AUTOPILOT_AGENT_RUN_MAX_STDERR_BYTES",
         DEFAULT_MAX_PI_STDERR_BYTES,
     );
-    let stdout_over = Arc::new(AtomicBool::new(false));
-    let stderr_over = Arc::new(AtomicBool::new(false));
-    let stdout_handle = spawn_reader(stdout, stdout_limit, Arc::clone(&stdout_over));
-    let stderr_handle = spawn_reader(stderr, stderr_limit, Arc::clone(&stderr_over));
+    let stdout_handle = spawn_stdout_reader(
+        stdout,
+        stdout_limit,
+        spec.provider.clone(),
+        spec.model.clone(),
+    );
+    let stderr_handle = spawn_tail_reader(stderr, stderr_limit);
     let timeout = Duration::from_millis(env_u64(
         "AUTOPILOT_AGENT_RUN_TIMEOUT_MS",
         DEFAULT_PI_TIMEOUT_MS,
     ));
     let started = Instant::now();
+    let mut timed_out = false;
     let status = loop {
-        if stdout_over.load(Ordering::SeqCst) {
-            terminate_child(&mut child);
-            return Err(format!("agent-run pi stdout exceeded {stdout_limit} bytes"));
-        }
-        if stderr_over.load(Ordering::SeqCst) {
-            terminate_child(&mut child);
-            return Err(format!("agent-run pi stderr exceeded {stderr_limit} bytes"));
-        }
         if started.elapsed() > timeout {
+            timed_out = true;
             terminate_child(&mut child);
-            return Err(format!(
-                "agent-run pi wall timeout exceeded {} ms",
-                timeout.as_millis()
-            ));
+            break None;
         }
         match child
             .try_wait()
             .map_err(|error| format!("agent-run wait failed: {error}"))?
         {
-            Some(status) => break status,
+            Some(status) => break Some(status),
             None => thread::sleep(Duration::from_millis(20)),
         }
     };
@@ -465,55 +530,173 @@ fn launch_pi(spec: &AgentRunSpec, prompt: &str) -> Result<ChildOutput, String> {
     let err = stderr_handle
         .join()
         .map_err(|_| "agent-run stderr reader panicked".to_owned())?;
-    if let Some(error) = out.read_error {
-        return Err(format!("agent-run stdout read failed: {error}"));
-    }
-    if let Some(error) = err.read_error {
-        return Err(format!("agent-run stderr read failed: {error}"));
-    }
+    let stdout_tail_bytes = out.tail.len();
+    let stderr_tail_bytes = err.data.len();
     Ok(ChildOutput {
-        stdout: out.data,
-        stderr: err.data,
+        assistant: out.assistant,
+        stdout_error: out.error,
+        stderr_error: err
+            .read_error
+            .map(|error| format!("agent-run stderr read failed: {error}")),
+        stdout_tail: out.tail,
+        stderr_tail: err.data,
         status,
+        timed_out,
+        diagnostics: StreamDiagnostics {
+            stdout_total_bytes: out.total_bytes,
+            stderr_total_bytes: err.total_bytes,
+            stdout_tail_bytes,
+            stderr_tail_bytes,
+            stdout_tail_truncated: out.tail_truncated,
+            stderr_tail_truncated: err.tail_truncated,
+            stdout_lines: out.lines,
+            final_event_bytes: out.final_event_bytes,
+            peak_retained_stdout_bytes: out.peak_retained_bytes,
+            peak_retained_stderr_bytes: err.peak_retained_bytes,
+            stdout_limit,
+            stderr_limit,
+        },
     })
 }
 
-fn spawn_reader<R: Read + Send + 'static>(
+fn spawn_stdout_reader<R: Read + Send + 'static>(
+    reader: R,
+    limit: usize,
+    expected_provider: String,
+    expected_model: String,
+) -> thread::JoinHandle<StdoutRead> {
+    thread::spawn(move || {
+        let mut parser = PiJsonlParser::new(expected_provider, expected_model);
+        let mut tail = RetainedTail::new(limit);
+        let mut reader = std::io::BufReader::new(reader);
+        let mut line = Vec::new();
+        let mut total_bytes = 0usize;
+        let mut peak_retained_bytes = 0usize;
+        let mut read_error = None;
+        loop {
+            line.clear();
+            match reader.read_until(b'\n', &mut line) {
+                Ok(0) => break,
+                Ok(n) => {
+                    total_bytes = total_bytes.saturating_add(n);
+                    tail.push(&line);
+                    if parser.error.is_none() {
+                        parser.ingest_line(&line);
+                    }
+                    peak_retained_bytes = peak_retained_bytes
+                        .max(tail.len().saturating_add(parser.retained_result_bytes()));
+                }
+                Err(error) => {
+                    read_error = Some(format!("agent-run stdout read failed: {error}"));
+                    break;
+                }
+            }
+        }
+        if parser.error.is_none() && read_error.is_none() {
+            parser.finish();
+        }
+        let parse_error = parser.error.clone();
+        let tail_truncated = tail.truncated;
+        StdoutRead {
+            assistant: parser.final_text(),
+            error: read_error.or(parse_error),
+            tail: tail.into_vec(),
+            total_bytes,
+            lines: parser.lines,
+            final_event_bytes: parser.final_event_bytes,
+            tail_truncated,
+            peak_retained_bytes,
+        }
+    })
+}
+
+fn spawn_tail_reader<R: Read + Send + 'static>(
     mut reader: R,
     limit: usize,
-    over: Arc<AtomicBool>,
-) -> thread::JoinHandle<StreamRead> {
+) -> thread::JoinHandle<TailRead> {
     thread::spawn(move || {
-        let mut data = Vec::new();
+        let mut tail = RetainedTail::new(limit);
         let mut buf = [0_u8; 8192];
+        let mut total_bytes = 0usize;
+        let mut peak_retained_bytes = 0usize;
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => {
-                    return StreamRead {
-                        data,
+                    let tail_truncated = tail.truncated;
+                    return TailRead {
+                        data: tail.into_vec(),
                         read_error: None,
+                        total_bytes,
+                        tail_truncated,
+                        peak_retained_bytes,
                     };
                 }
                 Ok(n) => {
-                    if data.len().saturating_add(n) > limit {
-                        over.store(true, Ordering::SeqCst);
-                        let remaining = limit.saturating_sub(data.len());
-                        if remaining > 0 {
-                            data.extend_from_slice(&buf[..remaining]);
-                        }
-                    } else {
-                        data.extend_from_slice(&buf[..n]);
-                    }
+                    total_bytes = total_bytes.saturating_add(n);
+                    tail.push(&buf[..n]);
+                    peak_retained_bytes = peak_retained_bytes.max(tail.len());
                 }
                 Err(error) => {
-                    return StreamRead {
-                        data,
+                    let tail_truncated = tail.truncated;
+                    return TailRead {
+                        data: tail.into_vec(),
                         read_error: Some(error.to_string()),
+                        total_bytes,
+                        tail_truncated,
+                        peak_retained_bytes,
                     };
                 }
             }
         }
     })
+}
+
+struct RetainedTail {
+    data: Vec<u8>,
+    limit: usize,
+    truncated: bool,
+}
+
+impl RetainedTail {
+    fn new(limit: usize) -> Self {
+        Self {
+            data: Vec::new(),
+            limit,
+            truncated: false,
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8]) {
+        if self.limit == 0 {
+            self.truncated |= !bytes.is_empty();
+            return;
+        }
+        if bytes.len() >= self.limit {
+            self.data.clear();
+            self.data
+                .extend_from_slice(&bytes[bytes.len().saturating_sub(self.limit)..]);
+            self.truncated = true;
+            return;
+        }
+        let overflow = self
+            .data
+            .len()
+            .saturating_add(bytes.len())
+            .saturating_sub(self.limit);
+        if overflow > 0 {
+            self.data.drain(..overflow);
+            self.truncated = true;
+        }
+        self.data.extend_from_slice(bytes);
+    }
+
+    fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    fn into_vec(self) -> Vec<u8> {
+        self.data
+    }
 }
 
 fn terminate_child(child: &mut std::process::Child) {
@@ -566,79 +749,204 @@ struct AssistantRecord {
     stop_reason: String,
 }
 
-fn parse_pi_jsonl(
-    output: &str,
-    expected_provider: &str,
-    expected_model: &str,
-) -> Result<String, String> {
-    let mut final_record: Option<AssistantRecord> = None;
-    let mut assistant_count = 0usize;
-    let mut tool_after_terminal = false;
-    let mut saw_agent_end = false;
-    for (index, line) in output.lines().enumerate() {
-        if line.trim().is_empty() {
-            continue;
+#[derive(Deserialize)]
+struct EventKind {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+}
+
+struct PiJsonlParser {
+    expected_provider: String,
+    expected_model: String,
+    final_record: Option<AssistantRecord>,
+    assistant_count: usize,
+    tool_after_terminal: bool,
+    saw_agent_end: bool,
+    lines: usize,
+    final_event_bytes: usize,
+    error: Option<String>,
+}
+
+impl PiJsonlParser {
+    fn new(expected_provider: String, expected_model: String) -> Self {
+        Self {
+            expected_provider,
+            expected_model,
+            final_record: None,
+            assistant_count: 0,
+            tool_after_terminal: false,
+            saw_agent_end: false,
+            lines: 0,
+            final_event_bytes: 0,
+            error: None,
         }
-        let value: Value = serde_json::from_str(line)
-            .map_err(|error| format!("agent-run malformed Pi JSONL line {}: {error}", index + 1))?;
-        if saw_agent_end {
-            if value.get("type").and_then(Value::as_str) == Some("agent_settled") {
-                continue;
-            }
-            return Err(format!(
-                "agent-run Pi JSONL contained events after agent_end at line {}",
-                index + 1
+    }
+
+    fn ingest_line(&mut self, line: &[u8]) {
+        if self.error.is_some() {
+            return;
+        }
+        self.lines = self.lines.saturating_add(1);
+        let line = trim_jsonl_newline(line);
+        let Ok(text) = std::str::from_utf8(line) else {
+            self.error = Some(format!(
+                "agent-run pi stdout was not UTF-8 at line {}",
+                self.lines
             ));
+            return;
+        };
+        if text.trim().is_empty() {
+            return;
         }
-        if is_tool_event(&value) {
-            if final_record.is_some() {
-                tool_after_terminal = true;
+        let kind = match serde_json::from_str::<EventKind>(text) {
+            Ok(kind) => kind.kind,
+            Err(error) => {
+                self.error = Some(format!(
+                    "agent-run malformed Pi JSONL line {}: {error}",
+                    self.lines
+                ));
+                return;
             }
-            continue;
+        };
+        if self.saw_agent_end {
+            if kind.as_deref() == Some("agent_settled") {
+                return;
+            }
+            self.error = Some(format!(
+                "agent-run Pi JSONL contained events after agent_end at line {}",
+                self.lines
+            ));
+            return;
         }
-        if let Some(record) = assistant_event(&value)? {
-            if record.stop_reason == "tooluse" {
-                continue;
+        if kind.as_deref().is_some_and(|kind| kind.contains("tool")) {
+            if self.final_record.is_some() {
+                self.tool_after_terminal = true;
             }
-            validate_terminal_assistant(&record, expected_provider, expected_model)?;
-            if final_record.as_ref() == Some(&record) {
-                continue;
-            }
-            assistant_count = assistant_count.saturating_add(1);
-            final_record = Some(record);
-            continue;
+            return;
         }
-        if let Some(record) = agent_end_record(&value)? {
-            validate_terminal_assistant(&record, expected_provider, expected_model)?;
-            if let Some(existing) = &final_record {
-                if existing != &record {
-                    return Err(
-                        "agent-run Pi agent_end terminal assistant drifted from message_end"
-                            .to_owned(),
-                    );
+        match kind.as_deref() {
+            Some("final" | "message_end" | "assistant" | "turn_end" | "agent_end") => {}
+            _ => return,
+        }
+        let value: Value = match serde_json::from_str(text) {
+            Ok(value) => value,
+            Err(error) => {
+                self.error = Some(format!(
+                    "agent-run malformed Pi JSONL line {}: {error}",
+                    self.lines
+                ));
+                return;
+            }
+        };
+        self.ingest_value(&value, text.len());
+    }
+
+    fn ingest_value(&mut self, value: &Value, line_bytes: usize) {
+        match assistant_event(value) {
+            Ok(Some(record)) => {
+                if record.stop_reason == "tooluse" {
+                    return;
                 }
-            } else {
-                assistant_count = assistant_count.saturating_add(1);
-                final_record = Some(record);
+                if let Err(error) = validate_terminal_assistant(
+                    &record,
+                    &self.expected_provider,
+                    &self.expected_model,
+                ) {
+                    self.error = Some(error);
+                    return;
+                }
+                if self.final_record.as_ref() == Some(&record) {
+                    return;
+                }
+                self.assistant_count = self.assistant_count.saturating_add(1);
+                self.final_record = Some(record);
+                return;
             }
-            saw_agent_end = true;
+            Ok(None) => {}
+            Err(error) => {
+                self.error = Some(error);
+                return;
+            }
+        }
+        match agent_end_record(value) {
+            Ok(Some(record)) => {
+                self.final_event_bytes = line_bytes;
+                if let Err(error) = validate_terminal_assistant(
+                    &record,
+                    &self.expected_provider,
+                    &self.expected_model,
+                ) {
+                    self.error = Some(error);
+                    return;
+                }
+                if let Some(existing) = &self.final_record {
+                    if existing != &record {
+                        self.error = Some(
+                            "agent-run Pi agent_end terminal assistant drifted from message_end"
+                                .to_owned(),
+                        );
+                        return;
+                    }
+                } else {
+                    self.assistant_count = self.assistant_count.saturating_add(1);
+                    self.final_record = Some(record);
+                }
+                self.saw_agent_end = true;
+            }
+            Ok(None) => {}
+            Err(error) => self.error = Some(error),
         }
     }
-    if !saw_agent_end {
-        return Err("agent-run Pi JSONL lacked agent_end".to_owned());
+
+    fn finish(&mut self) {
+        if self.error.is_some() {
+            return;
+        }
+        if !self.saw_agent_end {
+            self.error = Some("agent-run Pi JSONL lacked agent_end".to_owned());
+            return;
+        }
+        if self.tool_after_terminal {
+            self.error = Some(
+                "agent-run Pi JSONL had tool activity after terminal assistant result".to_owned(),
+            );
+            return;
+        }
+        match (&self.final_record, self.assistant_count) {
+            (Some(record), 1) if !record.text.trim().is_empty() => {}
+            (_, 0) => {
+                self.error =
+                    Some("agent-run Pi JSONL contained no final assistant result".to_owned())
+            }
+            (_, count) => {
+                self.error = Some(format!(
+                    "agent-run Pi JSONL contained {count} terminal assistant results; expected exactly one"
+                ));
+            }
+        }
     }
-    if tool_after_terminal {
-        return Err(
-            "agent-run Pi JSONL had tool activity after terminal assistant result".to_owned(),
-        );
+
+    fn final_text(&self) -> Option<String> {
+        self.final_record.as_ref().map(|record| record.text.clone())
     }
-    match (assistant_count, final_record) {
-        (1, Some(record)) if !record.text.trim().is_empty() => Ok(record.text),
-        (0, _) => Err("agent-run Pi JSONL contained no final assistant result".to_owned()),
-        (count, _) => Err(format!(
-            "agent-run Pi JSONL contained {count} terminal assistant results; expected exactly one"
-        )),
+
+    fn retained_result_bytes(&self) -> usize {
+        self.final_record
+            .as_ref()
+            .map(|record| record.text.len())
+            .unwrap_or(0)
+            .saturating_add(self.final_event_bytes)
     }
+}
+
+fn trim_jsonl_newline(mut line: &[u8]) -> &[u8] {
+    if line.ends_with(b"\n") {
+        line = &line[..line.len() - 1];
+    }
+    if line.ends_with(b"\r") {
+        line = &line[..line.len() - 1];
+    }
+    line
 }
 
 fn validate_terminal_assistant(
@@ -680,13 +988,6 @@ fn agent_end_record(value: &Value) -> Result<Option<AssistantRecord>, String> {
         }
     }
     Err("agent-run agent_end missing assistant message".to_owned())
-}
-
-fn is_tool_event(value: &Value) -> bool {
-    value
-        .get("type")
-        .and_then(Value::as_str)
-        .is_some_and(|kind| kind.contains("tool"))
 }
 
 fn assistant_event(value: &Value) -> Result<Option<AssistantRecord>, String> {
@@ -760,6 +1061,116 @@ fn string_field(value: &Value, key: &str) -> Option<String> {
 
 fn lower_string(value: &Value, key: &str) -> Option<String> {
     string_field(value, key).map(|text| text.to_ascii_lowercase())
+}
+
+fn error_with_optional_artifact(
+    spec: &AgentRunSpec,
+    output: &ChildOutput,
+    limit_name: &str,
+    detail: &str,
+) -> String {
+    if output.diagnostics.stdout_tail_truncated || output.diagnostics.stderr_tail_truncated {
+        transient_with_artifact(
+            spec,
+            output,
+            limit_name,
+            "retained diagnostic tail wrapped",
+            detail,
+        )
+    } else {
+        detail.to_owned()
+    }
+}
+
+fn transient_with_artifact(
+    spec: &AgentRunSpec,
+    output: &ChildOutput,
+    limit_name: &str,
+    reason: &str,
+    detail: &str,
+) -> String {
+    let artifact = write_diagnostic_artifact(spec, output, reason)
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|error| format!("artifact-write-failed:{error}"));
+    let failure = Failure::Transient {
+        retry: RetryPolicy::Backoff,
+    };
+    format!(
+        "agent-run transient failure taxonomy=D77 variant={failure:?} assignment={} limit={} artifact={artifact}: {detail}",
+        spec.assignment_id.0, limit_name
+    )
+}
+
+fn write_diagnostic_artifact(
+    spec: &AgentRunSpec,
+    output: &ChildOutput,
+    reason: &str,
+) -> Result<PathBuf, String> {
+    let root = Path::new(&spec.cwd.0).join(".pi/autopilot/runner/diagnostics");
+    fs::create_dir_all(&root)
+        .map_err(|error| format!("agent-run diagnostic mkdir failed {:?}: {error}", root))?;
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_nanos();
+    let path = root.join(format!(
+        "{}-{nanos}-pi-stream-diagnostic.json",
+        spec.assignment_id.0
+    ));
+    let artifact = serde_json::json!({
+        "schema": "autopilot.agent_run_stream_diagnostic.v1",
+        "assignment_id": spec.assignment_id.0,
+        "reason": reason,
+        "diagnostics": diagnostics_json(&output.diagnostics),
+        "stdout_tail_utf8_lossy": String::from_utf8_lossy(&output.stdout_tail).to_string(),
+        "stderr_tail_utf8_lossy": String::from_utf8_lossy(&output.stderr_tail).to_string(),
+    });
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|error| format!("agent-run diagnostic create failed {:?}: {error}", path))?;
+    file.write_all(
+        &serde_json::to_vec_pretty(&artifact)
+            .map_err(|error| format!("agent-run diagnostic serialize failed: {error}"))?,
+    )
+    .map_err(|error| format!("agent-run diagnostic write failed {:?}: {error}", path))?;
+    file.write_all(b"\n")
+        .map_err(|error| format!("agent-run diagnostic newline failed {:?}: {error}", path))?;
+    file.sync_all()
+        .map_err(|error| format!("agent-run diagnostic fsync failed {:?}: {error}", path))?;
+    Ok(path)
+}
+
+fn write_stats_if_requested(output: &ChildOutput) -> Result<(), String> {
+    let Some(path) = std::env::var_os("AUTOPILOT_AGENT_RUN_STATS_PATH") else {
+        return Ok(());
+    };
+    let path = PathBuf::from(path);
+    let stats = diagnostics_json(&output.diagnostics);
+    fs::write(
+        &path,
+        serde_json::to_vec_pretty(&stats)
+            .map_err(|error| format!("agent-run stats serialize failed: {error}"))?,
+    )
+    .map_err(|error| format!("agent-run stats write failed {:?}: {error}", path))
+}
+
+fn diagnostics_json(diagnostics: &StreamDiagnostics) -> Value {
+    serde_json::json!({
+        "stdout_total_bytes": diagnostics.stdout_total_bytes,
+        "stderr_total_bytes": diagnostics.stderr_total_bytes,
+        "stdout_tail_bytes": diagnostics.stdout_tail_bytes,
+        "stderr_tail_bytes": diagnostics.stderr_tail_bytes,
+        "stdout_tail_truncated": diagnostics.stdout_tail_truncated,
+        "stderr_tail_truncated": diagnostics.stderr_tail_truncated,
+        "stdout_lines": diagnostics.stdout_lines,
+        "final_event_bytes": diagnostics.final_event_bytes,
+        "peak_retained_stdout_bytes": diagnostics.peak_retained_stdout_bytes,
+        "peak_retained_stderr_bytes": diagnostics.peak_retained_stderr_bytes,
+        "stdout_retention_limit": diagnostics.stdout_limit,
+        "stderr_retention_limit": diagnostics.stderr_limit,
+    })
 }
 
 fn task_document_digest(class: &str, authority_set_id: &str, body: &str) -> String {
