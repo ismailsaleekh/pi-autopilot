@@ -142,6 +142,7 @@ fn accepted_registry_rejects_cross_extractor_duplicate_and_is_resume_stable() {
             "task-extractor",
             Some("TE02-"),
         ),
+        ("planning-ws-repository-scout-01", "repository-scout", None),
     ]);
     let event_log = stable.root.join("events.jsonl");
     let mut state = CoreState::open(Some(event_log.clone())).unwrap();
@@ -155,7 +156,7 @@ fn accepted_registry_rejects_cross_extractor_duplicate_and_is_resume_stable() {
         None,
         task_atoms("TE01-A"),
     );
-    let b = stable.seed_planning_binding(
+    let _b = stable.seed_planning_binding(
         &mut state,
         "task-extractor",
         "inventory",
@@ -165,12 +166,8 @@ fn accepted_registry_rejects_cross_extractor_duplicate_and_is_resume_stable() {
         None,
         task_atoms("TE02-B"),
     );
-    assert!(stable
-        .agent_result(&mut state, &a, task_atoms("TE01-A"))
-        .contains("accepted"));
-    assert!(stable
-        .agent_result(&mut state, &b, task_atoms("TE02-B"))
-        .contains("accepted"));
+    let next = stable.agent_response(&mut state, &a, task_atoms("TE01-A"));
+    assert_spawn_assignment(&next, "planning-ws-repository-scout-01");
     let registry_path = stable
         .root
         .join(".pi/autopilot/ws/planning/atom-registry.json");
@@ -556,6 +553,22 @@ fn response_status(response: &SeamEnvelope) -> String {
         .and_then(|value| value.as_str())
         .unwrap_or_else(|| panic!("non-status response: {response:?}"))
         .to_owned()
+}
+
+fn assert_spawn_assignment(response: &SeamEnvelope, assignment_id: &str) {
+    assert_eq!(
+        response.kind, "spawn",
+        "expected spawn response: {response:?}"
+    );
+    assert_eq!(
+        response
+            .payload
+            .get("action")
+            .and_then(|action| action.get("assignment_id"))
+            .and_then(serde_json::Value::as_str),
+        Some(assignment_id),
+        "spawn should launch the next planning assignment: {response:?}"
+    );
 }
 
 fn has_attempt_event(events: &[serde_json::Value], event: &str) -> bool {
