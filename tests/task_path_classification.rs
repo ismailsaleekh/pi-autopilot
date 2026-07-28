@@ -1,5 +1,7 @@
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -9,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 static CWD_LOCK: Mutex<()> = Mutex::new(());
 
 use drivers::planning::{
-    self, PlanningError, TaskDocumentClass, TaskInputSet, p1_inventory_from_input_set,
+    self, p1_inventory_from_input_set, PlanningError, TaskDocumentClass, TaskInputSet,
 };
 use drivers::seam::{self, CoreState};
 use kernel::generated::{CoreToHostDonePayload, CoreToHostSpawnPayload, SeamEnvelope};
@@ -34,12 +36,10 @@ fn task_path_classification_exact_three_authority_one_context_pack_passes_and_co
     assert_eq!(input.authority_set_id, "set-a");
     assert_eq!(input.authority_documents.len(), 3);
     assert_eq!(input.context_documents.len(), 1);
-    assert!(
-        input
-            .authority_documents
-            .iter()
-            .all(|doc| doc.class == TaskDocumentClass::Authority)
-    );
+    assert!(input
+        .authority_documents
+        .iter()
+        .all(|doc| doc.class == TaskDocumentClass::Authority));
     assert_eq!(
         input.context_documents[0].class,
         TaskDocumentClass::ContextNonAuthority
@@ -47,17 +47,15 @@ fn task_path_classification_exact_three_authority_one_context_pack_passes_and_co
 
     let inventory = p1_inventory_from_input_set(&input).expect("inventory");
     assert_eq!(inventory.atoms.len(), 3);
-    assert!(
-        inventory
-            .atoms
-            .iter()
-            .all(|atom| !atom.statement.contains("CONTEXT-SENTINEL-UNIQUE"))
-    );
+    assert!(inventory
+        .atoms
+        .iter()
+        .all(|atom| !atom.statement.contains("CONTEXT-SENTINEL-UNIQUE")));
 }
 
 #[test]
-fn task_path_classification_rejects_count_order_id_header_path_symlink_duplicate_and_forbidden_markers()
- {
+fn task_path_classification_rejects_count_order_id_header_path_symlink_duplicate_and_forbidden_markers(
+) {
     let root = temp_repo("classification-negative");
     write_pack(
         &root,
@@ -381,17 +379,15 @@ fn task_path_classification_rejects_root_and_ancestor_symlink_escapes_without_mu
     );
     assert_eq!(blocked.kind, "done");
     assert!(format!("{}", blocked.payload).contains("TaskPath"));
-    assert!(
-        !root
-            .join(".pi/autopilot/main/planning-manifest.json")
-            .exists()
-    );
+    assert!(!root
+        .join(".pi/autopilot/main/planning-manifest.json")
+        .exists());
     std::env::set_current_dir(previous).expect("restore cwd");
 }
 
 #[test]
-fn task_path_classification_terminal_events_require_core_issued_action_assignment_and_accept_exact_carrier()
- {
+fn task_path_classification_terminal_events_require_core_issued_action_assignment_and_accept_exact_carrier(
+) {
     let _guard = CWD_LOCK.lock().expect("cwd lock");
     let root = temp_repo("terminal-binding");
     write_pack(
@@ -464,7 +460,7 @@ fn task_path_classification_terminal_events_require_core_issued_action_assignmen
         "spec_digest":sha256_hex(spec_text.as_bytes()),
         "spec_path":spec_path,
         "carrier_path":carrier_path,
-        "raw_output":transcript("planning.task-atoms.v1")
+        "raw_output":common::planning_replay_output("planning.task-atoms.v1", &spec, &spec_path, None)
     });
     fs::write(
         carrier_path,
@@ -500,8 +496,8 @@ fn task_path_classification_terminal_events_require_core_issued_action_assignmen
 }
 
 #[test]
-fn task_path_classification_delivery_runtime_packages_uncommitted_lane_changes_and_ignores_unclaimed_residue()
- {
+fn task_path_classification_delivery_runtime_packages_uncommitted_lane_changes_and_ignores_unclaimed_residue(
+) {
     let _guard = CWD_LOCK.lock().expect("cwd lock");
     let root = temp_repo("delivery-runtime-package");
     fs::write(root.join("README.md"), "delivery terminal fixture\n").expect("fixture file");
@@ -598,8 +594,8 @@ fn task_path_classification_delivery_runtime_packages_uncommitted_lane_changes_a
 }
 
 #[test]
-fn task_path_classification_delivery_runtime_adopts_existing_agent_commit_without_duplicate_package_commit()
- {
+fn task_path_classification_delivery_runtime_adopts_existing_agent_commit_without_duplicate_package_commit(
+) {
     let _guard = CWD_LOCK.lock().expect("cwd lock");
     let root = temp_repo("delivery-runtime-adopt");
     fs::write(root.join("README.md"), "delivery terminal fixture\n").expect("fixture file");
@@ -677,8 +673,8 @@ fn task_path_classification_delivery_runtime_adopts_existing_agent_commit_withou
 }
 
 #[test]
-fn task_path_classification_delivery_terminal_carrier_is_core_accepted_and_incomplete_delivery_is_rejected_without_mutation()
- {
+fn task_path_classification_delivery_terminal_carrier_is_core_accepted_and_incomplete_delivery_is_rejected_without_mutation(
+) {
     let _guard = CWD_LOCK.lock().expect("cwd lock");
     let root = temp_repo("delivery-terminal");
     fs::write(root.join("README.md"), "delivery terminal fixture\n").expect("fixture file");
@@ -840,20 +836,6 @@ fn sha256_hex(data: &[u8]) -> String {
         out.push_str(&format!("{byte:02x}"));
     }
     out
-}
-
-fn transcript(boundary_id: &str) -> String {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../tests/transcripts")
-        .join(boundary_id)
-        .join("transcripts.json");
-    let value: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(path).expect("transcript file"))
-            .expect("transcript json");
-    value["records"][0]["raw_output"]
-        .as_str()
-        .expect("raw output")
-        .to_owned()
 }
 
 fn classify(root: &Path, paths: Vec<PathBuf>) -> TaskInputSet {
