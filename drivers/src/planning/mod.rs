@@ -404,7 +404,7 @@ fn classify_task_document(rel: &Path, bytes: &[u8]) -> Result<TaskDocument, Plan
     let empty = lines.next().ok_or_else(|| {
         PlanningError::TaskHeader(format!("missing-empty-line:{}", rel.display()))
     })?;
-    if empty != "" {
+    if !empty.is_empty() {
         return Err(PlanningError::TaskHeader(format!(
             "line3-not-empty:{}",
             rel.display()

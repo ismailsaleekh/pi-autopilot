@@ -54,32 +54,26 @@ fn all_public_commands_reach_driver_surfaces() {
         serde_json::from_value(run.payload).expect("spawn payload");
     assert!(spawn_payload.action.bg_run.command.0.contains(" --spec "));
     assert!(spawn_payload.action.assignment_id.0.contains("main"));
+    let task_binding = serde_json::json!({
+        "task_id": "task-command-routing",
+        "action_id": &spawn_payload.action.action_id.0,
+        "assignment_id": &spawn_payload.action.assignment_id.0,
+    });
+    let appended = send_with_log(
+        &format!("append:handoff-fixture:task-binding:{task_binding}"),
+        &event_log,
+        Some(&repo),
+    );
+    assert!(done_status(&appended).contains("state:sequence="));
+    let appended = send_with_log(
+        "append:final-precondition:unit-closed:main",
+        &event_log,
+        Some(&repo),
+    );
+    assert!(done_status(&appended).contains("state:sequence="));
 
     let status = send_once("autopilot-status", None);
     assert!(done_status(&status).contains("state:sequence=0;revision=0"));
-
-    let head = git_stdout(&repo, &["rev-parse", "--verify", "HEAD"]);
-    let tree = git_stdout(&repo, &["rev-parse", "--verify", "HEAD^{tree}"]);
-    let close = send_once(
-        &format!(
-            "autopilot-close main --run run-1 --expected-revision 0 --expected-event-tip sha256:{} --expected-tip {} --expected-tree {} --expected-final-digest sha256:{}",
-            "0".repeat(64),
-            head.trim(),
-            tree.trim(),
-            "1".repeat(64)
-        ),
-        Some(&repo),
-    );
-    assert!(done_status(&close).contains("rejection:lifecycle-close:NotReadyToClose"));
-    assert!(
-        !Command::new("git")
-            .current_dir(&repo)
-            .args(["rev-parse", "--verify", "refs/autopilot/results/main/run-1"])
-            .stdout(Stdio::null())
-            .status()
-            .expect("git rev-parse")
-            .success()
-    );
 
     let abort_root = temp_dir("abort-route");
     let abort = send_once("autopilot-abort main", Some(&abort_root));
@@ -102,11 +96,52 @@ fn all_public_commands_reach_driver_surfaces() {
             > 0
     );
 
-    let handoff = send_once("autopilot-handoff", None);
+    let handoff = send_with_log("autopilot-handoff", &event_log, Some(&repo));
     let handoff_payload: CoreToHostUiPayload =
         serde_json::from_value(handoff.payload).expect("handoff ui");
     assert_eq!(handoff_payload.content["driver"], "handoff");
     assert_eq!(handoff_payload.content["actions"], 4);
+
+    let terminal_ref = format!(
+        "terminal-consumed:{}:{}:{}",
+        spawn_payload.action.action_id.0,
+        spawn_payload.action.assignment_id.0,
+        spawn_payload.action.run_revision
+    );
+    let appended = send_with_log(
+        &format!("append:final-precondition:{terminal_ref}"),
+        &event_log,
+        Some(&repo),
+    );
+    assert!(done_status(&appended).contains("state:sequence="));
+
+    let head = git_stdout(&repo, &["rev-parse", "--verify", "HEAD"]);
+    let tree = git_stdout(&repo, &["rev-parse", "--verify", "HEAD^{tree}"]);
+    let close = send_with_log(
+        &format!(
+            "autopilot-close main --run run-1 --expected-revision 0 --expected-event-tip sha256:{} --expected-tip {} --expected-tree {} --expected-final-digest sha256:{}",
+            "0".repeat(64),
+            head.trim(),
+            tree.trim(),
+            "1".repeat(64)
+        ),
+        &event_log,
+        Some(&repo),
+    );
+    let close_status = done_status(&close);
+    assert!(
+        close_status.contains("rejection:lifecycle-close:FinalGateFailed:final-commands-exact-tip"),
+        "unexpected close status: {close_status}"
+    );
+    assert!(
+        !Command::new("git")
+            .current_dir(&repo)
+            .args(["rev-parse", "--verify", "refs/autopilot/results/main/run-1"])
+            .stdout(Stdio::null())
+            .status()
+            .expect("git rev-parse")
+            .success()
+    );
 
     let inject = send_once("autopilot-inject main", None);
     assert!(done_status(&inject).contains("attach:workstream=main;state:sequence=1;revision=1"));

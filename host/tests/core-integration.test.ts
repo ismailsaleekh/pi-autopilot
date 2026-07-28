@@ -104,7 +104,7 @@ test("planning rejects a bare directory with typed CONTEXT_GAP instead of fabric
 
   try {
     const effects = await dispatchRegistered(pi, "autopilot-plan", PLAN_ARGS);
-    assert.match(doneStatus(effects, "autopilot-plan bare directory"), /planning:TaskPath\("read:CONTEXT\.md:Is a directory/u);
+    assert.equal(doneStatus(effects, "autopilot-plan bare directory"), 'rejection:driver-error:planning:TaskPath("not-regular-file:CONTEXT.md")');
     assert.equal(effects.some((effect) => effect.kind === "spawn"), false, "bare directory must not synthesize an agent launch");
     assert.deepEqual(readEventsIfPresent(eventLog), [], "bare directory must not append agent:spawn evidence");
   } finally {

@@ -745,10 +745,10 @@ fn content_text(value: &Value) -> Option<String> {
     let content = value.get("content")?.as_array()?;
     let mut out = String::new();
     for item in content {
-        if item.get("type").and_then(Value::as_str) == Some("text") {
-            if let Some(text) = item.get("text").and_then(Value::as_str) {
-                out.push_str(text);
-            }
+        if item.get("type").and_then(Value::as_str) == Some("text")
+            && let Some(text) = item.get("text").and_then(Value::as_str)
+        {
+            out.push_str(text);
         }
     }
     (!out.is_empty()).then_some(out)

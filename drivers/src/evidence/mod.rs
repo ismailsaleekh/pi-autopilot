@@ -388,7 +388,18 @@ pub fn issue_planning_review(
     let prompt_ref = publish_ref(&identity.run_root, &prompt_path, prompt.as_bytes(), EvidenceContentKind::Prompt)?;
     let system_prompt_sha256 = Digest(sha256_tag(SYSTEM_PROMPT.as_bytes()));
     let report_staging_path = format!(".pi/autopilot/{workstream}/evidence-staging/{}.report.v1.json", assignment_id.0);
-    let consumer_binding = consumer_binding_without_hash(&identity, PURPOSE_PLANNING_REVIEW, &action_id, &assignment_id, assignment_revision, run_revision, "planning.plan-review.v1", &subject_digest);
+    let consumer_binding = consumer_binding_without_hash(
+        &identity,
+        ConsumerBindingDraft {
+            purpose_id: PURPOSE_PLANNING_REVIEW,
+            action_id: &action_id,
+            assignment_id: &assignment_id,
+            assignment_revision,
+            run_revision,
+            boundary_id: "planning.plan-review.v1",
+            subject_digest: &subject_digest,
+        },
+    );
     let consumer_binding = with_binding_hash(consumer_binding)?;
     let request_without_hash = Phase2PiAttestedRunRequest {
         schema_version: SchemaId(REQUEST_SCHEMA.to_owned()),
@@ -492,11 +503,11 @@ pub fn attested_action_json_ref(action: &AutopilotAttestedAction) -> Result<Ref,
 pub fn find_action_from_refs<'a>(refs: impl Iterator<Item = &'a Ref>, action_id: &str, assignment_id: &str) -> Result<AutopilotAttestedAction, EvidenceError> {
     let mut found = None;
     for reference in refs {
-        if let Some(action) = decode_attested_action_ref(reference) {
-            if action.action_id.0 == action_id && action.assignment_id.0 == assignment_id {
-                if found.is_some() { return Err(EvidenceError::BindingConflict); }
-                found = Some(action);
-            }
+        if let Some(action) = decode_attested_action_ref(reference)
+            && action.action_id.0 == action_id && action.assignment_id.0 == assignment_id
+        {
+            if found.is_some() { return Err(EvidenceError::BindingConflict); }
+            found = Some(action);
         }
     }
     found.ok_or(EvidenceError::MissingAssignment)
@@ -559,7 +570,13 @@ pub fn accept_attested_observation_inner(
     let report_ref = publish_ref(&identity.run_root, &format!("evidence/imports/{}/report.v1.json", action.assignment_id.0), &report_bytes, EvidenceContentKind::Report)?;
     let sidecar_ref = publish_ref(&identity.run_root, &format!("evidence/imports/{}/producer-attestation.v2.json", action.assignment_id.0), &sidecar_bytes, EvidenceContentKind::ProducerSidecar)?;
     let conflict_check = conflict_check(Vec::new())?;
-    let receipt = acceptance_receipt(&identity, action, &binding_ref, &report_ref, &sidecar_ref, &report, &sidecar, issue_event_ref, binding_event_ref, conflict_check)?;
+    let receipt = acceptance_receipt(
+        &identity,
+        action,
+        AcceptanceReceiptRefs { producer_binding: &binding_ref, report: &report_ref, sidecar: &sidecar_ref },
+        AcceptanceReceiptArtifacts { report: &report, sidecar: &sidecar },
+        AcceptanceReceiptGate { issue_event_ref, binding_event_ref, conflict_check },
+    )?;
     let receipt_ref = publish_json_ref(&identity.run_root, &format!("evidence/receipts/{}.acceptance.v1.json", action.assignment_id.0), &receipt, EvidenceContentKind::AcceptanceReceipt)?;
     Ok(AcceptedEvidence { receipt, receipt_ref, report, sidecar, envelope: None })
 }
@@ -668,7 +685,7 @@ fn validate_sidecar(action: &AutopilotAttestedAction, observation: &HostToCoreAt
         if sidecar.artifacts.prompt.sha256 != sha256_tag(action.producer_request.prompt_utf8.as_bytes()) { return Err(EvidenceError::Hash("prompt hash mismatch".to_owned())); }
     }
     if sidecar.artifacts.system_prompt.sha256 != sha256_tag(action.producer_request.system_prompt_utf8.as_bytes()) { return Err(EvidenceError::Hash("system prompt hash mismatch".to_owned())); }
-    if let Some(usage) = &sidecar.usage { if usage.cost_total_microusd.unwrap_or(0) != 0 { return Err(EvidenceError::MeteredUsage); } }
+    if let Some(usage) = &sidecar.usage && usage.cost_total_microusd.unwrap_or(0) != 0 { return Err(EvidenceError::MeteredUsage); }
     Ok(())
 }
 
@@ -715,7 +732,30 @@ fn producer_binding(identity: &EvidenceIdentity, action: &AutopilotAttestedActio
     Ok(AutopilotProducerBinding { binding_sha256: Digest(hash), ..without_hash })
 }
 
-fn acceptance_receipt(identity: &EvidenceIdentity, action: &AutopilotAttestedAction, producer_binding_ref: &AutopilotContentRef, report_ref: &AutopilotContentRef, sidecar_ref: &AutopilotContentRef, report: &Phase2PiTaskReportV1, sidecar: &Phase2PiTaskAttestationV2, issue_event_ref: AutopilotEventRef, binding_event_ref: AutopilotEventRef, conflict_check: AutopilotEvidenceConflictCheck) -> Result<AutopilotEvidenceAcceptanceReceipt, EvidenceError> {
+struct AcceptanceReceiptRefs<'a> {
+    producer_binding: &'a AutopilotContentRef,
+    report: &'a AutopilotContentRef,
+    sidecar: &'a AutopilotContentRef,
+}
+
+struct AcceptanceReceiptArtifacts<'a> {
+    report: &'a Phase2PiTaskReportV1,
+    sidecar: &'a Phase2PiTaskAttestationV2,
+}
+
+struct AcceptanceReceiptGate {
+    issue_event_ref: AutopilotEventRef,
+    binding_event_ref: AutopilotEventRef,
+    conflict_check: AutopilotEvidenceConflictCheck,
+}
+
+fn acceptance_receipt(
+    identity: &EvidenceIdentity,
+    action: &AutopilotAttestedAction,
+    refs: AcceptanceReceiptRefs<'_>,
+    artifacts: AcceptanceReceiptArtifacts<'_>,
+    gate: AcceptanceReceiptGate,
+) -> Result<AutopilotEvidenceAcceptanceReceipt, EvidenceError> {
     let receipt_id = Id(format!("ear-{}", digest_hex(format!("autopilot.evidence-acceptance.v1\0{}\0{}", action.assignment_id.0, action.producer_request.request_sha256.0).as_bytes())));
     let without_hash = AutopilotEvidenceAcceptanceReceipt {
         schema_version: SchemaId("autopilot.evidence_acceptance_receipt.v1".to_owned()),
@@ -732,28 +772,28 @@ fn acceptance_receipt(identity: &EvidenceIdentity, action: &AutopilotAttestedAct
         boundary_id: action.producer_request.consumer_binding.boundary_id.clone(),
         assignment_ref: action.assignment_ref.clone(),
         action_ref: action_content_ref(action)?,
-        producer_binding_ref: producer_binding_ref.clone(),
-        report_ref: report_ref.clone(),
-        producer_sidecar_ref: sidecar_ref.clone(),
-        producer_task_id: Id(report.producer_task_id.clone()),
+        producer_binding_ref: refs.producer_binding.clone(),
+        report_ref: refs.report.clone(),
+        producer_sidecar_ref: refs.sidecar.clone(),
+        producer_task_id: Id(artifacts.report.producer_task_id.clone()),
         producer_request_sha256: action.producer_request.request_sha256.clone(),
         prompt_sha256: Digest(sha256_tag(action.producer_request.prompt_utf8.as_bytes())),
         system_prompt_sha256: Digest(sha256_tag(action.producer_request.system_prompt_utf8.as_bytes())),
-        payload_sha256: Digest(report.payload_sha256.clone()),
+        payload_sha256: Digest(artifacts.report.payload_sha256.clone()),
         provider: PROVIDER.to_owned(),
         model: action.producer_request.model.clone(),
         channel: CHANNEL.to_owned(),
         auth_class: AUTH_CLASS.to_owned(),
         credential_kind: CREDENTIAL_KIND.to_owned(),
         direct_api_key: DIRECT_API_KEY,
-        pi_session_id: Id(sidecar.invocation.pi_session_id.clone()),
-        conflict_check,
+        pi_session_id: Id(artifacts.sidecar.invocation.pi_session_id.clone()),
+        conflict_check: gate.conflict_check,
         issue_idempotency_key: action.producer_request.idempotency_key.clone(),
         import_idempotency_key: Id(format!("evidence-import:v1:{}", action.assignment_id.0)),
-        issue_event_ref,
-        binding_event_ref,
+        issue_event_ref: gate.issue_event_ref,
+        binding_event_ref: gate.binding_event_ref,
         supersession_state_at_acceptance: "active".to_owned(),
-        accepted_at_unix_ms: UnixMs(sidecar.lifecycle.end_time_ms.to_string()),
+        accepted_at_unix_ms: UnixMs(artifacts.sidecar.lifecycle.end_time_ms.to_string()),
         receipt_sha256: Digest(String::new()),
     };
     let hash = canonical_sha256_self(&without_hash, "receipt_sha256")?;
@@ -802,20 +842,33 @@ fn conflict_check(compared: Vec<AutopilotContentRef>) -> Result<AutopilotEvidenc
     Ok(AutopilotEvidenceConflictCheck { check_sha256: Digest(hash), ..without_hash })
 }
 
-fn consumer_binding_without_hash(identity: &EvidenceIdentity, purpose_id: &str, action_id: &Id, assignment_id: &Id, assignment_revision: u32, run_revision: u64, boundary_id: &str, subject_digest: &str) -> Phase2PiConsumerBinding {
+struct ConsumerBindingDraft<'a> {
+    purpose_id: &'a str,
+    action_id: &'a Id,
+    assignment_id: &'a Id,
+    assignment_revision: u32,
+    run_revision: u64,
+    boundary_id: &'a str,
+    subject_digest: &'a str,
+}
+
+fn consumer_binding_without_hash(
+    identity: &EvidenceIdentity,
+    draft: ConsumerBindingDraft<'_>,
+) -> Phase2PiConsumerBinding {
     Phase2PiConsumerBinding {
         schema_version: SchemaId(CONSUMER_BINDING_SCHEMA.to_owned()),
         consumer: "pi-autopilot".to_owned(),
         run_id: identity.run_id.clone(),
         repo_key: identity.repo_key.clone(),
         workstream: identity.workstream.clone(),
-        purpose_id: Id(purpose_id.to_owned()),
-        action_id: action_id.clone(),
-        assignment_id: assignment_id.clone(),
-        assignment_revision,
-        run_revision,
-        boundary_id: ContractId(boundary_id.to_owned()),
-        subject_digest: Digest(subject_digest.to_owned()),
+        purpose_id: Id(draft.purpose_id.to_owned()),
+        action_id: draft.action_id.clone(),
+        assignment_id: draft.assignment_id.clone(),
+        assignment_revision: draft.assignment_revision,
+        run_revision: draft.run_revision,
+        boundary_id: ContractId(draft.boundary_id.to_owned()),
+        subject_digest: Digest(draft.subject_digest.to_owned()),
         binding_sha256: Digest(String::new()),
     }
 }
@@ -844,9 +897,7 @@ fn next_assignment_revision(identity: &EvidenceIdentity, _purpose: &str) -> Resu
         let path = entry.map_err(|error| EvidenceError::Store(error.to_string()))?.path();
         if path.extension().and_then(|ext| ext.to_str()) != Some("json") { continue; }
         let text = fs::read_to_string(&path).map_err(|error| EvidenceError::Store(error.to_string()))?;
-        if let Ok(assignment) = serde_json::from_str::<AutopilotAttestedAssignment>(&text) {
-            if assignment.purpose_id.0 == PURPOSE_PLANNING_REVIEW { max_rev = max_rev.max(assignment.assignment_revision); }
-        }
+        if let Ok(assignment) = serde_json::from_str::<AutopilotAttestedAssignment>(&text) && assignment.purpose_id.0 == PURPOSE_PLANNING_REVIEW { max_rev = max_rev.max(assignment.assignment_revision); }
     }
     Ok(max_rev.saturating_add(1).max(1))
 }
