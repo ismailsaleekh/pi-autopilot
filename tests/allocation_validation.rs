@@ -36,6 +36,19 @@ fn valid_allocation_preserves_units_and_authority() {
 }
 
 #[test]
+fn single_unit_allocation_preserves_boundary_contract() {
+    let units = vec![unit("u1", 1, &[], &[], &[], &["edge-u1"])];
+    let accepted = validate_allocation(
+        &units,
+        &submission_for(&units, vec![lane("l1", &["u1"], 0)]),
+        policy(),
+    )
+    .expect("single unit valid");
+    assert_eq!(accepted.lanes.len(), 1);
+    assert_eq!(accepted.lanes[0].proposal.ordered_unit_ids, ids(&["u1"]));
+}
+
+#[test]
 fn totality_requires_exact_assignment_or_future_reason() {
     let mut four_units = units();
     four_units.push(unit("u4", 4, &[], &[], &[], &["edge-u4"]));
@@ -142,10 +155,17 @@ fn cap_and_downstream_edges_are_preserved() {
 }
 
 fn submission(lanes: Vec<AllocationLaneProposal>) -> AllocationSubmission {
+    submission_for(&units(), lanes)
+}
+
+fn submission_for(
+    units: &[ApprovedUnit],
+    lanes: Vec<AllocationLaneProposal>,
+) -> AllocationSubmission {
     AllocationSubmission {
         lanes,
         future_units: Vec::new(),
-        authority_echo: units(),
+        authority_echo: units.to_vec(),
         ownership_claims: Vec::new(),
         overlap_blocks: Vec::new(),
     }

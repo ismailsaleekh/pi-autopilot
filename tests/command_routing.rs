@@ -31,12 +31,14 @@ fn command_routing_all_public_commands_reach_driver_surfaces() {
     let plan_spawn: CoreToHostSpawnPayload =
         serde_json::from_value(plan.payload).expect("plan spawn payload");
     assert!(plan_spawn.action.bg_run.command.0.contains(" --spec "));
-    assert!(!plan_spawn
-        .action
-        .bg_run
-        .command
-        .0
-        .contains("autopilot-agent-run --assignment"));
+    assert!(
+        !plan_spawn
+            .action
+            .bg_run
+            .command
+            .0
+            .contains("autopilot-agent-run --assignment")
+    );
 
     let ready = complete_planning_until_ready(plan_spawn, &event_log, &repo);
     assert!(done_status(&ready).contains("ready-to-execute:workstream=main"));
@@ -131,13 +133,15 @@ fn command_routing_all_public_commands_reach_driver_surfaces() {
         close_status.contains("rejection:lifecycle-close:FinalGateFailed:final-commands-exact-tip"),
         "unexpected close status: {close_status}"
     );
-    assert!(!Command::new("git")
-        .current_dir(&repo)
-        .args(["rev-parse", "--verify", "refs/autopilot/results/main/run-1"])
-        .stdout(Stdio::null())
-        .status()
-        .expect("git rev-parse")
-        .success());
+    assert!(
+        !Command::new("git")
+            .current_dir(&repo)
+            .args(["rev-parse", "--verify", "refs/autopilot/results/main/run-1"])
+            .stdout(Stdio::null())
+            .status()
+            .expect("git rev-parse")
+            .success()
+    );
 
     let inject = send_once("autopilot-inject main", None);
     assert!(done_status(&inject).contains("attach:workstream=main;state:sequence=1;revision=1"));
@@ -147,6 +151,101 @@ fn command_routing_all_public_commands_reach_driver_surfaces() {
         serde_json::from_value(onboard.payload).expect("onboard ui");
     assert_eq!(onboard_payload.content["driver"], "planning-onboard");
     assert_eq!(onboard_payload.content["atoms"], 1);
+}
+
+#[test]
+fn one_unit_work_map_reaches_ready_and_dispatches_one_lane() {
+    let root = temp_dir("one-unit-plan");
+    let repo = root.join("repo");
+    let vcs = GitVcs::new(&root);
+    vcs.init_fixture(&repo).expect("fixture repo");
+    let task_paths = write_task_pack(&repo, "set-one-unit-plan");
+    vcs.stage_all(&repo).expect("stage task");
+    vcs.snapshot(&repo, "task commit").expect("task commit");
+    let event_log = root.join("events.jsonl");
+
+    let plan_raw = format!("autopilot-plan main {}", task_paths.join(" "));
+    let plan = send_with_log(&plan_raw, &event_log, Some(&repo));
+    let plan_spawn: CoreToHostSpawnPayload =
+        serde_json::from_value(plan.payload).expect("plan spawn payload");
+    let ready = complete_planning_until_ready_with_work_map(
+        plan_spawn,
+        &event_log,
+        &repo,
+        Some(one_unit_work_map()),
+    );
+    assert!(done_status(&ready).contains("ready-to-execute:workstream=main"));
+    let approved: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(repo.join(".pi/autopilot/main/approved-plan.json"))
+            .expect("approved plan"),
+    )
+    .expect("approved json");
+    assert_eq!(
+        approved["units"].as_array().expect("approved units").len(),
+        1
+    );
+
+    let run = send_with_log("autopilot main", &event_log, Some(&repo));
+    assert_eq!(run.kind, "spawn", "single-lane run response: {:?}", run);
+    let spawn_payload: CoreToHostSpawnPayload =
+        serde_json::from_value(run.payload).expect("run spawn payload");
+    assert_eq!(spawn_payload.action.assignment_id.0, "assignment-main-L1");
+}
+
+#[test]
+fn failed_plan_review_projection_is_loud_unconsumed_and_retryable() {
+    let root = temp_dir("plan-review-retry");
+    let repo = root.join("repo");
+    let vcs = GitVcs::new(&root);
+    vcs.init_fixture(&repo).expect("fixture repo");
+    let task_paths = write_task_pack(&repo, "set-plan-review-retry");
+    vcs.stage_all(&repo).expect("stage task");
+    vcs.snapshot(&repo, "task commit").expect("task commit");
+    let event_log = root.join("events.jsonl");
+
+    let plan_raw = format!("autopilot-plan main {}", task_paths.join(" "));
+    let plan = send_with_log(&plan_raw, &event_log, Some(&repo));
+    let mut spawn_payload: CoreToHostSpawnPayload =
+        serde_json::from_value(plan.payload).expect("plan spawn payload");
+    while spawn_payload.action.assignment_id.0 != "planning-main-plan-reviewer-01" {
+        let response = send_agent_carrier(
+            &spawn_payload,
+            &event_log,
+            &repo,
+            20 + spawn_payload.action.run_revision,
+        );
+        assert_eq!(
+            response.kind, "spawn",
+            "pre-review planning response: {:?}",
+            response
+        );
+        spawn_payload = serde_json::from_value(response.payload).expect("next planning spawn");
+    }
+
+    fs::write(
+        repo.join(".pi/autopilot/main/work-map.md"),
+        "{\"units\":[]}",
+    )
+    .expect("poison work map");
+    let failed = send_agent_carrier(&spawn_payload, &event_log, &repo, 900);
+    let failed_status = done_status(&failed);
+    assert!(
+        failed_status.contains("rejection:planning-postprocess:CONTEXT_GAP:approved-plan:expected at least 1 approved unit, got 0"),
+        "unexpected status: {failed_status}"
+    );
+    assert!(!repo.join(".pi/autopilot/main/approved-plan.json").exists());
+    assert!(!fs::read_to_string(&event_log)
+        .expect("event log")
+        .contains("planning-result-consumed:action-planning-main-plan-reviewer-01:planning-main-plan-reviewer-01"));
+
+    fs::write(
+        repo.join(".pi/autopilot/main/work-map.md"),
+        one_unit_work_map(),
+    )
+    .expect("repair work map");
+    let retried = send_agent_carrier(&spawn_payload, &event_log, &repo, 901);
+    assert!(done_status(&retried).contains("ready-to-execute:workstream=main"));
+    assert!(repo.join(".pi/autopilot/main/approved-plan.json").exists());
 }
 
 #[test]
@@ -229,12 +328,27 @@ fn send_with_log(raw: &str, event_log: &Path, cwd: Option<&Path>) -> SeamEnvelop
 }
 
 fn complete_planning_until_ready(
-    mut spawn_payload: CoreToHostSpawnPayload,
+    spawn_payload: CoreToHostSpawnPayload,
     event_log: &Path,
     cwd: &Path,
 ) -> SeamEnvelope {
+    complete_planning_until_ready_with_work_map(spawn_payload, event_log, cwd, None)
+}
+
+fn complete_planning_until_ready_with_work_map(
+    mut spawn_payload: CoreToHostSpawnPayload,
+    event_log: &Path,
+    cwd: &Path,
+    work_map_override: Option<String>,
+) -> SeamEnvelope {
     for step in 0..40 {
-        let response = send_agent_carrier(&spawn_payload, event_log, cwd, step + 2);
+        let response = send_agent_carrier_with_work_map(
+            &spawn_payload,
+            event_log,
+            cwd,
+            step + 2,
+            work_map_override.as_deref(),
+        );
         if response.kind == "done" {
             return response;
         }
@@ -254,6 +368,16 @@ fn send_agent_carrier(
     cwd: &Path,
     id: u64,
 ) -> SeamEnvelope {
+    send_agent_carrier_with_work_map(spawn_payload, event_log, cwd, id, None)
+}
+
+fn send_agent_carrier_with_work_map(
+    spawn_payload: &CoreToHostSpawnPayload,
+    event_log: &Path,
+    cwd: &Path,
+    id: u64,
+    work_map_override: Option<&str>,
+) -> SeamEnvelope {
     let cwd = fs::canonicalize(cwd).expect("canonical cwd");
     let assignment_id = &spawn_payload.action.assignment_id.0;
     let spec_path = cwd
@@ -262,7 +386,13 @@ fn send_agent_carrier(
     let spec_text = fs::read_to_string(&spec_path).expect("planning spec");
     let spec: serde_json::Value = serde_json::from_str(&spec_text).expect("planning spec json");
     let boundary_id = spec["boundary_id"].as_str().expect("boundary");
-    let raw_output = planning_output(boundary_id);
+    let raw_output = if boundary_id == "planning.work-map.v1" {
+        work_map_override
+            .map(str::to_owned)
+            .unwrap_or_else(|| planning_output(boundary_id))
+    } else {
+        planning_output(boundary_id)
+    };
     let carrier_path = cwd
         .join(".pi/autopilot/main/planning/carriers")
         .join(format!("{assignment_id}.json"));
@@ -305,6 +435,10 @@ fn planning_output(boundary_id: &str) -> String {
         | "planning.questions.v1" => transcript(boundary_id),
         other => panic!("unexpected planning boundary {other}"),
     }
+}
+
+fn one_unit_work_map() -> String {
+    serde_json::json!({"units":[{"id":"U1","objective":"Deliver the one accepted work unit.","criteria":["The focused acceptance path passes."],"links":["W1"]}]}).to_string()
 }
 
 fn sha256_hex(data: &[u8]) -> String {
