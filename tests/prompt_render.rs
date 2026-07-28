@@ -83,6 +83,7 @@ fn prompt_input() -> PromptInput {
     PromptInput {
         role_id: "validator".to_owned(),
         mode_id: "forward-release".to_owned(),
+        mode_parameter: None,
         assignment_revision: "assignment-r1".to_owned(),
         plan_revision: "plan-r1".to_owned(),
         runtime_revision: 7,

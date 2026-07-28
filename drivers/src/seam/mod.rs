@@ -278,8 +278,8 @@ fn route_plan(id: u64, args: &[String], state: &mut CoreState) -> Result<SeamEnv
     let plan = planning::AssignmentPlan::d72_default();
     plan.validate(25)
         .map_err(|error| context_status("planning", error))?;
-    let assignments = planning_assignments(workstream)
-        .map_err(|error| context_status("planning", error))?;
+    let assignments =
+        planning_assignments(workstream).map_err(|error| context_status("planning", error))?;
     let first = assignments
         .first()
         .ok_or("planning assignment plan is empty")?;
@@ -421,19 +421,27 @@ fn accept_planning_carrier(
         return done(id, rejection("planning-postprocess", &error.to_string()));
     }
     if let Some(next) = next_planning_assignment(&carrier.workstream, state)
-        .map_err(|error| context_status("planning", error))? {
+        .map_err(|error| context_status("planning", error))?
+    {
         let input_set = read_planning_input_set(&carrier.workstream)
             .map_err(|error| format!("CONTEXT_GAP:planning-manifest:{error}"))?;
         let atom_registry = if next.boundary_id.as_deref() == Some("planning.work-map.v1") {
             match ensure_atom_registry(&carrier.workstream, state) {
                 Ok(registry) => Some(registry),
-                Err(error) => return done(id, rejection("planning-postprocess", &error.to_string())),
+                Err(error) => {
+                    return done(id, rejection("planning-postprocess", &error.to_string()));
+                }
             }
         } else {
             None
         };
-        let issue =
-            planning_bg_action(&carrier.workstream, &next, state.state.revision, &input_set, atom_registry)?;
+        let issue = planning_bg_action(
+            &carrier.workstream,
+            &next,
+            state.state.revision,
+            &input_set,
+            atom_registry,
+        )?;
         append_runner_invocation(state, &issue.binding)?;
         return controlled_spawn(id, issue.action, state, "planning");
     }
@@ -2031,6 +2039,7 @@ fn record_context_prompt_for_action(state: &CoreState, action: &BackgroundAction
     let prompt_input = crate::prompt::PromptInput {
         role_id: binding.role_id.0.clone(),
         mode_id: binding.mode.0.clone(),
+        mode_parameter: None,
         assignment_revision: binding.run_revision.to_string(),
         plan_revision: binding.spec_digest.clone(),
         runtime_revision: state.state.revision,
