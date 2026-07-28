@@ -21,7 +21,14 @@ impl planning::RepositoryEvidence for RepoGrounding {
 }
 
 #[derive(Clone, Debug)]
-struct AgentAssignment { assignment_id: String, role: String, mode: String, boundary_id: Option<String> }
+struct AgentAssignment {
+    assignment_id: String,
+    role: String,
+    mode: String,
+    boundary_id: Option<String>,
+    ordinal: u8,
+    atom_id_prefix: Option<String>,
+}
 #[derive(Debug, Deserialize)]
 struct AgentCarrier {
     schema: String,
@@ -49,21 +56,26 @@ struct AgentCarrier {
 #[derive(Debug, Deserialize, Serialize)]
 struct ApprovedPlanArtifact { units: Vec<ApprovedUnit> }
 
-fn planning_assignments(workstream: &str, plan: &planning::AssignmentPlan) -> Vec<AgentAssignment> {
+fn planning_assignments(workstream: &str) -> Result<Vec<AgentAssignment>, planning::PlanningError> {
     let mut out = Vec::new();
-    push_assignments(&mut out, workstream, "task-extractor", "inventory", Some("planning.task-atoms.v1"), plan.task_extractors);
-    push_assignments(&mut out, workstream, "repository-scout", "initial-grounding", Some("planning.scout-dossier.v1"), plan.scout_and_compiler_first_pass / 2);
-    push_assignments(&mut out, workstream, "plan-compiler", "initial-plan", Some("planning.work-map.v1"), plan.scout_and_compiler_first_pass - (plan.scout_and_compiler_first_pass / 2));
-    push_assignments(&mut out, workstream, "context-curator", "planning-context", Some("planning.scout-dossier.v1"), plan.context_curator);
-    push_assignments(&mut out, workstream, "plan-synthesizer", "initial-plan", Some("planning.work-map.v1"), plan.synthesizers);
-    push_assignments(&mut out, workstream, "plan-reviewer", "full-review", Some("planning.plan-review.v1"), plan.reviewer);
-    push_assignments(&mut out, workstream, "contradiction-resolver", "fact-resolution", Some("planning.questions.v1"), plan.reserved_resolution);
-    out
+    for row in planning::planning_assignment_roles()? {
+        push_assignments(&mut out, workstream, &row);
+    }
+    Ok(out)
 }
-fn push_assignments(out: &mut Vec<AgentAssignment>, workstream: &str, role: &str, mode: &str, boundary_id: Option<&str>, count: u8) {
-    for index in 1..=count { out.push(AgentAssignment { assignment_id: format!("planning-{workstream}-{role}-{index:02}"), role: role.to_owned(), mode: mode.to_owned(), boundary_id: boundary_id.map(str::to_owned) }); }
+fn push_assignments(out: &mut Vec<AgentAssignment>, workstream: &str, row: &planning::PlanningAssignmentRole) {
+    for index in 1..=row.count {
+        out.push(AgentAssignment {
+            assignment_id: format!("planning-{workstream}-{}-{index:02}", row.role),
+            role: row.role.clone(),
+            mode: row.mode.clone(),
+            boundary_id: Some(row.boundary_id.clone()),
+            ordinal: index,
+            atom_id_prefix: row.atom_namespace.as_ref().map(|namespace| format!("{namespace}{index:02}-")),
+        });
+    }
 }
-fn planning_bg_action(workstream: &str, assignment: &AgentAssignment, run_revision: u64, input_set: &planning::TaskInputSet) -> Result<runner::IssuedRunnerAction, runner::RunnerError> {
+fn planning_bg_action(workstream: &str, assignment: &AgentAssignment, run_revision: u64, input_set: &planning::TaskInputSet, atom_registry: Option<(String, String)>) -> Result<runner::IssuedRunnerAction, runner::RunnerError> {
     let context = input_set.context_documents.first().ok_or_else(|| runner::RunnerError::InvalidSpec("missing planning context".to_owned()))?;
     let mut issued = runner::planning_issue(&runner::PlanningRunnerRequest {
         workstream: workstream.to_owned(),
@@ -76,6 +88,9 @@ fn planning_bg_action(workstream: &str, assignment: &AgentAssignment, run_revisi
         authority_set_id: input_set.authority_set_id.clone(),
         authority_documents: input_set.authority_documents.iter().map(runner_doc_from_task).collect(),
         context_document: runner_doc_from_task(context),
+        atom_id_prefix: assignment.atom_id_prefix.clone(),
+        atom_registry_path: atom_registry.as_ref().map(|(path, _)| path.clone()),
+        atom_registry_digest: atom_registry.as_ref().map(|(_, digest)| digest.clone()),
     })?;
     augment_planning_issue_with_context_documents(&mut issued, input_set)?;
     Ok(issued)
@@ -135,23 +150,45 @@ fn augment_planning_issue_with_context_documents(issued: &mut runner::IssuedRunn
     issued.binding.spec_digest = spec_digest;
     Ok(())
 }
-fn next_planning_assignment(workstream: &str, state: &CoreState) -> Option<AgentAssignment> {
-    planning_assignments(workstream, &planning::AssignmentPlan::d72_default()).into_iter().find(|assignment| !state.state.refs.contains_key(&Ref(assignment.assignment_id.clone())))
+fn next_planning_assignment(workstream: &str, state: &CoreState) -> Result<Option<AgentAssignment>, planning::PlanningError> {
+    let assignments = manifest_assignments(workstream).map_err(planning::PlanningError::ContextGap)?;
+    Ok(assignments.into_iter().find(|assignment| !state.state.refs.contains_key(&Ref(assignment.assignment_id.clone()))))
 }
-fn validate_agent_output(boundary: &str, raw: &str) -> Result<String, Rejection> { runner::validate_child_boundary(boundary, raw) }
+fn validate_agent_output(binding: &runner::IssuedRunnerBinding, raw: &str) -> Result<String, Rejection> {
+    let spec = read_runner_spec_for_binding(binding).map_err(|detail| {
+        let mut runtime = boundary_runtime("planning.questions.v1");
+        runtime.flip_to_enforce();
+        match runtime.reject(format!("boundary_id={}; field=spec_path; expected=readable runner spec; got={detail}; hint=refuse unbound planning carrier", binding.boundary_id.0)) {
+            Err(rejection) => rejection,
+            Ok(()) => panic!("planning validation runtime unexpectedly allowed spec read failure"),
+        }
+    })?;
+    runner::validate_child_boundary(&spec, raw)
+}
 fn write_planning_manifest(workstream: &str, input_set: &planning::TaskInputSet, inventory: &planning::Inventory, dossier: &planning::Dossier, assignments: &[AgentAssignment]) -> Result<(), AnyError> {
     let dir = workstream_dir(workstream); fs::create_dir_all(&dir)?;
     let context = input_set.context_documents.first().ok_or("missing context document")?;
     let authority_docs = input_set.authority_documents.iter().map(runner_doc_from_task).map(|doc| serde_json::to_value(doc).expect("runner doc json")).collect::<Vec<_>>();
     let context_docs = input_set.context_documents.iter().map(runner_doc_from_task).map(|doc| serde_json::to_value(doc).expect("runner doc json")).collect::<Vec<_>>();
     let context_doc = runner_doc_from_task(context);
-    let body = serde_json::json!({"workstream":workstream,"authority_set_id":input_set.authority_set_id,"authority_paths":input_set.authority_documents.iter().map(|item| &item.path).collect::<Vec<_>>(),"authority_documents":authority_docs,"context_documents":context_docs,"context":{"path":context.path,"class":"context/non-authority","digest":context.digest},"context_document":context_doc,"file_digests":input_set.authority_documents.iter().chain(input_set.context_documents.iter()).map(|item| serde_json::json!({"path":item.path,"class":format!("{:?}", item.class),"digest":item.digest})).collect::<Vec<_>>(),"atoms":inventory.atoms.len(),"verified_facts":dossier.verified_facts,"assignments":assignments.iter().map(|item| &item.assignment_id).collect::<Vec<_>>()});
-    fs::write(dir.join("planning-manifest.json"), serde_json::to_vec_pretty(&body)?)?;
+    let body = serde_json::json!({"workstream":workstream,"authority_set_id":input_set.authority_set_id,"authority_paths":input_set.authority_documents.iter().map(|item| &item.path).collect::<Vec<_>>(),"authority_documents":authority_docs,"context_documents":context_docs,"context":{"path":context.path,"class":"context/non-authority","digest":context.digest},"context_document":context_doc,"file_digests":input_set.authority_documents.iter().chain(input_set.context_documents.iter()).map(|item| serde_json::json!({"path":item.path,"class":format!("{:?}", item.class),"digest":item.digest})).collect::<Vec<_>>(),"atoms":inventory.atoms.len(),"verified_facts":dossier.verified_facts,"assignments":assignments.iter().map(|item| serde_json::json!({"assignment_id":item.assignment_id,"role":item.role,"mode":item.mode,"boundary_id":item.boundary_id,"ordinal":item.ordinal,"atom_id_prefix":item.atom_id_prefix})).collect::<Vec<_>>()});
+    let bytes = serde_json::to_vec_pretty(&body)?;
+    let path = dir.join("planning-manifest.json");
+    match fs::read(&path) {
+        Ok(existing) if existing == bytes => {}
+        Ok(_) => return Err("CONTEXT_GAP:planning-manifest:digest drift".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => fs::write(path, bytes)?,
+        Err(error) => return Err(error.into()),
+    }
     Ok(())
 }
-fn read_planning_input_set(workstream: &str) -> Result<planning::TaskInputSet, String> {
+fn read_planning_manifest_value(workstream: &str) -> Result<serde_json::Value, String> {
     let text = fs::read_to_string(workstream_dir(workstream).join("planning-manifest.json")).map_err(|error| error.to_string())?;
-    let value: serde_json::Value = serde_json::from_str(&text).map_err(|error| error.to_string())?;
+    serde_json::from_str(&text).map_err(|error| error.to_string())
+}
+
+fn read_planning_input_set(workstream: &str) -> Result<planning::TaskInputSet, String> {
+    let value = read_planning_manifest_value(workstream)?;
     let authority_set_id = value["authority_set_id"].as_str().ok_or_else(|| "missing authority_set_id".to_owned())?.to_owned();
     let authority_documents = value["authority_documents"].as_array().ok_or_else(|| "missing authority_documents".to_owned())?.iter().enumerate().map(|(index, item)| task_doc_from_manifest(item, planning::TaskDocumentClass::Authority, &authority_set_id, index)).collect::<Result<Vec<_>, _>>()?;
     let context_documents = match value.get("context_documents").and_then(|item| item.as_array()) {
@@ -160,12 +197,98 @@ fn read_planning_input_set(workstream: &str) -> Result<planning::TaskInputSet, S
     };
     Ok(planning::TaskInputSet { authority_set_id, authority_documents, context_documents })
 }
+
+fn manifest_assignments(workstream: &str) -> Result<Vec<AgentAssignment>, String> {
+    let value = read_planning_manifest_value(workstream)?;
+    let items = value["assignments"].as_array().ok_or_else(|| "manifest missing assignments".to_owned())?;
+    let mut out = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        if let Some(id) = item.as_str() {
+            out.push(AgentAssignment { assignment_id: id.to_owned(), role: "unknown".to_owned(), mode: "unknown".to_owned(), boundary_id: None, ordinal: u8::try_from(index + 1).unwrap_or(u8::MAX), atom_id_prefix: None });
+            continue;
+        }
+        out.push(AgentAssignment {
+            assignment_id: item["assignment_id"].as_str().ok_or_else(|| format!("manifest assignment {index} missing assignment_id"))?.to_owned(),
+            role: item["role"].as_str().ok_or_else(|| format!("manifest assignment {index} missing role"))?.to_owned(),
+            mode: item["mode"].as_str().ok_or_else(|| format!("manifest assignment {index} missing mode"))?.to_owned(),
+            boundary_id: item.get("boundary_id").and_then(|value| value.as_str()).map(str::to_owned),
+            ordinal: item.get("ordinal").and_then(|value| value.as_u64()).and_then(|value| u8::try_from(value).ok()).unwrap_or(u8::try_from(index + 1).unwrap_or(u8::MAX)),
+            atom_id_prefix: item.get("atom_id_prefix").and_then(|value| value.as_str()).map(str::to_owned),
+        });
+    }
+    Ok(out)
+}
+
+fn read_runner_spec_for_binding(binding: &runner::IssuedRunnerBinding) -> Result<kernel::generated::AgentRunSpec, String> {
+    let text = fs::read_to_string(&binding.spec_path).map_err(|error| format!("{}:{error}", binding.spec_path))?;
+    let mut value: serde_json::Value = serde_json::from_str(&text).map_err(|error| error.to_string())?;
+    if value.get("context_documents").is_some() {
+        value.as_object_mut().ok_or_else(|| "spec top-level not object".to_owned())?.remove("context_documents");
+    }
+    serde_json::from_value(value).map_err(|error| error.to_string())
+}
+
 fn task_doc_from_manifest(value: &serde_json::Value, class: planning::TaskDocumentClass, authority_set_id: &str, index: usize) -> Result<planning::TaskDocument, String> {
     let path = value["path"].as_str().ok_or_else(|| format!("manifest doc {index} missing path"))?.to_owned();
     let digest = value["digest"].as_str().ok_or_else(|| format!("manifest doc {index} missing digest"))?.to_owned();
     let body = value["body"].as_str().ok_or_else(|| format!("manifest doc {index} missing body"))?.to_owned();
     Ok(planning::TaskDocument { id: path.clone(), path, class, authority_set_id: authority_set_id.to_owned(), body, digest })
 }
+fn ensure_atom_registry_after_task_atoms(workstream: &str, state: &CoreState) -> Result<(), AnyError> {
+    let assignments = manifest_assignments(workstream).map_err(|error| format!("CONTEXT_GAP:planning-manifest:{error}"))?;
+    let task_extractors = assignments.iter().filter(|assignment| assignment.role == "task-extractor").collect::<Vec<_>>();
+    if task_extractors.is_empty() {
+        return Ok(());
+    }
+    let all_accepted = task_extractors.iter().all(|assignment| accepted_binding_for_assignment(state, &assignment.assignment_id).is_some());
+    if all_accepted {
+        let _ = ensure_atom_registry(workstream, state)?;
+    }
+    Ok(())
+}
+
+fn ensure_atom_registry(workstream: &str, state: &CoreState) -> Result<(String, String), AnyError> {
+    let manifest = read_planning_manifest_value(workstream).map_err(|error| format!("CONTEXT_GAP:planning-manifest:{error}"))?;
+    let authority_set_id = manifest["authority_set_id"].as_str().ok_or("CONTEXT_GAP:planning-manifest:missing authority_set_id")?.to_owned();
+    let assignments = manifest_assignments(workstream).map_err(|error| format!("CONTEXT_GAP:planning-manifest:{error}"))?;
+    let anchors = planning::TaskAnchorRegistry::from_input_set(&read_planning_input_set(workstream).map_err(|error| format!("CONTEXT_GAP:planning-manifest:{error}"))?);
+    let mut records = Vec::new();
+    let mut producer_ids = Vec::new();
+    for (assignment_order, assignment) in assignments.iter().enumerate().filter(|(_, assignment)| assignment.role == "task-extractor") {
+        let binding = accepted_binding_for_assignment(state, &assignment.assignment_id)
+            .ok_or_else(|| format!("CONTEXT_GAP:atom-registry:unaccepted {}", assignment.assignment_id))?;
+        let carrier_text = fs::read_to_string(&binding.carrier_path).map_err(|error| format!("CONTEXT_GAP:atom-registry-carrier:{}:{error}", binding.carrier_path))?;
+        let carrier: AgentCarrier = serde_json::from_str(&carrier_text).map_err(|error| format!("CONTEXT_GAP:atom-registry-carrier-json:{}:{error}", binding.carrier_path))?;
+        let spec = read_runner_spec_for_binding(&binding).map_err(|error| format!("CONTEXT_GAP:atom-registry-spec:{error}"))?;
+        let prefix = spec.atom_id_prefix.as_deref().ok_or_else(|| format!("CONTEXT_GAP:atom-registry-prefix:{}", binding.assignment_id.0))?;
+        let atoms: kernel::generated::TaskAtoms = serde_json::from_str(&carrier.raw_output).map_err(|error| format!("CONTEXT_GAP:atom-registry-atoms:{}:{error}", binding.assignment_id.0))?;
+        planning::validate_task_atoms_for_assignment(&atoms, prefix, &anchors)
+            .map_err(|error| format!("CONTEXT_GAP:atom-registry-boundary:{}", boundary_status(&error)))?;
+        producer_ids.push(binding.assignment_id.clone());
+        records.push((assignment_order, 0usize, binding.assignment_id.clone(), atoms));
+    }
+    let atoms = planning::sorted_registry_atoms(records).map_err(|error| context_status("atom-registry", error))?;
+    let bytes = planning::atom_registry_bytes(workstream, &authority_set_id, producer_ids, atoms).map_err(|error| context_status("atom-registry", error))?;
+    let digest = sha256_hex_local(&bytes);
+    let path = std::env::current_dir()?.join(atom_registry_path(workstream));
+    if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
+    match fs::read(&path) {
+        Ok(existing) if existing == bytes => Ok((path.display().to_string(), digest)),
+        Ok(_) => Err("CONTEXT_GAP:atom-registry:digest drift".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut file = OpenOptions::new().write(true).create_new(true).open(&path)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            Ok((path.display().to_string(), digest))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn accepted_binding_for_assignment(state: &CoreState, assignment_id: &str) -> Option<runner::IssuedRunnerBinding> {
+    state.state.refs.keys().filter_map(|reference| runner::decode_binding_ref(&reference.0)).find(|binding| binding.assignment_id.0 == assignment_id && planning_result_consumed(state, binding))
+}
+
 fn write_work_map(workstream: &str, raw: &str) -> Result<(), AnyError> { let path = work_map_path(workstream); if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; } fs::write(path, raw)?; Ok(()) }
 fn read_work_map(workstream: &str) -> Result<String, String> { fs::read_to_string(work_map_path(workstream)).map_err(|error| error.to_string()) }
 fn write_approved_plan(workstream: &str, units: &[ApprovedUnit]) -> Result<(), AnyError> { let path = plan_path(workstream); if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; } fs::write(path, serde_json::to_vec_pretty(&ApprovedPlanArtifact { units: units.to_vec() })?)?; Ok(()) }
@@ -188,7 +311,7 @@ fn approved_units_from_work_map(work_map: &kernel::generated::WorkMap) -> Result
     work_map.units.iter().enumerate().map(|(index, unit)| {
         if unit.id.0.trim().is_empty() || unit.objective.trim().is_empty() || unit.criteria.is_empty() { return Err(format!("unit {} missing criteria/objective", unit.id.0)); }
         let order = index as u32 + 1;
-        Ok(ApprovedUnit { id: unit.id.clone(), operator_order: order, decisions: Vec::new(), criteria: unit.criteria.iter().enumerate().map(|(criterion_index, _)| idv(&format!("AC-{}-{}", unit.id.0, criterion_index + 1))).collect(), dependencies: if index == 0 { Vec::new() } else { vec![work_map.units[index - 1].id.clone()] }, predecessor_forward_criteria: if order <= 1 { Vec::new() } else { vec![idv(&format!("FC{}", order - 1))] }, downstream_release_edges: vec![idv(&format!("EDGE{order}"))] })
+        Ok(ApprovedUnit { id: unit.id.clone(), operator_order: order, decisions: unit.links.clone(), criteria: unit.criteria.iter().enumerate().map(|(criterion_index, _)| idv(&format!("AC-{}-{}", unit.id.0, criterion_index + 1))).collect(), dependencies: if index == 0 { Vec::new() } else { vec![work_map.units[index - 1].id.clone()] }, predecessor_forward_criteria: if order <= 1 { Vec::new() } else { vec![idv(&format!("FC{}", order - 1))] }, downstream_release_edges: vec![idv(&format!("EDGE{order}"))] })
     }).collect()
 }
 fn allocation_submission_from_plan(workstream: &str, approved: &[ApprovedUnit]) -> Result<AllocationSubmission, String> {
@@ -261,6 +384,7 @@ fn available_memory_bytes() -> Result<u64, String> { if let Ok(text) = fs::read_
 fn git_stdout(repo: &Path, args: &[&str]) -> Result<String, String> { let output = Command::new("git").current_dir(repo).args(args).output().map_err(|error| error.to_string())?; if !output.status.success() { return Err(format!("git {:?} failed", args)); } String::from_utf8(output.stdout).map_err(|error| error.to_string()) }
 fn workstream_dir(workstream: &str) -> PathBuf { PathBuf::from(".pi/autopilot").join(workstream) }
 fn work_map_path(workstream: &str) -> PathBuf { workstream_dir(workstream).join("work-map.md") }
+fn atom_registry_path(workstream: &str) -> PathBuf { workstream_dir(workstream).join("planning/atom-registry.json") }
 fn plan_path(workstream: &str) -> PathBuf { workstream_dir(workstream).join("approved-plan.json") }
 fn context_status(scope: &str, error: planning::PlanningError) -> String { match error { planning::PlanningError::ContextGap(detail) => format!("CONTEXT_GAP:{scope}:{detail}"), other => format!("{scope}:{other:?}") } }
 fn idv(value: &str) -> Id { Id(value.to_owned()) }

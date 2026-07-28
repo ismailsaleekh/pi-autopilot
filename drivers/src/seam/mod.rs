@@ -278,12 +278,13 @@ fn route_plan(id: u64, args: &[String], state: &mut CoreState) -> Result<SeamEnv
     let plan = planning::AssignmentPlan::d72_default();
     plan.validate(25)
         .map_err(|error| context_status("planning", error))?;
-    let assignments = planning_assignments(workstream, &plan);
+    let assignments = planning_assignments(workstream)
+        .map_err(|error| context_status("planning", error))?;
     let first = assignments
         .first()
         .ok_or("planning assignment plan is empty")?;
     write_planning_manifest(workstream, &input_set, &inventory, &dossier, &assignments)?;
-    let issue = planning_bg_action(workstream, first, state.state.revision, &input_set)?;
+    let issue = planning_bg_action(workstream, first, state.state.revision, &input_set, None)?;
     append_runner_invocation(state, &issue.binding)?;
     controlled_spawn(id, issue.action, state, "planning")
 }
@@ -373,7 +374,7 @@ fn accept_planning_carrier(
             ),
         );
     }
-    if let Err(error) = validate_agent_output(&carrier.boundary_id, &carrier.raw_output) {
+    if let Err(error) = validate_agent_output(&binding, &carrier.raw_output) {
         return done(id, boundary_status(&error));
     }
     if let Err(error) = apply_planning_side_effects(&carrier) {
@@ -416,11 +417,23 @@ fn accept_planning_carrier(
             planning_result_consumed_ref(&binding),
         ],
     )?;
-    if let Some(next) = next_planning_assignment(&carrier.workstream, state) {
+    if let Err(error) = ensure_atom_registry_after_task_atoms(&carrier.workstream, state) {
+        return done(id, rejection("planning-postprocess", &error.to_string()));
+    }
+    if let Some(next) = next_planning_assignment(&carrier.workstream, state)
+        .map_err(|error| context_status("planning", error))? {
         let input_set = read_planning_input_set(&carrier.workstream)
             .map_err(|error| format!("CONTEXT_GAP:planning-manifest:{error}"))?;
+        let atom_registry = if next.boundary_id.as_deref() == Some("planning.work-map.v1") {
+            match ensure_atom_registry(&carrier.workstream, state) {
+                Ok(registry) => Some(registry),
+                Err(error) => return done(id, rejection("planning-postprocess", &error.to_string())),
+            }
+        } else {
+            None
+        };
         let issue =
-            planning_bg_action(&carrier.workstream, &next, state.state.revision, &input_set)?;
+            planning_bg_action(&carrier.workstream, &next, state.state.revision, &input_set, atom_registry)?;
         append_runner_invocation(state, &issue.binding)?;
         return controlled_spawn(id, issue.action, state, "planning");
     }

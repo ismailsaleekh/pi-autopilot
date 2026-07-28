@@ -475,6 +475,11 @@ artifact "agent_run_spec" schema="autopilot.agent_run_spec.v1" producer="Package
     field "validation_attempt" type="u32" required=#false nullable=#true
     field "semantic_round" type="u32" required=#false nullable=#true
     field "model_submission_path" type="path" required=#false nullable=#true
+    field "atom_id_prefix" type="string" required=#false nullable=#true
+    field "atom_registry_path" type="path" required=#false nullable=#true
+    field "atom_registry_digest" type="digest" required=#false nullable=#true
+    field "planning_inputs_path" type="path" required=#false nullable=#true
+    field "planning_inputs_digest" type="digest" required=#false nullable=#true
 }
 
 artifact "run_identity" schema="autopilot.run_identity.v1" producer="Package" model_produced=#false {
@@ -514,13 +519,29 @@ artifact "agent_handoff" schema="autopilot.agent-handoff.v1" producer="Model" mo
 
 artifact "task_atoms" schema="planning.task-atoms.v1" producer="Model" model_produced=#true {
     doc "Model-facing task atom submission. Shape is deliberately small: structure is enforced by the submit tool; source values are checked against task authority anchors by the planning driver."
-    admits "Task extractor output must name operator-task atoms with source anchors and no repository findings. Call autopilot_submit_atoms as the final action with atoms containing id, kind, text, and sources."
+    admits "Task extractor output must use the exact runner-issued atom id prefix for every atoms[].id, name operator-task atoms with source anchors, and include no repository findings. Call autopilot_submit_atoms as the final action with atoms containing id, kind, text, and sources."
     list "atoms" item="task_atom" required=#true doc="Task atoms; may be empty only when no task authority text exists."
     record "task_atom" {
         field "id" type="id" required=#true
         field "kind" type="planning_atom_kind" required=#true
         field "text" type="string" required=#true
         list "sources" item="ref" required=#true doc="Task-document anchors supplied by the package."
+    }
+}
+
+artifact "planning_atom_registry" schema="autopilot.planning_atom_registry.v1" producer="Package" model_produced=#false {
+    doc "Create-once accepted task atom registry materialized by the seam after task extractors are accepted."
+    field "schema" type="schema-id" required=#true constant="autopilot.planning_atom_registry.v1"
+    field "workstream" type="id" required=#true
+    field "authority_set_id" type="string" required=#true
+    list "producer_assignment_ids" item="id" required=#true
+    list "atoms" item="planning_atom_registry_atom" required=#true
+    record "planning_atom_registry_atom" {
+        field "id" type="id" required=#true
+        field "producer_assignment_id" type="id" required=#true
+        field "kind" type="planning_atom_kind" required=#true
+        field "text" type="string" required=#true
+        list "sources" item="ref" required=#true
     }
 }
 

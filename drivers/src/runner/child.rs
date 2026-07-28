@@ -1425,7 +1425,7 @@ fn write_carrier(
             value_rejection("carrier_path", "create-once writable carrier path", error)
         })
     } else {
-        crate::runner::validate_child_boundary(&spec.boundary_id.0, assistant).map_err(
+        crate::runner::validate_child_boundary(spec, assistant).map_err(
             |error| {
                 value_rejection(
                     "raw_output",
@@ -1521,7 +1521,7 @@ fn validate_existing_planning_carrier(
         .get("raw_output")
         .and_then(Value::as_str)
         .ok_or_else(|| value_rejection("raw_output", "string", "missing-or-wrong-type"))?;
-    crate::runner::validate_child_boundary(&spec.boundary_id.0, raw).map_err(|error| {
+    crate::runner::validate_child_boundary(spec, raw).map_err(|error| {
         value_rejection(
             "raw_output",
             format!("{} admitted value", error.boundary_id()),

@@ -24,12 +24,11 @@ const DEFAULT_BG_TIMEOUT_SECONDS: u32 = 3600;
 const DEFAULT_REQUIRED_FOCUSED_EVIDENCE: u32 = 2;
 const SETTINGS_IDENTITY: &str = "agent-run-settings:session-id,no-extensions,no-skills,no-prompt-templates,no-themes,no-context-files:v1";
 const SKILLS_IDENTITY: &str = "agent-run-skills:disabled:v1";
-const TASK_ATOMS_ADMITS: &str = "Task extractor output must name operator-task atoms with source anchors and no repository findings.";
-const SCOUT_DOSSIER_ADMITS: &str =
-    "Repository scout and dossier output must cite current evidence and avoid work planning.";
-const QUESTIONS_ADMITS: &str = "Question output must be either an explicit empty set (`questions: []`) or structured nominations. Each nomination must include class, evidence, and consequence fields. The class field is closed to: invalidated-decision, missing-material-decision, material-underdetermination, dod-hole, unsafe-irreversible.";
-const WORK_MAP_ADMITS: &str = "Plan compiler and synthesizer output must contain one or more unit sections. Each unit must have an objective, acceptance criteria, and a traceable link by exact task phrase, atom id, source anchor, backlink, or verified evidence/fact.";
-const PLAN_REVIEW_ADMITS: &str = "Plan review output must assign a verdict to each finding, using pass, blocker, advisory, fail, blocked, or needs-fix. It must include at least one verdict and must not give an overall pass while a substantive finding is left unclassified.";
+const TASK_ATOMS_ADMITS: &str = kernel::generated::TASK_ATOMS_ADMITS;
+const SCOUT_DOSSIER_ADMITS: &str = kernel::generated::SCOUT_DOSSIER_ADMITS;
+const QUESTIONS_ADMITS: &str = kernel::generated::QUESTIONS_ADMITS;
+const WORK_MAP_ADMITS: &str = kernel::generated::WORK_MAP_ADMITS;
+const PLAN_REVIEW_ADMITS: &str = kernel::generated::PLAN_REVIEW_ADMITS;
 pub const ISSUED_BINDING_REF_PREFIX: &str = "runner-binding:";
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -113,6 +112,9 @@ pub struct PlanningRunnerRequest {
     pub authority_set_id: String,
     pub authority_documents: Vec<RunnerTaskDocument>,
     pub context_document: RunnerTaskDocument,
+    pub atom_id_prefix: Option<String>,
+    pub atom_registry_path: Option<String>,
+    pub atom_registry_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -372,6 +374,17 @@ pub fn planning_issue(request: &PlanningRunnerRequest) -> Result<IssuedRunnerAct
         validation_attempt: None,
         semantic_round: None,
         model_submission_path: None,
+        atom_id_prefix: request.atom_id_prefix.clone(),
+        atom_registry_path: request
+            .atom_registry_path
+            .as_ref()
+            .map(|path| ContractPath(path.clone())),
+        atom_registry_digest: request
+            .atom_registry_digest
+            .as_ref()
+            .map(|digest| Digest(digest.clone())),
+        planning_inputs_path: None,
+        planning_inputs_digest: None,
     };
     let spec_digest = write_spec_document(&paths.spec_path, &spec)?;
     let binding = IssuedRunnerBinding {
@@ -496,6 +509,11 @@ pub fn delivery_issue_with_facts(
         validation_attempt: None,
         semantic_round: None,
         model_submission_path: None,
+        atom_id_prefix: None,
+        atom_registry_path: None,
+        atom_registry_digest: None,
+        planning_inputs_path: None,
+        planning_inputs_digest: None,
     };
     let spec_digest = write_spec_document(&paths.spec_path, &spec)?;
     let binding = IssuedRunnerBinding {
@@ -732,6 +750,49 @@ fn validate_planning_request(request: &PlanningRunnerRequest) -> Result<(), Runn
         "context/non-authority",
         &request.authority_set_id,
     )?;
+    match request.boundary_id.0.as_str() {
+        "planning.task-atoms.v1" => {
+            let Some(prefix) = &request.atom_id_prefix else {
+                return Err(RunnerError::InvalidSpec(
+                    "task atom assignment missing atom_id_prefix".to_owned(),
+                ));
+            };
+            if prefix.trim().is_empty() {
+                return Err(RunnerError::InvalidSpec(
+                    "task atom assignment empty atom_id_prefix".to_owned(),
+                ));
+            }
+            if request.atom_registry_path.is_some() || request.atom_registry_digest.is_some() {
+                return Err(RunnerError::InvalidSpec(
+                    "task atom assignment cannot bind an atom registry".to_owned(),
+                ));
+            }
+        }
+        "planning.work-map.v1" => {
+            if request.atom_registry_path.as_deref().is_none_or(str::is_empty)
+                || request.atom_registry_digest.as_deref().is_none_or(str::is_empty)
+            {
+                return Err(RunnerError::InvalidSpec(
+                    "work-map assignment missing atom registry binding".to_owned(),
+                ));
+            }
+            if request.atom_id_prefix.is_some() {
+                return Err(RunnerError::InvalidSpec(
+                    "work-map assignment cannot bind an atom id prefix".to_owned(),
+                ));
+            }
+        }
+        _ => {
+            if request.atom_id_prefix.is_some()
+                || request.atom_registry_path.is_some()
+                || request.atom_registry_digest.is_some()
+            {
+                return Err(RunnerError::InvalidSpec(
+                    "non atom/work-map planning assignment has atom bindings".to_owned(),
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -896,6 +957,16 @@ fn planning_prompt(request: &PlanningRunnerRequest, route: &roster::Route) -> St
         route.thinking,
         request.authority_set_id,
     );
+    if let Some(prefix) = &request.atom_id_prefix {
+        out.push_str(&format!(
+            "\n## Runner-issued atom namespace\nEvery atoms[].id you submit must begin with this exact prefix and must add a non-empty local suffix: `{prefix}`\nDo not rewrite the prefix, do not omit it, and do not use another extractor's prefix.\n"
+        ));
+    }
+    if let (Some(path), Some(digest)) = (&request.atom_registry_path, &request.atom_registry_digest) {
+        out.push_str(&format!(
+            "\n## Bound atom registry\nUse only atom ids from this package-created registry for units[].links.\npath: {path}\ndigest: {digest}\nPlaceholder links such as A1/A2/A3 are invalid unless they are exact registry ids.\n"
+        ));
+    }
     for (index, document) in request.authority_documents.iter().enumerate() {
         out.push_str(&format!(
             "\n### AUTHORITY {}\npath: {}\ndigest: {}\nbody_digest: {}\n```text\n{}\n```\n",
@@ -1564,9 +1635,10 @@ fn git_failure_message(
 }
 
 pub(crate) fn validate_child_boundary(
-    boundary: &str,
+    spec: &AgentRunSpec,
     raw: &str,
 ) -> Result<String, kernel::boundary::Rejection> {
+    let boundary = spec.boundary_id.0.as_str();
     let mut runtime = boundary_runtime(match boundary {
         "planning.task-atoms.v1" => "planning.task-atoms.v1",
         "planning.scout-dossier.v1" => "planning.scout-dossier.v1",
@@ -1577,14 +1649,97 @@ pub(crate) fn validate_child_boundary(
     });
     runtime.flip_to_enforce();
     match boundary {
-        "planning.task-atoms.v1" => crate::planning::accept_task_atoms(raw, &runtime),
+        "planning.task-atoms.v1" => {
+            let Some(prefix) = spec.atom_id_prefix.as_deref() else {
+                runtime.reject("boundary_id=planning.task-atoms.v1; field=atoms.id; expected=runner-issued atom id prefix; got=missing; hint=refuse unbound task atom assignment".to_owned())?;
+                return Ok(raw.to_owned());
+            };
+            let anchors = task_anchor_registry_from_spec(spec, &mut runtime)?;
+            crate::planning::accept_task_atoms_for_assignment(raw, &runtime, prefix, &anchors)
+        }
         "planning.scout-dossier.v1" => crate::planning::accept_scout_dossier(raw, &runtime),
         "planning.questions.v1" => crate::planning::accept_questions(raw, &runtime),
-        "planning.work-map.v1" => crate::planning::accept_work_map(raw, &runtime),
+        "planning.work-map.v1" => {
+            let (path, digest) = atom_registry_binding_from_spec(spec, &mut runtime)?;
+            let atom_ids = match crate::planning::load_atom_registry_ids(Path::new(path), digest) {
+                Ok(ids) => ids,
+                Err(error) => {
+                    runtime.reject(format!(
+                        "boundary_id=planning.work-map.v1; field=atom_registry; expected=spec-bound atom registry {digest}; got={error:?}; hint=repair package registry binding before accepting work-map"
+                    ))?;
+                    return Ok(raw.to_owned());
+                }
+            };
+            crate::planning::accept_work_map_for_atoms(raw, &runtime, &atom_ids, digest)
+        }
         "planning.plan-review.v1" => crate::planning::accept_plan_review(raw, &runtime),
         other => {
             runtime.reject(format!("unknown-boundary:{other}"))?;
             Ok(raw.to_owned())
         }
     }
+}
+
+pub(crate) fn task_anchor_registry_from_spec(
+    spec: &AgentRunSpec,
+    runtime: &mut kernel::boundary::BoundaryRuntime,
+) -> Result<crate::planning::TaskAnchorRegistry, kernel::boundary::Rejection> {
+    let Some(authority_set_id) = spec.authority_set_id.as_ref() else {
+        runtime.reject("boundary_id=planning.task-atoms.v1; field=authority_set_id; expected=runner-issued task authority; got=missing; hint=refuse unbound task atom assignment".to_owned())?;
+        unreachable!("runtime.reject returns Err in enforce mode")
+    };
+    let Some(authority_documents) = spec.authority_documents.as_ref() else {
+        runtime.reject("boundary_id=planning.task-atoms.v1; field=authority_documents; expected=runner-issued task documents; got=missing; hint=refuse unbound task atom assignment".to_owned())?;
+        unreachable!("runtime.reject returns Err in enforce mode")
+    };
+    let Some(context_document) = spec.context_document.as_ref() else {
+        runtime.reject("boundary_id=planning.task-atoms.v1; field=context_document; expected=runner-issued context document; got=missing; hint=refuse unbound task atom assignment".to_owned())?;
+        unreachable!("runtime.reject returns Err in enforce mode")
+    };
+    let authority_documents = authority_documents
+        .iter()
+        .map(|document| planning_task_document_from_contract(document, crate::planning::TaskDocumentClass::Authority, authority_set_id))
+        .collect::<Vec<_>>();
+    let context_documents = vec![planning_task_document_from_contract(
+        context_document,
+        crate::planning::TaskDocumentClass::ContextNonAuthority,
+        authority_set_id,
+    )];
+    Ok(crate::planning::TaskAnchorRegistry::from_input_set(
+        &crate::planning::TaskInputSet {
+            authority_set_id: authority_set_id.clone(),
+            authority_documents,
+            context_documents,
+        },
+    ))
+}
+
+fn planning_task_document_from_contract(
+    document: &ContractTaskDocument,
+    class: crate::planning::TaskDocumentClass,
+    authority_set_id: &str,
+) -> crate::planning::TaskDocument {
+    crate::planning::TaskDocument {
+        id: document.path.0.clone(),
+        path: document.path.0.clone(),
+        class,
+        authority_set_id: authority_set_id.to_owned(),
+        body: document.body.clone(),
+        digest: document.digest.0.clone(),
+    }
+}
+
+pub(crate) fn atom_registry_binding_from_spec<'a>(
+    spec: &'a AgentRunSpec,
+    runtime: &mut kernel::boundary::BoundaryRuntime,
+) -> Result<(&'a str, &'a str), kernel::boundary::Rejection> {
+    let Some(path) = spec.atom_registry_path.as_ref().map(|path| path.0.as_str()) else {
+        runtime.reject("boundary_id=planning.work-map.v1; field=atom_registry_path; expected=spec-bound atom registry path; got=missing; hint=refuse unbound work-map assignment".to_owned())?;
+        unreachable!("runtime.reject returns Err in enforce mode")
+    };
+    let Some(digest) = spec.atom_registry_digest.as_ref().map(|digest| digest.0.as_str()) else {
+        runtime.reject("boundary_id=planning.work-map.v1; field=atom_registry_digest; expected=spec-bound atom registry digest; got=missing; hint=refuse unbound work-map assignment".to_owned())?;
+        unreachable!("runtime.reject returns Err in enforce mode")
+    };
+    Ok((path, digest))
 }

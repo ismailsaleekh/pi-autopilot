@@ -1,11 +1,15 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use crate::roles::kdl::{attr as kdl_attr, boundary_runtime as runtime_by_id, table_values};
 use kernel::boundary::{BoundaryRuntime, Rejection};
-use kernel::generated::{Id, PlanReview, Questions, Ref, ScoutDossier, TaskAtoms, WorkMap};
+use kernel::generated::{
+    Id, PlanReview, PlanningAtomRegistry, PlanningAtomRegistryAtom, Questions, Ref, ScoutDossier,
+    SchemaId, TaskAtoms, WorkMap,
+};
 use kernel_macros::acceptance_boundary;
 use sha2::{Digest as ShaDigest, Sha256};
 
@@ -17,6 +21,7 @@ pub const MODEL_BOUNDARIES: [&str; 5] = [
     "planning.plan-review.v1",
 ];
 const DRIVER_TABLES_KDL: &str = include_str!("../../../data/driver-tables.kdl");
+const PLANNING_KDL: &str = include_str!("../../../data/planning.kdl");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AtomKind {
@@ -109,6 +114,54 @@ impl AssignmentPlan {
             Ok(())
         }
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlanningAssignmentRole {
+    pub role: String,
+    pub count: u8,
+    pub mode: String,
+    pub boundary_id: String,
+    pub atom_namespace: Option<String>,
+}
+
+pub fn planning_assignment_roles() -> Result<Vec<PlanningAssignmentRole>, PlanningError> {
+    parse_planning_assignment_roles(PLANNING_KDL)
+}
+
+fn parse_planning_assignment_roles(text: &str) -> Result<Vec<PlanningAssignmentRole>, PlanningError> {
+    let mut roles = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("assignment_role ") {
+            continue;
+        }
+        let after = trimmed
+            .strip_prefix("assignment_role \"")
+            .ok_or_else(|| PlanningError::BadDeclaration(trimmed.to_owned()))?;
+        let Some((role, attrs)) = after.split_once('"') else {
+            return Err(PlanningError::BadDeclaration(trimmed.to_owned()));
+        };
+        let count = parse_attr(attrs, "count=")?
+            .parse::<u8>()
+            .map_err(|error| PlanningError::BadDeclaration(error.to_string()))?;
+        if count == 0 {
+            return Err(PlanningError::BadDeclaration(format!("zero count for {role}")));
+        }
+        roles.push(PlanningAssignmentRole {
+            role: role.to_owned(),
+            count,
+            mode: parse_attr(attrs, "mode=")?,
+            boundary_id: parse_attr(attrs, "boundary=")?,
+            atom_namespace: kdl_attr(attrs, "atom_namespace="),
+        });
+    }
+    if roles.is_empty() {
+        return Err(PlanningError::BadDeclaration(
+            "missing assignment_role rows".to_owned(),
+        ));
+    }
+    Ok(roles)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -582,7 +635,7 @@ pub fn boundary_runtime(id: &'static str) -> BoundaryRuntime {
     runtime_by_id(id)
 }
 
-#[acceptance_boundary(id = "planning.task-atoms.v1", producer = Producer::Model, visible = true, admits = "Task extractor output must name operator-task atoms with source anchors and no repository findings. Call autopilot_submit_atoms as the final action with atoms containing id, kind, text, and sources.", mode = BoundaryMode::Enforce)]
+#[acceptance_boundary(id = "planning.task-atoms.v1", producer = Producer::Model, visible = true, admits = "Task extractor output must use the exact runner-issued atom id prefix for every atoms[].id, name operator-task atoms with source anchors, and include no repository findings. Call autopilot_submit_atoms as the final action with atoms containing id, kind, text, and sources.", mode = BoundaryMode::Enforce)]
 pub fn accept_task_atoms(raw: &str, runtime: &BoundaryRuntime) -> Result<String, Rejection> {
     let atoms = parse_model_payload::<TaskAtoms>(raw, runtime, "planning.task-atoms.v1")?;
     validate_task_atoms_shape(&atoms, runtime)?;
@@ -653,12 +706,6 @@ pub fn accept_questions_payload(questions: Questions) -> Result<Questions, Rejec
     Ok(questions)
 }
 
-pub fn accept_work_map_payload(work_map: WorkMap) -> Result<WorkMap, Rejection> {
-    let runtime = boundary_runtime("planning.work-map.v1");
-    validate_work_map_shape(&work_map, &runtime)?;
-    Ok(work_map)
-}
-
 pub fn accept_plan_review_payload(review: PlanReview) -> Result<PlanReview, Rejection> {
     let runtime = boundary_runtime("planning.plan-review.v1");
     validate_plan_review_shape(&review, &runtime)?;
@@ -708,17 +755,59 @@ pub struct PinnedRepo {
     pub base_commit: String,
 }
 
-pub fn accept_task_atoms_with_anchors(
-    atoms: TaskAtoms,
+pub fn accept_task_atoms_for_assignment(
+    raw: &str,
+    runtime: &BoundaryRuntime,
+    prefix: &str,
     anchors: &TaskAnchorRegistry,
-) -> Result<TaskAtoms, Rejection> {
+) -> Result<String, Rejection> {
+    let atoms = parse_model_payload::<TaskAtoms>(raw, runtime, "planning.task-atoms.v1")?;
+    validate_task_atoms_shape(&atoms, runtime)?;
+    validate_task_atom_assignment(&atoms, runtime, prefix, anchors)?;
+    Ok(raw.to_owned())
+}
+
+pub fn validate_task_atoms_for_assignment(
+    atoms: &TaskAtoms,
+    prefix: &str,
+    anchors: &TaskAnchorRegistry,
+) -> Result<(), Rejection> {
     let runtime = boundary_runtime("planning.task-atoms.v1");
-    validate_task_atoms_shape(&atoms, &runtime)?;
+    validate_task_atoms_shape(atoms, &runtime)?;
+    validate_task_atom_assignment(atoms, &runtime, prefix, anchors)
+}
+
+fn validate_task_atom_assignment(
+    atoms: &TaskAtoms,
+    runtime: &BoundaryRuntime,
+    prefix: &str,
+    anchors: &TaskAnchorRegistry,
+) -> Result<(), Rejection> {
+    if prefix.is_empty() {
+        return reject_value(
+            runtime,
+            "planning.task-atoms.v1",
+            "atoms.id",
+            "non-empty runner-issued atom id prefix",
+            "missing",
+            "The runner must bind the assignment prefix before asking for atoms.",
+        );
+    }
+    let mut seen = BTreeSet::new();
+    let mut bad_prefix = Vec::new();
+    let mut duplicates = Vec::new();
     for atom in &atoms.atoms {
+        match atom.id.0.strip_prefix(prefix) {
+            Some(local) if !local.is_empty() => {}
+            _ => bad_prefix.push(atom.id.0.clone()),
+        }
+        if !seen.insert(atom.id.0.clone()) {
+            duplicates.push(atom.id.0.clone());
+        }
         for source in &atom.sources {
             if !anchors.has(source) {
                 return reject_value(
-                    &runtime,
+                    runtime,
                     "planning.task-atoms.v1",
                     "atoms.sources",
                     "a real task-document anchor supplied by package authority",
@@ -728,7 +817,27 @@ pub fn accept_task_atoms_with_anchors(
             }
         }
     }
-    Ok(atoms)
+    if !bad_prefix.is_empty() {
+        return reject_value(
+            runtime,
+            "planning.task-atoms.v1",
+            "atoms.id",
+            &format!("exact prefix {prefix} plus a non-empty local id"),
+            &format!("offending ids {:?}", bad_prefix),
+            "Keep the local suffix you intend, but emit it under the runner-issued prefix.",
+        );
+    }
+    if !duplicates.is_empty() {
+        return reject_value(
+            runtime,
+            "planning.task-atoms.v1",
+            "atoms.id",
+            &format!("unique full ids under expected prefix {prefix}"),
+            &format!("duplicate ids {:?}", duplicates),
+            "Emit each task atom id at most once in this submission.",
+        );
+    }
+    Ok(())
 }
 
 pub fn accept_scout_dossier_at_base(
@@ -766,26 +875,147 @@ pub fn accept_scout_dossier_at_base(
 }
 
 pub fn accept_work_map_for_atoms(
-    work_map: WorkMap,
+    raw: &str,
+    runtime: &BoundaryRuntime,
     atom_ids: &BTreeSet<Id>,
-) -> Result<WorkMap, Rejection> {
-    let runtime = boundary_runtime("planning.work-map.v1");
-    validate_work_map_shape(&work_map, &runtime)?;
+    registry_digest: &str,
+) -> Result<String, Rejection> {
+    let work_map = parse_model_payload::<WorkMap>(raw, runtime, "planning.work-map.v1")?;
+    validate_work_map_shape(&work_map, runtime)?;
+    validate_work_map_links(&work_map, runtime, atom_ids, registry_digest)?;
+    Ok(raw.to_owned())
+}
+
+fn validate_work_map_links(
+    work_map: &WorkMap,
+    runtime: &BoundaryRuntime,
+    atom_ids: &BTreeSet<Id>,
+    registry_digest: &str,
+) -> Result<(), Rejection> {
+    let mut unknown = BTreeSet::new();
     for unit in &work_map.units {
         for link in &unit.links {
             if atom_ids.get(link).is_none() {
-                return reject_value(
-                    &runtime,
-                    "planning.work-map.v1",
-                    "units.links",
-                    "an atom id accepted by planning.task-atoms.v1",
-                    &link.0,
-                    "Link each plan unit to a real accepted atom id.",
-                );
+                unknown.insert(link.0.clone());
             }
         }
     }
-    Ok(work_map)
+    if !unknown.is_empty() {
+        let allowed = atom_ids.iter().map(|id| id.0.as_str()).collect::<Vec<_>>().join(",");
+        return reject_value(
+            runtime,
+            "planning.work-map.v1",
+            "units.links",
+            &format!("exact ids from atom registry {registry_digest}; allowed=[{allowed}]"),
+            &format!("unknown ids {:?}", unknown),
+            "Replace placeholders with ids from the bound atom registry.",
+        );
+    }
+    Ok(())
+}
+
+pub fn atom_registry_bytes(
+    workstream: &str,
+    authority_set_id: &str,
+    producer_assignment_ids: Vec<Id>,
+    atoms: Vec<PlanningAtomRegistryAtom>,
+) -> Result<Vec<u8>, PlanningError> {
+    let registry = PlanningAtomRegistry {
+        schema: SchemaId("autopilot.planning_atom_registry.v1".to_owned()),
+        workstream: Id(workstream.to_owned()),
+        authority_set_id: authority_set_id.to_owned(),
+        producer_assignment_ids,
+        atoms,
+    };
+    serde_json::to_vec_pretty(&registry)
+        .map_err(|error| PlanningError::ContextGap(format!("atom registry json:{error}")))
+}
+
+pub fn load_atom_registry_ids(path: &Path, expected_digest: &str) -> Result<BTreeSet<Id>, PlanningError> {
+    reject_link_components_for_absolute(path)
+        .map_err(|error| PlanningError::ContextGap(format!("atom-registry-path:{error}")))?;
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| PlanningError::ContextGap(format!("atom-registry-metadata:{error}")))?;
+    if !metadata.file_type().is_file() {
+        return Err(PlanningError::ContextGap(
+            "atom-registry-not-regular-file".to_owned(),
+        ));
+    }
+    let mut file = fs::File::open(path)
+        .map_err(|error| PlanningError::ContextGap(format!("atom-registry-open:{error}")))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| PlanningError::ContextGap(format!("atom-registry-read:{error}")))?;
+    let actual = sha256_hex(&bytes);
+    if actual != expected_digest {
+        return Err(PlanningError::ContextGap(format!(
+            "atom-registry-digest:expected={expected_digest}:got={actual}"
+        )));
+    }
+    let registry: PlanningAtomRegistry = serde_json::from_slice(&bytes)
+        .map_err(|error| PlanningError::ContextGap(format!("atom-registry-json:{error}")))?;
+    let mut ids = BTreeSet::new();
+    for atom in registry.atoms {
+        if !ids.insert(atom.id.clone()) {
+            return Err(PlanningError::ContextGap(format!(
+                "atom-registry-duplicate:{}",
+                atom.id.0
+            )));
+        }
+    }
+    Ok(ids)
+}
+
+pub fn sorted_registry_atoms(
+    records: Vec<(usize, usize, Id, TaskAtoms)>,
+) -> Result<Vec<PlanningAtomRegistryAtom>, PlanningError> {
+    let mut keyed = Vec::new();
+    let mut global = BTreeMap::new();
+    for (assignment_order, carrier_order, producer_assignment_id, atoms) in records {
+        for (atom_order, atom) in atoms.atoms.into_iter().enumerate() {
+            if let Some(previous) = global.insert(atom.id.0.clone(), producer_assignment_id.0.clone()) {
+                return Err(PlanningError::ContextGap(format!(
+                    "atom-registry-duplicate:{}:{}:{}",
+                    atom.id.0, previous, producer_assignment_id.0
+                )));
+            }
+            keyed.push((
+                assignment_order,
+                carrier_order,
+                atom_order,
+                PlanningAtomRegistryAtom {
+                    id: atom.id,
+                    producer_assignment_id: producer_assignment_id.clone(),
+                    kind: atom.kind,
+                    text: atom.text,
+                    sources: atom.sources,
+                },
+            ));
+        }
+    }
+    keyed.sort_by(|left, right| {
+        (left.0, left.1, left.2, &left.3.id.0).cmp(&(right.0, right.1, right.2, &right.3.id.0))
+    });
+    Ok(keyed.into_iter().map(|(_, _, _, atom)| atom).collect())
+}
+
+fn reject_link_components_for_absolute(path: &Path) -> Result<(), String> {
+    if !path.is_absolute() {
+        return Err(format!("path is not absolute: {}", path.display()));
+    }
+    let mut probe = PathBuf::new();
+    for component in path.components() {
+        probe.push(component.as_os_str());
+        match fs::symlink_metadata(&probe) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!("symlink component: {}", probe.display()));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("inspect {}: {error}", probe.display())),
+        }
+    }
+    Ok(())
 }
 
 fn parse_model_payload<T: serde::de::DeserializeOwned>(

@@ -150,6 +150,11 @@ export interface AgentRunSpec {
   validation_attempt?: number | null;
   semantic_round?: number | null;
   model_submission_path?: Path | null;
+  atom_id_prefix?: string | null;
+  atom_registry_path?: Path | null;
+  atom_registry_digest?: Digest | null;
+  planning_inputs_path?: Path | null;
+  planning_inputs_digest?: Digest | null;
 }
 
 export interface AllocationLaneProposal {
@@ -773,6 +778,22 @@ export interface PlanReviewVerdict {
   criterion_id: Id;
   verdict: PlanningReviewVerdict;
   finding?: string;
+}
+
+export interface PlanningAtomRegistry {
+  schema: SchemaId;
+  workstream: Id;
+  authority_set_id: string;
+  producer_assignment_ids: Id[];
+  atoms: PlanningAtomRegistryAtom[];
+}
+
+export interface PlanningAtomRegistryAtom {
+  id: Id;
+  producer_assignment_id: Id;
+  kind: PlanningAtomKind;
+  text: string;
+  sources: Ref[];
 }
 
 export interface Questions {

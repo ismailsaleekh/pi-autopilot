@@ -861,6 +861,21 @@ pub struct AgentRunSpec {
     #[serde(rename = "model_submission_path")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_submission_path: Option<Path>,
+    #[serde(rename = "atom_id_prefix")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub atom_id_prefix: Option<String>,
+    #[serde(rename = "atom_registry_path")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub atom_registry_path: Option<Path>,
+    #[serde(rename = "atom_registry_digest")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub atom_registry_digest: Option<Digest>,
+    #[serde(rename = "planning_inputs_path")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub planning_inputs_path: Option<Path>,
+    #[serde(rename = "planning_inputs_digest")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub planning_inputs_digest: Option<Digest>,
 }
 
 /// Allocator model proposal; package validates totality, dependencies, cap, and no invented ownership (D76 §7).
@@ -2168,6 +2183,38 @@ pub struct PlanReviewVerdict {
     pub finding: Option<String>,
 }
 
+/// Create-once accepted task atom registry materialized by the seam after task extractors are accepted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanningAtomRegistry {
+    #[serde(rename = "schema")]
+    pub schema: SchemaId,
+    #[serde(rename = "workstream")]
+    pub workstream: Id,
+    #[serde(rename = "authority_set_id")]
+    pub authority_set_id: String,
+    #[serde(rename = "producer_assignment_ids")]
+    pub producer_assignment_ids: Vec<Id>,
+    #[serde(rename = "atoms")]
+    pub atoms: Vec<PlanningAtomRegistryAtom>,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanningAtomRegistryAtom {
+    #[serde(rename = "id")]
+    pub id: Id,
+    #[serde(rename = "producer_assignment_id")]
+    pub producer_assignment_id: Id,
+    #[serde(rename = "kind")]
+    pub kind: PlanningAtomKind,
+    #[serde(rename = "text")]
+    pub text: String,
+    #[serde(rename = "sources")]
+    pub sources: Vec<Ref>,
+}
+
 /// Model-facing contradiction/question nominations. Empty questions are valid when no material unresolved issue remains.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Questions {
@@ -2863,7 +2910,7 @@ pub const FINDING_V2_ADMITS: &str = "For each material issue, emit one determini
 pub const PLAN_REVIEW_ADMITS: &str = "Plan review output must assign a verdict to each criterion using pass, blocker, advisory, fail, blocked, or needs-fix. It must include at least one verdict. Call autopilot_submit_review as the final action.";
 pub const QUESTIONS_ADMITS: &str = "Question output must be an explicit questions array, which may be empty, or structured nominations. Each nomination must include class, evidence, and consequence. The class field is closed to: invalidated-decision, missing-material-decision, material-underdetermination, dod-hole, unsafe-irreversible.";
 pub const SCOUT_DOSSIER_ADMITS: &str = "Repository scout and dossier output must cite current evidence and avoid work planning. Call autopilot_submit_scout_report as the final action with findings containing path, observation, and evidence_ref.";
-pub const TASK_ATOMS_ADMITS: &str = "Task extractor output must name operator-task atoms with source anchors and no repository findings. Call autopilot_submit_atoms as the final action with atoms containing id, kind, text, and sources.";
+pub const TASK_ATOMS_ADMITS: &str = "Task extractor output must use the exact runner-issued atom id prefix for every atoms[].id, name operator-task atoms with source anchors, and include no repository findings. Call autopilot_submit_atoms as the final action with atoms containing id, kind, text, and sources.";
 pub const VALIDATION_SUBMISSION_V2_ADMITS: &str = "Call autopilot_emit_status exactly once with this closed JSON object. Verdict every required criterion exactly once, cite only declared evidence refs, embed every finding, and do not claim PASS/READY when Core would compute a material blocker.";
 pub const VALIDATION_VERDICT_ADMITS: &str = "Verdict every required criterion independently as PASS, FAIL, or BLOCKED, and attach evidence refs, finding refs, covered paths, semantic surfaces, and forward-edge ids. Do not issue an overall PASS while any required criterion is unverdicted, stale, failed, or blocked. Use FORWARD_READY, FORWARD_BLOCKED, or BLOCKED only for forward validation, and PASS, NEEDS_FIX, or BLOCKED only for closure/final validation.";
 pub const WORK_MAP_ADMITS: &str = "Plan compiler and synthesizer output must contain one or more units. Each unit must have an objective, acceptance criteria, and traceable links by real atom id. Call autopilot_submit_plan_cluster or autopilot_submit_synthesis as the final action.";
