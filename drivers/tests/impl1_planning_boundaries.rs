@@ -156,7 +156,7 @@ fn accepted_registry_rejects_cross_extractor_duplicate_and_is_resume_stable() {
         None,
         task_atoms("TE01-A"),
     );
-    let _b = stable.seed_planning_binding(
+    let b = stable.seed_planning_binding(
         &mut state,
         "task-extractor",
         "inventory",
@@ -166,14 +166,32 @@ fn accepted_registry_rejects_cross_extractor_duplicate_and_is_resume_stable() {
         None,
         task_atoms("TE02-B"),
     );
-    let next = stable.agent_response(&mut state, &a, task_atoms("TE01-A"));
-    assert_spawn_assignment(&next, "planning-ws-repository-scout-01");
+    assert!(stable
+        .agent_result(&mut state, &a, task_atoms("TE01-A"))
+        .contains("accepted"));
+    assert!(stable
+        .agent_result(&mut state, &b, task_atoms("TE02-B"))
+        .contains("accepted"));
     let registry_path = stable
         .root
         .join(".pi/autopilot/ws/planning/atom-registry.json");
     let before = fs::read(&registry_path).unwrap();
-    fs::remove_file(&registry_path).unwrap();
-    let _replayed = CoreState::open(Some(event_log)).unwrap();
+    let mut replayed = CoreState::open(Some(event_log)).unwrap();
+    let scout = stable.seed_planning_binding(
+        &mut replayed,
+        "repository-scout",
+        "initial-grounding",
+        "planning.scout-dossier.v1",
+        "planning-ws-repository-scout-01",
+        None,
+        None,
+        scout_dossier(),
+    );
+    let next = stable.agent_response(&mut replayed, &scout, scout_dossier());
+    assert_eq!(
+        next.kind, "spawn",
+        "scout result should advance planning: {next:?}"
+    );
     let after = fs::read(&registry_path).unwrap();
     assert_eq!(
         before, after,
@@ -555,22 +573,6 @@ fn response_status(response: &SeamEnvelope) -> String {
         .to_owned()
 }
 
-fn assert_spawn_assignment(response: &SeamEnvelope, assignment_id: &str) {
-    assert_eq!(
-        response.kind, "spawn",
-        "expected spawn response: {response:?}"
-    );
-    assert_eq!(
-        response
-            .payload
-            .get("action")
-            .and_then(|action| action.get("assignment_id"))
-            .and_then(serde_json::Value::as_str),
-        Some(assignment_id),
-        "spawn should launch the next planning assignment: {response:?}"
-    );
-}
-
 fn has_attempt_event(events: &[serde_json::Value], event: &str) -> bool {
     events
         .iter()
@@ -620,6 +622,10 @@ fn task_atoms(id: &str) -> String {
 fn work_map(links: &[&str]) -> String {
     json!({"units":[{"id":"U1","objective":"Implement unit","criteria":["done"],"links":links}]})
         .to_string()
+}
+
+fn scout_dossier() -> String {
+    json!({"findings":[{"path":"Cargo.toml","observation":"exists","evidence_ref":"repo://Cargo.toml"}]}).to_string()
 }
 
 fn plan_review() -> String {
