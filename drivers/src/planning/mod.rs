@@ -5,9 +5,7 @@ use std::process::Command;
 
 use crate::roles::kdl::{attr as kdl_attr, boundary_runtime as runtime_by_id, table_values};
 use kernel::boundary::{BoundaryRuntime, Rejection};
-use kernel::generated::{
-    Id, PlanReview, Questions, Ref, ScoutDossier, TaskAtoms, WorkMap,
-};
+use kernel::generated::{Id, PlanReview, Questions, Ref, ScoutDossier, TaskAtoms, WorkMap};
 use kernel_macros::acceptance_boundary;
 use sha2::{Digest as ShaDigest, Sha256};
 
@@ -347,14 +345,10 @@ pub fn admit_task_document_header(document: &TaskDocument) -> Result<&TaskDocume
     id = "planning.task-file-pack.v1",
     producer = Producer::Operator,
     visible = true,
-    admits = "File-backed /autopilot-plan admits exactly four distinct repository-relative regular files ordered [authority], [authority], [authority], [context/non-authority] with one shared authority_set_id; historical and index markers are recognized but forbidden inputs.",
+    admits = "File-backed /autopilot-plan admits distinct repository-relative regular files supplied as task paths; byte-exact first-line markers must include at least one [authority] document and at least one [context/non-authority] document with one shared authority_set_id; order is not significant, and historical/index markers are recognized but forbidden inputs.",
     mode = BoundaryMode::Enforce
 )]
 pub fn admit_task_file_pack_shape(raw_paths: &[PathBuf]) -> Result<&[PathBuf], Rejection> {
-    if raw_paths.len() != 4 {
-        boundary_runtime("planning.task-file-pack.v1")
-            .reject(format!("expected four paths, got {}", raw_paths.len()))?;
-    }
     Ok(raw_paths)
 }
 
@@ -398,34 +392,16 @@ fn classify_task_document(rel: &Path, bytes: &[u8]) -> Result<TaskDocument, Plan
     }
     let text = std::str::from_utf8(bytes)
         .map_err(|_| PlanningError::TaskHeader(format!("non-utf8:{}", rel.display())))?;
+    if text.is_empty() {
+        return Err(PlanningError::TaskHeader(format!(
+            "missing-marker:{}",
+            rel.display()
+        )));
+    }
     let mut lines = text.split('\n');
     let marker = lines
         .next()
         .ok_or_else(|| PlanningError::TaskHeader(format!("missing-marker:{}", rel.display())))?;
-    let authority_line = lines.next().ok_or_else(|| {
-        PlanningError::TaskHeader(format!("missing-authority-set:{}", rel.display()))
-    })?;
-    let empty = lines.next().ok_or_else(|| {
-        PlanningError::TaskHeader(format!("missing-empty-line:{}", rel.display()))
-    })?;
-    if !empty.is_empty() {
-        return Err(PlanningError::TaskHeader(format!(
-            "line3-not-empty:{}",
-            rel.display()
-        )));
-    }
-    let Some(authority_set_id) = authority_line.strip_prefix("authority_set_id: ") else {
-        return Err(PlanningError::TaskHeader(format!(
-            "bad-authority-line:{}",
-            rel.display()
-        )));
-    };
-    if authority_set_id.is_empty() || authority_set_id.trim() != authority_set_id {
-        return Err(PlanningError::TaskHeader(format!(
-            "bad-authority-id:{}",
-            rel.display()
-        )));
-    }
     let class = match marker {
         "[authority]" => TaskDocumentClass::Authority,
         "[context/non-authority]" => TaskDocumentClass::ContextNonAuthority,
@@ -438,6 +414,30 @@ fn classify_task_document(rel: &Path, bytes: &[u8]) -> Result<TaskDocument, Plan
             )));
         }
     };
+    let authority_line = lines.next().ok_or_else(|| {
+        PlanningError::TaskHeader(format!("missing-authority-set:{}", rel.display()))
+    })?;
+    let Some(authority_set_id) = authority_line.strip_prefix("authority_set_id: ") else {
+        return Err(PlanningError::TaskHeader(format!(
+            "bad-authority-line:{}",
+            rel.display()
+        )));
+    };
+    if authority_set_id.is_empty() || authority_set_id.trim() != authority_set_id {
+        return Err(PlanningError::TaskHeader(format!(
+            "bad-authority-id:{}",
+            rel.display()
+        )));
+    }
+    let empty = lines.next().ok_or_else(|| {
+        PlanningError::TaskHeader(format!("missing-empty-line:{}", rel.display()))
+    })?;
+    if !empty.is_empty() {
+        return Err(PlanningError::TaskHeader(format!(
+            "line3-not-empty:{}",
+            rel.display()
+        )));
+    }
     let body = lines.collect::<Vec<_>>().join("\n");
     if body.trim().is_empty() {
         return Err(PlanningError::TaskHeader(format!(
@@ -459,52 +459,64 @@ fn classify_task_document(rel: &Path, bytes: &[u8]) -> Result<TaskDocument, Plan
 }
 
 fn validate_task_input_set(documents: Vec<TaskDocument>) -> Result<TaskInputSet, PlanningError> {
-    if documents.len() != 4 {
-        return Err(PlanningError::TaskInputCount {
-            expected: 4,
-            actual: documents.len(),
-        });
-    }
-    let authority_set_id = documents[0].authority_set_id.clone();
-    if authority_set_id.is_empty()
-        || documents
-            .iter()
-            .any(|document| document.authority_set_id != authority_set_id)
-    {
-        return Err(PlanningError::TaskAuthoritySetMismatch);
-    }
     for document in &documents {
         match document.class {
             TaskDocumentClass::HistoricalNonAuthority => {
-                return Err(PlanningError::HistoricalTaskInput(document.path.clone()));
+                return Err(PlanningError::HistoricalTaskInput(format!(
+                    "forbidden [historical/non-authority] input: {}",
+                    document.path
+                )));
             }
             TaskDocumentClass::IndexNonAuthority => {
-                return Err(PlanningError::IndexTaskInput(document.path.clone()));
+                return Err(PlanningError::IndexTaskInput(format!(
+                    "forbidden [index/non-authority] input: {}",
+                    document.path
+                )));
             }
             TaskDocumentClass::Authority
             | TaskDocumentClass::ContextNonAuthority
             | TaskDocumentClass::InlineTask => {}
         }
     }
-    for (index, document) in documents.iter().enumerate() {
-        let expected = if index < 3 {
-            TaskDocumentClass::Authority
-        } else {
-            TaskDocumentClass::ContextNonAuthority
-        };
-        if document.class != expected {
-            return Err(PlanningError::TaskInputOrder(format!(
-                "position {} expected {:?} got {:?}",
-                index + 1,
-                expected,
-                document.class
-            )));
+
+    if let Some(first) = documents.first() {
+        for document in documents.iter().skip(1) {
+            if document.authority_set_id != first.authority_set_id {
+                return Err(PlanningError::TaskAuthoritySetMismatch(format!(
+                    "authority_set_id mismatch: {}={} {}={}",
+                    first.path, first.authority_set_id, document.path, document.authority_set_id
+                )));
+            }
         }
     }
+
+    let mut authority_documents = Vec::new();
+    let mut context_documents = Vec::new();
+    for document in documents {
+        match document.class {
+            TaskDocumentClass::Authority => authority_documents.push(document),
+            TaskDocumentClass::ContextNonAuthority => context_documents.push(document),
+            TaskDocumentClass::InlineTask => authority_documents.push(document),
+            TaskDocumentClass::HistoricalNonAuthority | TaskDocumentClass::IndexNonAuthority => {
+                unreachable!("forbidden classes were rejected before partition")
+            }
+        }
+    }
+    if authority_documents.is_empty() {
+        return Err(PlanningError::TaskInputInvariant(
+            "no [authority] document supplied".to_owned(),
+        ));
+    }
+    if context_documents.is_empty() {
+        return Err(PlanningError::TaskInputInvariant(
+            "no [context/non-authority] document supplied".to_owned(),
+        ));
+    }
+    let authority_set_id = authority_documents[0].authority_set_id.clone();
     Ok(TaskInputSet {
         authority_set_id,
-        authority_documents: documents[..3].to_vec(),
-        context_documents: vec![documents[3].clone()],
+        authority_documents,
+        context_documents,
     })
 }
 
@@ -616,8 +628,9 @@ pub enum PlanningError {
     TaskHeader(String),
     TaskInputCount { expected: usize, actual: usize },
     TaskInputOrder(String),
+    TaskInputInvariant(String),
     DuplicateTaskPath(PathBuf),
-    TaskAuthoritySetMismatch,
+    TaskAuthoritySetMismatch(String),
     HistoricalTaskInput(String),
     IndexTaskInput(String),
 }

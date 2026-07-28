@@ -65,7 +65,7 @@ fn push_assignments(out: &mut Vec<AgentAssignment>, workstream: &str, role: &str
 }
 fn planning_bg_action(workstream: &str, assignment: &AgentAssignment, run_revision: u64, input_set: &planning::TaskInputSet) -> Result<runner::IssuedRunnerAction, runner::RunnerError> {
     let context = input_set.context_documents.first().ok_or_else(|| runner::RunnerError::InvalidSpec("missing planning context".to_owned()))?;
-    runner::planning_issue(&runner::PlanningRunnerRequest {
+    let mut issued = runner::planning_issue(&runner::PlanningRunnerRequest {
         workstream: workstream.to_owned(),
         action_id: idv(&format!("action-{}", assignment.assignment_id)),
         assignment_id: idv(&assignment.assignment_id),
@@ -76,7 +76,9 @@ fn planning_bg_action(workstream: &str, assignment: &AgentAssignment, run_revisi
         authority_set_id: input_set.authority_set_id.clone(),
         authority_documents: input_set.authority_documents.iter().map(runner_doc_from_task).collect(),
         context_document: runner_doc_from_task(context),
-    })
+    })?;
+    augment_planning_issue_with_context_documents(&mut issued, input_set)?;
+    Ok(issued)
 }
 fn append_runner_invocation(state: &mut CoreState, binding: &runner::IssuedRunnerBinding) -> Result<(), AnyError> {
     let mut refs = vec![
@@ -102,6 +104,37 @@ fn runner_doc_from_task(document: &planning::TaskDocument) -> runner::RunnerTask
     };
     runner::RunnerTaskDocument::new(document.path.clone(), class.to_owned(), document.digest.clone(), document.body.clone())
 }
+fn augment_planning_issue_with_context_documents(issued: &mut runner::IssuedRunnerAction, input_set: &planning::TaskInputSet) -> Result<(), runner::RunnerError> {
+    let context = input_set.context_documents.first().ok_or_else(|| runner::RunnerError::InvalidSpec("missing planning context".to_owned()))?;
+    let authority_docs = input_set.authority_documents.iter().map(runner_doc_from_task).collect::<Vec<_>>();
+    let context_docs = input_set.context_documents.iter().map(runner_doc_from_task).collect::<Vec<_>>();
+    let context_digest = serde_json::to_vec(&serde_json::json!({"authority_set_id":input_set.authority_set_id,"authority_documents":authority_docs,"context_documents":context_docs})).map(|data| sha256_hex_local(&data)).map_err(|error| runner::RunnerError::InvalidSpec(format!("planning context digest json: {error}")))?;
+    let prompt_path = PathBuf::from(&issued.binding.prompt_path);
+    let mut prompt = fs::read_to_string(&prompt_path).map_err(|error| runner::RunnerError::Io(format!("planning prompt read {}: {error}", prompt_path.display())))?;
+    if input_set.context_documents.len() > 1 {
+        prompt.push_str("\n## Additional grounding context documents (non-authority)\n");
+        for (index, document) in input_set.context_documents.iter().enumerate().skip(1) {
+            let doc = runner_doc_from_task(document);
+            prompt.push_str(&format!("\n### CONTEXT {}\npath: {}\ndigest: {}\nbody_digest: {}\nThis document is context only; do not emit it as a Work atom.\n```text\n{}\n```\n", index + 1, doc.path, doc.digest, doc.body_digest, doc.body));
+        }
+    }
+    let prompt_digest = sha256_hex_local(prompt.as_bytes());
+    fs::write(&prompt_path, prompt).map_err(|error| runner::RunnerError::Io(format!("planning prompt write {}: {error}", prompt_path.display())))?;
+    let spec_path = PathBuf::from(&issued.binding.spec_path);
+    let spec_text = fs::read_to_string(&spec_path).map_err(|error| runner::RunnerError::Io(format!("planning spec read {}: {error}", spec_path.display())))?;
+    let mut spec: serde_json::Value = serde_json::from_str(&spec_text).map_err(|error| runner::RunnerError::InvalidSpec(format!("planning spec json: {error}")))?;
+    spec["context_document"] = serde_json::to_value(runner_doc_from_task(context)).map_err(|error| runner::RunnerError::InvalidSpec(format!("context alias json: {error}")))?;
+    spec["context_documents"] = serde_json::to_value(&context_docs).map_err(|error| runner::RunnerError::InvalidSpec(format!("context documents json: {error}")))?;
+    spec["context_digest"] = serde_json::Value::String(context_digest.clone());
+    spec["prompt_digest"] = serde_json::Value::String(prompt_digest.clone());
+    let spec_bytes = serde_json::to_vec_pretty(&spec).map_err(|error| runner::RunnerError::InvalidSpec(format!("planning spec encode: {error}")))?;
+    let spec_digest = sha256_hex_local(&spec_bytes);
+    fs::write(&spec_path, spec_bytes).map_err(|error| runner::RunnerError::Io(format!("planning spec write {}: {error}", spec_path.display())))?;
+    issued.binding.prompt_digest = prompt_digest;
+    issued.binding.context_digest = context_digest;
+    issued.binding.spec_digest = spec_digest;
+    Ok(())
+}
 fn next_planning_assignment(workstream: &str, state: &CoreState) -> Option<AgentAssignment> {
     planning_assignments(workstream, &planning::AssignmentPlan::d72_default()).into_iter().find(|assignment| !state.state.refs.contains_key(&Ref(assignment.assignment_id.clone())))
 }
@@ -110,8 +143,9 @@ fn write_planning_manifest(workstream: &str, input_set: &planning::TaskInputSet,
     let dir = workstream_dir(workstream); fs::create_dir_all(&dir)?;
     let context = input_set.context_documents.first().ok_or("missing context document")?;
     let authority_docs = input_set.authority_documents.iter().map(runner_doc_from_task).map(|doc| serde_json::to_value(doc).expect("runner doc json")).collect::<Vec<_>>();
+    let context_docs = input_set.context_documents.iter().map(runner_doc_from_task).map(|doc| serde_json::to_value(doc).expect("runner doc json")).collect::<Vec<_>>();
     let context_doc = runner_doc_from_task(context);
-    let body = serde_json::json!({"workstream":workstream,"authority_set_id":input_set.authority_set_id,"authority_paths":input_set.authority_documents.iter().map(|item| &item.path).collect::<Vec<_>>(),"authority_documents":authority_docs,"context":{"path":context.path,"class":"context/non-authority","digest":context.digest},"context_document":context_doc,"file_digests":input_set.authority_documents.iter().chain(input_set.context_documents.iter()).map(|item| serde_json::json!({"path":item.path,"class":format!("{:?}", item.class),"digest":item.digest})).collect::<Vec<_>>(),"atoms":inventory.atoms.len(),"verified_facts":dossier.verified_facts,"assignments":assignments.iter().map(|item| &item.assignment_id).collect::<Vec<_>>()});
+    let body = serde_json::json!({"workstream":workstream,"authority_set_id":input_set.authority_set_id,"authority_paths":input_set.authority_documents.iter().map(|item| &item.path).collect::<Vec<_>>(),"authority_documents":authority_docs,"context_documents":context_docs,"context":{"path":context.path,"class":"context/non-authority","digest":context.digest},"context_document":context_doc,"file_digests":input_set.authority_documents.iter().chain(input_set.context_documents.iter()).map(|item| serde_json::json!({"path":item.path,"class":format!("{:?}", item.class),"digest":item.digest})).collect::<Vec<_>>(),"atoms":inventory.atoms.len(),"verified_facts":dossier.verified_facts,"assignments":assignments.iter().map(|item| &item.assignment_id).collect::<Vec<_>>()});
     fs::write(dir.join("planning-manifest.json"), serde_json::to_vec_pretty(&body)?)?;
     Ok(())
 }
@@ -120,8 +154,11 @@ fn read_planning_input_set(workstream: &str) -> Result<planning::TaskInputSet, S
     let value: serde_json::Value = serde_json::from_str(&text).map_err(|error| error.to_string())?;
     let authority_set_id = value["authority_set_id"].as_str().ok_or_else(|| "missing authority_set_id".to_owned())?.to_owned();
     let authority_documents = value["authority_documents"].as_array().ok_or_else(|| "missing authority_documents".to_owned())?.iter().enumerate().map(|(index, item)| task_doc_from_manifest(item, planning::TaskDocumentClass::Authority, &authority_set_id, index)).collect::<Result<Vec<_>, _>>()?;
-    let context_document = task_doc_from_manifest(&value["context_document"], planning::TaskDocumentClass::ContextNonAuthority, &authority_set_id, 3)?;
-    Ok(planning::TaskInputSet { authority_set_id, authority_documents, context_documents: vec![context_document] })
+    let context_documents = match value.get("context_documents").and_then(|item| item.as_array()) {
+        Some(items) => items.iter().enumerate().map(|(index, item)| task_doc_from_manifest(item, planning::TaskDocumentClass::ContextNonAuthority, &authority_set_id, authority_documents.len() + index)).collect::<Result<Vec<_>, _>>()?,
+        None => vec![task_doc_from_manifest(&value["context_document"], planning::TaskDocumentClass::ContextNonAuthority, &authority_set_id, authority_documents.len())?],
+    };
+    Ok(planning::TaskInputSet { authority_set_id, authority_documents, context_documents })
 }
 fn task_doc_from_manifest(value: &serde_json::Value, class: planning::TaskDocumentClass, authority_set_id: &str, index: usize) -> Result<planning::TaskDocument, String> {
     let path = value["path"].as_str().ok_or_else(|| format!("manifest doc {index} missing path"))?.to_owned();

@@ -1,11 +1,16 @@
-use std::{cell::Cell, fs};
+use std::{
+    cell::Cell,
+    fs,
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use drivers::planning::{
-    accept_questions, accept_questions_payload, admit_question, boundary_runtime,
-    inline_task_input, p1_inventory, p2_ground, question_class_from_d72,
-    require_material_backlinks, require_total_dispositions, AssignmentPlan, Atom, AtomKind,
-    Backlink, Disposition, MaterialPlanElement, PlanningDeclarations, PlanningError, QuestionClass,
-    QuestionNomination, RepositoryEvidence, TaskAuthority,
+    AssignmentPlan, Atom, AtomKind, Backlink, Disposition, MaterialPlanElement,
+    PlanningDeclarations, PlanningError, QuestionClass, QuestionNomination, RepositoryEvidence,
+    TaskAuthority, TaskDocumentClass, TaskInputSet, accept_questions, accept_questions_payload,
+    admit_question, boundary_runtime, inline_task_input, p1_inventory, p2_ground,
+    question_class_from_d72, require_material_backlinks, require_total_dispositions,
 };
 use kernel::generated::{PlanningQuestion, PlanningQuestionClass, Questions};
 
@@ -208,4 +213,256 @@ fn assignment_cap_holds() {
         too_many.validate(25),
         Err(PlanningError::AssignmentCap { total: 26, cap: 25 })
     );
+}
+
+#[test]
+fn planning_variadic_task_file_packs_accept_two_three_seven_and_marker_order() {
+    let root = temp_repo("planning-variadic-accept");
+    write_doc(
+        &root,
+        "C1.md",
+        "[context/non-authority]",
+        "set-a",
+        "context one",
+    );
+    write_doc(
+        &root,
+        "C2.md",
+        "[context/non-authority]",
+        "set-a",
+        "context two",
+    );
+    for index in 1..=6 {
+        write_doc(
+            &root,
+            &format!("A{index}.md"),
+            "[authority]",
+            "set-a",
+            &format!("authority {index}"),
+        );
+    }
+
+    let two = classify(&root, ["C1.md", "A1.md"]);
+    assert_pack(&two, 1, 1);
+    assert_eq!(two.context_documents[0].path, "C1.md");
+    assert_eq!(two.authority_documents[0].path, "A1.md");
+
+    let three = classify(&root, ["A1.md", "C1.md", "C2.md"]);
+    assert_pack(&three, 1, 2);
+
+    let seven = classify(
+        &root,
+        [
+            "A1.md", "A2.md", "A3.md", "A4.md", "A5.md", "A6.md", "C1.md",
+        ],
+    );
+    assert_pack(&seven, 6, 1);
+
+    let interleaved = classify(&root, ["C1.md", "A1.md", "C2.md", "A2.md"]);
+    assert_pack(&interleaved, 2, 2);
+    assert_eq!(
+        interleaved
+            .context_documents
+            .iter()
+            .map(|doc| doc.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["C1.md", "C2.md"]
+    );
+    assert_eq!(
+        interleaved
+            .authority_documents
+            .iter()
+            .map(|doc| doc.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["A1.md", "A2.md"]
+    );
+}
+
+#[test]
+fn planning_variadic_task_file_packs_reject_missing_classes_mismatch_forbidden_and_duplicate_precisely() {
+    let root = temp_repo("planning-variadic-reject");
+    write_doc(&root, "A1.md", "[authority]", "set-a", "authority one");
+    write_doc(&root, "A2.md", "[authority]", "set-a", "authority two");
+    write_doc(&root, "A3.md", "[authority]", "set-a", "authority three");
+    write_doc(&root, "A4.md", "[authority]", "set-a", "authority four");
+    write_doc(&root, "B.md", "[authority]", "set-b", "authority mismatch");
+    write_doc(
+        &root,
+        "C1.md",
+        "[context/non-authority]",
+        "set-a",
+        "context one",
+    );
+    write_doc(
+        &root,
+        "C2.md",
+        "[context/non-authority]",
+        "set-a",
+        "context two",
+    );
+    write_doc(
+        &root,
+        "H.md",
+        "[historical/non-authority]",
+        "set-a",
+        "history",
+    );
+    write_doc(&root, "I.md", "[index/non-authority]", "set-a", "index");
+
+    assert_error_contains(
+        &root,
+        ["C1.md", "C2.md"],
+        "no [authority] document supplied",
+    );
+    assert_error_contains(
+        &root,
+        ["A1.md", "A2.md", "A3.md", "A4.md"],
+        "no [context/non-authority] document supplied",
+    );
+    assert_error_contains(
+        &root,
+        ["A1.md", "B.md", "C1.md"],
+        "authority_set_id mismatch: A1.md=set-a B.md=set-b",
+    );
+    assert_error_contains(
+        &root,
+        ["A1.md", "H.md", "C1.md"],
+        "forbidden [historical/non-authority] input: H.md",
+    );
+    assert_error_contains(
+        &root,
+        ["A1.md", "I.md", "C1.md"],
+        "forbidden [index/non-authority] input: I.md",
+    );
+    assert_error_contains(&root, ["A1.md", "A1.md"], "DuplicateTaskPath");
+}
+
+#[test]
+fn planning_task_header_marker_diagnostics_are_precise() {
+    let root = temp_repo("planning-marker-diagnostics");
+    write_doc(&root, "C.md", "[context/non-authority]", "set-a", "context");
+
+    fs::write(root.join("NO-MARKER.md"), "authority_set_id: set-a\n\nbody")
+        .expect("no marker fixture");
+    assert_error_contains(
+        &root,
+        ["NO-MARKER.md", "C.md"],
+        "unknown-marker:NO-MARKER.md:authority_set_id: set-a",
+    );
+
+    fs::write(
+        root.join("MARKER-LINE-2.md"),
+        "authority_set_id: set-a\n[authority]\n\nbody",
+    )
+    .expect("marker line 2 fixture");
+    assert_error_contains(
+        &root,
+        ["MARKER-LINE-2.md", "C.md"],
+        "unknown-marker:MARKER-LINE-2.md:authority_set_id: set-a",
+    );
+
+    fs::write(root.join("EMPTY.md"), "").expect("empty fixture");
+    assert_error_contains(&root, ["EMPTY.md", "C.md"], "missing-marker:EMPTY.md");
+}
+
+#[test]
+fn planning_variadic_task_file_security_rejections_are_preserved_without_count_masking() {
+    let root = temp_repo("planning-variadic-security");
+    write_doc(&root, "A.md", "[authority]", "set-a", "authority");
+    write_doc(&root, "C.md", "[context/non-authority]", "set-a", "context");
+
+    assert_error_contains_pathbuf(
+        &root,
+        vec![PathBuf::from("../outside.md"), PathBuf::from("C.md")],
+        "TaskPath",
+    );
+    assert_error_contains_pathbuf(
+        &root,
+        vec![PathBuf::from("bad\\path.md"), PathBuf::from("C.md")],
+        "TaskPath",
+    );
+
+    fs::write(
+        root.join("BOM.md"),
+        "\u{feff}[authority]\nauthority_set_id: set-a\n\nbody",
+    )
+    .expect("bom fixture");
+    assert_error_contains(&root, ["BOM.md", "C.md"], "bom:BOM.md");
+
+    fs::write(
+        root.join("CRLF.md"),
+        "[authority]\r\nauthority_set_id: set-a\r\n\r\nbody",
+    )
+    .expect("crlf fixture");
+    assert_error_contains(&root, ["CRLF.md", "C.md"], "crlf:CRLF.md");
+
+    fs::create_dir(root.join("DIR.md")).expect("dir fixture");
+    assert_error_contains(&root, ["DIR.md", "C.md"], "not-regular-file:DIR.md");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        symlink(root.join("A.md"), root.join("LINK.md")).expect("symlink fixture");
+        assert_error_contains(&root, ["LINK.md", "C.md"], "symlink:LINK.md");
+    }
+}
+
+fn assert_pack(input: &TaskInputSet, authority_count: usize, context_count: usize) {
+    assert_eq!(input.authority_set_id, "set-a");
+    assert_eq!(input.authority_documents.len(), authority_count);
+    assert_eq!(input.context_documents.len(), context_count);
+    assert!(
+        input
+            .authority_documents
+            .iter()
+            .all(|doc| doc.class == TaskDocumentClass::Authority)
+    );
+    assert!(
+        input
+            .context_documents
+            .iter()
+            .all(|doc| doc.class == TaskDocumentClass::ContextNonAuthority)
+    );
+}
+
+fn classify<const N: usize>(root: &Path, names: [&str; N]) -> TaskInputSet {
+    drivers::planning::classify_task_file_pack(root, &paths(names)).expect("classified")
+}
+
+fn assert_error_contains<const N: usize>(root: &Path, names: [&str; N], needle: &str) {
+    assert_error_contains_pathbuf(root, paths(names), needle);
+}
+
+fn assert_error_contains_pathbuf(root: &Path, paths: Vec<PathBuf>, needle: &str) {
+    let error = drivers::planning::classify_task_file_pack(root, &paths)
+        .expect_err("classification rejected");
+    let debug = format!("{error:?}");
+    assert!(
+        debug.contains(needle),
+        "expected error {debug:?} to contain {needle:?}"
+    );
+}
+
+fn paths<const N: usize>(names: [&str; N]) -> Vec<PathBuf> {
+    names.into_iter().map(PathBuf::from).collect()
+}
+
+fn write_doc(root: &Path, name: &str, marker: &str, id: &str, body: &str) {
+    fs::write(root.join(name), doc(marker, id, body)).expect("write doc");
+}
+
+fn doc(marker: &str, id: &str, body: &str) -> String {
+    format!("{marker}\nauthority_set_id: {id}\n\n{body}")
+}
+
+fn temp_repo(name: &str) -> PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target/test-tmp")
+        .join(format!("pi-autopilot-{name}-{unique}"));
+    fs::create_dir_all(&root).expect("temp repo");
+    root
 }

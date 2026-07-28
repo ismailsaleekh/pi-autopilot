@@ -2,15 +2,18 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use drivers::runner::{child, planning_paths, role_builtin_tool_names, session_id_for};
-use kernel::generated::{ContractId, Id, ModeId};
+use drivers::seam::{self, CoreState};
+use kernel::generated::{ContractId, CoreToHostSpawnPayload, Id, ModeId, SeamEnvelope};
 use serde_json::{json, Value};
 use sha2::{Digest as ShaDigest, Sha256};
 
 static PATH_LOCK: Mutex<()> = Mutex::new(());
+static CWD_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn fake_pi_journey_writes_identity_carrier_and_isolated_exact_args() {
@@ -85,6 +88,119 @@ console.log(JSON.stringify({{type:'agent_end', messages:[message], willRetry:fal
         PathBuf::from(argv_record["cwd"].as_str().expect("cwd")),
         root
     );
+}
+
+#[test]
+fn real_core_agent_run_accepts_variadic_authority_spec() {
+    let root = temp_root("runner-variadic-real-core");
+    write_fake_pi(&root, &success_fake_pi(&transcript("planning.task-atoms.v1")));
+    let context_document = doc(
+        "CONTEXT.md",
+        "context/non-authority",
+        "CONTEXT-SENTINEL-UNIQUE",
+    );
+    let authority_documents = (1..=6)
+        .map(|index| doc(&format!("TASK-{index}.md"), "authority", &format!("AUTHORITY-{index}")))
+        .collect::<Vec<_>>();
+    let expected_context_digest = sha_json(&json!({
+        "authority_set_id":"set-a",
+        "authority_documents":authority_documents.clone(),
+        "context_document":context_document.clone(),
+    }));
+    let spec = write_planning_spec(
+        &root,
+        |mut value| {
+            value["authority_documents"] = json!(authority_documents);
+            value["context_digest"] = json!(expected_context_digest);
+            value
+        },
+        "planning.task-atoms.v1",
+        "gpt-5.5",
+    );
+
+    let output = with_fake_path(&root, || {
+        Command::new(env!("CARGO_BIN_EXE_autopilot-core"))
+            .args(["agent-run", "--spec"])
+            .arg(&spec)
+            .output()
+            .expect("run real autopilot-core agent-run")
+    });
+    assert!(
+        output.status.success(),
+        "real autopilot-core agent-run rejected variadic spec status={} stderr={} stdout={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn autopilot_plan_preserves_multiple_context_documents_in_manifest_spec_and_prompt() {
+    let _guard = CWD_LOCK.lock().expect("cwd lock");
+    let root = temp_root("runner-plan-multi-context");
+    for index in 1..=6 {
+        write_task_file(
+            &root,
+            &format!("A{index}.md"),
+            "[authority]",
+            "set-a",
+            &format!("AUTHORITY-{index}"),
+        );
+    }
+    write_task_file(&root, "C1.md", "[context/non-authority]", "set-a", "CTX1");
+    write_task_file(&root, "C2.md", "[context/non-authority]", "set-a", "CTX2");
+    git_init(&root);
+    unsafe {
+        std::env::set_var(
+            "AUTOPILOT_NODE_EXECUTABLE",
+            std::env::current_exe().expect("current exe"),
+        );
+        std::env::set_var(
+            "AUTOPILOT_AGENT_RUNNER_WRAPPER",
+            std::env::current_exe().expect("current exe"),
+        );
+    }
+
+    let previous = std::env::current_dir().expect("current dir");
+    std::env::set_current_dir(&root).expect("chdir root");
+    let mut state = CoreState::open(None).expect("core state");
+    let envelope = send_command(
+        &mut state,
+        "autopilot-plan main A1.md A2.md A3.md A4.md A5.md A6.md C1.md C2.md",
+    );
+    std::env::set_current_dir(previous).expect("restore cwd");
+
+    assert_eq!(envelope.kind, "spawn", "payload={}", envelope.payload);
+    let spawn: CoreToHostSpawnPayload =
+        serde_json::from_value(envelope.payload).expect("spawn payload");
+    assert_eq!(spawn.action.assignment_id.0, "planning-main-task-extractor-01");
+
+    let manifest: Value = serde_json::from_slice(
+        &fs::read(root.join(".pi/autopilot/main/planning-manifest.json")).expect("manifest"),
+    )
+    .expect("manifest json");
+    let manifest_contexts = manifest["context_documents"].as_array().expect("manifest contexts");
+    assert_eq!(manifest_contexts.len(), 2);
+    assert_eq!(manifest_contexts[0]["path"], "C1.md");
+    assert_eq!(manifest_contexts[1]["path"], "C2.md");
+    assert_eq!(manifest["context"]["path"], "C1.md");
+    assert_eq!(manifest["context_document"]["path"], "C1.md");
+
+    let spec_path = root.join(".pi/autopilot/main/planning/specs/planning-main-task-extractor-01.json");
+    let spec: Value = serde_json::from_slice(&fs::read(&spec_path).expect("spec"))
+        .expect("spec json");
+    let spec_contexts = spec["context_documents"].as_array().expect("spec contexts");
+    assert_eq!(spec_contexts.len(), 2);
+    assert_eq!(spec_contexts[0]["body"], "CTX1");
+    assert_eq!(spec_contexts[1]["body"], "CTX2");
+    assert_eq!(spec["context_document"]["path"], "C1.md");
+
+    let prompt = fs::read_to_string(
+        root.join(".pi/autopilot/main/planning/prompts/planning-main-task-extractor-01.md"),
+    )
+    .expect("planning prompt");
+    assert!(prompt.contains("CTX1"), "{prompt}");
+    assert!(prompt.contains("CTX2"), "{prompt}");
 }
 
 #[test]
@@ -669,6 +785,39 @@ fn success_fake_pi(output: &str) -> String {
     format!(
         "#!/usr/bin/env node\nconst text={output:?};\nconst message={{role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{{type:'text', text}}], stopReason:'stop'}};\nconsole.log(JSON.stringify({{type:'message_end', message}}));\nconsole.log(JSON.stringify({{type:'turn_end', message, toolResults:[]}}));\nconsole.log(JSON.stringify({{type:'agent_end', messages:[message], willRetry:false}}));\nconsole.log(JSON.stringify({{type:'agent_settled'}}));\n"
     )
+}
+
+fn send_command(state: &mut CoreState, raw: &str) -> SeamEnvelope {
+    let frame = json!({"v":1,"id":1,"kind":"command","payload":{"raw":raw,"background_capabilities":{"api_version":1,"run":true,"run_is_agent":true,"run_completion_trigger":true,"status":true,"logs":true,"logs_bounded":true,"kill":true}}});
+    seam::handle_line(&frame.to_string(), state).expect("handle command")
+}
+
+fn write_task_file(root: &Path, name: &str, marker: &str, id: &str, body: &str) {
+    fs::write(root.join(name), format!("{marker}\nauthority_set_id: {id}\n\n{body}"))
+        .expect("write task file");
+}
+
+fn git_init(root: &Path) {
+    git(root, &["init"]);
+    git(root, &["config", "user.email", "runner-child@example.invalid"]);
+    git(root, &["config", "user.name", "Runner Child"]);
+    git(root, &["add", "."]);
+    git(root, &["commit", "-m", "task pack"]);
+}
+
+fn git(root: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .expect("git");
+    assert!(
+        output.status.success(),
+        "git {:?} failed stdout={} stderr={}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn write_fake_pi(root: &Path, body: &str) {
