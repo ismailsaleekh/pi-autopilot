@@ -558,22 +558,6 @@ fn response_status(response: &SeamEnvelope) -> String {
         .to_owned()
 }
 
-fn assert_spawn_assignment(response: &SeamEnvelope, assignment_id: &str) {
-    assert_eq!(
-        response.kind, "spawn",
-        "expected spawn response: {response:?}"
-    );
-    assert_eq!(
-        response
-            .payload
-            .get("action")
-            .and_then(|action| action.get("assignment_id"))
-            .and_then(serde_json::Value::as_str),
-        Some(assignment_id),
-        "spawn should launch the next planning assignment: {response:?}"
-    );
-}
-
 fn has_attempt_event(events: &[serde_json::Value], event: &str) -> bool {
     events
         .iter()
