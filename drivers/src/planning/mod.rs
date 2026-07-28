@@ -388,28 +388,84 @@ fn validate_planning_waves(
             )));
         }
     }
-    let all_wave_names = waves
-        .iter()
-        .map(|wave| wave.id.clone())
-        .collect::<BTreeSet<_>>();
-    let mut seen = BTreeSet::new();
     for wave in waves {
         for dependency in &wave.dependencies {
-            if !all_wave_names.contains(dependency) {
+            if dependency == &wave.id {
+                return Err(PlanningError::BadDeclaration(format!(
+                    "wave {} depends on itself",
+                    wave.id
+                )));
+            }
+            if !wave_names.contains(dependency) {
                 return Err(PlanningError::BadDeclaration(format!(
                     "wave {} references unknown dependency {dependency}",
                     wave.id
                 )));
             }
-            if !seen.contains(dependency) {
-                return Err(PlanningError::BadDeclaration(format!(
-                    "wave {} dependency {dependency} must appear earlier",
-                    wave.id
-                )));
-            }
         }
-        seen.insert(wave.id.clone());
     }
+    validate_planning_wave_acyclic(waves)
+}
+
+fn validate_planning_wave_acyclic(waves: &[PlanningWaveDeclaration]) -> Result<(), PlanningError> {
+    let dependencies_by_wave = waves
+        .iter()
+        .map(|wave| (wave.id.as_str(), wave.dependencies.as_slice()))
+        .collect::<BTreeMap<_, _>>();
+    let mut visiting = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    let mut stack = Vec::new();
+    for wave in waves {
+        visit_planning_wave_dependency(
+            wave.id.as_str(),
+            &dependencies_by_wave,
+            &mut visiting,
+            &mut visited,
+            &mut stack,
+        )?;
+    }
+    Ok(())
+}
+
+fn visit_planning_wave_dependency<'a>(
+    wave_id: &'a str,
+    dependencies_by_wave: &BTreeMap<&'a str, &'a [String]>,
+    visiting: &mut BTreeSet<&'a str>,
+    visited: &mut BTreeSet<&'a str>,
+    stack: &mut Vec<&'a str>,
+) -> Result<(), PlanningError> {
+    if visited.contains(wave_id) {
+        return Ok(());
+    }
+    if visiting.contains(wave_id) {
+        let cycle_start = stack
+            .iter()
+            .position(|stacked| *stacked == wave_id)
+            .unwrap_or(0);
+        let mut cycle = stack[cycle_start..].to_vec();
+        cycle.push(wave_id);
+        return Err(PlanningError::BadDeclaration(format!(
+            "planning_wave dependency cycle: {}",
+            cycle.join(" -> ")
+        )));
+    }
+    visiting.insert(wave_id);
+    stack.push(wave_id);
+    let dependencies = dependencies_by_wave
+        .get(wave_id)
+        .expect("wave dependency map is built from validated wave ids");
+    for dependency in *dependencies {
+        visit_planning_wave_dependency(
+            dependency.as_str(),
+            dependencies_by_wave,
+            visiting,
+            visited,
+            stack,
+        )?;
+    }
+    stack.pop();
+    visiting.remove(wave_id);
+    visited.insert(wave_id);
     Ok(())
 }
 
@@ -525,6 +581,9 @@ pub fn next_planning_wave(
 ) -> Result<Vec<PlanningAgentAssignment>, PlanningWaveFailure> {
     let effective_cap = cap.min(manifest.planning_wave_cap);
     for wave in &manifest.waves {
+        if !planning_wave_dependencies_complete(manifest, wave, refs) {
+            continue;
+        }
         let status = barrier_status(manifest, wave, refs);
         match status {
             PlanningBarrierStatus::Complete => continue,
@@ -550,6 +609,22 @@ pub fn next_planning_wave(
         }
     }
     Ok(Vec::new())
+}
+
+fn planning_wave_dependencies_complete(
+    manifest: &PlanningManifest,
+    wave: &PlanningWaveDeclaration,
+    refs: &PlanningRefs,
+) -> bool {
+    wave.dependencies.iter().all(|dependency| {
+        manifest
+            .waves
+            .iter()
+            .find(|candidate| candidate.id == *dependency)
+            .is_some_and(|dependency_wave| {
+                barrier_status(manifest, dependency_wave, refs) == PlanningBarrierStatus::Complete
+            })
+    })
 }
 
 fn blocked_wave(

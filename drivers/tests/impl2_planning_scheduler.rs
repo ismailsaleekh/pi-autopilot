@@ -1,8 +1,9 @@
 use std::collections::BTreeSet;
 
 use drivers::planning::{
-    next_planning_wave, planning_policy, PlanningAcceptedRef, PlanningIssuedRef, PlanningManifest,
-    PlanningRefs, PlanningTerminalFailureRef, PlanningWaveFailure,
+    next_planning_wave, planning_policy, PlanningAcceptedRef, PlanningError, PlanningIssuedRef,
+    PlanningManifest, PlanningPolicy, PlanningRefs, PlanningTerminalFailureRef,
+    PlanningWaveFailure,
 };
 
 fn manifest(workstream: &str) -> PlanningManifest {
@@ -19,6 +20,56 @@ fn by_role<'a>(
         .iter()
         .filter(|assignment| assignment.role == role)
         .collect()
+}
+
+fn manifest_from_kdl(workstream: &str, text: &str) -> PlanningManifest {
+    let policy = PlanningPolicy::parse(text).expect("edited planning policy parses");
+    PlanningManifest::from_policy(workstream, &policy).expect("manifest from edited policy")
+}
+
+fn accept_roles(manifest: &PlanningManifest, roles: &[&str]) -> PlanningRefs {
+    let selected_roles = roles.iter().copied().collect::<BTreeSet<_>>();
+    let mut issued = Vec::new();
+    let mut accepted = BTreeSet::new();
+    for (index, assignment) in manifest
+        .assignments
+        .iter()
+        .filter(|assignment| selected_roles.contains(assignment.role.as_str()))
+        .enumerate()
+    {
+        let action_id = format!("accepted-action-{index}");
+        issued.push(PlanningIssuedRef {
+            assignment_id: assignment.assignment_id.clone(),
+            action_id: action_id.clone(),
+            run_revision: 1,
+        });
+        accepted.insert(PlanningAcceptedRef {
+            assignment_id: assignment.assignment_id.clone(),
+            action_id,
+            run_revision: 1,
+        });
+    }
+    PlanningRefs {
+        issued,
+        accepted,
+        terminal_failures: BTreeSet::new(),
+        activation_refs: BTreeSet::new(),
+    }
+}
+
+fn move_line_before(text: &str, moving: &str, before: &str) -> String {
+    assert_eq!(
+        text.match_indices(moving).count(),
+        1,
+        "planning KDL must contain exactly one moving line"
+    );
+    assert_eq!(
+        text.match_indices(before).count(),
+        1,
+        "planning KDL must contain exactly one target line"
+    );
+    let without_moving = text.replace(moving, "");
+    without_moving.replace(before, &format!("{moving}{before}"))
 }
 
 #[test]
@@ -51,14 +102,18 @@ fn planning_scheduler_respects_role_barrier_and_partial_topup() {
         activation_refs: BTreeSet::new(),
     };
 
-    let next = next_planning_wave(&manifest, &refs, 4).expect("P1 top-up remains schedulable");
+    let next = next_planning_wave(&manifest, &refs, 64).expect("P1 top-up remains schedulable");
     assert_eq!(
         next.len(),
-        1,
-        "one accepted P1 member frees exactly one cap slot"
+        3,
+        "cap headroom must top up only unfinished P1 members"
     );
     assert_eq!(next[0].assignment_id, p1[4].assignment_id);
-    assert_eq!(next[0].role, "task-extractor");
+    assert_eq!(next[1].assignment_id, p1[5].assignment_id);
+    assert_eq!(next[2].assignment_id, p1[6].assignment_id);
+    assert!(next
+        .iter()
+        .all(|assignment| assignment.role == "task-extractor"));
     assert!(next
         .iter()
         .all(|assignment| assignment.role != "repository-scout"));
@@ -130,6 +185,15 @@ fn planning_compiler_count_and_wave_graph_are_data_defined() {
         manifest
             .waves
             .iter()
+            .find(|wave| wave.id == "P2.scout")
+            .expect("scout wave declared in data")
+            .dependencies,
+        vec!["P1.extract".to_owned()]
+    );
+    assert_eq!(
+        manifest
+            .waves
+            .iter()
             .find(|wave| wave.id == "P4.compile")
             .expect("compile wave declared in data")
             .dependencies,
@@ -149,6 +213,120 @@ fn planning_compiler_count_and_wave_graph_are_data_defined() {
     let edited_manifest = PlanningManifest::from_policy("scheduler-data-edited", &edited_policy)
         .expect("edited manifest from policy");
     assert_eq!(by_role(&edited_manifest, "plan-compiler").len(), 4);
+}
+
+#[test]
+fn scout_wave_blocked_until_every_p1_member_accepted() {
+    let scout_line =
+        "planning_wave \"P2.scout\" role=\"repository-scout\" depends=\"P1.extract\"\n";
+    let extract_line = "planning_wave \"P1.extract\" role=\"task-extractor\"\n";
+    let reordered_kdl = move_line_before(
+        include_str!("../../data/planning.kdl"),
+        scout_line,
+        extract_line,
+    );
+    let manifest = manifest_from_kdl("scheduler-scout-deps", &reordered_kdl);
+    let next = next_planning_wave(&manifest, &PlanningRefs::default(), 64)
+        .expect("dependency-blocked scout leaves P1 schedulable");
+
+    assert_eq!(next.len(), 7);
+    assert!(next
+        .iter()
+        .all(|assignment| assignment.role == "task-extractor"));
+}
+
+#[test]
+fn compile_wave_requires_all_three_declared_dependencies() {
+    let compile_line = "planning_wave \"P4.compile\" role=\"plan-compiler\" depends=\"P1.extract,P2.curate,P3.resolve\"\n";
+    let resolve_line = "planning_wave \"P3.resolve\" role=\"contradiction-resolver\" depends=\"P2.curate\" activation_ref=\"planning-resolution-required\"\n";
+    let reordered_kdl = move_line_before(
+        include_str!("../../data/planning.kdl"),
+        compile_line,
+        resolve_line,
+    );
+    let manifest = manifest_from_kdl("scheduler-compile-deps", &reordered_kdl);
+
+    let mut two_dependency_refs = accept_roles(
+        &manifest,
+        &["task-extractor", "repository-scout", "context-curator"],
+    );
+    two_dependency_refs
+        .activation_refs
+        .insert("planning-resolution-required".to_owned());
+    let blocked_by_active_resolution = next_planning_wave(&manifest, &two_dependency_refs, 64)
+        .expect("active P3 dependency blocks compile and schedules resolution");
+    assert_eq!(blocked_by_active_resolution.len(), 3);
+    assert!(blocked_by_active_resolution
+        .iter()
+        .all(|assignment| assignment.role == "contradiction-resolver"));
+
+    let inactive_resolution_refs = accept_roles(
+        &manifest,
+        &["task-extractor", "repository-scout", "context-curator"],
+    );
+    let compile_after_inactive_resolution =
+        next_planning_wave(&manifest, &inactive_resolution_refs, 64)
+            .expect("inactive P3 dependency is complete for compile");
+    assert_eq!(compile_after_inactive_resolution.len(), 5);
+    assert!(compile_after_inactive_resolution
+        .iter()
+        .all(|assignment| assignment.role == "plan-compiler"));
+
+    let mut all_dependency_refs = accept_roles(
+        &manifest,
+        &[
+            "task-extractor",
+            "repository-scout",
+            "context-curator",
+            "contradiction-resolver",
+        ],
+    );
+    all_dependency_refs
+        .activation_refs
+        .insert("planning-resolution-required".to_owned());
+    let compile_after_all_dependencies = next_planning_wave(&manifest, &all_dependency_refs, 64)
+        .expect("all compile dependencies satisfied");
+    assert_eq!(compile_after_all_dependencies.len(), 5);
+    assert!(compile_after_all_dependencies
+        .iter()
+        .all(|assignment| assignment.role == "plan-compiler"));
+}
+
+#[test]
+fn unknown_or_cyclic_wave_dependency_is_rejected_at_parse() {
+    let base = include_str!("../../data/planning.kdl");
+    let unknown_dependency = base.replace(
+        "planning_wave \"P2.scout\" role=\"repository-scout\" depends=\"P1.extract\"",
+        "planning_wave \"P2.scout\" role=\"repository-scout\" depends=\"P1.missing\"",
+    );
+    assert_eq!(
+        PlanningPolicy::parse(&unknown_dependency),
+        Err(PlanningError::BadDeclaration(
+            "wave P2.scout references unknown dependency P1.missing".to_owned()
+        ))
+    );
+
+    let self_dependency = base.replace(
+        "planning_wave \"P2.scout\" role=\"repository-scout\" depends=\"P1.extract\"",
+        "planning_wave \"P2.scout\" role=\"repository-scout\" depends=\"P2.scout\"",
+    );
+    assert_eq!(
+        PlanningPolicy::parse(&self_dependency),
+        Err(PlanningError::BadDeclaration(
+            "wave P2.scout depends on itself".to_owned()
+        ))
+    );
+
+    let cycle = base.replace(
+        "planning_wave \"P1.extract\" role=\"task-extractor\"",
+        "planning_wave \"P1.extract\" role=\"task-extractor\" depends=\"P2.scout\"",
+    );
+    assert_eq!(
+        PlanningPolicy::parse(&cycle),
+        Err(PlanningError::BadDeclaration(
+            "planning_wave dependency cycle: P1.extract -> P2.scout -> P1.extract".to_owned()
+        ))
+    );
 }
 
 #[test]
