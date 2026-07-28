@@ -108,6 +108,10 @@ name = "runner_child"
 path = "../tests/runner_child.rs"
 
 [[test]]
+name = "runner_rpc"
+path = "../tests/runner_rpc.rs"
+
+[[test]]
 name = "checkpoint_resume"
 path = "../tests/checkpoint_resume.rs"
 

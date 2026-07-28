@@ -17,6 +17,7 @@ use crate::roster::{self, Roster};
 use crate::vcs::GitVcs;
 
 pub mod child;
+pub mod rpc;
 
 const ROLES_KDL: &str = include_str!("../../../data/roles.kdl");
 const DEFAULT_BG_TIMEOUT_SECONDS: u32 = 3600;
