@@ -4,7 +4,7 @@ Inventory the assigned semantic lens.
 
 ## Additional context
 
-Apply exactly one lens parameter: WORK, DECISION, CONSTRAINT, ACCEPTANCE, PREMISE, QUESTION, or REFERENCE.
+Apply exactly one lens parameter: `{{MODE_PARAMETER}}`.
 
 ## Mode procedure
 

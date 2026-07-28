@@ -14,6 +14,7 @@ const DRIVER_TABLES_KDL: &str = include_str!("../../../data/driver-tables.kdl");
 pub struct PromptInput {
     pub role_id: String,
     pub mode_id: String,
+    pub mode_parameter: Option<String>,
     pub assignment_revision: String,
     pub plan_revision: String,
     pub runtime_revision: u64,
@@ -36,6 +37,8 @@ pub enum PromptError {
     MissingTemplate(String),
     Io(String),
     BadSections(String),
+    ModeParameterTemplate(String),
+    ModeParameterBinding(String),
 }
 
 pub fn render(input: &PromptInput) -> Result<RenderedPrompt, PromptError> {
@@ -77,6 +80,7 @@ impl Renderer {
         )?;
         check_sections(&base, "prompt.base-sections", &role.id)?;
         check_sections(&mode, "prompt.mode-sections", &input.mode_id)?;
+        let mode = bind_mode_parameter(role, input, &mode)?;
         let mut out = String::from("# Autopilot rendered prompt\n\n");
         out.push_str(&record(input, role));
         layer(&mut out, 1, &["glo", "bal doctrine"].concat(), &doctrine);
@@ -114,17 +118,62 @@ impl Renderer {
 }
 
 fn record(input: &PromptInput, role: &Role) -> String {
+    let mode_parameter = input.mode_parameter.as_deref().unwrap_or("<none>");
     format!(
-        "renderer_version: {RENDERER_VERSION}\nrole: {}@{}\nmode: {}@1\nassignment_revision: {}\nplan_revision: {}\nruntime_revision: {}\ncontext_manifest_id: {}\ngit_identity: {}\n\n",
+        "renderer_version: {RENDERER_VERSION}\nrole: {}@{}\nmode: {}@1\nmode_parameter: {}\nassignment_revision: {}\nplan_revision: {}\nruntime_revision: {}\ncontext_manifest_id: {}\ngit_identity: {}\n\n",
         role.id,
         role.version,
         input.mode_id,
+        mode_parameter,
         input.assignment_revision,
         input.plan_revision,
         input.runtime_revision,
         input.context_manifest_id,
         input.git_identity
     )
+}
+
+fn bind_mode_parameter(
+    role: &Role,
+    input: &PromptInput,
+    mode: &str,
+) -> Result<String, PromptError> {
+    const TOKEN: &str = "{{MODE_PARAMETER}}";
+    let token_count = mode.match_indices(TOKEN).count();
+    if role.mode_parameters.is_empty() {
+        if token_count != 0 {
+            return Err(PromptError::ModeParameterTemplate(format!(
+                "{}:{} has token for parameterless role",
+                role.id, input.mode_id
+            )));
+        }
+        if input.mode_parameter.is_some() {
+            return Err(PromptError::ModeParameterBinding(format!(
+                "{}:{} received a mode parameter but declares none",
+                role.id, input.mode_id
+            )));
+        }
+        return Ok(mode.to_owned());
+    }
+    if token_count != 1 {
+        return Err(PromptError::ModeParameterTemplate(format!(
+            "{}:{} expected exactly one {TOKEN} token, found {token_count}",
+            role.id, input.mode_id
+        )));
+    }
+    let Some(value) = input.mode_parameter.as_deref() else {
+        return Err(PromptError::ModeParameterBinding(format!(
+            "{}:{} requires a bound mode parameter",
+            role.id, input.mode_id
+        )));
+    };
+    if !role.mode_parameters.iter().any(|allowed| allowed == value) {
+        return Err(PromptError::ModeParameterBinding(format!(
+            "{}:{} bound mode parameter {value} is not declared for the role",
+            role.id, input.mode_id
+        )));
+    }
+    Ok(mode.replace(TOKEN, value))
 }
 
 fn contract_with_boundaries(

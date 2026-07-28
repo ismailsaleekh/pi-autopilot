@@ -11,3 +11,13 @@ table "prompt.mode-sections" {
 table "planning.d72-question-classes" {
   values "invalidated-decision" "missing-material-decision" "material-underdetermination" "dod-hole" "unsafe-irreversible"
 }
+
+table "planning.mode-parameter-atom-kind" {
+  row parameter="WORK" planning_atom_kind="work"
+  row parameter="DECISION" planning_atom_kind="decision"
+  row parameter="CONSTRAINT" planning_atom_kind="constraint"
+  row parameter="ACCEPTANCE" planning_atom_kind="acceptance"
+  row parameter="PREMISE" planning_atom_kind="premise"
+  row parameter="QUESTION" planning_atom_kind="question"
+  row parameter="REFERENCE" planning_atom_kind="reference"
+}

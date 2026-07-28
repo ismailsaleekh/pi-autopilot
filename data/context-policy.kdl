@@ -1,59 +1,310 @@
-context_policy schema="autopilot.context_policy.v1" revision=1 {
-    role id="implementer" mode="lane-delivery" {
-        mandatory_inline "task-authority"
-        mandatory_inline "approved-plan-unit"
-        mandatory_inline "acceptance-criteria"
-        required_reads "dossier-findings"
-        required_reads "runtime-identity"
-        on_demand "source-anchor"
+context_policy schema="autopilot.context_policy.v1" revision=2 {
+  category id="task-authority" source="task-document" class="authority"
+  category id="repository-context" source="task-document" class="context/non-authority"
+  category id="task-atoms" source="accepted-planning-artifact" boundary="planning.task-atoms.v1" class="planning-artifact"
+  category id="scout-findings" source="accepted-planning-artifact" boundary="planning.scout-dossier.v1" class="planning-artifact"
+  category id="compiler-work-maps" source="accepted-planning-artifact" boundary="planning.work-map.v1" class="planning-artifact"
+  category id="synthesized-work-map" source="accepted-planning-artifact" boundary="planning.work-map.v1" class="planning-artifact"
+  category id="review-verdicts" source="accepted-planning-artifact" boundary="planning.plan-review.v1" class="planning-artifact"
+  category id="contradiction-bundle" source="accepted-planning-artifact" boundary="planning.questions.v1" class="planning-artifact"
+  category id="authority-index" source="package-generated" class="index"
+  category id="artifact-index" source="package-generated" class="index"
+  category id="atom-index" source="package-generated" class="index"
+  category id="assignment-scope" source="package-generated" class="index"
+  category id="criterion-trace-index" source="package-generated" class="index"
+  category id="coverage-index" source="package-generated" class="index"
+  category id="current-manifests" source="package-generated" class="index"
+  category id="manifest-gaps" source="package-generated" class="context-gap"
+  category id="budget-overage" source="package-generated" class="budget"
+  category id="approved-plan-unit" source="package-state" class="execution-artifact"
+  category id="acceptance-criteria" source="package-state" class="authority"
+  category id="dossier-findings" source="package-state" class="planning-artifact"
+  category id="runtime-identity" source="package-state" class="runtime"
+  category id="delivery-evidence" source="package-state" class="evidence"
+  category id="closure-evidence" source="package-state" class="evidence"
+  category id="prior-findings" source="package-state" class="review-artifact"
+  category id="delta-evidence" source="package-state" class="evidence"
+  category id="conflict-resolution" source="package-state" class="resolution-artifact"
+  category id="conflict-evidence" source="package-state" class="evidence"
+  category id="final-dod" source="package-state" class="authority"
+  category id="final-command-evidence" source="package-state" class="evidence"
+  category id="blocking-finding" source="package-state" class="review-artifact"
+  category id="context-gaps" source="package-state" class="context-gap"
+  category id="manifest-revision" source="package-state" class="manifest"
+  category id="source-anchor" source="repository" class="source"
+  category id="onboard-brief" source="operator-input" class="authority"
+  category id="orchestration-state" source="package-state" class="control"
+  category id="allocation-dossier" source="package-state" class="execution-artifact"
+
+  policy id="onboard.v1" role="onboard" {
+    mode id="thin-intake" {
+      mandatory_inline "onboard-brief"
+      required_reads "task-authority"
+      on_demand "repository-context"
     }
-    role id="validator" mode="forward-release" {
-        mandatory_inline "acceptance-criteria"
-        mandatory_inline "approved-plan-unit"
-        required_reads "delivery-evidence"
-        required_reads "source-anchor"
-        on_demand "dossier-findings"
+  }
+  policy id="orchestrator.v1" role="orchestrator" {
+    mode id="planning-control" {
+      mandatory_inline "orchestration-state"
+      required_reads "artifact-index"
+      on_demand "current-manifests"
     }
-    role id="validator" mode="deep-closure" {
-        mandatory_inline "acceptance-criteria"
-        required_reads "closure-evidence"
-        required_reads "source-anchor"
-        on_demand "dossier-findings"
+    mode id="execution-control" {
+      mandatory_inline "orchestration-state"
+      required_reads "approved-plan-unit"
+      required_reads "artifact-index"
+      on_demand "runtime-identity"
     }
-    role id="validator" mode="delta-revalidation" {
-        mandatory_inline "prior-findings"
-        mandatory_inline "acceptance-criteria"
-        required_reads "delta-evidence"
-        required_reads "source-anchor"
-        on_demand "dossier-findings"
+  }
+  policy id="task-extractor.v1" role="task-extractor" {
+    mode id="inventory" {
+      mandatory_inline "authority-index"
+      required_reads "task-authority"
+      excluded "repository-context"
     }
-    role id="validator" mode="conflict-review" {
-        mandatory_inline "conflict-resolution"
-        mandatory_inline "acceptance-criteria"
-        required_reads "conflict-evidence"
-        required_reads "source-anchor"
-        on_demand "dossier-findings"
+  }
+  policy id="repository-scout.v1" role="repository-scout" {
+    mode id="initial-grounding" {
+      mandatory_inline "atom-index"
+      mandatory_inline "assignment-scope"
+      required_reads "task-atoms"
+      required_reads "task-authority"
+      required_reads "repository-context"
+      on_demand "source-anchor"
     }
-    role id="validator" mode="final-review" {
-        mandatory_inline "final-dod"
-        mandatory_inline "acceptance-criteria"
-        required_reads "final-command-evidence"
-        required_reads "source-anchor"
-        on_demand "dossier-findings"
+    mode id="targeted-followup" {
+      mandatory_inline "atom-index"
+      mandatory_inline "assignment-scope"
+      required_reads "task-atoms"
+      required_reads "scout-findings"
+      required_reads "repository-context"
+      on_demand "source-anchor"
     }
-    role id="fixer" mode="targeted-repair" {
-        mandatory_inline "blocking-finding"
-        mandatory_inline "approved-plan-unit"
-        mandatory_inline "acceptance-criteria"
-        required_reads "delivery-evidence"
-        required_reads "source-anchor"
-        on_demand "dossier-findings"
+  }
+  policy id="contradiction-resolver.v1" role="contradiction-resolver" {
+    mode id="fact-resolution" {
+      mandatory_inline "contradiction-bundle"
+      required_reads "review-verdicts"
+      required_reads "task-authority"
+      required_reads "synthesized-work-map"
+      on_demand "artifact-index"
+      on_demand "source-anchor"
     }
-    role id="curator" mode="context-reprioritization" {
-        mandatory_inline "budget-overage"
-        mandatory_inline "authority-index"
-        required_reads "context-gaps"
-        required_reads "manifest-revision"
-        on_demand "source-anchor"
+  }
+  policy id="plan-compiler.v1" role="plan-compiler" {
+    mode id="initial-plan" {
+      mandatory_inline "authority-index"
+      mandatory_inline "artifact-index"
+      mandatory_inline "assignment-scope"
+      required_reads "task-atoms"
+      required_reads "scout-findings"
+      required_reads "task-authority"
+      on_demand "repository-context"
+      on_demand "source-anchor"
     }
+    mode id="unit-spec-patch" {
+      mandatory_inline "artifact-index"
+      mandatory_inline "assignment-scope"
+      required_reads "task-atoms"
+      required_reads "scout-findings"
+      required_reads "synthesized-work-map"
+      on_demand "task-authority"
+      on_demand "source-anchor"
+    }
+    mode id="cluster-amendment" {
+      mandatory_inline "artifact-index"
+      mandatory_inline "assignment-scope"
+      required_reads "task-atoms"
+      required_reads "scout-findings"
+      required_reads "compiler-work-maps"
+      on_demand "task-authority"
+      on_demand "source-anchor"
+    }
+  }
+  policy id="context-synthesizer.v1" role="context-synthesizer" {
+    mode id="initial-dossier" {
+      mandatory_inline "artifact-index"
+      required_reads "scout-findings"
+      required_reads "repository-context"
+      on_demand "source-anchor"
+    }
+    mode id="dossier-delta" {
+      mandatory_inline "artifact-index"
+      required_reads "scout-findings"
+      required_reads "review-verdicts"
+      on_demand "repository-context"
+      on_demand "source-anchor"
+    }
+  }
+  policy id="plan-synthesizer.v1" role="plan-synthesizer" {
+    mode id="initial-plan" {
+      mandatory_inline "compiler-work-maps"
+      mandatory_inline "coverage-index"
+      mandatory_inline "artifact-index"
+      required_reads "compiler-work-maps"
+      required_reads "task-atoms"
+      required_reads "scout-findings"
+      on_demand "task-authority"
+      on_demand "repository-context"
+      on_demand "source-anchor"
+    }
+    mode id="affected-scope" {
+      mandatory_inline "coverage-index"
+      mandatory_inline "artifact-index"
+      required_reads "compiler-work-maps"
+      required_reads "synthesized-work-map"
+      required_reads "review-verdicts"
+      on_demand "task-authority"
+      on_demand "source-anchor"
+    }
+  }
+  policy id="plan-reviewer.v1" role="plan-reviewer" {
+    mode id="full-review" {
+      mandatory_inline "synthesized-work-map"
+      mandatory_inline "criterion-trace-index"
+      required_reads "task-authority"
+      required_reads "task-atoms"
+      required_reads "scout-findings"
+      required_reads "compiler-work-maps"
+      on_demand "repository-context"
+      on_demand "source-anchor"
+    }
+    mode id="delta-review" {
+      mandatory_inline "synthesized-work-map"
+      mandatory_inline "criterion-trace-index"
+      required_reads "review-verdicts"
+      required_reads "compiler-work-maps"
+      required_reads "task-authority"
+      on_demand "repository-context"
+      on_demand "source-anchor"
+    }
+  }
+  policy id="context-curator.v1" role="context-curator" {
+    mode id="discovery-navigation" {
+      mandatory_inline "artifact-index"
+      required_reads "repository-context"
+      required_reads "task-authority"
+      on_demand "source-anchor"
+    }
+    mode id="planning-context" {
+      mandatory_inline "artifact-index"
+      mandatory_inline "budget-overage"
+      mandatory_inline "manifest-gaps"
+      required_reads "task-atoms"
+      required_reads "scout-findings"
+      required_reads "compiler-work-maps"
+      required_reads "current-manifests"
+      on_demand "source-anchor"
+    }
+    mode id="execution-context" {
+      mandatory_inline "artifact-index"
+      mandatory_inline "budget-overage"
+      required_reads "approved-plan-unit"
+      required_reads "dossier-findings"
+      required_reads "current-manifests"
+      on_demand "source-anchor"
+    }
+  }
+  policy id="execution-allocator.v1" role="execution-allocator" {
+    mode id="initial-allocation" {
+      mandatory_inline "allocation-dossier"
+      mandatory_inline "approved-plan-unit"
+      required_reads "dossier-findings"
+      required_reads "acceptance-criteria"
+      on_demand "source-anchor"
+    }
+    mode id="delta-allocation" {
+      mandatory_inline "allocation-dossier"
+      mandatory_inline "prior-findings"
+      required_reads "approved-plan-unit"
+      required_reads "delta-evidence"
+      on_demand "source-anchor"
+    }
+  }
+  policy id="implementer.v1" role="implementer" {
+    mode id="lane-delivery" {
+      mandatory_inline "task-authority"
+      mandatory_inline "approved-plan-unit"
+      mandatory_inline "acceptance-criteria"
+      required_reads "dossier-findings"
+      required_reads "runtime-identity"
+      on_demand "source-anchor"
+    }
+  }
+  policy id="validator.v1" role="validator" {
+    mode id="forward-release" {
+      mandatory_inline "acceptance-criteria"
+      mandatory_inline "approved-plan-unit"
+      required_reads "delivery-evidence"
+      required_reads "source-anchor"
+      on_demand "dossier-findings"
+    }
+    mode id="deep-closure" {
+      mandatory_inline "acceptance-criteria"
+      required_reads "closure-evidence"
+      required_reads "source-anchor"
+      on_demand "dossier-findings"
+    }
+    mode id="delta-revalidation" {
+      mandatory_inline "prior-findings"
+      mandatory_inline "acceptance-criteria"
+      required_reads "delta-evidence"
+      required_reads "source-anchor"
+      on_demand "dossier-findings"
+    }
+    mode id="conflict-review" {
+      mandatory_inline "conflict-resolution"
+      mandatory_inline "acceptance-criteria"
+      required_reads "conflict-evidence"
+      required_reads "source-anchor"
+      on_demand "dossier-findings"
+    }
+    mode id="final-review" {
+      mandatory_inline "final-dod"
+      mandatory_inline "acceptance-criteria"
+      required_reads "final-command-evidence"
+      required_reads "source-anchor"
+      on_demand "dossier-findings"
+    }
+  }
+  policy id="fixer-integrator.v1" role="fixer-integrator" {
+    mode id="forward-critical" {
+      mandatory_inline "blocking-finding"
+      mandatory_inline "approved-plan-unit"
+      mandatory_inline "acceptance-criteria"
+      required_reads "delivery-evidence"
+      required_reads "source-anchor"
+      on_demand "dossier-findings"
+    }
+    mode id="closure-repair" {
+      mandatory_inline "blocking-finding"
+      mandatory_inline "acceptance-criteria"
+      required_reads "closure-evidence"
+      required_reads "source-anchor"
+      on_demand "dossier-findings"
+    }
+    mode id="failed-test" {
+      mandatory_inline "blocking-finding"
+      mandatory_inline "acceptance-criteria"
+      required_reads "delta-evidence"
+      required_reads "source-anchor"
+      on_demand "dossier-findings"
+    }
+    mode id="conflict-resolution" {
+      mandatory_inline "conflict-resolution"
+      mandatory_inline "acceptance-criteria"
+      required_reads "conflict-evidence"
+      required_reads "source-anchor"
+      on_demand "dossier-findings"
+    }
+  }
+  policy id="bughunter.v1" role="bughunter" {
+    mode id="final-bughunt" {
+      mandatory_inline "final-dod"
+      mandatory_inline "acceptance-criteria"
+      required_reads "final-command-evidence"
+      required_reads "source-anchor"
+      on_demand "dossier-findings"
+    }
+  }
 }

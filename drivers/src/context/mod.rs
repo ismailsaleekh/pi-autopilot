@@ -1,3 +1,5 @@
+pub mod policy;
+
 use kernel::boundary::Rejection;
 use kernel::generated::{
     ContextAnchor, ContextAnchorForm, ContextManifest, ContextManifestBudget,
