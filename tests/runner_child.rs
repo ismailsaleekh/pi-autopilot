@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use drivers::runner::{child, planning_paths, role_builtin_tool_names, session_id_for};
 use kernel::generated::{ContractId, Id, ModeId};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha2::{Digest as ShaDigest, Sha256};
 
 static PATH_LOCK: Mutex<()> = Mutex::new(());
@@ -16,17 +16,19 @@ static PATH_LOCK: Mutex<()> = Mutex::new(());
 fn fake_pi_journey_writes_identity_carrier_and_isolated_exact_args() {
     let root = temp_root("runner-success");
     let argv_path = root.join("argv.json");
+    let accepted = transcript("planning.task-atoms.v1");
     write_fake_pi(
         &root,
         &format!(
             r#"#!/usr/bin/env node
 import {{ writeFileSync }} from 'node:fs';
 writeFileSync({:?}, JSON.stringify({{ argv: process.argv.slice(2), cwd: process.cwd() }}));
-const message = {{role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{{type:'text', text:'atom: deliver success'}}], stopReason:'stop'}};
+const text = {:?};
+const message = {{role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{{type:'text', text}}], stopReason:'stop'}};
 console.log(JSON.stringify({{type:'message_end', message}}));
 console.log(JSON.stringify({{type:'agent_end', messages:[message], willRetry:false}}));
 "#,
-            argv_path
+            argv_path, accepted
         ),
     );
     let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
@@ -47,7 +49,7 @@ console.log(JSON.stringify({{type:'agent_end', messages:[message], willRetry:fal
     assert_eq!(carrier["role_id"], "task-extractor");
     assert_eq!(carrier["mode"], "inventory");
     assert_eq!(carrier["boundary_id"], "planning.task-atoms.v1");
-    assert_eq!(carrier["raw_output"], "atom: deliver success");
+    assert_eq!(carrier["raw_output"], accepted);
     assert!(carrier["spec_digest"].as_str().expect("spec digest").len() == 64);
 
     let argv_record: Value =
@@ -58,12 +60,11 @@ console.log(JSON.stringify({{type:'agent_end', messages:[message], willRetry:fal
         .iter()
         .map(|item| item.as_str().expect("arg").to_owned())
         .collect::<Vec<_>>();
+    assert_eq!(argv[0..3], ["--mode", "json", "--session-id"]);
+    assert!(argv[3].starts_with("autopilot-planning-main-task-extractor-01-"));
     assert_eq!(
-        argv[0..13],
+        argv[4..15],
         [
-            "--mode",
-            "json",
-            "--no-session",
             "--no-extensions",
             "--no-skills",
             "--no-prompt-templates",
@@ -73,7 +74,8 @@ console.log(JSON.stringify({{type:'agent_end', messages:[message], willRetry:fal
             "openai-codex",
             "--model",
             "gpt-5.5",
-            "--thinking"
+            "--thinking",
+            "high"
         ]
     );
     assert!(argv.contains(&"--tools".to_owned()));
@@ -90,7 +92,7 @@ fn fake_pi_boundary_retry_reuses_session_and_succeeds() {
     let root = temp_root("runner-retry");
     let count_path = root.join("count.txt");
     let argv_path = root.join("argv.jsonl");
-    let accepted = valid_atoms_output("retry success");
+    let accepted = transcript("planning.task-atoms.v1");
     write_fake_pi(
         &root,
         &format!(
@@ -155,93 +157,97 @@ fn fake_pi_nonzero_malformed_wrong_model_boundary_and_jsonl_protocol_fail_loudly
 
     write_fake_pi(&root, "#!/usr/bin/env node\nprocess.exit(42);\n");
     let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
-    assert!(
-        with_fake_path(&root, || child::main(&[
-            "--spec".to_owned(),
-            spec.display().to_string()
-        ]))
-        .expect_err("nonzero")
-        .contains("nonzero")
-    );
+    assert!(with_fake_path(&root, || child::main(&[
+        "--spec".to_owned(),
+        spec.display().to_string()
+    ]))
+    .expect_err("nonzero")
+    .contains("nonzero"));
 
     write_fake_pi(&root, "#!/usr/bin/env node\nconsole.log('not json');\n");
-    assert!(
-        with_fake_path(&root, || child::main(&[
-            "--spec".to_owned(),
-            spec.display().to_string()
-        ]))
-        .expect_err("malformed")
-        .contains("malformed")
-    );
+    assert!(with_fake_path(&root, || child::main(&[
+        "--spec".to_owned(),
+        spec.display().to_string()
+    ]))
+    .expect_err("malformed")
+    .contains("malformed"));
 
     write_fake_pi(
         &root,
-        "#!/usr/bin/env node\nconst message={role:'assistant', provider:'openai-codex', model:'wrong', content:[{type:'text', text:'atom'}], stopReason:'stop'};\nconsole.log(JSON.stringify({type:'message_end', message}));\nconsole.log(JSON.stringify({type:'agent_end', messages:[message], willRetry:false}));\n",
+        &format!(
+            "#!/usr/bin/env node\nconst text={:?};\nconst message={{role:'assistant', provider:'openai-codex', model:'wrong', content:[{{type:'text', text}}], stopReason:'stop'}};\nconsole.log(JSON.stringify({{type:'message_end', message}}));\nconsole.log(JSON.stringify({{type:'agent_end', messages:[message], willRetry:false}}));\n",
+            transcript("planning.task-atoms.v1")
+        ),
     );
-    assert!(
-        with_fake_path(&root, || child::main(&[
-            "--spec".to_owned(),
-            spec.display().to_string()
-        ]))
-        .expect_err("wrong model")
-        .contains("provider/model drift")
-    );
+    assert!(with_fake_path(&root, || child::main(&[
+        "--spec".to_owned(),
+        spec.display().to_string()
+    ]))
+    .expect_err("wrong model")
+    .contains("provider/model drift"));
 
     write_fake_pi(
         &root,
         "#!/usr/bin/env node\nconst message={role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{type:'text', text:'no boundary token here'}], stopReason:'stop'};\nconsole.log(JSON.stringify({type:'message_end', message}));\nconsole.log(JSON.stringify({type:'agent_end', messages:[message], willRetry:false}));\n",
     );
-    assert!(
-        with_fake_path(&root, || child::main(&[
-            "--spec".to_owned(),
-            spec.display().to_string()
-        ]))
-        .expect_err("boundary")
-        .contains("boundary rejection")
-    );
+    assert!(with_fake_path(&root, || child::main(&[
+        "--spec".to_owned(),
+        spec.display().to_string()
+    ]))
+    .expect_err("boundary")
+    .contains("value repair exhausted"));
 
     write_fake_pi(
         &root,
-        "#!/usr/bin/env node\nconst message={role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{type:'text', text:'atom'}], stopReason:'stop'};\nconsole.log(JSON.stringify({type:'message_end', message}));\n",
+        &format!(
+            "#!/usr/bin/env node\nconst text={:?};\nconst message={{role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{{type:'text', text}}], stopReason:'stop'}};\nconsole.log(JSON.stringify({{type:'message_end', message}}));\n",
+            transcript("planning.task-atoms.v1")
+        ),
     );
-    assert!(
-        with_fake_path(&root, || child::main(&[
-            "--spec".to_owned(),
-            spec.display().to_string()
-        ]))
-        .expect_err("agent_end")
-        .contains("agent_end")
-    );
+    assert!(with_fake_path(&root, || child::main(&[
+        "--spec".to_owned(),
+        spec.display().to_string()
+    ]))
+    .expect_err("agent_end")
+    .contains("agent_end"));
 
     write_fake_pi(
         &root,
-        "#!/usr/bin/env node\nconst one={role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{type:'text', text:'atom'}], stopReason:'stop'};\nconst two={role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{type:'text', text:'atom two'}], stopReason:'stop'};\nconsole.log(JSON.stringify({type:'message_end', message:one}));\nconsole.log(JSON.stringify({type:'message_end', message:two}));\nconsole.log(JSON.stringify({type:'agent_end', messages:[two], willRetry:false}));\n",
-    );
-    assert!(
-        with_fake_path(&root, || child::main(&[
-            "--spec".to_owned(),
-            spec.display().to_string()
-        ]))
-        .expect_err("multiple assistants")
-        .contains("assistant results")
-    );
-
-    write_fake_pi(
-        &root,
-        "#!/usr/bin/env node\nconst message={role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{type:'text', text:'atom'}], stopReason:'stop'};\nconsole.log(JSON.stringify({type:'message_end', message}));\nconsole.log(JSON.stringify({type:'tool_execution_start', toolName:'read'}));\nconsole.log(JSON.stringify({type:'agent_end', messages:[message], willRetry:false}));\n",
+        &format!(
+            "#!/usr/bin/env node\nconst text={:?};\nconst one={{role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{{type:'text', text}}], stopReason:'stop'}};\nconst two={{role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{{type:'text', text}}], stopReason:'stop'}};\nconsole.log(JSON.stringify({{type:'message_end', message:one}}));\nconsole.log(JSON.stringify({{type:'message_end', message:two}}));\nconsole.log(JSON.stringify({{type:'agent_end', messages:[one,two], willRetry:false}}));\n",
+            transcript("planning.task-atoms.v1")
+        ),
     );
     assert!(
         with_fake_path(&root, || child::main(&[
             "--spec".to_owned(),
             spec.display().to_string()
         ]))
-        .expect_err("tool after assistant")
-        .contains("tool activity")
+        .is_ok(),
+        "agent_end final messages select the accepted assistant result"
     );
+    fs::remove_file(carrier_path(&root)).ok();
 
     write_fake_pi(
         &root,
-        "#!/usr/bin/env node\nconst toolUse={role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{type:'text', text:'thinking'}], stopReason:'toolUse'};\nconst final={role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{type:'text', text:'atom'}], stopReason:'stop'};\nconsole.log(JSON.stringify({type:'message_end', message:toolUse}));\nconsole.log(JSON.stringify({type:'tool_execution_start', toolName:'read'}));\nconsole.log(JSON.stringify({type:'tool_execution_end', toolName:'read'}));\nconsole.log(JSON.stringify({type:'turn_end', message:final, toolResults:[]}));\nconsole.log(JSON.stringify({type:'agent_end', messages:[toolUse, final], willRetry:false}));\n",
+        &format!(
+            "#!/usr/bin/env node\nconst text={:?};\nconst message={{role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{{type:'text', text}}], stopReason:'stop'}};\nconsole.log(JSON.stringify({{type:'message_end', message}}));\nconsole.log(JSON.stringify({{type:'tool_execution_start', toolName:'read'}}));\nconsole.log(JSON.stringify({{type:'agent_end', messages:[message], willRetry:false}}));\n",
+            transcript("planning.task-atoms.v1")
+        ),
+    );
+    assert!(with_fake_path(&root, || child::main(&[
+        "--spec".to_owned(),
+        spec.display().to_string()
+    ]))
+    .expect_err("tool after assistant")
+    .contains("tool activity"));
+
+    write_fake_pi(
+        &root,
+        &format!(
+            "#!/usr/bin/env node\nconst text={:?};\nconst toolUse={{role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{{type:'text', text:'thinking'}}], stopReason:'toolUse'}};\nconst final={{role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{{type:'text', text}}], stopReason:'stop'}};\nconsole.log(JSON.stringify({{type:'message_end', message:toolUse}}));\nconsole.log(JSON.stringify({{type:'tool_execution_start', toolName:'read'}}));\nconsole.log(JSON.stringify({{type:'tool_execution_end', toolName:'read'}}));\nconsole.log(JSON.stringify({{type:'turn_end', message:final, toolResults:[]}}));\nconsole.log(JSON.stringify({{type:'agent_end', messages:[toolUse, final], willRetry:false}}));\n",
+            transcript("planning.task-atoms.v1")
+        ),
     );
     fs::remove_file(carrier_path(&root)).ok();
     assert!(
@@ -255,17 +261,18 @@ fn fake_pi_nonzero_malformed_wrong_model_boundary_and_jsonl_protocol_fail_loudly
 
     write_fake_pi(
         &root,
-        "#!/usr/bin/env node\nconst message={role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{type:'text', text:'atom'}], stopReason:'length'};\nconsole.log(JSON.stringify({type:'message_end', message}));\nconsole.log(JSON.stringify({type:'agent_end', messages:[message], willRetry:false}));\n",
+        &format!(
+            "#!/usr/bin/env node\nconst text={:?};\nconst message={{role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{{type:'text', text}}], stopReason:'length'}};\nconsole.log(JSON.stringify({{type:'message_end', message}}));\nconsole.log(JSON.stringify({{type:'agent_end', messages:[message], willRetry:false}}));\n",
+            transcript("planning.task-atoms.v1")
+        ),
     );
     fs::remove_file(carrier_path(&root)).ok();
-    assert!(
-        with_fake_path(&root, || child::main(&[
-            "--spec".to_owned(),
-            spec.display().to_string()
-        ]))
-        .expect_err("bad stopReason")
-        .contains("stopReason")
-    );
+    assert!(with_fake_path(&root, || child::main(&[
+        "--spec".to_owned(),
+        spec.display().to_string()
+    ]))
+    .expect_err("bad stopReason")
+    .contains("stopReason"));
 }
 
 #[test]
@@ -374,7 +381,10 @@ fn drifted_spec_fields_are_rejected_before_pi_launch() {
     ];
     for (label, mutate) in cases {
         let root = temp_root(&format!("runner-drift-{label}"));
-        write_fake_pi(&root, success_fake_pi());
+        write_fake_pi(
+            &root,
+            &success_fake_pi(&transcript("planning.task-atoms.v1")),
+        );
         let spec = write_planning_spec(&root, mutate, "planning.task-atoms.v1", "gpt-5.5");
         let error = with_fake_path(&root, || {
             child::main(&["--spec".to_owned(), spec.display().to_string()])
@@ -393,19 +403,20 @@ fn drifted_spec_fields_are_rejected_before_pi_launch() {
 #[test]
 fn runner_stale_or_linked_carrier_output_and_resource_limits_fail_closed() {
     let root = temp_root("runner-stale");
-    write_fake_pi(&root, success_fake_pi());
+    write_fake_pi(
+        &root,
+        &success_fake_pi(&transcript("planning.task-atoms.v1")),
+    );
     let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
     let stale_path = carrier_path(&root);
     fs::create_dir_all(stale_path.parent().expect("carrier parent")).expect("carrier dir");
     fs::write(stale_path, b"stale").expect("stale carrier");
-    assert!(
-        with_fake_path(&root, || child::main(&[
-            "--spec".to_owned(),
-            spec.display().to_string()
-        ]))
-        .expect_err("stale")
-        .contains("already present")
-    );
+    assert!(with_fake_path(&root, || child::main(&[
+        "--spec".to_owned(),
+        spec.display().to_string()
+    ]))
+    .expect_err("stale")
+    .contains("stale carrier rejected"));
 
     let root = temp_root("runner-bounded");
     write_fake_pi(
@@ -469,9 +480,13 @@ fn runner_stale_or_linked_carrier_output_and_resource_limits_fail_closed() {
 fn runner_streaming_pi_jsonl_discards_message_update_chatter_but_keeps_final_event() {
     let root = temp_root("runner-streaming");
     let stats_path = root.join("stream-stats.json");
+    let accepted = transcript("planning.task-atoms.v1");
     write_fake_pi(
         &root,
-        "#!/usr/bin/env node\nconst finalMessage={role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{type:'text', text:'atom: streaming success'}], stopReason:'stop'};\nfor (let i=0; i<400; i++) {\n  const message={role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{type:'text', text:'scratch '+i+' '+ 'x'.repeat(2048)}], stopReason:'toolUse'};\n  console.log(JSON.stringify({type:'message_update', message, assistantMessageEvent:{type:'thinking_delta', delta:'x'}}));\n}\nconsole.log(JSON.stringify({type:'message_end', message:finalMessage}));\nconsole.log(JSON.stringify({type:'agent_end', messages:[finalMessage], willRetry:false}));\n",
+        &format!(
+            "#!/usr/bin/env node\nconst text={:?};\nconst finalMessage={{role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{{type:'text', text}}], stopReason:'stop'}};\nfor (let i=0; i<400; i++) {{\n  const message={{role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{{type:'text', text:'scratch '+i+' '+ 'x'.repeat(2048)}}], stopReason:'toolUse'}};\n  console.log(JSON.stringify({{type:'message_update', message, assistantMessageEvent:{{type:'thinking_delta', delta:'x'}}}}));\n}}\nconsole.log(JSON.stringify({{type:'message_end', message:finalMessage}}));\nconsole.log(JSON.stringify({{type:'agent_end', messages:[finalMessage], willRetry:false}}));\n",
+            accepted
+        ),
     );
     let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
     with_fake_path(&root, || {
@@ -486,7 +501,7 @@ fn runner_streaming_pi_jsonl_discards_message_update_chatter_but_keeps_final_eve
     .expect("streaming chatter should not trip total stdout cap");
     let carrier: Value = serde_json::from_slice(&fs::read(carrier_path(&root)).expect("carrier"))
         .expect("carrier json");
-    assert_eq!(carrier["raw_output"], "atom: streaming success");
+    assert_eq!(carrier["raw_output"], accepted);
     let stats: Value =
         serde_json::from_slice(&fs::read(stats_path).expect("stats")).expect("stats json");
     assert!(stats["stdout_total_bytes"].as_u64().expect("total") > 1024);
@@ -507,13 +522,16 @@ fn runner_real_pi_high_streaming_probe_when_enabled() {
     }
     let root = temp_root("runner-real-pi-streaming");
     let stats_path = root.join("real-pi-stream-stats.json");
-    let prompt = "You are validating a streaming JSON runner. Think carefully about why repeated message_update events can amplify transcript bytes at high thinking depth. Then return a concise final answer containing exactly this line and no code block: atom: real pi streaming proof";
+    let expected = transcript("planning.task-atoms.v1");
+    let prompt = format!(
+        "You are validating a streaming JSON runner. Think carefully about why repeated message_update events can amplify transcript bytes at high thinking depth. Then return exactly this JSON payload, with no code block or surrounding prose:\n{expected}"
+    );
     let spec = write_planning_spec_with_prompt(
         &root,
         |value| value,
         "planning.task-atoms.v1",
         "gpt-5.5",
-        prompt,
+        &prompt,
     );
     with_env("AUTOPILOT_AGENT_RUN_MAX_STDOUT_BYTES", "4096", || {
         with_env(
@@ -525,12 +543,10 @@ fn runner_real_pi_high_streaming_probe_when_enabled() {
     .expect("real pi streaming run");
     let carrier: Value = serde_json::from_slice(&fs::read(carrier_path(&root)).expect("carrier"))
         .expect("carrier json");
-    assert!(
-        carrier["raw_output"]
-            .as_str()
-            .expect("raw")
-            .contains("atom")
-    );
+    assert!(carrier["raw_output"]
+        .as_str()
+        .expect("raw")
+        .contains("\"atoms\""));
     let stats: Value =
         serde_json::from_slice(&fs::read(stats_path).expect("stats")).expect("stats json");
     let total = stats["stdout_total_bytes"].as_u64().expect("total");
@@ -649,12 +665,10 @@ fn carrier_path(root: &Path) -> PathBuf {
     .carrier_path
 }
 
-fn valid_atoms_output(text: &str) -> String {
-    json!({"atoms":[{"id":"a1","kind":"work","text":text,"sources":["task://source"]}]}).to_string()
-}
-
-fn success_fake_pi() -> &'static str {
-    "#!/usr/bin/env node\nconst message={role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{type:'text', text:'atom'}], stopReason:'stop'};\nconsole.log(JSON.stringify({type:'message_end', message}));\nconsole.log(JSON.stringify({type:'turn_end', message, toolResults:[]}));\nconsole.log(JSON.stringify({type:'agent_end', messages:[message], willRetry:false}));\nconsole.log(JSON.stringify({type:'agent_settled'}));\n"
+fn success_fake_pi(output: &str) -> String {
+    format!(
+        "#!/usr/bin/env node\nconst text={output:?};\nconst message={{role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{{type:'text', text}}], stopReason:'stop'}};\nconsole.log(JSON.stringify({{type:'message_end', message}}));\nconsole.log(JSON.stringify({{type:'turn_end', message, toolResults:[]}}));\nconsole.log(JSON.stringify({{type:'agent_end', messages:[message], willRetry:false}}));\nconsole.log(JSON.stringify({{type:'agent_settled'}}));\n"
+    )
 }
 
 fn write_fake_pi(root: &Path, body: &str) {
@@ -750,6 +764,20 @@ fn task_document_digest(class: &str, authority_set_id: &str, body: &str) -> Stri
 
 fn sha_json(value: &impl serde::Serialize) -> String {
     sha256_hex(&serde_json::to_vec(value).expect("json digest"))
+}
+
+fn transcript(boundary_id: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../tests/transcripts")
+        .join(boundary_id)
+        .join("transcripts.json");
+    let value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(path).expect("transcript file"))
+            .expect("transcript json");
+    value["records"][0]["raw_output"]
+        .as_str()
+        .expect("raw output")
+        .to_owned()
 }
 
 fn sha256_hex(data: &[u8]) -> String {

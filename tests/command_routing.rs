@@ -15,7 +15,7 @@ use kernel::generated::{
 use sha2::{Digest as ShaDigest, Sha256};
 
 #[test]
-fn all_public_commands_reach_driver_surfaces() {
+fn command_routing_all_public_commands_reach_driver_surfaces() {
     let root = temp_dir("public-routes");
     let repo = root.join("repo");
     let vcs = GitVcs::new(&root);
@@ -31,14 +31,12 @@ fn all_public_commands_reach_driver_surfaces() {
     let plan_spawn: CoreToHostSpawnPayload =
         serde_json::from_value(plan.payload).expect("plan spawn payload");
     assert!(plan_spawn.action.bg_run.command.0.contains(" --spec "));
-    assert!(
-        !plan_spawn
-            .action
-            .bg_run
-            .command
-            .0
-            .contains("autopilot-agent-run --assignment")
-    );
+    assert!(!plan_spawn
+        .action
+        .bg_run
+        .command
+        .0
+        .contains("autopilot-agent-run --assignment"));
 
     let ready = complete_planning_until_ready(plan_spawn, &event_log, &repo);
     assert!(done_status(&ready).contains("ready-to-execute:workstream=main"));
@@ -133,15 +131,13 @@ fn all_public_commands_reach_driver_surfaces() {
         close_status.contains("rejection:lifecycle-close:FinalGateFailed:final-commands-exact-tip"),
         "unexpected close status: {close_status}"
     );
-    assert!(
-        !Command::new("git")
-            .current_dir(&repo)
-            .args(["rev-parse", "--verify", "refs/autopilot/results/main/run-1"])
-            .stdout(Stdio::null())
-            .status()
-            .expect("git rev-parse")
-            .success()
-    );
+    assert!(!Command::new("git")
+        .current_dir(&repo)
+        .args(["rev-parse", "--verify", "refs/autopilot/results/main/run-1"])
+        .stdout(Stdio::null())
+        .status()
+        .expect("git rev-parse")
+        .success());
 
     let inject = send_once("autopilot-inject main", None);
     assert!(done_status(&inject).contains("attach:workstream=main;state:sequence=1;revision=1"));
@@ -302,11 +298,11 @@ fn send_agent_carrier(
 
 fn planning_output(boundary_id: &str) -> String {
     match boundary_id {
-        "planning.task-atoms.v1" => "atom: command routing".to_owned(),
-        "planning.scout-dossier.v1" => "evidence: command routing".to_owned(),
-        "planning.work-map.v1" => transcript("planning.work-map.v1"),
-        "planning.plan-review.v1" => transcript("planning.plan-review.v1"),
-        "planning.questions.v1" => "questions: []".to_owned(),
+        "planning.task-atoms.v1"
+        | "planning.scout-dossier.v1"
+        | "planning.work-map.v1"
+        | "planning.plan-review.v1"
+        | "planning.questions.v1" => transcript(boundary_id),
         other => panic!("unexpected planning boundary {other}"),
     }
 }

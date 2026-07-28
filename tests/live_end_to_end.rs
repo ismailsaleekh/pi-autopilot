@@ -329,10 +329,10 @@ fn drive_planning_to_ready(fixture: &Fixture) -> PlanningOutcome {
     let work_map = replay(&store, "planning.work-map.v1");
     let review = replay(&store, "planning.plan-review.v1");
     let allocation = replay(&store, "allocation.lane-proposal.v1");
-    assert!(
-        allocation.contains("Lane 1"),
-        "recorded allocator transcript is replayed, not authored"
-    );
+    let allocation_json: serde_json::Value =
+        serde_json::from_str(&allocation).expect("recorded allocator typed JSON");
+    assert_eq!(allocation_json["lane_id"], "L1");
+    assert_eq!(allocation_json["ordered_unit_ids"][0], "U1");
 
     let mut runtime = boundary_runtime("planning.task-atoms.v1");
     runtime.flip_to_enforce();
@@ -357,9 +357,13 @@ fn drive_planning_to_ready(fixture: &Fixture) -> PlanningOutcome {
         backlinks: vec![drivers::planning::Backlink::Atom("W1".to_owned())],
     }])
     .expect("material backlinks");
+    let work_map_json: serde_json::Value =
+        serde_json::from_str(&work_map).expect("recorded work-map typed JSON");
     assert!(
-        work_map.contains("acceptance criteria"),
-        "approved plan has acceptance criteria from recorded transcript"
+        work_map_json["units"][0]["criteria"]
+            .as_array()
+            .is_some_and(|criteria| !criteria.is_empty()),
+        "approved plan has criteria from recorded transcript"
     );
 
     PlanningOutcome {

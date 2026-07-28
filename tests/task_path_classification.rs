@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 static CWD_LOCK: Mutex<()> = Mutex::new(());
 
 use drivers::planning::{
-    self, PlanningError, TaskDocumentClass, TaskInputSet, p1_inventory_from_input_set,
+    self, p1_inventory_from_input_set, PlanningError, TaskDocumentClass, TaskInputSet,
 };
 use drivers::seam::{self, CoreState};
 use kernel::generated::{CoreToHostDonePayload, CoreToHostSpawnPayload, SeamEnvelope};
@@ -33,12 +33,10 @@ fn exact_three_authority_one_context_pack_passes_and_context_is_not_work() {
     assert_eq!(input.authority_set_id, "set-a");
     assert_eq!(input.authority_documents.len(), 3);
     assert_eq!(input.context_documents.len(), 1);
-    assert!(
-        input
-            .authority_documents
-            .iter()
-            .all(|doc| doc.class == TaskDocumentClass::Authority)
-    );
+    assert!(input
+        .authority_documents
+        .iter()
+        .all(|doc| doc.class == TaskDocumentClass::Authority));
     assert_eq!(
         input.context_documents[0].class,
         TaskDocumentClass::ContextNonAuthority
@@ -46,12 +44,10 @@ fn exact_three_authority_one_context_pack_passes_and_context_is_not_work() {
 
     let inventory = p1_inventory_from_input_set(&input).expect("inventory");
     assert_eq!(inventory.atoms.len(), 3);
-    assert!(
-        inventory
-            .atoms
-            .iter()
-            .all(|atom| !atom.statement.contains("CONTEXT-SENTINEL-UNIQUE"))
-    );
+    assert!(inventory
+        .atoms
+        .iter()
+        .all(|atom| !atom.statement.contains("CONTEXT-SENTINEL-UNIQUE")));
 }
 
 #[test]
@@ -377,11 +373,9 @@ fn classification_rejects_root_and_ancestor_symlink_escapes_without_mutation() {
     );
     assert_eq!(blocked.kind, "done");
     assert!(format!("{}", blocked.payload).contains("TaskPath"));
-    assert!(
-        !root
-            .join(".pi/autopilot/main/planning-manifest.json")
-            .exists()
-    );
+    assert!(!root
+        .join(".pi/autopilot/main/planning-manifest.json")
+        .exists());
     std::env::set_current_dir(previous).expect("restore cwd");
 }
 
@@ -459,7 +453,7 @@ fn terminal_events_require_core_issued_action_assignment_and_accept_exact_carrie
         "spec_digest":sha256_hex(spec_text.as_bytes()),
         "spec_path":spec_path,
         "carrier_path":carrier_path,
-        "raw_output":"atom: accepted terminal carrier"
+        "raw_output":transcript("planning.task-atoms.v1")
     });
     fs::write(
         carrier_path,
@@ -470,20 +464,20 @@ fn terminal_events_require_core_issued_action_assignment_and_accept_exact_carrie
         &mut state,
         serde_json::json!({"v":1,"id":10,"kind":"task-completed","payload":{"task_id":"task-real-1","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}),
     );
-    assert_eq!(completed.kind, "done");
-    assert!(done_status(&completed).contains("state:sequence="));
+    assert_eq!(completed.kind, "spawn");
+    let next: CoreToHostSpawnPayload =
+        serde_json::from_value(completed.payload).expect("next spawn");
+    assert_eq!(
+        next.action.assignment_id.0,
+        "planning-main-task-extractor-02"
+    );
 
     let accepted = send_frame(
         &mut state,
         serde_json::json!({"v":1,"id":12,"kind":"agent-result","payload":{"assignment_id":spawn.action.assignment_id,"carrier":carrier}}),
     );
-    assert_eq!(accepted.kind, "spawn");
-    let next: CoreToHostSpawnPayload =
-        serde_json::from_value(accepted.payload).expect("next spawn");
-    assert_eq!(
-        next.action.assignment_id.0,
-        "planning-main-task-extractor-02"
-    );
+    assert_eq!(accepted.kind, "done");
+    assert!(done_status(&accepted).contains("agent-result:already-accepted"));
 
     let duplicate = send_frame(
         &mut state,
@@ -650,6 +644,20 @@ fn sha256_hex(data: &[u8]) -> String {
         out.push_str(&format!("{byte:02x}"));
     }
     out
+}
+
+fn transcript(boundary_id: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../tests/transcripts")
+        .join(boundary_id)
+        .join("transcripts.json");
+    let value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(path).expect("transcript file"))
+            .expect("transcript json");
+    value["records"][0]["raw_output"]
+        .as_str()
+        .expect("raw output")
+        .to_owned()
 }
 
 fn classify(root: &Path, paths: Vec<PathBuf>) -> TaskInputSet {

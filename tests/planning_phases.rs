@@ -1,12 +1,13 @@
 use std::{cell::Cell, fs};
 
 use drivers::planning::{
-    AssignmentPlan, Atom, AtomKind, Backlink, Disposition, MaterialPlanElement,
-    PlanningDeclarations, PlanningError, QuestionClass, QuestionNomination, RepositoryEvidence,
-    TaskAuthority, accept_questions, admit_question, boundary_runtime, inline_task_input,
-    p1_inventory, p2_ground, question_class_from_d72, require_material_backlinks,
-    require_total_dispositions,
+    accept_questions, accept_questions_payload, admit_question, boundary_runtime,
+    inline_task_input, p1_inventory, p2_ground, question_class_from_d72,
+    require_material_backlinks, require_total_dispositions, AssignmentPlan, Atom, AtomKind,
+    Backlink, Disposition, MaterialPlanElement, PlanningDeclarations, PlanningError, QuestionClass,
+    QuestionNomination, RepositoryEvidence, TaskAuthority,
 };
+use kernel::generated::{PlanningQuestion, PlanningQuestionClass, Questions};
 
 struct TaskOnly {
     reads: Cell<u32>,
@@ -129,12 +130,9 @@ fn question_gate_admits_only_d72_five_classes() {
 }
 
 #[test]
-fn question_boundary_admits_live_empty_capture() {
-    let raw = match fs::read_to_string("/tmp/w4-live/raw/planning.questions.v1.raw") {
-        Ok(value) => value,
-        Err(error) => panic!("live question transcript missing: {error}"),
-    };
-    assert_eq!(raw, "No qualifying questions.\n");
+fn question_boundary_admits_recorded_empty_capture() {
+    let raw = transcript("planning.questions.v1");
+    assert_eq!(raw, "{\n  \"questions\": []\n}\n");
     let mut runtime = boundary_runtime("planning.questions.v1");
     runtime.flip_to_enforce();
     assert_eq!(accept_questions(&raw, &runtime), Ok(raw));
@@ -142,18 +140,22 @@ fn question_boundary_admits_live_empty_capture() {
 
 #[test]
 fn question_boundary_admits_structured_empty_set() {
-    let raw = "questions: []\n";
+    let raw = transcript("planning.questions.v1");
     let mut runtime = boundary_runtime("planning.questions.v1");
     runtime.flip_to_enforce();
-    assert_eq!(accept_questions(raw, &runtime), Ok(raw.to_owned()));
+    assert_eq!(accept_questions(&raw, &runtime), Ok(raw));
 }
 
 #[test]
 fn question_boundary_admits_valid_populated_nomination() {
-    let raw = "class: material-underdetermination\nevidence: task and repository leave two plausible paths\nconsequence: choice changes verification scope\n";
-    let mut runtime = boundary_runtime("planning.questions.v1");
-    runtime.flip_to_enforce();
-    assert_eq!(accept_questions(raw, &runtime), Ok(raw.to_owned()));
+    let payload = Questions {
+        questions: vec![PlanningQuestion {
+            class: PlanningQuestionClass::MaterialUnderdetermination,
+            evidence: "task and repository leave two plausible paths".to_owned(),
+            consequence: "choice changes verification scope".to_owned(),
+        }],
+    };
+    assert_eq!(accept_questions_payload(payload.clone()), Ok(payload));
 }
 
 #[test]
@@ -179,6 +181,20 @@ fn question_boundary_rejects_prose_mentioning_class() {
         Err(value) => value,
     };
     assert_eq!(rejection.boundary_id(), "planning.questions.v1");
+}
+
+fn transcript(boundary_id: &str) -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../tests/transcripts")
+        .join(boundary_id)
+        .join("transcripts.json");
+    let value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(path).expect("transcript file"))
+            .expect("transcript json");
+    value["records"][0]["raw_output"]
+        .as_str()
+        .expect("raw output")
+        .to_owned()
 }
 
 #[test]
