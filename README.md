@@ -24,6 +24,19 @@
 
 `/autopilot-plan <workstream> <a> <b> <c> <context>` accepts exactly three `[authority]` files followed by one `[context/non-authority]` file. All four must share the same `authority_set_id`; historical/index files, symlinks, absolute paths, path escapes, CRLF/BOM headers, duplicate paths, and context-as-authority order drift fail before mutation. Only the three authority files become Work atoms; the fourth file is preserved as context.
 
+**Full format specification, every rejection reason, and a worked example:** [`docs/task-document-format.md`](docs/task-document-format.md).
+**Ready-to-copy pack:** [`templates/task-pack/`](templates/task-pack/) — copy the four files, replace `REPLACE-ME-task-slug`, and run.
+
+```
+[authority]
+authority_set_id: my-task-2026-07-28
+                          <- line 3 must be empty
+Mission
+Build the thing.
+```
+
+Line 1 is the class marker, line 2 is exactly `authority_set_id: <id>`, line 3 is empty, and the body follows. UTF-8, LF endings, no BOM.
+
 ## Local development commands
 
 Run package-local checks from `packages/pi-autopilot` with offline environment variables:
@@ -46,6 +59,7 @@ No default check calls a live provider, paid/metered API, external network, root
 
 ## Documentation
 
+- Task document format (required for `/autopilot-plan`): `docs/task-document-format.md`; copyable pack at `templates/task-pack/`.
 - Generated contracts/roles/roster/workflow: `docs/generated/`.
 - Runner details: `docs/cli/autopilot-agent-run.md` and `docs/subsystems/runner-and-forced-output.md`.
 - Release/certification procedure: `docs/operations/release-certification.md`.
