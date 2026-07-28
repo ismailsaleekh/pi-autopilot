@@ -53,6 +53,8 @@ readonly -a BANNED_DECISION=(
   'mergeCandidate' 'updateRef' 'compareAndSwap' 'threeWayMerge' 'resolveConflict'
   # verdicts — Core owns acceptance
   'FORWARD_READY' 'FORWARD_BLOCKED' 'NEEDS_FIX' 'acceptDelivery' 'verdictFor'
+  'localAcceptance' 'findings.length' 'validationFindings'
+  '"pass" | "fail"' "'pass' | 'fail'" '"pass" : "fail"' "'pass' : 'fail'"
   # role/prompt selection — Core owns the registry and renderer
   'selectRole' 'renderPrompt' 'buildPrompt' 'chooseMode' 'contextManifest'
 )

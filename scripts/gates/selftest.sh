@@ -73,7 +73,8 @@ write_binary_parity_fixture() {
     "$root/binaries/darwin-arm64" \
     "$root/kernel/src" \
     "$root/drivers/src" \
-    "$root/codegen/src"
+    "$root/codegen/src" \
+    "$root/modelcheck/src"
 
   cat > "$root/bin/autopilot-core.mjs" <<'JS'
 #!/usr/bin/env node
@@ -92,14 +93,31 @@ RS
   cat > "$root/codegen/src/main.rs" <<'RS'
 fn main() {}
 RS
+  cat > "$root/modelcheck/src/main.rs" <<'RS'
+fn main() {}
+RS
+  cat > "$root/Cargo.toml" <<'TOML'
+[workspace]
+members = ["kernel", "drivers", "codegen", "modelcheck"]
+TOML
+  cat > "$root/Cargo.lock" <<'LOCK'
+# fixture lockfile
+LOCK
+  cat > "$root/rust-toolchain.toml" <<'TOML'
+[toolchain]
+channel = "stable"
+TOML
   cat > "$root/data/seam_real_producers.rs" <<'RS'
 pub fn seam_fixture() -> u8 { 4 }
 RS
+  cat > "$root/data/workflow.kdl" <<'KDL'
+workflow {}
+KDL
 
   printf '#!/bin/sh\necho autopilot-core fixture\n' > "$root/binaries/darwin-arm64/autopilot-core"
   chmod +x "$root/binaries/darwin-arm64/autopilot-core"
 
-  touch -t 202607280101.00 "$root/kernel/src/lib.rs" "$root/drivers/src/lib.rs" "$root/codegen/src/main.rs" "$root/data/seam_real_producers.rs"
+  touch -t 202607280101.00 "$root/kernel/src/lib.rs" "$root/drivers/src/lib.rs" "$root/codegen/src/main.rs" "$root/modelcheck/src/main.rs" "$root/data/seam_real_producers.rs" "$root/data/workflow.kdl" "$root/Cargo.toml" "$root/Cargo.lock" "$root/rust-toolchain.toml"
   touch -t 202607280102.00 "$root/binaries/darwin-arm64/autopilot-core"
 
   python3 - "$root" <<'PY'
@@ -109,9 +127,8 @@ import sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
-source_files = ["codegen/src/main.rs", "data/seam_real_producers.rs", "drivers/src/lib.rs", "kernel/src/lib.rs"]
+source_files = ["Cargo.lock", "Cargo.toml", "codegen/src/main.rs", "data/seam_real_producers.rs", "data/workflow.kdl", "drivers/src/lib.rs", "kernel/src/lib.rs", "modelcheck/src/main.rs", "rust-toolchain.toml"]
 h = hashlib.sha256()
-newest = max(source_files, key=lambda rel: (root / rel).stat().st_mtime_ns)
 for rel in sorted(source_files):
     h.update(rel.encode())
     h.update(b"\0")
@@ -123,9 +140,10 @@ binary_hash = hashlib.sha256((root / binary_rel).read_bytes()).hexdigest()
 manifest = {
     "schema": 1,
     "source": {
-        "directories": ["kernel", "drivers", "codegen", "data"],
+        "directories": ["kernel", "drivers", "codegen", "modelcheck", "data"],
+        "files": ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml"],
         "hash": source_hash,
-        "newestTrackedSource": newest,
+        "hashAlgorithm": "sha256(path-nul-content-nul over build-affecting tracked and untracked inputs)",
     },
     "binaries": {
         "darwin-arm64": {
@@ -142,12 +160,23 @@ PY
   git -C "$root" init -q
   git -C "$root" config user.email selftest@example.invalid
   git -C "$root" config user.name 'Gate Selftest'
-  git -C "$root" add bin kernel drivers codegen data binaries
+  git -C "$root" add bin kernel drivers codegen modelcheck data binaries Cargo.toml Cargo.lock rust-toolchain.toml
 
   if [ "$mode" = "stale" ]; then
     printf '\npub fn repaired_source() -> u8 { 3 }\n' >> "$root/drivers/src/lib.rs"
     touch -t 202607280103.00 "$root/drivers/src/lib.rs"
     git -C "$root" add drivers/src/lib.rs
+  elif [ "$mode" = "untracked" ]; then
+    cat > "$root/drivers/src/untracked_build_input.rs" <<'RS'
+pub fn untracked_build_input() -> u8 { 9 }
+RS
+    touch -t 202607280103.00 "$root/drivers/src/untracked_build_input.rs"
+  elif [ "$mode" = "cargo" ]; then
+    printf '\n[profile.release]\nopt-level = "z"\n' >> "$root/Cargo.toml"
+    touch -t 202607280103.00 "$root/Cargo.toml"
+    git -C "$root" add Cargo.toml
+  elif [ "$mode" = "newer-mtime" ]; then
+    touch -t 202607280103.00 "$root/kernel/src/lib.rs"
   fi
 }
 
@@ -173,6 +202,13 @@ bad="$tmp/loc-bad"
 mkdir -p "$bad/kernel"
 for i in $(seq 1 2500); do echo "let x$i = $i;"; done > "$bad/kernel/lib.rs"
 expect 1 "rejects a 2500-LOC kernel (kill-switch)" "$LOC" --root "$bad" kernel
+
+# BAD: symlinked Rust sources are still source; they must not bypass the budget.
+lsym="$tmp/loc-symlink-bad"
+mkdir -p "$lsym/kernel"
+for i in $(seq 1 2500); do echo "let symlinked$i = $i;"; done > "$lsym/large.rs"
+ln -s ../large.rs "$lsym/kernel/lib.rs"
+expect 1 "rejects a 2500-LOC kernel through a symlinked .rs file" "$LOC" --root "$lsym" kernel
 
 # BAD: the kernel kill-switch is independent even when Core as a whole is under 6500.
 kind="$tmp/loc-kernel-independent"
@@ -329,6 +365,15 @@ pub fn load(p: &Path) -> Vec<u8> {
 RS
 expect 1 "rejects std::fs in the kernel" "$PURITY" --root "$pimp2"
 
+pimp3="$tmp/purity-impure-env-current-dir"
+mkdir -p "$pimp3/kernel"
+cat > "$pimp3/kernel/lib.rs" <<'RS'
+pub fn cwd() -> std::path::PathBuf {
+    std::env::current_dir().unwrap()
+}
+RS
+expect 1 "rejects std::env::current_dir in the kernel" "$PURITY" --root "$pimp3"
+
 expect 0 "tolerates an absent kernel/ (pre-W1)" "$PURITY" --root "$tmp/loc-empty-root"
 
 # ---------------------------------------------------------------------------
@@ -433,6 +478,15 @@ pub fn choose(mut artifacts: Vec<Artifact>) -> Option<Artifact> {
 }
 RS
 expect 1 "rejects sort_by_key(|e| e.modified) ordering" "$NOINFER" --root "$nsort"
+
+nread="$tmp/noinfer-read-to-string-state"
+mkdir -p "$nread/drivers"
+cat > "$nread/drivers/lib.rs" <<'RS'
+pub fn infer() -> Step {
+    if std::fs::read_to_string("runs/closed.marker").is_ok() { Step::Closed } else { Step::Open }
+}
+RS
+expect 1 "rejects state inferred from std::fs::read_to_string" "$NOINFER" --root "$nread"
 
 # Pattern-list errors must fail loudly before any source scan.
 nmalformed="$tmp/noinfer-malformed-pattern-root"
@@ -549,6 +603,15 @@ await mergeCandidate(candidate, runMain);
 TS
 expect 1 "rejects integration logic in the host" "$HOSTTHIN" --root "$hmerge"
 
+hverdict="$tmp/host-generic-verdict"
+mkdir -p "$hverdict/src"
+cat > "$hverdict/src/extension.ts" <<'TS'
+export function localAcceptance(findings: string[]): "pass" | "fail" {
+  return findings.length === 0 ? "pass" : "fail";
+}
+TS
+expect 1 "rejects generic local pass/fail acceptance logic in the host" "$HOSTTHIN" --root "$hverdict"
+
 # Decision vocabulary in a comment must NOT trip the gate.
 hcmt="$tmp/host-comment"
 mkdir -p "$hcmt/src"
@@ -583,47 +646,49 @@ printf '\nreal-producers.mjs\n'
 rgood="$tmp/real-producers-good"
 mkdir -p "$rgood/drivers/src/seam"
 cat > "$rgood/drivers/src/seam/mod.rs" <<'RS'
+fn dispatch(frame: SeamEnvelope, state: &mut CoreState) -> Result<SeamEnvelope, AnyError> {
+    match frame.kind.as_str() { "command" => command(frame, state), "agent-result" => route_agent_result(frame, state), "task-completed" => route_task_completed(frame, state), other => done(frame.id, rejection("unknown-kind", other)), }
+}
+fn command(frame: SeamEnvelope, state: &mut CoreState) -> Result<SeamEnvelope, AnyError> {
+    match parsed.route.driver.as_str() { "planning" => route_plan(frame.id, &parsed.args, state), "allocation-dispatch-runner" => route_run(frame.id, &parsed.args[0], state), other => done(frame.id, rejection("unknown-driver", other)), }
+}
 fn route_plan(id: u64, args: &[String], state: &mut CoreState) -> Result<SeamEnvelope, AnyError> {
     let dossier = p2_ground(&RepoGrounding { repo: current_dir()? }, &inventory)?;
     let assignments = planning_assignments(&args[0], &plan);
-    append_agent_invocation(state, &args[0], assignments.first().unwrap())?;
-    spawn(id, planning_bg_action(assignments.first().unwrap(), state.state.revision))
+    let issue = planning_bg_action(assignments.first().unwrap(), state.state.revision);
+    append_runner_invocation(state, &issue.binding)?;
+    spawn(id, issue.action)
 }
-fn route_run(id: u64, workstream: &str, state: &mut CoreState) -> Result<SeamEnvelope, AnyError> {
-    let approved = read_approved_plan(workstream)?;
-    let readiness = lane_readiness_from_events(&lanes, &approved, state);
-    let resources = host_resource_facts()?;
-    append_agent_invocation(state, workstream, &assignment)?;
-    spawn(id, action)
-}
+fn route_run(id: u64, workstream: &str, state: &mut CoreState) -> Result<SeamEnvelope, AnyError> { let approved = read_approved_plan(workstream)?; let readiness = lane_readiness_from_events(&lanes, &approved, state); let resources = host_resource_facts()?; append_runner_invocation(state, &binding)?; spawn(id, action) }
+fn route_agent_result(frame: SeamEnvelope, state: &mut CoreState) -> Result<SeamEnvelope, AnyError> { accept_planning_carrier(frame.id, &assignment_id, carrier, state, None) }
+fn route_task_completed(frame: SeamEnvelope, state: &mut CoreState) -> Result<SeamEnvelope, AnyError> { let binding = binding_for(state, &payload.action_id, &payload.assignment_id)?; append_terminal_event(state, &payload, &binding)?; done(frame.id, state.summary()) }
+fn accept_planning_carrier(id: u64, assignment_id: &Id, carrier: AgentCarrier, state: &mut CoreState, terminal: Option<&Payload>) -> Result<SeamEnvelope, AnyError> { done(id, "accepted".to_owned()) }
 RS
-expect 0 "accepts routes backed by repo grounding, persisted plan, resources, and agent spawn" node "$REALPROD" --root "$rgood"
+expect 0 "accepts reachable routes backed by real producers and recorded spawns" node "$REALPROD" --root "$rgood"
 
 rbad="$tmp/real-producers-bad"
 mkdir -p "$rbad/drivers/src/seam"
 cat > "$rbad/drivers/src/seam/mod.rs" <<'RS'
+fn dispatch(frame: SeamEnvelope, state: &mut CoreState) -> Result<SeamEnvelope, AnyError> {
+    match frame.kind.as_str() { "command" => command(frame, state), "agent-result" => route_agent_result(frame, state), "task-completed" => route_task_completed(frame, state), other => done(frame.id, rejection("unknown-kind", other)), }
+}
+fn command(frame: SeamEnvelope, state: &mut CoreState) -> Result<SeamEnvelope, AnyError> {
+    match parsed.route.driver.as_str() { "planning" => route_plan(frame.id, &parsed.args, state), "allocation-dispatch-runner" => route_run(frame.id, &parsed.args[0], state), other => done(frame.id, rejection("unknown-driver", other)), }
+}
 fn route_plan(id: u64, args: &[String], state: &mut CoreState) -> Result<SeamEnvelope, AnyError> {
-    let dossier = p2_ground(&Facts, &inventory)?;
-    state.append(EventKind("planning:P1-P6".to_owned()), vec![])?;
-    done(id, "planning:P1-P6:atoms=1:facts=1".to_owned())
+    let dossier = p2_ground(&RepoGrounding { repo: current_dir()? }, &inventory)?;
+    let assignments = planning_assignments(&args[0], &plan);
+    let issue = planning_bg_action(assignments.first().unwrap(), state.state.revision);
+    let result = spawn(id, issue.action);
+    return result;
+    append_runner_invocation(state, &issue.binding)?;
 }
-struct Facts;
-impl RepositoryEvidence for Facts {
-    fn facts_for_atoms(&self, atoms: &[Atom]) -> Result<Vec<String>, PlanningError> {
-        Ok(atoms.iter().map(|atom| format!("verified:{}", atom.id)).collect())
-    }
-}
-fn route_run(id: u64, workstream: &str, state: &mut CoreState) -> Result<SeamEnvelope, AnyError> {
-    let approved = units();
-    let readiness = vec![ready("l1")];
-    let host = resources();
-    spawn(id, action)
-}
-fn units() -> Vec<ApprovedUnit> { vec![] }
-fn ready(name: &str) -> LaneReadiness { LaneReadiness { lane_id: id(name), predecessor_gates_met: true, blockers_clear: true, unit_free: true, route_ready: true, preflight_passed: true, pressure_delay: false } }
-fn resources() -> ResourceFacts { ResourceFacts { free_storage_bytes: 20, projected_storage_bytes: 1, available_memory_bytes: 8, physical_memory_bytes: 16 } }
+fn route_run(id: u64, workstream: &str, state: &mut CoreState) -> Result<SeamEnvelope, AnyError> { let approved = read_approved_plan(workstream)?; let readiness = lane_readiness_from_events(&lanes, &approved, state); let resources = host_resource_facts()?; append_runner_invocation(state, &binding)?; spawn(id, action) }
+fn route_agent_result(frame: SeamEnvelope, state: &mut CoreState) -> Result<SeamEnvelope, AnyError> { accept_planning_carrier(frame.id, &assignment_id, carrier, state, None) }
+fn route_task_completed(frame: SeamEnvelope, state: &mut CoreState) -> Result<SeamEnvelope, AnyError> { let binding = binding_for(state, &payload.action_id, &payload.assignment_id)?; append_terminal_event(state, &payload, &binding)?; done(frame.id, state.summary()) }
+fn accept_planning_carrier(id: u64, assignment_id: &Id, carrier: AgentCarrier, state: &mut CoreState, terminal: Option<&Payload>) -> Result<SeamEnvelope, AnyError> { done(id, "accepted".to_owned()) }
 RS
-expect 1 "rejects fabricated route producers and success without recorded invocation" node "$REALPROD" --root "$rbad"
+expect 1 "rejects a reachable route that records invocation only after spawn returns" node "$REALPROD" --root "$rbad"
 
 # ---------------------------------------------------------------------------
 # binary-parity.sh  (D81 source/artifact parity)
@@ -636,7 +701,19 @@ expect 0 "accepts binaries rebuilt from the current tracked source hash" "$BINAR
 
 bbad="$tmp/binary-parity-stale"
 write_binary_parity_fixture "$bbad" stale
-expect 1 "rejects stale binary older than repaired source and stale manifest hash" "$BINARY" --root "$bbad"
+expect 1 "rejects stale binary with a stale manifest source hash" "$BINARY" --root "$bbad"
+
+buntracked="$tmp/binary-parity-untracked"
+write_binary_parity_fixture "$buntracked" untracked
+expect 1 "rejects an untracked Rust build input missing from the manifest hash" "$BINARY" --root "$buntracked"
+
+bcargo="$tmp/binary-parity-cargo"
+write_binary_parity_fixture "$bcargo" cargo
+expect 1 "rejects a tracked Cargo.toml build-input change missing from the manifest hash" "$BINARY" --root "$bcargo"
+
+bmtime="$tmp/binary-parity-newer-mtime"
+write_binary_parity_fixture "$bmtime" newer-mtime
+expect 0 "accepts matching sourceHash even when source mtimes are newer than binaries" "$BINARY" --root "$bmtime"
 
 # ---------------------------------------------------------------------------
 

@@ -5,7 +5,7 @@
       "path": "binaries/darwin-arm64/autopilot-core",
       "sha256": "ae3007e7af493dbead649ea6f1779526928dc4a7a6c9cd1f21d57b54a7796ec7",
       "sizeBytes": 1603632,
-      "sourceHash": "b58322a680ec63c6e6a1d6312f6b33e6633da632714b93e4fd264aede6a94dbb",
+      "sourceHash": "179423f749a1533aff8072e8696227dcedca786b4e03f76e0370e778f8173276",
       "target": "aarch64-apple-darwin"
     },
     "darwin-x64": {
@@ -13,7 +13,7 @@
       "path": "binaries/darwin-x64/autopilot-core",
       "sha256": "04b914f51493188308d1e2898e9eb4a857fa763d1a5664d728b2ffdb7e39105a",
       "sizeBytes": 1717384,
-      "sourceHash": "b58322a680ec63c6e6a1d6312f6b33e6633da632714b93e4fd264aede6a94dbb",
+      "sourceHash": "179423f749a1533aff8072e8696227dcedca786b4e03f76e0370e778f8173276",
       "target": "x86_64-apple-darwin"
     },
     "linux-arm64": {
@@ -21,7 +21,7 @@
       "path": "binaries/linux-arm64/autopilot-core",
       "sha256": "d4ff843345ab2f8560ed8d7426be0d28db6b835154ca7b253c0db8d85c9209e2",
       "sizeBytes": 1913008,
-      "sourceHash": "b58322a680ec63c6e6a1d6312f6b33e6633da632714b93e4fd264aede6a94dbb",
+      "sourceHash": "179423f749a1533aff8072e8696227dcedca786b4e03f76e0370e778f8173276",
       "target": "aarch64-unknown-linux-musl"
     },
     "linux-x64": {
@@ -29,7 +29,7 @@
       "path": "binaries/linux-x64/autopilot-core",
       "sha256": "5872f9bf123474480f303c9a11f0b8bd0688035efd826148f00bdcce3dd45ce0",
       "sizeBytes": 2021064,
-      "sourceHash": "b58322a680ec63c6e6a1d6312f6b33e6633da632714b93e4fd264aede6a94dbb",
+      "sourceHash": "179423f749a1533aff8072e8696227dcedca786b4e03f76e0370e778f8173276",
       "target": "x86_64-unknown-linux-musl"
     },
     "win32-x64": {
@@ -37,7 +37,7 @@
       "path": "binaries/win32-x64/autopilot-core.exe",
       "sha256": "2c7748a847c63cc0c8e38d10b5780cc0e789892e9f60ac39fb215e9840d27362",
       "sizeBytes": 3275525,
-      "sourceHash": "b58322a680ec63c6e6a1d6312f6b33e6633da632714b93e4fd264aede6a94dbb",
+      "sourceHash": "179423f749a1533aff8072e8696227dcedca786b4e03f76e0370e778f8173276",
       "target": "x86_64-pc-windows-gnu"
     }
   },
@@ -48,12 +48,16 @@
       "kernel",
       "drivers",
       "codegen",
+      "modelcheck",
       "data"
     ],
-    "fileCount": 57,
-    "hash": "b58322a680ec63c6e6a1d6312f6b33e6633da632714b93e4fd264aede6a94dbb",
-    "hashAlgorithm": "sha256(path-nul-content-nul over git-tracked .rs files)",
-    "newestTrackedSource": "data/seam_real_producers.rs",
-    "newestTrackedSourceMtimeNs": 1785205350384266031
+    "files": [
+      "Cargo.toml",
+      "Cargo.lock",
+      "rust-toolchain.toml"
+    ],
+    "fileCount": 93,
+    "hash": "179423f749a1533aff8072e8696227dcedca786b4e03f76e0370e778f8173276",
+    "hashAlgorithm": "sha256(path-nul-content-nul over build-affecting tracked and untracked inputs)"
   }
 }

@@ -133,7 +133,7 @@ for d in "${dirs[@]}"; do
   [ -d "$full" ] || continue
   while IFS= read -r f; do
     files+=("$f")
-  done < <(find "$full" -type f -name '*.rs' -not -path '*/target/*' | LC_ALL=C sort)
+  done < <(find -L "$full" -type f -name '*.rs' -not -path '*/target/*' | LC_ALL=C sort)
 done
 
 # --- count ------------------------------------------------------------------

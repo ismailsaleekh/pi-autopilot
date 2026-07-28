@@ -46,7 +46,10 @@ readonly -a BANNED_INFERENCE_CONCEPTS=(
   'created'
   'accessed'
   'metadata'
-  # listing-as-authority
+  # content/listing-as-authority
+  'read_to_string'
+  'fs::read'
+  'std::fs::read'
   'read_dir'
   'glob'
   'walkdir'
