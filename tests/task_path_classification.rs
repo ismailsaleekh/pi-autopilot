@@ -16,7 +16,8 @@ use kernel::generated::{CoreToHostDonePayload, CoreToHostSpawnPayload, SeamEnvel
 use sha2::{Digest as ShaDigest, Sha256};
 
 #[test]
-fn exact_three_authority_one_context_pack_passes_and_context_is_not_work() {
+fn task_path_classification_exact_three_authority_one_context_pack_passes_and_context_is_not_work()
+{
     let root = temp_repo("classification-pass");
     write_pack(
         &root,
@@ -51,7 +52,8 @@ fn exact_three_authority_one_context_pack_passes_and_context_is_not_work() {
 }
 
 #[test]
-fn classification_rejects_count_order_id_header_path_symlink_duplicate_and_forbidden_markers() {
+fn task_path_classification_rejects_count_order_id_header_path_symlink_duplicate_and_forbidden_markers(
+) {
     let root = temp_repo("classification-negative");
     write_pack(
         &root,
@@ -208,7 +210,7 @@ fn classification_rejects_count_order_id_header_path_symlink_duplicate_and_forbi
 }
 
 #[test]
-fn exact_four_path_command_spawns_and_hlo_replacement_does_not_mutate() {
+fn task_path_classification_exact_four_path_command_spawns_and_hlo_replacement_does_not_mutate() {
     let _guard = CWD_LOCK.lock().expect("cwd lock");
     let root = temp_repo("classification-seam");
     write_pack(
@@ -305,7 +307,7 @@ fn exact_four_path_command_spawns_and_hlo_replacement_does_not_mutate() {
 
 #[cfg(unix)]
 #[test]
-fn classification_rejects_root_and_ancestor_symlink_escapes_without_mutation() {
+fn task_path_classification_rejects_root_and_ancestor_symlink_escapes_without_mutation() {
     let _guard = CWD_LOCK.lock().expect("cwd lock");
     use std::os::unix::fs::symlink;
 
@@ -380,7 +382,8 @@ fn classification_rejects_root_and_ancestor_symlink_escapes_without_mutation() {
 }
 
 #[test]
-fn terminal_events_require_core_issued_action_assignment_and_accept_exact_carrier() {
+fn task_path_classification_terminal_events_require_core_issued_action_assignment_and_accept_exact_carrier(
+) {
     let _guard = CWD_LOCK.lock().expect("cwd lock");
     let root = temp_repo("terminal-binding");
     write_pack(
@@ -489,8 +492,185 @@ fn terminal_events_require_core_issued_action_assignment_and_accept_exact_carrie
 }
 
 #[test]
-fn delivery_terminal_carrier_is_core_accepted_and_incomplete_delivery_is_rejected_without_mutation()
-{
+fn task_path_classification_delivery_runtime_packages_uncommitted_lane_changes_and_ignores_unclaimed_residue(
+) {
+    let _guard = CWD_LOCK.lock().expect("cwd lock");
+    let root = temp_repo("delivery-runtime-package");
+    fs::write(root.join("README.md"), "delivery terminal fixture\n").expect("fixture file");
+    git_init(&root);
+    fs::create_dir_all(root.join(".pi/autopilot/main")).expect("plan dir");
+    fs::write(root.join(".pi/autopilot/main/approved-plan.json"), serde_json::to_vec_pretty(&serde_json::json!({
+        "units":[
+            {"id":"U1","operator_order":1,"decisions":[],"criteria":["AC1"],"dependencies":[],"predecessor_forward_criteria":[],"downstream_release_edges":["EDGE1"]}
+        ]
+    })).expect("approved json")).expect("approved plan");
+    let previous = std::env::current_dir().expect("cwd");
+    unsafe {
+        std::env::set_var(
+            "AUTOPILOT_NODE_EXECUTABLE",
+            std::env::current_exe().expect("exe"),
+        );
+        std::env::set_var(
+            "AUTOPILOT_AGENT_RUNNER_WRAPPER",
+            std::env::current_exe().expect("exe"),
+        );
+        std::env::set_var(
+            "AUTOPILOT_VALIDATOR_COMMAND",
+            std::env::current_exe().expect("exe"),
+        );
+    }
+    std::env::set_current_dir(&root).expect("chdir root");
+    let event_path = root.join(".pi/autopilot/events.jsonl");
+    let mut state = CoreState::open(Some(event_path.clone())).expect("state");
+    let launch = send_command(&mut state, "autopilot main");
+    assert_eq!(launch.kind, "spawn");
+    let spawn: CoreToHostSpawnPayload =
+        serde_json::from_value(launch.payload).expect("delivery spawn");
+    let spec_path = root
+        .join(".pi/autopilot/main/worktrees/L1/.pi/autopilot/runner/specs/assignment-main-L1.json");
+    let spec: serde_json::Value =
+        serde_json::from_slice(&fs::read(&spec_path).expect("delivery spec"))
+            .expect("delivery spec json");
+    let carrier_path = PathBuf::from(spec["carrier_path"].as_str().expect("carrier path"));
+    let worktree = PathBuf::from(spec["worktree"].as_str().expect("worktree path"));
+    let base_commit = git_out(&worktree, &["rev-parse", "--verify", "HEAD^{commit}"]);
+    fs::write(
+        worktree.join("README.md"),
+        "delivery terminal fixture changed\n",
+    )
+    .expect("worktree edit");
+    fs::write(worktree.join("Cargo.lock"), "# build residue\n").expect("cargo residue");
+    fs::create_dir_all(worktree.join(".pi/autopilot/runner/attempt-events"))
+        .expect("attempt-events dir");
+    fs::create_dir_all(worktree.join(".pi/autopilot/runner/carriers")).expect("carriers dir");
+    fs::write(
+        worktree.join(".pi/autopilot/runner/attempt-events/assignment-main-L1.jsonl"),
+        "{}\n",
+    )
+    .expect("attempt event artifact");
+    fs::create_dir_all(carrier_path.parent().expect("carrier parent")).expect("carrier dir");
+    fs::write(
+        &carrier_path,
+        serde_json::to_vec_pretty(&delivery_carrier_without_package(&spec, 2))
+            .expect("delivery carrier"),
+    )
+    .expect("carrier write");
+
+    let accepted = send_frame(
+        &mut state,
+        serde_json::json!({"v":1,"id":30,"kind":"task-completed","payload":{"task_id":"task-delivery-runtime","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}),
+    );
+    assert_eq!(accepted.kind, "spawn");
+    let validation: CoreToHostSpawnPayload =
+        serde_json::from_value(accepted.payload).expect("validation spawn");
+    assert_eq!(
+        validation.action.assignment_id.0,
+        "validator-assignment-main-L1"
+    );
+    let package_commit = git_out(&worktree, &["rev-parse", "--verify", "HEAD^{commit}"]);
+    assert_ne!(
+        package_commit, base_commit,
+        "runtime must create a delivery commit"
+    );
+    assert_eq!(
+        git_out(
+            &worktree,
+            &["diff", "--name-only", &base_commit, &package_commit, "--"]
+        ),
+        "README.md"
+    );
+    assert!(
+        worktree.join("Cargo.lock").exists(),
+        "residue is not packaged"
+    );
+    let events = fs::read_to_string(&event_path).expect("event log");
+    assert!(events.contains("agent:delivery-accepted"));
+    assert!(events.contains(&package_commit));
+    std::env::set_current_dir(previous).expect("restore cwd");
+}
+
+#[test]
+fn task_path_classification_delivery_runtime_adopts_existing_agent_commit_without_duplicate_package_commit(
+) {
+    let _guard = CWD_LOCK.lock().expect("cwd lock");
+    let root = temp_repo("delivery-runtime-adopt");
+    fs::write(root.join("README.md"), "delivery terminal fixture\n").expect("fixture file");
+    git_init(&root);
+    fs::create_dir_all(root.join(".pi/autopilot/main")).expect("plan dir");
+    fs::write(root.join(".pi/autopilot/main/approved-plan.json"), serde_json::to_vec_pretty(&serde_json::json!({
+        "units":[
+            {"id":"U1","operator_order":1,"decisions":[],"criteria":["AC1"],"dependencies":[],"predecessor_forward_criteria":[],"downstream_release_edges":["EDGE1"]}
+        ]
+    })).expect("approved json")).expect("approved plan");
+    let previous = std::env::current_dir().expect("cwd");
+    unsafe {
+        std::env::set_var(
+            "AUTOPILOT_NODE_EXECUTABLE",
+            std::env::current_exe().expect("exe"),
+        );
+        std::env::set_var(
+            "AUTOPILOT_AGENT_RUNNER_WRAPPER",
+            std::env::current_exe().expect("exe"),
+        );
+        std::env::set_var(
+            "AUTOPILOT_VALIDATOR_COMMAND",
+            std::env::current_exe().expect("exe"),
+        );
+    }
+    std::env::set_current_dir(&root).expect("chdir root");
+    let mut state = CoreState::open(None).expect("state");
+    let launch = send_command(&mut state, "autopilot main");
+    assert_eq!(launch.kind, "spawn");
+    let spawn: CoreToHostSpawnPayload =
+        serde_json::from_value(launch.payload).expect("delivery spawn");
+    let spec_path = root
+        .join(".pi/autopilot/main/worktrees/L1/.pi/autopilot/runner/specs/assignment-main-L1.json");
+    let spec: serde_json::Value =
+        serde_json::from_slice(&fs::read(&spec_path).expect("delivery spec"))
+            .expect("delivery spec json");
+    let carrier_path = PathBuf::from(spec["carrier_path"].as_str().expect("carrier path"));
+    let worktree = PathBuf::from(spec["worktree"].as_str().expect("worktree path"));
+    fs::write(
+        worktree.join("README.md"),
+        "delivery terminal fixture changed\n",
+    )
+    .expect("worktree edit");
+    run(&worktree, &["add", "README.md"]);
+    run(
+        &worktree,
+        &["commit", "-m", "agent-created delivery commit"],
+    );
+    let agent_commit = git_out(&worktree, &["rev-parse", "--verify", "HEAD^{commit}"]);
+    let before_count = git_out(&worktree, &["rev-list", "--count", "HEAD"]);
+    fs::create_dir_all(carrier_path.parent().expect("carrier parent")).expect("carrier dir");
+    fs::write(
+        &carrier_path,
+        serde_json::to_vec_pretty(&delivery_carrier_without_package(&spec, 2))
+            .expect("delivery carrier"),
+    )
+    .expect("carrier write");
+
+    let accepted = send_frame(
+        &mut state,
+        serde_json::json!({"v":1,"id":31,"kind":"task-completed","payload":{"task_id":"task-delivery-adopt","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}),
+    );
+    assert_eq!(accepted.kind, "spawn");
+    assert_eq!(
+        git_out(&worktree, &["rev-parse", "--verify", "HEAD^{commit}"]),
+        agent_commit,
+        "runtime must adopt the existing package commit"
+    );
+    assert_eq!(
+        git_out(&worktree, &["rev-list", "--count", "HEAD"]),
+        before_count,
+        "runtime must not create a duplicate commit"
+    );
+    std::env::set_current_dir(previous).expect("restore cwd");
+}
+
+#[test]
+fn task_path_classification_delivery_terminal_carrier_is_core_accepted_and_incomplete_delivery_is_rejected_without_mutation(
+) {
     let _guard = CWD_LOCK.lock().expect("cwd lock");
     let root = temp_repo("delivery-terminal");
     fs::write(root.join("README.md"), "delivery terminal fixture\n").expect("fixture file");
@@ -587,6 +767,16 @@ fn delivery_carrier(
     package_tree: &str,
     evidence_count: usize,
 ) -> serde_json::Value {
+    let mut carrier = delivery_carrier_without_package(spec, evidence_count);
+    carrier["package_commit"] = serde_json::json!(package_commit);
+    carrier["package_tree"] = serde_json::json!(package_tree);
+    carrier
+}
+
+fn delivery_carrier_without_package(
+    spec: &serde_json::Value,
+    evidence_count: usize,
+) -> serde_json::Value {
     serde_json::json!({
         "assignment_id":spec["assignment_id"],
         "role_id":spec["role_id"],
@@ -608,8 +798,6 @@ fn delivery_carrier(
         "context_digest":spec["context_digest"],
         "skills_digest":spec["skills_digest"],
         "subscription_digest":spec["subscription_digest"],
-        "package_commit":package_commit,
-        "package_tree":package_tree,
         "actual_changed_paths":["README.md"],
         "execution_audit_ref":"audit:delivery",
         "focused_evidence_refs":(0..evidence_count).map(|index| serde_json::json!(format!("evidence:{index}"))).collect::<Vec<_>>(),

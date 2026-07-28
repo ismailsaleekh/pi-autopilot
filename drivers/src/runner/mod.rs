@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use kernel::failure::{Failure, HardBoundary};
@@ -166,6 +166,12 @@ pub struct AcceptedDelivery {
     pub package_tree: Sha,
     pub changed_paths: Vec<String>,
     pub audit_ref: Ref,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct PackageFacts {
+    pub package_commit: Sha,
+    pub package_tree: Sha,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -1073,6 +1079,71 @@ pub fn refuse_agent_git_mutation(vcs: &GitVcs) -> Result<(), DeliveryRejection> 
     }
 }
 
+pub fn establish_delivery_package(
+    result: &DeliveryResult,
+    expected: &DeliveryExpectation,
+) -> Result<PackageFacts, DeliveryRejection> {
+    validate_delivery_pre_package(result, expected)?;
+    let worktree = canonical_delivery_worktree(result, expected)?;
+    verify_distinct_git_worktree(&worktree, &expected.base_commit)
+        .map_err(|_| DeliveryRejection::GitState)?;
+    let head = git_stdout_checked(&worktree, &["rev-parse", "--verify", "HEAD^{commit}"])
+        .map_err(|_| DeliveryRejection::GitState)?;
+    let head = head.trim().to_owned();
+    if head != expected.base_commit.0 {
+        return package_facts_for_head(&worktree, head);
+    }
+    let claimed = claimed_changed_paths(result)?;
+    git_status_checked(&worktree, &["reset", "--mixed", "HEAD"])
+        .map_err(|_| DeliveryRejection::GitState)?;
+    git_status_checked_with_paths(&worktree, &["add", "--"], &claimed)
+        .map_err(|_| DeliveryRejection::GitState)?;
+    let staged = git_stdout_checked(
+        &worktree,
+        &["diff", "--cached", "--name-only", "HEAD", "--"],
+    )
+    .map_err(|_| DeliveryRejection::GitState)?;
+    let mut staged_paths = staged
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let mut sorted_claimed = claimed.clone();
+    staged_paths.sort();
+    sorted_claimed.sort();
+    if staged_paths != sorted_claimed {
+        let _ = git_status_checked(&worktree, &["reset", "--mixed", "HEAD"]);
+        return Err(DeliveryRejection::GitState);
+    }
+    git_status_checked(
+        &worktree,
+        &["commit", "--no-gpg-sign", "-m", "autopilot delivery package"],
+    )
+    .map_err(|_| DeliveryRejection::GitState)?;
+    let package_commit = git_stdout_checked(&worktree, &["rev-parse", "--verify", "HEAD^{commit}"])
+        .map_err(|_| DeliveryRejection::GitState)?;
+    package_facts_for_head(&worktree, package_commit.trim().to_owned())
+}
+
+pub fn accept_delivery_with_package_facts(
+    carriers: &[DeliveryResult],
+    expected: &DeliveryExpectation,
+    package: &PackageFacts,
+) -> Result<AcceptedDelivery, DeliveryRejection> {
+    if carriers.len() != 1 {
+        return Err(DeliveryRejection::CarrierCount);
+    }
+    let result = &carriers[0];
+    validate_delivery_pre_package(result, expected)?;
+    verify_delivery_git_state(
+        result,
+        expected,
+        &package.package_commit,
+        &package.package_tree,
+    )?;
+    Ok(accepted_delivery_from(result, package.clone()))
+}
+
 pub fn accept_delivery(
     carriers: &[DeliveryResult],
     expected: &DeliveryExpectation,
@@ -1081,6 +1152,49 @@ pub fn accept_delivery(
         return Err(DeliveryRejection::CarrierCount);
     }
     let result = &carriers[0];
+    validate_delivery_identity(result, expected)?;
+    if !result.hard_boundary_violations.is_empty() {
+        return Err(DeliveryRejection::HardBoundaryViolation);
+    }
+    let package_commit = match &result.package_commit {
+        Some(value) if !value.0.trim().is_empty() => value.clone(),
+        _ => return Err(DeliveryRejection::MissingPackageCommit),
+    };
+    let package_tree = match &result.package_tree {
+        Some(value) if !value.0.trim().is_empty() => value.clone(),
+        _ => return Err(DeliveryRejection::MissingPackageCommit),
+    };
+    validate_delivery_claims(result, expected)?;
+    verify_delivery_binding(result, expected)?;
+    let package = PackageFacts {
+        package_commit,
+        package_tree,
+    };
+    verify_delivery_git_state(
+        result,
+        expected,
+        &package.package_commit,
+        &package.package_tree,
+    )?;
+    Ok(accepted_delivery_from(result, package))
+}
+
+fn validate_delivery_pre_package(
+    result: &DeliveryResult,
+    expected: &DeliveryExpectation,
+) -> Result<(), DeliveryRejection> {
+    validate_delivery_identity(result, expected)?;
+    if !result.hard_boundary_violations.is_empty() {
+        return Err(DeliveryRejection::HardBoundaryViolation);
+    }
+    validate_delivery_claims(result, expected)?;
+    verify_delivery_binding(result, expected)
+}
+
+fn validate_delivery_identity(
+    result: &DeliveryResult,
+    expected: &DeliveryExpectation,
+) -> Result<(), DeliveryRejection> {
     if result.assignment_id != expected.assignment_id
         || result.role_id != expected.role_id
         || result.mode != expected.mode
@@ -1095,38 +1209,91 @@ pub fn accept_delivery(
     {
         return Err(DeliveryRejection::BaseOrWorktree);
     }
-    if !result.hard_boundary_violations.is_empty() {
-        return Err(DeliveryRejection::HardBoundaryViolation);
-    }
-    let package_commit = match &result.package_commit {
-        Some(value) if !value.0.trim().is_empty() => value.clone(),
-        _ => return Err(DeliveryRejection::MissingPackageCommit),
-    };
-    let package_tree = match &result.package_tree {
-        Some(value) if !value.0.trim().is_empty() => value.clone(),
-        _ => return Err(DeliveryRejection::MissingPackageCommit),
-    };
-    if result.actual_changed_paths.is_empty() {
-        return Err(DeliveryRejection::MissingChangedPaths);
-    }
+    Ok(())
+}
+
+fn validate_delivery_claims(
+    result: &DeliveryResult,
+    expected: &DeliveryExpectation,
+) -> Result<(), DeliveryRejection> {
+    claimed_changed_paths(result)?;
     if result.execution_audit_ref.0.trim().is_empty() {
         return Err(DeliveryRejection::MissingAudit);
     }
     if result.focused_evidence_refs.len() < expected.required_focused_evidence {
         return Err(DeliveryRejection::MissingFocusedEvidence);
     }
-    verify_delivery_binding(result, expected)?;
-    verify_delivery_git_state(result, expected, &package_commit, &package_tree)?;
-    Ok(AcceptedDelivery {
-        package_commit,
-        package_tree,
+    Ok(())
+}
+
+fn claimed_changed_paths(result: &DeliveryResult) -> Result<Vec<String>, DeliveryRejection> {
+    if result.actual_changed_paths.is_empty() {
+        return Err(DeliveryRejection::MissingChangedPaths);
+    }
+    let mut paths = Vec::with_capacity(result.actual_changed_paths.len());
+    for path in &result.actual_changed_paths {
+        if !claimed_path_is_safe(&path.0) {
+            return Err(DeliveryRejection::GitState);
+        }
+        paths.push(path.0.clone());
+    }
+    Ok(paths)
+}
+
+fn claimed_path_is_safe(path: &str) -> bool {
+    if path.trim().is_empty()
+        || path.contains('\0')
+        || path.contains('\\')
+        || path.starts_with(".pi/autopilot/runner/")
+        || Path::new(path).is_absolute()
+    {
+        return false;
+    }
+    let mut saw_normal = false;
+    for component in Path::new(path).components() {
+        match component {
+            Component::Normal(value) if value != ".git" => saw_normal = true,
+            _ => return false,
+        }
+    }
+    saw_normal
+}
+
+fn canonical_delivery_worktree(
+    result: &DeliveryResult,
+    expected: &DeliveryExpectation,
+) -> Result<PathBuf, DeliveryRejection> {
+    let worktree = Path::new(&result.worktree.0);
+    reject_link_components_for_path(worktree).map_err(|_| DeliveryRejection::GitState)?;
+    let actual_worktree = fs::canonicalize(worktree).map_err(|_| DeliveryRejection::GitState)?;
+    let expected_worktree =
+        fs::canonicalize(&expected.worktree).map_err(|_| DeliveryRejection::GitState)?;
+    if actual_worktree != expected_worktree {
+        return Err(DeliveryRejection::BaseOrWorktree);
+    }
+    Ok(actual_worktree)
+}
+
+fn package_facts_for_head(worktree: &Path, head: String) -> Result<PackageFacts, DeliveryRejection> {
+    let tree = git_stdout_checked(worktree, &["rev-parse", "--verify", "HEAD^{tree}"])
+        .map_err(|_| DeliveryRejection::GitState)?;
+    Ok(PackageFacts {
+        package_commit: Sha(head),
+        package_tree: Sha(tree.trim().to_owned()),
+    })
+}
+
+fn accepted_delivery_from(result: &DeliveryResult, package: PackageFacts) -> AcceptedDelivery {
+    AcceptedDelivery {
+        package_commit: package.package_commit,
+        package_tree: package.package_tree,
         changed_paths: result
             .actual_changed_paths
             .iter()
             .map(|path| path.0.clone())
             .collect(),
         audit_ref: result.execution_audit_ref.clone(),
-    })
+    }
 }
 
 fn verify_delivery_binding(
@@ -1191,14 +1358,7 @@ fn verify_delivery_git_state(
     package_commit: &Sha,
     package_tree: &Sha,
 ) -> Result<(), DeliveryRejection> {
-    let worktree = Path::new(&result.worktree.0);
-    reject_link_components_for_path(worktree).map_err(|_| DeliveryRejection::GitState)?;
-    let actual_worktree = fs::canonicalize(worktree).map_err(|_| DeliveryRejection::GitState)?;
-    let expected_worktree =
-        fs::canonicalize(&expected.worktree).map_err(|_| DeliveryRejection::GitState)?;
-    if actual_worktree != expected_worktree {
-        return Err(DeliveryRejection::BaseOrWorktree);
-    }
+    let actual_worktree = canonical_delivery_worktree(result, expected)?;
     verify_distinct_git_worktree(&actual_worktree, &expected.base_commit)
         .map_err(|_| DeliveryRejection::GitState)?;
     let head = git_stdout_checked(
@@ -1229,10 +1389,7 @@ fn verify_delivery_git_state(
         &["status", "--porcelain", "--untracked-files=all"],
     )
     .map_err(|_| DeliveryRejection::GitState)?;
-    if status
-        .lines()
-        .any(|line| !status_line_is_runner_artifact(line))
-    {
+    if status.lines().any(status_line_blocks_delivery) {
         return Err(DeliveryRejection::GitState);
     }
     let diff = git_stdout_checked(
@@ -1262,6 +1419,13 @@ fn verify_delivery_git_state(
         return Err(DeliveryRejection::GitState);
     }
     Ok(())
+}
+
+fn status_line_blocks_delivery(line: &str) -> bool {
+    if status_line_is_runner_artifact(line) {
+        return false;
+    }
+    !line.starts_with("?? ")
 }
 
 fn status_line_is_runner_artifact(line: &str) -> bool {
@@ -1337,6 +1501,24 @@ fn git_status_checked(cwd: &Path, args: &[&str]) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("git {:?} failed", args))
+    }
+}
+
+fn git_status_checked_with_paths(
+    cwd: &Path,
+    args: &[&str],
+    paths: &[String],
+) -> Result<(), String> {
+    let status = Command::new("git")
+        .current_dir(cwd)
+        .args(args)
+        .args(paths)
+        .status()
+        .map_err(|error| error.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("git {:?} with delivery paths failed", args))
     }
 }
 

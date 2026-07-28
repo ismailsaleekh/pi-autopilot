@@ -578,7 +578,7 @@ artifact "allocation_lane_proposal" schema="autopilot.allocation_lane_proposal.v
 
 artifact "delivery_result" schema="autopilot.delivery_result.v1" producer="Model" model_produced=#true {
     doc "Implementer/Fixer terminal delivery carrier pending package acceptance (D76 §8.2)."
-    admits "Submit exactly one terminal delivery carrier for your assigned role, mode, assignment, attempt, and run revision. Report the exact base, worktree, resulting commit/tree or preservation checkpoint as applicable, actual changed paths, execution audit reference, and required focused evidence. Do not claim validation, merge, package state mutation, or success hidden behind missing evidence. If any hard boundary was violated or required evidence is missing, say so instead of reporting DONE."
+    admits "Submit exactly one terminal delivery carrier for your assigned role, mode, assignment, attempt, and run revision. Report the exact base, worktree, actual changed paths, execution audit reference, and required focused evidence. Do not claim validation, merge, package commit/tree, package state mutation, or success hidden behind missing evidence. The runtime establishes package commit/tree after accepting this carrier. If any hard boundary was violated or required evidence is missing, say so instead of reporting DONE."
     field "assignment_id" type="id" required=#true
     field "role_id" type="id" required=#true
     field "mode" type="mode-id" required=#true

@@ -480,7 +480,20 @@ fn route_task_completed(
             Ok(value) => value,
             Err(error) => return done(frame.id, rejection("delivery-binding", &error)),
         };
-        let accepted = match runner::accept_delivery(&[result], &expected) {
+        let package = match runner::establish_delivery_package(&result, &expected) {
+            Ok(value) => value,
+            Err(error) => {
+                return done(
+                    frame.id,
+                    rejection("delivery-rejected", &format!("{error:?}")),
+                );
+            }
+        };
+        let accepted = match runner::accept_delivery_with_package_facts(
+            std::slice::from_ref(&result),
+            &expected,
+            &package,
+        ) {
             Ok(value) => value,
             Err(error) => {
                 return done(

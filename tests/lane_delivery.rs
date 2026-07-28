@@ -4,13 +4,13 @@ use std::{
 };
 
 use drivers::allocation::{
-    AllocationPolicy, AllocationSubmission, ApprovedUnit, validate_allocation,
+    validate_allocation, AllocationPolicy, AllocationSubmission, ApprovedUnit,
 };
-use drivers::dispatch::{DispatchInput, LaneReadiness, launch_lanes, select_ready_lanes};
+use drivers::dispatch::{launch_lanes, select_ready_lanes, DispatchInput, LaneReadiness};
 use drivers::runner::{
-    DeliveryExpectation, DeliveryRejection, RunnerAssignment, RunnerTransportFacts,
-    accept_delivery, delivery_bg_action_with_facts, delivery_issue_with_facts,
-    package_delivery_commit, refuse_agent_git_mutation,
+    accept_delivery, accept_delivery_with_package_facts, delivery_bg_action_with_facts,
+    delivery_issue_with_facts, package_delivery_commit, refuse_agent_git_mutation,
+    DeliveryExpectation, DeliveryRejection, PackageFacts, RunnerAssignment, RunnerTransportFacts,
 };
 use drivers::{sim::SimPlatform, vcs::GitVcs};
 use kernel::generated::{
@@ -19,7 +19,7 @@ use kernel::generated::{
 use kernel::schedule::ResourceFacts;
 
 #[test]
-fn lane_launch_uses_recorded_tip_at_dispatch_and_package_owned_commit_delivers() {
+fn lane_delivery_launch_uses_recorded_tip_at_dispatch_and_package_owned_commit_delivers() {
     let fixture = fixture("real-lane-commit");
     let vcs = GitVcs::new(&fixture.root);
     let source = fixture.root.join("source");
@@ -76,6 +76,16 @@ fn lane_launch_uses_recorded_tip_at_dispatch_and_package_owned_commit_delivers()
     );
 
     let expected = expectation(&launches[0].worktree, &Sha(new_tip), 1);
+    let runtime_facts = PackageFacts {
+        package_commit: package_commit.clone(),
+        package_tree: package_tree.clone(),
+    };
+    let model_shaped = delivery(&expected, None, None);
+    let runtime_accepted =
+        accept_delivery_with_package_facts(&[model_shaped], &expected, &runtime_facts)
+            .expect("model-shaped delivery accepted with runtime package facts");
+    assert_eq!(runtime_accepted.package_commit, package_commit);
+    assert_eq!(runtime_accepted.package_tree, package_tree);
     let accepted = accept_delivery(
         &[delivery(
             &expected,
@@ -89,6 +99,15 @@ fn lane_launch_uses_recorded_tip_at_dispatch_and_package_owned_commit_delivers()
     assert_eq!(accepted.package_tree, package_tree);
     assert_eq!(accepted.changed_paths, vec!["keep.txt".to_owned()]);
 
+    let forged_commit = delivery(
+        &expected,
+        Some(Sha("0000000000000000000000000000000000000000".to_owned())),
+        Some(package_tree.clone()),
+    );
+    assert_eq!(
+        accept_delivery(&[forged_commit], &expected),
+        Err(DeliveryRejection::GitState)
+    );
     let mut forged_tree = delivery(
         &expected,
         Some(package_commit.clone()),
@@ -107,7 +126,7 @@ fn lane_launch_uses_recorded_tip_at_dispatch_and_package_owned_commit_delivers()
 }
 
 #[test]
-fn agent_git_mutation_and_incomplete_delivery_are_refused_without_side_effects() {
+fn lane_delivery_agent_git_mutation_and_incomplete_delivery_are_refused_without_side_effects() {
     let fixture = fixture("negative-delivery");
     let vcs = GitVcs::new(&fixture.root);
     let source = fixture.root.join("source");
@@ -125,10 +144,14 @@ fn agent_git_mutation_and_incomplete_delivery_are_refused_without_side_effects()
 
     let worktree = fixture.root.join("worktree");
     let expected = expectation(&worktree, &tip, 2);
-    let missing_commit = delivery(&expected, None, Some(Sha("tree".to_owned())));
+    let model_shaped_delivery = delivery(&expected, None, None);
+    let package = PackageFacts {
+        package_commit: tip.clone(),
+        package_tree: Sha(vcs.read_tip(&source, "HEAD^{tree}").expect("source tree")),
+    };
     assert_eq!(
-        accept_delivery(&[missing_commit], &expected),
-        Err(DeliveryRejection::MissingPackageCommit)
+        accept_delivery_with_package_facts(&[model_shaped_delivery], &expected, &package),
+        Err(DeliveryRejection::GitState)
     );
     assert_eq!(
         vcs.read_tip(&source, "HEAD").expect("read source tip"),
@@ -136,14 +159,10 @@ fn agent_git_mutation_and_incomplete_delivery_are_refused_without_side_effects()
         "bad delivery mutated nothing"
     );
 
-    let mut missing_evidence = delivery(
-        &expected,
-        Some(Sha("commit".to_owned())),
-        Some(Sha("tree".to_owned())),
-    );
+    let mut missing_evidence = delivery(&expected, None, None);
     missing_evidence.focused_evidence_refs = vec![Ref("evidence:one".to_owned())];
     assert_eq!(
-        accept_delivery(&[missing_evidence], &expected),
+        accept_delivery_with_package_facts(&[missing_evidence], &expected, &package),
         Err(DeliveryRejection::MissingFocusedEvidence)
     );
     assert_eq!(
