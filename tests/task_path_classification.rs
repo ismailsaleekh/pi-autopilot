@@ -66,23 +66,25 @@ fn task_path_classification_rejects_count_order_id_header_path_symlink_duplicate
         ["set-a", "set-a", "set-a", "set-a"],
     );
 
-    assert!(matches!(
-        planning::classify_task_file_pack(&root, &pack_paths()[..3]),
-        Err(PlanningError::TaskInputOrder(_))
-    ));
-    assert!(matches!(
-        classify_err(
-            &root,
-            vec!["CONTEXT.md", "TASK-A.md", "TASK-B.md", "TASK-C.md"]
-        ),
-        PlanningError::TaskInputOrder(_)
-    ));
+    let no_context = planning::classify_task_file_pack(&root, &pack_paths()[..3])
+        .expect_err("missing context rejected");
+    assert!(format!("{no_context:?}").contains("no [context/non-authority] document supplied"));
+    let context_first = classify(
+        &root,
+        vec![
+            PathBuf::from("CONTEXT.md"),
+            PathBuf::from("TASK-A.md"),
+            PathBuf::from("TASK-B.md"),
+            PathBuf::from("TASK-C.md"),
+        ],
+    );
+    assert_eq!(context_first.authority_documents.len(), 3);
+    assert_eq!(context_first.context_documents.len(), 1);
+    assert_eq!(context_first.context_documents[0].path, "CONTEXT.md");
 
     fs::write(root.join("TASK-B.md"), doc("[authority]", "other", "B")).expect("mismatch write");
-    assert!(matches!(
-        classify_err(&root, pack_names()),
-        PlanningError::TaskAuthoritySetMismatch
-    ));
+    let mismatch = classify_err(&root, pack_names());
+    assert!(format!("{mismatch:?}").contains("authority_set_id mismatch"));
     fs::write(root.join("TASK-B.md"), doc("[authority]", "set-a", "B")).expect("restore");
 
     fs::write(
