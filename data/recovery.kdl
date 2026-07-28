@@ -4,6 +4,8 @@ recovery version="v1" {
 
   lock scope="assignment" backend="os-create-new-file" duplicate="visible-wait" live-holder="no-age-kill"
 
+  value_repair scope="agent-run" max_attempts=3 retry_prompt="typed-diff" exhaustion="paused-operator-decision" session="same-session-id"
+
   r13 number=1 name="planning" status="live"
   r13 number=2 name="normal execution" status="live"
   r13 number=3 name="forward release" status="live"

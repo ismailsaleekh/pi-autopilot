@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use drivers::runner::{child, planning_paths, role_builtin_tool_names};
-use kernel::generated::Id;
+use drivers::runner::{child, planning_paths, role_builtin_tool_names, session_id_for};
+use kernel::generated::{ContractId, Id, ModeId};
 use serde_json::{Value, json};
 use sha2::{Digest as ShaDigest, Sha256};
 
@@ -83,6 +83,70 @@ console.log(JSON.stringify({{type:'agent_end', messages:[message], willRetry:fal
         PathBuf::from(argv_record["cwd"].as_str().expect("cwd")),
         root
     );
+}
+
+#[test]
+fn fake_pi_boundary_retry_reuses_session_and_succeeds() {
+    let root = temp_root("runner-retry");
+    let count_path = root.join("count.txt");
+    let argv_path = root.join("argv.jsonl");
+    let accepted = valid_atoms_output("retry success");
+    write_fake_pi(
+        &root,
+        &format!(
+            r#"#!/usr/bin/env node
+import {{ readFileSync, writeFileSync, appendFileSync }} from 'node:fs';
+let count = 0;
+try {{ count = Number(readFileSync({count_path:?}, 'utf8')); }} catch {{ count = 0; }}
+count += 1;
+writeFileSync({count_path:?}, String(count));
+appendFileSync({argv_path:?}, JSON.stringify({{ argv: process.argv.slice(2) }}) + '\n');
+const prompt = process.argv[process.argv.indexOf('-p') + 1];
+if (count === 2 && !prompt.includes('field:    raw_output')) process.exit(43);
+const text = count === 1 ? 'not-json' : {accepted:?};
+const message = {{role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[{{type:'text', text}}], stopReason:'stop'}};
+console.log(JSON.stringify({{type:'message_end', message}}));
+console.log(JSON.stringify({{type:'agent_end', messages:[message], willRetry:false}}));
+"#,
+            count_path = count_path,
+            argv_path = argv_path,
+            accepted = accepted,
+        ),
+    );
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect("retry should repair into same session");
+
+    assert_eq!(fs::read_to_string(&count_path).expect("count"), "2");
+    let argv_lines = fs::read_to_string(&argv_path).expect("argv");
+    let invocations = argv_lines
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("argv json"))
+        .collect::<Vec<_>>();
+    let session_ids = invocations
+        .iter()
+        .map(|value| {
+            let argv = value["argv"].as_array().expect("argv array");
+            let index = argv
+                .iter()
+                .position(|item| item.as_str() == Some("--session-id"))
+                .expect("session flag");
+            argv[index + 1].as_str().expect("session id").to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(session_ids.len(), 2);
+    assert_eq!(session_ids[0], session_ids[1]);
+    let carrier: Value = serde_json::from_slice(&fs::read(carrier_path(&root)).expect("carrier"))
+        .expect("carrier json");
+    assert_eq!(carrier["raw_output"], accepted);
+    let attempts = fs::read_to_string(
+        root.join(".pi/autopilot/runner/attempt-events/planning-main-task-extractor-01.jsonl"),
+    )
+    .expect("attempt events");
+    assert!(attempts.contains("value-rejected"), "{attempts}");
+    assert!(attempts.contains("accepted"), "{attempts}");
 }
 
 #[test]
@@ -523,6 +587,13 @@ fn write_planning_spec_with_prompt(
         "authority_documents":authority_documents.clone(),
         "context_document":context_document.clone(),
     }));
+    let session_id = session_id_for(
+        &Id("main".to_owned()),
+        &assignment_id,
+        &Id("task-extractor".to_owned()),
+        &ModeId("inventory".to_owned()),
+        &ContractId(boundary.to_owned()),
+    );
     let spec = json!({
         "schema":"autopilot.agent_run_spec.v1",
         "assignment_kind":"planning-review",
@@ -546,6 +617,7 @@ fn write_planning_spec_with_prompt(
         "result_contract":boundary,
         "result_contract_digest":contract_digest(boundary),
         "carrier_path":paths.carrier_path,
+        "session_id":session_id.0,
         "settings_digest":sha256_hex(SETTINGS_IDENTITY.as_bytes()),
         "context_digest":context_digest,
         "skills_digest":sha256_hex(SKILLS_IDENTITY.as_bytes()),
@@ -575,6 +647,10 @@ fn carrier_path(root: &Path) -> PathBuf {
         &Id("planning-main-task-extractor-01".to_owned()),
     )
     .carrier_path
+}
+
+fn valid_atoms_output(text: &str) -> String {
+    json!({"atoms":[{"id":"a1","kind":"work","text":text,"sources":["task://source"]}]}).to_string()
 }
 
 fn success_fake_pi() -> &'static str {
@@ -643,7 +719,7 @@ fn temp_root(name: &str) -> PathBuf {
     fs::canonicalize(&root).expect("canonical temp root")
 }
 
-const SETTINGS_IDENTITY: &str = "agent-run-settings:no-session,no-extensions,no-skills,no-prompt-templates,no-themes,no-context-files:v1";
+const SETTINGS_IDENTITY: &str = "agent-run-settings:session-id,no-extensions,no-skills,no-prompt-templates,no-themes,no-context-files:v1";
 const SKILLS_IDENTITY: &str = "agent-run-skills:disabled:v1";
 
 fn contract_digest(contract_id: &str) -> String {

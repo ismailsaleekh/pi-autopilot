@@ -363,11 +363,22 @@ fn accept_planning_carrier(
     if let Err(error) = validate_planning_binding(&carrier, &binding) {
         return done(id, rejection("agent-carrier-binding", &error));
     }
+    if planning_result_consumed(state, &binding) {
+        return done(
+            id,
+            format!(
+                "agent-result:already-accepted:{};{}",
+                carrier.boundary_id,
+                state.summary()
+            ),
+        );
+    }
     if let Err(error) = validate_agent_output(&carrier.boundary_id, &carrier.raw_output) {
         return done(id, boundary_status(&error));
     }
     if let Some(payload) = terminal {
         append_terminal_event(state, payload, &binding)?;
+        record_task_completion_control(state, payload)?;
     }
     state.append(
         EventKind("agent:result".to_owned()),
@@ -377,6 +388,7 @@ fn accept_planning_carrier(
             Ref(carrier.boundary_id.clone()),
             Ref(carrier.workstream.clone()),
             Ref(carrier.spec_digest.clone()),
+            planning_result_consumed_ref(&binding),
         ],
     )?;
     if carrier.boundary_id == "planning.work-map.v1" {
@@ -497,6 +509,27 @@ fn route_task_completed(
         record_task_completion_control(state, &payload)?;
         return validation_completed(frame.id, &binding, state);
     }
+    if binding.result_contract.0.starts_with("planning.") {
+        let carrier_text = match fs::read_to_string(&binding.carrier_path) {
+            Ok(value) => value,
+            Err(error) => {
+                return done(
+                    frame.id,
+                    rejection("carrier-read", &format!("{}:{error}", binding.carrier_path)),
+                );
+            }
+        };
+        let carrier: AgentCarrier = match serde_json::from_str(&carrier_text) {
+            Ok(value) => value,
+            Err(error) => {
+                return done(
+                    frame.id,
+                    rejection("planning-carrier", &format!("{}:{error}", binding.carrier_path)),
+                );
+            }
+        };
+        return accept_planning_carrier(frame.id, &binding.assignment_id, carrier, state, Some(&payload));
+    }
     append_terminal_event(state, &payload, &binding)?;
     record_task_completion_control(state, &payload)?;
     done(frame.id, state.summary())
@@ -572,6 +605,13 @@ fn terminal_consumed(state: &CoreState, binding: &runner::IssuedRunnerBinding) -
         .contains_key(&terminal_consumed_ref(binding))
 }
 
+fn planning_result_consumed(state: &CoreState, binding: &runner::IssuedRunnerBinding) -> bool {
+    state
+        .state
+        .refs
+        .contains_key(&planning_result_consumed_ref(binding))
+}
+
 fn append_terminal_event(
     state: &mut CoreState,
     payload: &HostToCoreTaskCompletedPayload,
@@ -595,6 +635,13 @@ fn append_terminal_event(
 fn terminal_consumed_ref(binding: &runner::IssuedRunnerBinding) -> Ref {
     Ref(format!(
         "terminal-consumed:{}:{}:{}",
+        binding.action_id.0, binding.assignment_id.0, binding.run_revision
+    ))
+}
+
+fn planning_result_consumed_ref(binding: &runner::IssuedRunnerBinding) -> Ref {
+    Ref(format!(
+        "planning-result-consumed:{}:{}:{}",
         binding.action_id.0, binding.assignment_id.0, binding.run_revision
     ))
 }
@@ -1398,6 +1445,13 @@ fn validation_issue_for_delivery(
         spec_path: spec_path.display().to_string(),
         spec_digest,
         carrier_path: carrier_path.display().to_string(),
+        session_id: runner::session_id_for(
+            &binding.workstream,
+            &assignment_id,
+            &Id("validator".to_owned()),
+            &ModeId("forward-release".to_owned()),
+            &kernel::generated::ContractId("validation.verdict.v1".to_owned()),
+        ),
         boundary_digest: sha256_hex_local(crate::validation::BOUNDARY_ID.as_bytes()),
         result_contract_digest: sha256_hex_local(crate::validation::BOUNDARY_ID.as_bytes()),
         settings_digest: runner::settings_digest(),

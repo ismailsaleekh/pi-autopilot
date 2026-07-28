@@ -115,6 +115,7 @@ export interface AgentRunSpec {
   result_contract: ContractId;
   result_contract_digest: Digest;
   carrier_path: Path;
+  session_id: Id;
   settings_digest: Digest;
   context_digest: Digest;
   skills_digest: Digest;

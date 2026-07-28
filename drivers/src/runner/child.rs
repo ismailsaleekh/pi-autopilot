@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use kernel::failure::{Failure, RetryPolicy};
+use kernel::failure::{Failure, OperatorDecision, RetryPolicy};
 use kernel::generated::{AgentRunSpec, DeliveryResult, TaskDocument};
 use serde::Deserialize;
 use serde_json::Value;
@@ -14,6 +14,14 @@ use sha2::{Digest as ShaDigest, Sha256};
 const DEFAULT_MAX_PI_STDOUT_BYTES: usize = 1024 * 1024;
 const DEFAULT_MAX_PI_STDERR_BYTES: usize = 256 * 1024;
 const DEFAULT_PI_TIMEOUT_MS: u64 = 60 * 60 * 1000;
+const MAX_VALUE_ATTEMPTS: u32 = 3;
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct ValueRejection {
+    field: String,
+    expected: String,
+    got: String,
+}
 
 struct ChildOutput {
     assistant: Option<String>,
@@ -87,52 +95,34 @@ pub fn main(args: &[String]) -> Result<(), String> {
             spec.prompt_digest.0, digest
         ));
     }
-    let output = launch_pi(&spec, &prompt)?;
-    write_stats_if_requested(&output)?;
-    if output.timed_out {
-        return Err(transient_with_artifact(
-            &spec,
-            &output,
-            "AUTOPILOT_AGENT_RUN_TIMEOUT_MS",
-            "timeout",
-            "agent-run pi wall timeout exceeded",
-        ));
+    if existing_carrier_valid(&spec_path, &spec_digest, &spec)? {
+        append_attempt_event(&spec, 0, "existing-carrier-accepted", None)?;
+        return Ok(());
     }
-    let status = output
-        .status
-        .ok_or_else(|| "agent-run pi status unavailable after launch".to_owned())?;
-    if !status.success() {
-        return Err(error_with_optional_artifact(
-            &spec,
-            &output,
-            "AUTOPILOT_AGENT_RUN_MAX_STDERR_BYTES",
-            &format!(
-                "agent-run pi exited nonzero status={status} stderr={}",
-                String::from_utf8_lossy(&output.stderr_tail)
-            ),
-        ));
+    let mut attempt_prompt = prompt;
+    for attempt in 1..=MAX_VALUE_ATTEMPTS {
+        append_attempt_event(&spec, attempt, "started", None)?;
+        let output = checked_pi_output(&spec, &attempt_prompt)?;
+        let assistant = output
+            .assistant
+            .as_deref()
+            .ok_or_else(|| "agent-run Pi JSONL contained no final assistant result".to_owned())?;
+        match write_carrier(&spec_path, &spec_digest, &spec, assistant) {
+            Ok(()) => {
+                append_attempt_event(&spec, attempt, "accepted", None)?;
+                return Ok(());
+            }
+            Err(rejection) if attempt < MAX_VALUE_ATTEMPTS => {
+                append_attempt_event(&spec, attempt, "value-rejected", Some(&rejection))?;
+                attempt_prompt = render_repair_prompt(&spec, &rejection);
+            }
+            Err(rejection) => {
+                append_attempt_event(&spec, attempt, "paused-after-exhaustion", Some(&rejection))?;
+                return Err(paused_after_exhaustion(&spec, &rejection));
+            }
+        }
     }
-    if let Some(error) = &output.stderr_error {
-        return Err(error_with_optional_artifact(
-            &spec,
-            &output,
-            "AUTOPILOT_AGENT_RUN_MAX_STDERR_BYTES",
-            error,
-        ));
-    }
-    if let Some(error) = &output.stdout_error {
-        return Err(error_with_optional_artifact(
-            &spec,
-            &output,
-            "AUTOPILOT_AGENT_RUN_MAX_STDOUT_BYTES",
-            error,
-        ));
-    }
-    let assistant = output
-        .assistant
-        .as_deref()
-        .ok_or_else(|| "agent-run Pi JSONL contained no final assistant result".to_owned())?;
-    write_carrier(&spec_path, &spec_digest, &spec, assistant)
+    unreachable!("bounded value attempt loop must return")
 }
 
 fn parse_args(args: &[String]) -> Result<PathBuf, String> {
@@ -144,6 +134,51 @@ fn parse_args(args: &[String]) -> Result<PathBuf, String> {
         return Err(format!("agent-run spec path must be absolute: {:?}", path));
     }
     Ok(path)
+}
+
+fn checked_pi_output(spec: &AgentRunSpec, prompt: &str) -> Result<ChildOutput, String> {
+    let output = launch_pi(spec, prompt)?;
+    write_stats_if_requested(&output)?;
+    if output.timed_out {
+        return Err(transient_with_artifact(
+            spec,
+            &output,
+            "AUTOPILOT_AGENT_RUN_TIMEOUT_MS",
+            "timeout",
+            "agent-run pi wall timeout exceeded",
+        ));
+    }
+    let status = output
+        .status
+        .ok_or_else(|| "agent-run pi status unavailable after launch".to_owned())?;
+    if !status.success() {
+        return Err(error_with_optional_artifact(
+            spec,
+            &output,
+            "AUTOPILOT_AGENT_RUN_MAX_STDERR_BYTES",
+            &format!(
+                "agent-run pi exited nonzero status={status} stderr={}",
+                String::from_utf8_lossy(&output.stderr_tail)
+            ),
+        ));
+    }
+    if let Some(error) = &output.stderr_error {
+        return Err(error_with_optional_artifact(
+            spec,
+            &output,
+            "AUTOPILOT_AGENT_RUN_MAX_STDERR_BYTES",
+            error,
+        ));
+    }
+    if let Some(error) = &output.stdout_error {
+        return Err(error_with_optional_artifact(
+            spec,
+            &output,
+            "AUTOPILOT_AGENT_RUN_MAX_STDOUT_BYTES",
+            error,
+        ));
+    }
+    Ok(output)
 }
 
 fn validate_spec(strict: &AgentRunSpec, spec_path: &Path) -> Result<(), String> {
@@ -159,15 +194,33 @@ fn validate_spec(strict: &AgentRunSpec, spec_path: &Path) -> Result<(), String> 
         ("workstream", strict.workstream.0.as_str()),
         ("role_id", strict.role_id.0.as_str()),
         ("mode", strict.mode.0.as_str()),
+        ("session_id", strict.session_id.0.as_str()),
     ] {
         validate_id(label, value)?;
     }
     validate_route_and_role(strict)?;
     validate_paths(strict, spec_path)?;
     validate_digests(strict)?;
+    validate_session_identity(strict)?;
     validate_delivery_identity(strict)?;
     validate_planning_documents(strict)?;
-    ensure_carrier_clear(Path::new(&strict.carrier_path.0))?;
+    Ok(())
+}
+
+fn validate_session_identity(strict: &AgentRunSpec) -> Result<(), String> {
+    let expected = super::session_id_for(
+        &strict.workstream,
+        &strict.assignment_id,
+        &strict.role_id,
+        &strict.mode,
+        &strict.boundary_id,
+    );
+    if strict.session_id != expected {
+        return Err(format!(
+            "agent-run session_id drift: expected {}, got {}",
+            expected.0, strict.session_id.0
+        ));
+    }
     Ok(())
 }
 
@@ -440,7 +493,8 @@ fn launch_pi(spec: &AgentRunSpec, prompt: &str) -> Result<ChildOutput, String> {
         .current_dir(&spec.cwd.0)
         .arg("--mode")
         .arg("json")
-        .arg("--no-session")
+        .arg("--session-id")
+        .arg(&spec.session_id.0)
         .arg(format!("--no-{}s", concat!("ext", "ension")))
         .arg("--no-skills")
         .arg("--no-prompt-templates")
@@ -1188,28 +1242,132 @@ fn sha_json(value: &impl serde::Serialize) -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
+fn value_rejection(
+    field: impl Into<String>,
+    expected: impl Into<String>,
+    got: impl Into<String>,
+) -> ValueRejection {
+    ValueRejection {
+        field: field.into(),
+        expected: expected.into(),
+        got: got.into(),
+    }
+}
+
+fn render_repair_prompt(spec: &AgentRunSpec, rejection: &ValueRejection) -> String {
+    format!(
+        "Your {} call was rejected.\n  field:    {}\n  expected: {}\n  got:      {}\nRe-emit with corrected values.",
+        spec.boundary_id.0, rejection.field, rejection.expected, rejection.got
+    )
+}
+
+fn paused_after_exhaustion(spec: &AgentRunSpec, rejection: &ValueRejection) -> String {
+    let failure = Failure::Paused {
+        needs: OperatorDecision::ChooseAfterExhaustion,
+    };
+    format!(
+        "agent-run value repair exhausted taxonomy=D77 variant={failure:?} assignment={} attempts={} field={} expected={} got={}",
+        spec.assignment_id.0, MAX_VALUE_ATTEMPTS, rejection.field, rejection.expected, rejection.got
+    )
+}
+
+fn append_attempt_event(
+    spec: &AgentRunSpec,
+    attempt: u32,
+    event: &str,
+    rejection: Option<&ValueRejection>,
+) -> Result<(), String> {
+    let root = Path::new(&spec.cwd.0).join(".pi/autopilot/runner/attempt-events");
+    fs::create_dir_all(&root)
+        .map_err(|error| format!("agent-run attempt event mkdir failed {:?}: {error}", root))?;
+    let path = root.join(format!("{}.jsonl", spec.assignment_id.0));
+    super::reject_link_components_for_path(&path).map_err(|error| error.to_string())?;
+    let row = serde_json::json!({
+        "schema": "autopilot.agent_run_attempt_event.v1",
+        "assignment_id": spec.assignment_id.0,
+        "session_id": spec.session_id.0,
+        "attempt": attempt,
+        "event": event,
+        "rejection": rejection.map(|value| serde_json::json!({
+            "field": value.field.clone(),
+            "expected": value.expected.clone(),
+            "got": value.got.clone(),
+        })),
+    });
+    let mut data = serde_json::to_vec(&row)
+        .map_err(|error| format!("agent-run attempt event serialize failed: {error}"))?;
+    data.push(b'\n');
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|error| format!("agent-run attempt event open failed {:?}: {error}", path))?;
+    file.write_all(&data)
+        .map_err(|error| format!("agent-run attempt event write failed {:?}: {error}", path))?;
+    file.sync_all()
+        .map_err(|error| format!("agent-run attempt event fsync failed {:?}: {error}", path))?;
+    Ok(())
+}
+
+fn existing_carrier_valid(
+    spec_path: &Path,
+    spec_digest: &str,
+    spec: &AgentRunSpec,
+) -> Result<bool, String> {
+    let path = Path::new(&spec.carrier_path.0);
+    super::reject_link_components_for_path(path).map_err(|error| error.to_string())?;
+    let text = match fs::read_to_string(path) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("carrier inspection failed {:?}: {error}", path)),
+    };
+    validate_existing_carrier(spec_path, spec_digest, spec, &text).map_err(|rejection| {
+        format!(
+            "agent-run stale carrier rejected field={} expected={} got={}",
+            rejection.field, rejection.expected, rejection.got
+        )
+    })?;
+    Ok(true)
+}
+
+fn validate_existing_carrier(
+    spec_path: &Path,
+    spec_digest: &str,
+    spec: &AgentRunSpec,
+    text: &str,
+) -> Result<(), ValueRejection> {
+    if spec.result_contract.0 == "autopilot.delivery_result.v1" {
+        let mut carrier: DeliveryResult = serde_json::from_str(text).map_err(|error| {
+            value_rejection("carrier", "existing autopilot.delivery_result.v1 JSON object", format!("invalid JSON: {error}"))
+        })?;
+        validate_delivery_carrier(spec, &carrier)?;
+        bind_delivery_carrier(spec_path, spec_digest, spec, &mut carrier)?;
+        return Ok(());
+    }
+    let value: Value = serde_json::from_str(text).map_err(|error| {
+        value_rejection("carrier", "existing autopilot.planning_carrier.v1 JSON object", format!("invalid JSON: {error}"))
+    })?;
+    validate_existing_planning_carrier(spec_path, spec_digest, spec, &value)
+}
+
 fn write_carrier(
     spec_path: &Path,
     spec_digest: &str,
     spec: &AgentRunSpec,
     assistant: &str,
-) -> Result<(), String> {
+) -> Result<(), ValueRejection> {
     if spec.result_contract.0 == "autopilot.delivery_result.v1" {
-        let mut carrier: DeliveryResult = serde_json::from_str(assistant)
-            .map_err(|error| format!("agent-run delivery carrier JSON invalid: {error}"))?;
+        let mut carrier: DeliveryResult = serde_json::from_str(assistant).map_err(|error| {
+            value_rejection("carrier", "autopilot.delivery_result.v1 JSON object", format!("invalid JSON: {error}"))
+        })?;
         validate_delivery_carrier(spec, &carrier)?;
         bind_delivery_carrier(spec_path, spec_digest, spec, &mut carrier)?;
         write_json_new(&spec.carrier_path.0, &carrier)
+            .map_err(|error| value_rejection("carrier_path", "create-once writable carrier path", error))
     } else {
-        crate::runner::validate_child_boundary(&spec.boundary_id.0, assistant).map_err(
-            |error| {
-                format!(
-                    "agent-run boundary rejection {}: {}",
-                    error.boundary_id(),
-                    error.actual()
-                )
-            },
-        )?;
+        crate::runner::validate_child_boundary(&spec.boundary_id.0, assistant).map_err(|error| {
+            value_rejection("raw_output", format!("{} admitted value", error.boundary_id()), error.actual().to_owned())
+        })?;
         let carrier = serde_json::json!({
             "schema": "autopilot.planning_carrier.v1",
             "action_id": spec.action_id.0,
@@ -1229,12 +1387,64 @@ fn write_carrier(
             "skills_digest": spec.skills_digest.0,
             "subscription_digest": spec.subscription_digest.0,
             "spec_digest": spec_digest,
-            "spec_path": super::path_to_string(spec_path).map_err(|error| error.to_string())?,
+            "spec_path": super::path_to_string(spec_path).map_err(|error| {
+                value_rejection("spec_path", "absolute runner spec path", error.to_string())
+            })?,
             "carrier_path": spec.carrier_path.0,
             "raw_output": assistant,
         });
         write_json_new(&spec.carrier_path.0, &carrier)
+            .map_err(|error| value_rejection("carrier_path", "create-once writable carrier path", error))
     }
+}
+
+fn validate_existing_planning_carrier(
+    spec_path: &Path,
+    spec_digest: &str,
+    spec: &AgentRunSpec,
+    value: &Value,
+) -> Result<(), ValueRejection> {
+    for (field, expected) in [
+        ("schema", "autopilot.planning_carrier.v1".to_owned()),
+        ("action_id", spec.action_id.0.clone()),
+        ("assignment_id", spec.assignment_id.0.clone()),
+        ("run_revision", spec.run_revision.to_string()),
+        ("workstream", spec.workstream.0.clone()),
+        ("role_id", spec.role_id.0.clone()),
+        ("mode", spec.mode.0.clone()),
+        ("boundary_id", spec.boundary_id.0.clone()),
+        ("result_contract", spec.result_contract.0.clone()),
+        ("prompt_path", spec.prompt_path.0.clone()),
+        ("prompt_digest", spec.prompt_digest.0.clone()),
+        ("boundary_digest", spec.boundary_digest.0.clone()),
+        ("result_contract_digest", spec.result_contract_digest.0.clone()),
+        ("settings_digest", spec.settings_digest.0.clone()),
+        ("context_digest", spec.context_digest.0.clone()),
+        ("skills_digest", spec.skills_digest.0.clone()),
+        ("subscription_digest", spec.subscription_digest.0.clone()),
+        ("spec_digest", spec_digest.to_owned()),
+        ("spec_path", super::path_to_string(spec_path).map_err(|error| {
+            value_rejection("spec_path", "absolute runner spec path", error.to_string())
+        })?),
+        ("carrier_path", spec.carrier_path.0.clone()),
+    ] {
+        let got = if field == "run_revision" {
+            value.get(field).and_then(Value::as_u64).map(|v| v.to_string())
+        } else {
+            value.get(field).and_then(Value::as_str).map(str::to_owned)
+        };
+        if got.as_deref() != Some(expected.as_str()) {
+            return Err(value_rejection(field, expected, got.unwrap_or_else(|| "missing-or-wrong-type".to_owned())));
+        }
+    }
+    let raw = value
+        .get("raw_output")
+        .and_then(Value::as_str)
+        .ok_or_else(|| value_rejection("raw_output", "string", "missing-or-wrong-type"))?;
+    crate::runner::validate_child_boundary(&spec.boundary_id.0, raw).map_err(|error| {
+        value_rejection("raw_output", format!("{} admitted value", error.boundary_id()), error.actual().to_owned())
+    })?;
+    Ok(())
 }
 
 fn bind_delivery_carrier(
@@ -1242,12 +1452,14 @@ fn bind_delivery_carrier(
     spec_digest: &str,
     spec: &AgentRunSpec,
     carrier: &mut DeliveryResult,
-) -> Result<(), String> {
+) -> Result<(), ValueRejection> {
     carrier.action_id = Some(spec.action_id.clone());
     carrier.prompt_path = Some(spec.prompt_path.clone());
     carrier.prompt_digest = Some(spec.prompt_digest.clone());
     carrier.spec_path = Some(kernel::generated::Path(
-        super::path_to_string(spec_path).map_err(|error| error.to_string())?,
+        super::path_to_string(spec_path).map_err(|error| {
+            value_rejection("spec_path", "absolute runner spec path", error.to_string())
+        })?,
     ));
     carrier.spec_digest = Some(kernel::generated::Digest(spec_digest.to_owned()));
     carrier.carrier_path = Some(spec.carrier_path.clone());
@@ -1260,22 +1472,30 @@ fn bind_delivery_carrier(
     Ok(())
 }
 
-fn validate_delivery_carrier(spec: &AgentRunSpec, carrier: &DeliveryResult) -> Result<(), String> {
+fn delivery_identity_got(carrier: &DeliveryResult) -> String {
+    format!(
+        "assignment_id={} role_id={} mode={} run_revision={} lane_id={} attempt={} base_commit={} worktree={}",
+        carrier.assignment_id.0, carrier.role_id.0, carrier.mode.0, carrier.run_revision,
+        carrier.lane_id.0, carrier.attempt, carrier.base_commit.0, carrier.worktree.0
+    )
+}
+
+fn validate_delivery_carrier(spec: &AgentRunSpec, carrier: &DeliveryResult) -> Result<(), ValueRejection> {
     let lane = spec
         .lane_id
         .as_ref()
-        .ok_or_else(|| "agent-run missing lane identity".to_owned())?;
+        .ok_or_else(|| value_rejection("lane_id", "runner-issued lane identity", "missing"))?;
     let attempt = spec
         .attempt
-        .ok_or_else(|| "agent-run missing attempt identity".to_owned())?;
+        .ok_or_else(|| value_rejection("attempt", "runner-issued attempt identity", "missing"))?;
     let base = spec
         .base_commit
         .as_ref()
-        .ok_or_else(|| "agent-run missing base identity".to_owned())?;
+        .ok_or_else(|| value_rejection("base_commit", "runner-issued base identity", "missing"))?;
     let worktree = spec
         .worktree
         .as_ref()
-        .ok_or_else(|| "agent-run missing worktree identity".to_owned())?;
+        .ok_or_else(|| value_rejection("worktree", "runner-issued worktree identity", "missing"))?;
     if carrier.assignment_id != spec.assignment_id
         || carrier.role_id != spec.role_id
         || carrier.mode != spec.mode
@@ -1285,7 +1505,7 @@ fn validate_delivery_carrier(spec: &AgentRunSpec, carrier: &DeliveryResult) -> R
         || carrier.base_commit != *base
         || carrier.worktree.0 != worktree.0
     {
-        return Err("agent-run delivery carrier identity drift".to_owned());
+        return Err(value_rejection("carrier.identity", "assignment_id/role_id/mode/run_revision/lane_id/attempt/base_commit/worktree matching spec", delivery_identity_got(carrier)));
     }
     if carrier
         .action_id
@@ -1332,7 +1552,7 @@ fn validate_delivery_carrier(spec: &AgentRunSpec, carrier: &DeliveryResult) -> R
             .as_ref()
             .is_some_and(|value| value != &spec.subscription_digest)
     {
-        return Err("agent-run delivery carrier binding drift".to_owned());
+        return Err(value_rejection("carrier.binding", "optional binding fields absent or matching runner spec", "binding drift"));
     }
     Ok(())
 }

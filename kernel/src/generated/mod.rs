@@ -723,6 +723,8 @@ pub struct AgentRunSpec {
     pub result_contract_digest: Digest,
     #[serde(rename = "carrier_path")]
     pub carrier_path: Path,
+    #[serde(rename = "session_id")]
+    pub session_id: Id,
     #[serde(rename = "settings_digest")]
     pub settings_digest: Digest,
     #[serde(rename = "context_digest")]

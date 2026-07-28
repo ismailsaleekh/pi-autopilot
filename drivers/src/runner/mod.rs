@@ -21,7 +21,7 @@ pub mod child;
 const ROLES_KDL: &str = include_str!("../../../data/roles.kdl");
 const DEFAULT_BG_TIMEOUT_SECONDS: u32 = 3600;
 const DEFAULT_REQUIRED_FOCUSED_EVIDENCE: u32 = 2;
-const SETTINGS_IDENTITY: &str = "agent-run-settings:no-session,no-extensions,no-skills,no-prompt-templates,no-themes,no-context-files:v1";
+const SETTINGS_IDENTITY: &str = "agent-run-settings:session-id,no-extensions,no-skills,no-prompt-templates,no-themes,no-context-files:v1";
 const SKILLS_IDENTITY: &str = "agent-run-skills:disabled:v1";
 const TASK_ATOMS_ADMITS: &str = "Task extractor output must name operator-task atoms with source anchors and no repository findings.";
 const SCOUT_DOSSIER_ADMITS: &str =
@@ -197,6 +197,7 @@ pub struct IssuedRunnerBinding {
     pub spec_path: String,
     pub spec_digest: String,
     pub carrier_path: String,
+    pub session_id: Id,
     pub boundary_digest: String,
     pub result_contract_digest: String,
     pub settings_digest: String,
@@ -296,7 +297,14 @@ pub fn planning_issue(request: &PlanningRunnerRequest) -> Result<IssuedRunnerAct
     let route = route_for_role(&request.role_id.0)?;
     let cwd = canonical_current_dir()?;
     let paths = planning_paths(&cwd, &request.workstream, &request.assignment_id);
-    ensure_carrier_clear(&paths.carrier_path)?;
+    reject_link_components_for_path(&paths.carrier_path)?;
+    let session_id = session_id_for(
+        &Id(request.workstream.clone()),
+        &request.assignment_id,
+        &request.role_id,
+        &request.mode,
+        &request.boundary_id,
+    );
     let prompt = planning_prompt(request, &route);
     write_parent_file(&paths.prompt_path, prompt.as_bytes())?;
     let prompt_digest = sha256_hex(prompt.as_bytes());
@@ -327,6 +335,7 @@ pub fn planning_issue(request: &PlanningRunnerRequest) -> Result<IssuedRunnerAct
         result_contract: request.boundary_id.clone(),
         result_contract_digest: Digest(binding_digests.result_contract_digest.clone()),
         carrier_path: to_contract_path(&paths.carrier_path)?,
+        session_id: session_id.clone(),
         settings_digest: Digest(binding_digests.settings_digest.clone()),
         context_digest: Digest(binding_digests.context_digest.clone()),
         skills_digest: Digest(binding_digests.skills_digest.clone()),
@@ -372,6 +381,7 @@ pub fn planning_issue(request: &PlanningRunnerRequest) -> Result<IssuedRunnerAct
         spec_path: path_to_string(&paths.spec_path)?,
         spec_digest,
         carrier_path: path_to_string(&paths.carrier_path)?,
+        session_id,
         boundary_digest: binding_digests.boundary_digest,
         result_contract_digest: binding_digests.result_contract_digest,
         settings_digest: binding_digests.settings_digest,
@@ -414,14 +424,21 @@ pub fn delivery_issue_with_facts(
     let worktree = absolute_path(&assignment.worktree)?;
     reject_link_components_for_path(&worktree)?;
     verify_distinct_git_worktree(&worktree, &assignment.base_commit)?;
+    let delivery_contract = delivery_contract_id();
     let paths = delivery_paths(&worktree, &assignment.assignment_id);
-    ensure_carrier_clear(&paths.carrier_path)?;
+    reject_link_components_for_path(&paths.carrier_path)?;
     let worktree_text = path_to_string(&worktree)?;
+    let session_id = session_id_for(
+        &assignment.workstream,
+        &assignment.assignment_id,
+        &assignment.role_id,
+        &assignment.mode,
+        &delivery_contract,
+    );
     let prompt = delivery_prompt(assignment, &route, &worktree_text);
     write_parent_file(&paths.prompt_path, prompt.as_bytes())?;
     let prompt_digest = sha256_hex(prompt.as_bytes());
     let binding_digests = delivery_binding_digests(assignment, &route, &worktree_text)?;
-    let delivery_contract = ContractId("autopilot.delivery_result.v1".to_owned());
     let spec = AgentRunSpec {
         schema: kernel::generated::SchemaId("autopilot.agent_run_spec.v1".to_owned()),
         assignment_kind: ValidationAssignmentKind::Delivery,
@@ -448,6 +465,7 @@ pub fn delivery_issue_with_facts(
         result_contract: delivery_contract.clone(),
         result_contract_digest: Digest(binding_digests.result_contract_digest.clone()),
         carrier_path: to_contract_path(&paths.carrier_path)?,
+        session_id: session_id.clone(),
         settings_digest: Digest(binding_digests.settings_digest.clone()),
         context_digest: Digest(binding_digests.context_digest.clone()),
         skills_digest: Digest(binding_digests.skills_digest.clone()),
@@ -487,6 +505,7 @@ pub fn delivery_issue_with_facts(
         spec_path: path_to_string(&paths.spec_path)?,
         spec_digest,
         carrier_path: path_to_string(&paths.carrier_path)?,
+        session_id,
         boundary_digest: binding_digests.boundary_digest,
         result_contract_digest: binding_digests.result_contract_digest,
         settings_digest: binding_digests.settings_digest,
@@ -605,6 +624,25 @@ pub fn expected_boundary_for_role(role_id: &str) -> Option<&'static str> {
         "implementer" | "fixer-integrator" => Some("autopilot.delivery_result.v1"),
         _ => None,
     }
+}
+
+pub fn session_id_for(
+    workstream: &Id,
+    assignment_id: &Id,
+    role_id: &Id,
+    mode: &ModeId,
+    boundary_id: &ContractId,
+) -> Id {
+    let material = format!(
+        "autopilot.pi-session.v1\0{}\0{}\0{}\0{}\0{}",
+        workstream.0, assignment_id.0, role_id.0, mode.0, boundary_id.0
+    );
+    let digest = sha256_hex(material.as_bytes());
+    Id(format!("autopilot-{}-{}", assignment_id.0, &digest[..16]))
+}
+
+fn delivery_contract_id() -> ContractId {
+    ContractId("autopilot.delivery_result.v1".to_owned())
 }
 
 pub fn binding_ref(binding: &IssuedRunnerBinding) -> Result<Ref, RunnerError> {
@@ -904,18 +942,6 @@ fn write_parent_file(path: &Path, data: &[u8]) -> Result<(), RunnerError> {
         fs::create_dir_all(parent).map_err(io_error)?;
     }
     fs::write(path, data).map_err(io_error)
-}
-
-fn ensure_carrier_clear(path: &Path) -> Result<(), RunnerError> {
-    reject_link_components_for_path(path)?;
-    match fs::File::open(path) {
-        Ok(_) => Err(RunnerError::StaleCarrier(format!(
-            "carrier already present at {:?}",
-            path
-        ))),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(io_error(error)),
-    }
 }
 
 pub(crate) fn reject_link_components_for_path(path: &Path) -> Result<(), RunnerError> {

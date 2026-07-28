@@ -451,6 +451,7 @@ artifact "agent_run_spec" schema="autopilot.agent_run_spec.v1" producer="Package
     field "result_contract" type="contract-id" required=#true
     field "result_contract_digest" type="digest" required=#true
     field "carrier_path" type="path" required=#true
+    field "session_id" type="id" required=#true doc="Stable pi --session-id derived from typed assignment identity; reused for value-repair turns and resume."
     field "settings_digest" type="digest" required=#true
     field "context_digest" type="digest" required=#true
     field "skills_digest" type="digest" required=#true
