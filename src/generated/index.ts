@@ -95,6 +95,14 @@ export interface AcceptedEvidenceEnvelope {
   envelope_sha256: Digest;
 }
 
+export interface AgentHandoff {
+  schema: SchemaId;
+  completed: string[];
+  remaining: string[];
+  critical_state: JsonObject;
+  next_action: string;
+}
+
 export interface AgentRunSpec {
   schema: SchemaId;
   assignment_kind: ValidationAssignmentKind;

@@ -502,6 +502,16 @@ artifact "state_cache" schema="autopilot.state_cache.v1" producer="Package" mode
     field "state_hash" type="digest" required=#true
 }
 
+artifact "agent_handoff" schema="autopilot.agent-handoff.v1" producer="Model" model_produced=#true {
+    doc "Model-facing checkpoint handoff. The package preserves unknown top-level properties and validates role-required critical_state slots from data/checkpoint-policy.kdl before compaction/resume."
+    admits "When checkpointed, return one autopilot.agent-handoff.v1 object with exactly these required fields: schema, completed, remaining, critical_state, and next_action. Put finished obligations in completed, unfinished obligations in remaining, role-required scalar or array-of-scalar slots in critical_state, and the immediate resume instruction in next_action; do not invent completion."
+    field "schema" type="schema-id" required=#true constant="autopilot.agent-handoff.v1"
+    list "completed" item="string" required=#true doc="Bounded finished obligations/results that must survive compaction."
+    list "remaining" item="string" required=#true doc="Bounded unfinished obligations/results that must survive compaction."
+    field "critical_state" type="object" required=#true doc="Role-specific slots; values must be scalar or arrays of scalar as declared in checkpoint-policy.kdl."
+    field "next_action" type="string" required=#true doc="Immediate next action after resume."
+}
+
 artifact "task_atoms" schema="planning.task-atoms.v1" producer="Model" model_produced=#true {
     doc "Model-facing task atom submission. Shape is deliberately small: structure is enforced by the submit tool; source values are checked against task authority anchors by the planning driver."
     admits "Task extractor output must name operator-task atoms with source anchors and no repository findings. Call autopilot_submit_atoms as the final action with atoms containing id, kind, text, and sources."

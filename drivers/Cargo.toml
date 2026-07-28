@@ -12,6 +12,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 
+[dev-dependencies]
+kdl = { workspace = true }
+
 [[test]]
 name = "kernel_purity_proof"
 path = "../tests/kernel_purity_proof.rs"
@@ -107,6 +110,10 @@ path = "../tests/runner_child.rs"
 [[test]]
 name = "checkpoint_resume"
 path = "../tests/checkpoint_resume.rs"
+
+[[test]]
+name = "checkpoint_policy"
+path = "../tests/checkpoint_policy.rs"
 
 [[test]]
 name = "closure_repair"

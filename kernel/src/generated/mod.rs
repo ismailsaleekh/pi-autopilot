@@ -725,6 +725,25 @@ pub struct AcceptedEvidenceEnvelope {
     pub envelope_sha256: Digest,
 }
 
+/// Model-facing checkpoint handoff. The package preserves unknown top-level properties and validates role-required critical_state slots from data/checkpoint-policy.kdl before compaction/resume.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentHandoff {
+    #[serde(rename = "schema")]
+    pub schema: SchemaId,
+    /// Bounded finished obligations/results that must survive compaction.
+    #[serde(rename = "completed")]
+    pub completed: Vec<String>,
+    /// Bounded unfinished obligations/results that must survive compaction.
+    #[serde(rename = "remaining")]
+    pub remaining: Vec<String>,
+    /// Role-specific slots; values must be scalar or arrays of scalar as declared in checkpoint-policy.kdl.
+    #[serde(rename = "critical_state")]
+    pub critical_state: serde_json::Value,
+    /// Immediate next action after resume.
+    #[serde(rename = "next_action")]
+    pub next_action: String,
+}
+
 /// Strict parent-Core written child runner specification for the package-contained autopilot-agent-run wrapper and Rust agent-run mode.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2836,6 +2855,7 @@ pub struct HostToCoreTaskCompletedPayload {
 pub const CONTRACT_SCHEMA: &str = "autopilot.contracts.v1";
 pub const CONTRACT_VERSION: u64 = 1;
 
+pub const AGENT_HANDOFF_ADMITS: &str = "When checkpointed, return one autopilot.agent-handoff.v1 object with exactly these required fields: schema, completed, remaining, critical_state, and next_action. Put finished obligations in completed, unfinished obligations in remaining, role-required scalar or array-of-scalar slots in critical_state, and the immediate resume instruction in next_action; do not invent completion.";
 pub const ALLOCATION_LANE_PROPOSAL_ADMITS: &str = "Return a lane proposal that groups only approved plan units. Preserve every unit id, dependency, predecessor forward criterion, downstream release edge, and verification obligation exactly as supplied. Do not invent file ownership or modify plan authority. Include ordered unit ids, one delivery boundary, context family id and estimate, focused tests, and launch wave.";
 pub const DELIVERY_RESULT_ADMITS: &str = "Submit exactly one terminal delivery carrier for your assigned role, mode, assignment, attempt, and run revision. Report the exact base, worktree, actual changed paths, execution audit reference, and required focused evidence. Do not claim validation, merge, package commit/tree, package state mutation, or success hidden behind missing evidence. The runtime establishes package commit/tree after accepting this carrier. If any hard boundary was violated or required evidence is missing, say so instead of reporting DONE.";
 pub const FINDING_ADMITS: &str = "For each material issue, record one effect: forward-blocking, closure-blocking-forward-safe, or advisory. Tie the finding to exact criteria or forward edges and evidence. Do not use severity alone to decide scheduling, do not hide a mandatory blocker as advisory, and do not report a source repair requirement without the evidence that makes it mandatory.";

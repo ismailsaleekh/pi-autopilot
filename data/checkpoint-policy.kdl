@@ -1,0 +1,82 @@
+schema "autopilot.checkpoint-policy.v1"
+version 1
+
+doc "Data-owned checkpoint handoff policy. Rust interprets generic slot sets and bounds; it must not branch on role names. Critical-state values are scalars or arrays of scalars only."
+
+handoff_contract "autopilot.agent-handoff.v1"
+
+threshold "arm" percent=75 basis="Operator requirement: arm checkpoint at about 75 percent context before hard interruption."
+threshold "checkpoint" percent=85 basis="Operator requirement from the RPC compaction plan; not a proof of overflow safety."
+
+handoff_bounds completed_max_entries=32 remaining_max_entries=32 entry_max_bytes=512 total_max_bytes=65536 critical_state_max_slots=16 critical_state_value_max_bytes=4096 critical_state_array_max_entries=256 basis="64 KiB keeps one handoff near the live-probed 50 KiB Pi tool-result ceiling plus envelope; 32x512 list bounds reserve room for critical_state."
+
+slot_set "task-atom-ledger" output_contract="planning.task-atoms.v1" rationale="Task extractor output is one accumulating atom ledger, so one slot set covers all inventory modes." {
+  slot "semantic_lens" type="string" required=#true max_bytes=512 doc="Preserves the active WORK/DECISION/CONSTRAINT/ACCEPTANCE/PREMISE/QUESTION/REFERENCE lens so atom kind boundaries do not drift."
+  slot "authority_coverage" type="array<string>" required=#true max_entries=64 max_bytes=1024 doc="Preserves authority documents and ranges already covered or not covered so task evidence is not reread or skipped."
+  slot "atom_ledger" type="array<string>" required=#true max_entries=128 max_bytes=2048 doc="Preserves atom id/kind/text/source-anchor tuples already accepted across compaction."
+  slot "duplicate_dispositions" type="array<string>" required=#true max_entries=64 max_bytes=1024 doc="Preserves duplicate and rejected-atom decisions that prevent double counting after resume."
+  slot "unresolved_ambiguities" type="array<string>" required=#true max_entries=32 max_bytes=1024 doc="Preserves authority ambiguities that must remain questions rather than invented atoms."
+}
+
+slot_set "evidence-selection-ledger" output_contract="planning.scout-dossier.v1" rationale="Repository scout and context curator both accumulate evidence/source-selection ledgers; one superset prevents two near-identical policies." {
+  slot "scope_identity" type="string" required=#true max_bytes=512 doc="Preserves assigned topology, catalog, manifest, or scope identity so evidence remains bounded."
+  slot "source_ranges_considered" type="array<string>" required=#true max_entries=128 max_bytes=2048 doc="Preserves exact files, line ranges, sections, or catalog sources already read or considered."
+  slot "accepted_outputs" type="array<string>" required=#true max_entries=128 max_bytes=2048 doc="Preserves accepted finding tuples or selected source refs with their purpose mapping."
+  slot "rejected_uncertain_outputs" type="array<string>" required=#true max_entries=64 max_bytes=1024 doc="Preserves rejected, uncertain, or out-of-budget claims so resume cannot promote them silently."
+  slot "unvisited_or_gap_refs" type="array<string>" required=#true max_entries=64 max_bytes=1024 doc="Preserves unvisited entry points and exact CONTEXT_GAPs that still need action."
+  slot "budget_identity" type="string" required=#true max_bytes=512 doc="Preserves base Git, budget, or context-manifest identity needed to bind evidence freshness."
+}
+
+slot_set "question-ledger" output_contract="planning.questions.v1" rationale="Contradiction resolver output is one question/resolution ledger." {
+  slot "resolution_batch" type="string" required=#true max_bytes=512 doc="Preserves contradiction or batch identity so both sides remain paired after resume."
+  slot "claim_evidence_ledger" type="array<string>" required=#true max_entries=128 max_bytes=2048 doc="Preserves both-side claim, evidence, and freshness comparisons required for symmetric resolution."
+  slot "surviving_facts" type="array<string>" required=#true max_entries=64 max_bytes=1024 doc="Preserves facts retained with confidence so they are not re-contested or weakened."
+  slot "rejected_facts" type="array<string>" required=#true max_entries=64 max_bytes=1024 doc="Preserves rejected facts and reasons so resume cannot revive invalidated claims."
+  slot "unresolved_gaps" type="array<string>" required=#true max_entries=64 max_bytes=1024 doc="Preserves unresolved material gaps that must remain operator questions if not closed."
+  slot "pending_questions" type="array<string>" required=#true max_entries=64 max_bytes=1024 doc="Preserves drafted question nominations with class/evidence/consequence boundaries."
+}
+
+slot_set "work-map-ledger" output_contract="planning.work-map.v1" rationale="Plan compiler and plan synthesizer both produce the same work-map contract; a shared ledger captures compiler disposition and synthesizer merge decisions." {
+  slot "input_disposition_matrix" type="array<string>" required=#true max_entries=256 max_bytes=4096 doc="Preserves atom/finding/decision/compiler-input coverage so plausible work maps cannot drop inputs."
+  slot "draft_units" type="array<string>" required=#true max_entries=128 max_bytes=4096 doc="Preserves current unit ids, objectives, criteria, and trace links already drafted."
+  slot "dependency_gate_tdd_obligations" type="array<string>" required=#true max_entries=128 max_bytes=2048 doc="Preserves dependency, gate, TDD, context, and release obligations attached to units."
+  slot "merge_conflict_decisions" type="array<string>" required=#true max_entries=64 max_bytes=2048 doc="Preserves coalescing, conflict, assumption, and deviation decisions, including explicit none when absent."
+  slot "trace_gaps" type="array<string>" required=#true max_entries=64 max_bytes=1024 doc="Preserves unresolved trace gaps and still-unincorporated inputs that block silent omissions."
+}
+
+slot_set "plan-review-ledger" output_contract="planning.plan-review.v1" rationale="Plan reviewer output is a verdict ledger over the criterion universe." {
+  slot "criterion_universe" type="array<string>" required=#true max_entries=256 max_bytes=4096 doc="Preserves every criterion that must receive a closed verdict before approval."
+  slot "verdict_ledger" type="array<string>" required=#true max_entries=256 max_bytes=4096 doc="Preserves verdicts already assigned by criterion so resume cannot double-report or omit."
+  slot "evidence_rationale_refs" type="array<string>" required=#true max_entries=128 max_bytes=2048 doc="Preserves evidence, finding refs, and rationale needed to justify each verdict."
+  slot "checked_dimensions" type="array<string>" required=#true max_entries=64 max_bytes=1024 doc="Preserves review dimensions already checked so coverage remains total."
+  slot "unreviewed_criteria" type="array<string>" required=#true max_entries=128 max_bytes=2048 doc="Preserves criteria still requiring verdicts, preventing false overall pass."
+  slot "blocker_advisory_split" type="array<string>" required=#true max_entries=64 max_bytes=1024 doc="Preserves blocker/advisory classification boundaries that affect release decisions."
+}
+
+slot_set "delivery-ledger" output_contract="autopilot.delivery_result.v1" rationale="Implementer and fixer-integrator both terminate through delivery_result; fixer state is an additive repair ledger, not a separate Rust branch." {
+  slot "worktree_identity" type="string" required=#true max_bytes=512 doc="Preserves exact base commit, worktree, assignment, lane, attempt, and revision identity."
+  slot "scope_boundaries" type="array<string>" required=#true max_entries=128 max_bytes=2048 doc="Preserves owned, read-only, and untouchable scopes so resume cannot cross boundaries."
+  slot "edit_ledger" type="array<string>" required=#true max_entries=256 max_bytes=4096 doc="Preserves actual dirty paths and edit decisions that must be mechanically checked."
+  slot "tdd_command_ledger" type="array<string>" required=#true max_entries=128 max_bytes=2048 doc="Preserves criterion, test, command, failing-before, and passing-after evidence."
+  slot "evidence_refs" type="array<string>" required=#true max_entries=128 max_bytes=2048 doc="Preserves evidence refs required by delivery_result and repair findings."
+  slot "boundary_violations" type="array<string>" required=#true max_entries=64 max_bytes=1024 doc="Preserves any hard boundary violation that must remain loud at terminal status."
+  slot "repair_decisions" type="array<string>" required=#true max_entries=128 max_bytes=2048 doc="Preserves finding ids, root causes, conflict decisions, and unchanged contracts; empty only for non-repair deliveries."
+  slot "draft_delivery_status" type="string" required=#true max_bytes=512 doc="Preserves current terminal-status draft so resume cannot convert blocked work into DONE."
+}
+
+role_policy "task-extractor" interruptible=#true slot_set="task-atom-ledger" reason="Long-running inventory can accumulate partial atoms that are safe only if the atom ledger and authority coverage survive."
+role_policy "repository-scout" interruptible=#true slot_set="evidence-selection-ledger" reason="Live probe proved scout findings can cross compaction; evidence and unvisited scope must survive."
+role_policy "context-curator" interruptible=#true slot_set="evidence-selection-ledger" reason="Curator accumulates selected/rejected sources and budget gaps; losing them silently degrades downstream context."
+role_policy "plan-compiler" interruptible=#true slot_set="work-map-ledger" reason="Compiler must account for every atom/finding/decision while drafting executable units."
+role_policy "plan-synthesizer" interruptible=#true slot_set="work-map-ledger" reason="Synthesizer can silently drop compiler/trace inputs unless merge and DAG state survive."
+role_policy "plan-reviewer" interruptible=#true slot_set="plan-review-ledger" reason="Reviewer must preserve criterion-level verdict coverage; a plausible PASS cannot hide omissions."
+role_policy "contradiction-resolver" interruptible=#true slot_set="question-ledger" reason="Resolver must preserve both sides of each contradiction and pending question nominations."
+role_policy "implementer" interruptible=#true slot_set="delivery-ledger" reason="Delivery work mutates a sparse worktree; edit, evidence, and boundary ledgers must survive."
+role_policy "fixer-integrator" interruptible=#true slot_set="delivery-ledger" reason="Fixer repair state extends delivery state with failure, root-cause, and unchanged-contract obligations."
+
+role_policy "onboard" interruptible=#false reason="Thin intake is short and operator-authority bound; interrupting it has no lossless Q1 handoff policy."
+role_policy "orchestrator" interruptible=#false reason="Control decisions mutate scheduling authority; checkpointing them as model state is unsafe."
+role_policy "context-synthesizer" interruptible=#false reason="Legacy context synthesis has no Q1 evidence-backed handoff slots; runtime must hard-fail rather than resume lossy."
+role_policy "execution-allocator" interruptible=#false reason="Allocation is a CAS/control-adjacent proposal; no lossless Q1 policy was established for partial lane allocation."
+role_policy "validator" interruptible=#false reason="Validation verdicts are closure gates and must be atomic; partial verdict resume is worse than loud failure."
+role_policy "bughunter" interruptible=#false reason="Final bughunt is a terminal review gate; it should restart or fail loudly rather than resume partial findings."
