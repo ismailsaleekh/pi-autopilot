@@ -3,12 +3,12 @@
     {
       "schema": "autopilot.transcript.v1",
       "boundary_id": "allocation.lane-proposal.v1",
-      "raw_output": "## Delivery boundary DB1\nUtility `--json` behavior and its approved focused verification, comprising **U1, U2, U3**.\n\n**Ordered unit ids:** U1 → U2 → U3\n\n### Lane 1 — Flag handling\n- **Context family:** CF-UTILITY-JSON\n- **Estimate:** Small\n- **Launch wave:** 1\n- **Units:**\n  > unit U1: parse the --json flag in the utility entrypoint; depends on: none;  \n  > forward criterion FC1 = flag recognized and unknown flags exit non-zero\n- **Focused tests:** None separately approved; covered by U3.\n- **Downstream release edges:** U1 → U2 via FC1; U1 → U3 via FC1.\n\n### Lane 2 — JSON output\n- **Context family:** CF-UTILITY-JSON\n- **Estimate:** Small\n- **Launch wave:** 2, after U1 satisfies FC1\n- **Units:**\n  > unit U2: emit the documented JSON object when --json is set, preserving default  \n  > output byte-for-byte; depends on: U1; consumes forward criterion FC1\n- **Focused tests:** None separately approved; covered by U3.\n- **Downstream release edge:** U2 → U3 via FC2. FC2 remains the supplied, undefined reference.\n\n### Lane 3 — Focused verification\n- **Context family:** CF-UTILITY-JSON\n- **Estimate:** Small\n- **Launch wave:** 3, after U1 and U2\n- **Units:**\n  > unit U3: focused test covering --json, default output, and unknown-flag rejection;  \n  > depends on: U1, U2; consumes forward criteria FC1, FC2\n- **Focused tests:** U3 exactly as supplied.\n",
+      "raw_output": "{\n  \"lane_id\": \"L1\",\n  \"objective\": \"Add opt-in JSON output support for state_root while preserving existing CLI behavior and covering flag handling with focused tests.\",\n  \"ordered_unit_ids\": [\n    \"U1\",\n    \"U2\",\n    \"U3\"\n  ],\n  \"rationale\": \"U1 establishes the CLI flag parsing boundary required by U2; U2 implements the documented JSON output while preserving default output and derivation; U3 verifies both output modes and unknown-flag rejection. Keeping all three in one lane preserves the dependency chain and verification obligations.\",\n  \"delivery_boundary\": \"Complete state_root CLI change including --json parsing with unknown-flag rejection, documented JSON emission, unchanged default output/derivation behavior, and focused regression tests.\",\n  \"predecessor_forward_criteria\": [\n    \"FC1\",\n    \"FC2\"\n  ],\n  \"downstream_release_edges\": [\n    \"FC1\",\n    \"FC2\"\n  ],\n  \"context_family_id\": \"CF-UTILITY-JSON\",\n  \"context_estimate\": 3,\n  \"focused_tests\": [\n    \"cargo test -q state_root\"\n  ],\n  \"launch_wave\": 1\n}\n",
       "provenance": {
         "provider": "openai-codex",
-        "model": "gpt-5.6-sol",
-        "thinking": "max",
-        "session_id": "w5-capture-allocation-lane-proposal-43595"
+        "model": "gpt-5.5",
+        "thinking": "high",
+        "session_id": "c-record-allocation-lane-proposal-v1-20260728"
       }
     }
   ]

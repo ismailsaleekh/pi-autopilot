@@ -3,12 +3,12 @@
     {
       "schema": "autopilot.transcript.v1",
       "boundary_id": "planning.questions.v1",
-      "raw_output": "No qualifying questions.\n",
+      "raw_output": "{\n  \"questions\": []\n}\n",
       "provenance": {
         "provider": "openai-codex",
         "model": "gpt-5.5",
         "thinking": "high",
-        "session_id": "w4-capture-planning-questions-v1-2254"
+        "session_id": "c-record-planning-questions-v1-20260728"
       }
     }
   ]
