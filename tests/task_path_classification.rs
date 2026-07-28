@@ -419,7 +419,7 @@ fn terminal_events_require_core_issued_action_assignment_and_accept_exact_carrie
     );
     let spawn: CoreToHostSpawnPayload =
         serde_json::from_value(plan.payload).expect("spawn payload");
-    assert!(state_status(&mut state).contains("state:sequence=1;revision=1"));
+    assert!(state_status(&mut state).contains("state:sequence=2;revision=2"));
 
     let forged = send_frame(
         &mut state,
@@ -428,7 +428,7 @@ fn terminal_events_require_core_issued_action_assignment_and_accept_exact_carrie
     assert_eq!(forged.kind, "done");
     assert!(done_status(&forged).contains("terminal-binding"));
     assert!(
-        state_status(&mut state).contains("state:sequence=1;revision=1"),
+        state_status(&mut state).contains("state:sequence=2;revision=2"),
         "forged terminal must not mutate state"
     );
 
@@ -466,9 +466,16 @@ fn terminal_events_require_core_issued_action_assignment_and_accept_exact_carrie
         serde_json::to_vec_pretty(&carrier).expect("carrier json"),
     )
     .expect("carrier write");
-    let accepted = send_frame(
+    let completed = send_frame(
         &mut state,
         serde_json::json!({"v":1,"id":10,"kind":"task-completed","payload":{"task_id":"task-real-1","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}),
+    );
+    assert_eq!(completed.kind, "done");
+    assert!(done_status(&completed).contains("state:sequence="));
+
+    let accepted = send_frame(
+        &mut state,
+        serde_json::json!({"v":1,"id":12,"kind":"agent-result","payload":{"assignment_id":spawn.action.assignment_id,"carrier":carrier}}),
     );
     assert_eq!(accepted.kind, "spawn");
     let next: CoreToHostSpawnPayload =
@@ -566,8 +573,13 @@ fn delivery_terminal_carrier_is_core_accepted_and_incomplete_delivery_is_rejecte
         &mut state,
         serde_json::json!({"v":1,"id":21,"kind":"task-completed","payload":{"task_id":"task-delivery-1","action_id":"action-main-L1","assignment_id":"assignment-main-L1","status":"completed"}}),
     );
-    assert_eq!(accepted.kind, "done");
-    assert!(done_status(&accepted).contains("delivery:accepted:assignment-main-L1"));
+    assert_eq!(accepted.kind, "spawn");
+    let validation: CoreToHostSpawnPayload =
+        serde_json::from_value(accepted.payload).expect("validation spawn");
+    assert_eq!(
+        validation.action.assignment_id.0,
+        "validator-assignment-main-L1"
+    );
     std::env::set_current_dir(previous).expect("restore cwd");
 }
 

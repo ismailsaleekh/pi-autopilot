@@ -202,53 +202,15 @@ fn command(frame: SeamEnvelope, state: &mut CoreState) -> Result<SeamEnvelope, A
         Ok(value) => value,
         Err(error) => return done(frame.id, boundary_status(&error)),
     };
+    let id = frame.id;
     let caps = bgtasks::BgCapabilities::from_generated(&background_capabilities);
-    product_command(
-        frame.id,
-        parsed,
-        state,
-        &caps,
-        background_capability_diagnostic.as_deref(),
-    )
-}
-
-fn legacy_command(
-    id: u64,
-    verb: &str,
-    rest: &str,
-    state: &mut CoreState,
-) -> Result<SeamEnvelope, AnyError> {
-    let pause = match verb {
-        "append" => false,
-        "crash-window" => true,
-        "state" => return done(id, rejection("malformed-command", verb)),
-        other => return done(id, rejection("unknown-command", other)),
-    };
-    let (kind, reference) = match event_parts(rest) {
-        Ok(parts) => parts,
-        Err(status) => return done(id, status),
-    };
-    state.append(kind, vec![reference])?;
-    if pause {
-        eprintln!("autopilot-core: crash-window-ready {}", state.summary());
-        thread::sleep(Duration::from_secs(30));
-    }
-    done(id, state.summary())
-}
-
-fn product_command(
-    id: u64,
-    parsed: ParsedCommand,
-    state: &mut CoreState,
-    caps: &bgtasks::BgCapabilities,
-    diagnostic: Option<&str>,
-) -> Result<SeamEnvelope, AnyError> {
+    let diagnostic = background_capability_diagnostic.as_deref();
     let result = match parsed.route.driver.as_str() {
-        "planning" => bgtasks::require_before_mutation(caps, diagnostic, || {
+        "planning" => bgtasks::require_before_mutation(&caps, diagnostic, || {
             route_plan(id, &parsed.args, state)
         })
         .unwrap_or_else(|error| done(id, bgtasks::pause_status(&error))),
-        "allocation-dispatch-runner" => bgtasks::require_before_mutation(caps, diagnostic, || {
+        "allocation-dispatch-runner" => bgtasks::require_before_mutation(&caps, diagnostic, || {
             route_run(id, &parsed.args[0], state)
         })
         .unwrap_or_else(|error| done(id, bgtasks::pause_status(&error))),
@@ -276,6 +238,30 @@ fn product_command(
         Ok(frame) => Ok(frame),
         Err(error) => done(id, rejection("driver-error", &error.to_string())),
     }
+}
+
+fn legacy_command(
+    id: u64,
+    verb: &str,
+    rest: &str,
+    state: &mut CoreState,
+) -> Result<SeamEnvelope, AnyError> {
+    let pause = match verb {
+        "append" => false,
+        "crash-window" => true,
+        "state" => return done(id, rejection("malformed-command", verb)),
+        other => return done(id, rejection("unknown-command", other)),
+    };
+    let (kind, reference) = match event_parts(rest) {
+        Ok(parts) => parts,
+        Err(status) => return done(id, status),
+    };
+    state.append(kind, vec![reference])?;
+    if pause {
+        eprintln!("autopilot-core: crash-window-ready {}", state.summary());
+        thread::sleep(Duration::from_secs(30));
+    }
+    done(id, state.summary())
 }
 
 fn route_plan(id: u64, args: &[String], state: &mut CoreState) -> Result<SeamEnvelope, AnyError> {
@@ -504,12 +490,12 @@ fn route_task_completed(
             ],
         )?;
         record_delivery_transcript(&binding, &carrier_text, state)?;
-        return route_delivery_accepted(frame.id, &binding, &accepted, state);
+        return delivery_accepted(frame.id, &binding, &accepted, state);
     }
     if binding.result_contract.0 == "validation.verdict.v1" {
         append_terminal_event(state, &payload, &binding)?;
         record_task_completion_control(state, &payload)?;
-        return route_validation_completed(frame.id, &binding, state);
+        return validation_completed(frame.id, &binding, state);
     }
     append_terminal_event(state, &payload, &binding)?;
     record_task_completion_control(state, &payload)?;
@@ -1081,7 +1067,7 @@ fn arm_watchdog_if_needed(
     ))
 }
 
-fn route_delivery_accepted(
+fn delivery_accepted(
     id: u64,
     binding: &runner::IssuedRunnerBinding,
     accepted: &runner::AcceptedDelivery,
@@ -1105,7 +1091,7 @@ fn route_delivery_accepted(
     controlled_spawn(id, issue.action, state, "delivery-accepted")
 }
 
-fn route_validation_completed(
+fn validation_completed(
     id: u64,
     binding: &runner::IssuedRunnerBinding,
     state: &mut CoreState,
@@ -1138,7 +1124,7 @@ fn route_validation_completed(
             integrate_validated_candidate(id, binding, &verdict, state)
         }
         crate::validation::ForwardDecision::ConsolidatedFixer { blocker_ids } => {
-            route_repair_needed(id, binding, blocker_ids, state)
+            repair_needed(id, binding, blocker_ids, state)
         }
         crate::validation::ForwardDecision::Tier23 { blocker_ids } => done(
             id,
@@ -1192,7 +1178,7 @@ fn integrate_validated_candidate(
     let prepared = match integrator.merge_and_cas(request, &root, &checks) {
         Ok(value) => value,
         Err(error @ crate::integration::IntegrationError::Git) => {
-            return route_conflict(id, binding, &candidate, error, state);
+            return conflict_response(id, binding, &candidate, error, state);
         }
         Err(error) => return done(id, rejection("integration", &format!("{error:?}"))),
     };
@@ -1264,7 +1250,7 @@ fn integrate_validated_candidate(
     )
 }
 
-fn route_conflict(
+fn conflict_response(
     id: u64,
     binding: &runner::IssuedRunnerBinding,
     candidate: &crate::integration::CandidateRequest,
@@ -1308,7 +1294,7 @@ fn route_conflict(
     )
 }
 
-fn route_repair_needed(
+fn repair_needed(
     id: u64,
     binding: &runner::IssuedRunnerBinding,
     blocker_ids: Vec<Id>,
