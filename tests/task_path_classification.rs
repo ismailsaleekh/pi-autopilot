@@ -519,6 +519,10 @@ fn delivery_terminal_carrier_is_core_accepted_and_incomplete_delivery_is_rejecte
             "AUTOPILOT_AGENT_RUNNER_WRAPPER",
             std::env::current_exe().expect("exe"),
         );
+        std::env::set_var(
+            "AUTOPILOT_VALIDATOR_COMMAND",
+            std::env::current_exe().expect("exe"),
+        );
     }
     std::env::set_current_dir(&root).expect("chdir root");
     let mut state = CoreState::open(None).expect("state");
