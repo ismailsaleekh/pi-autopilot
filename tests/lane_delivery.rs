@@ -1,22 +1,26 @@
 use std::{
     fs,
+    io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
+    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
 };
 
 use drivers::allocation::{
-    validate_allocation, AllocationPolicy, AllocationSubmission, ApprovedUnit,
+    AllocationPolicy, AllocationSubmission, ApprovedUnit, validate_allocation,
 };
-use drivers::dispatch::{launch_lanes, select_ready_lanes, DispatchInput, LaneReadiness};
+use drivers::dispatch::{DispatchInput, LaneReadiness, launch_lanes, select_ready_lanes};
 use drivers::runner::{
+    DeliveryExpectation, DeliveryRejection, PackageFacts, RunnerAssignment, RunnerTransportFacts,
     accept_delivery, accept_delivery_with_package_facts, delivery_bg_action_with_facts,
     delivery_issue_with_facts, package_delivery_commit, refuse_agent_git_mutation,
-    DeliveryExpectation, DeliveryRejection, PackageFacts, RunnerAssignment, RunnerTransportFacts,
 };
 use drivers::{sim::SimPlatform, vcs::GitVcs};
 use kernel::generated::{
-    DeliveryResult, DeliveryTerminalStatus, Id, ModeId, Path as ContractPath, Ref, Sha,
+    CoreToHostSpawnPayload, DeliveryResult, DeliveryTerminalStatus, Id, ModeId,
+    Path as ContractPath, Ref, SeamEnvelope, Sha,
 };
 use kernel::schedule::ResourceFacts;
+use sha2::{Digest as ShaDigest, Sha256};
 
 #[test]
 fn lane_delivery_launch_uses_recorded_tip_at_dispatch_and_package_owned_commit_delivers() {
@@ -214,6 +218,55 @@ fn lane_delivery_agent_git_mutation_and_incomplete_delivery_are_refused_without_
     assert_eq!(spec["attempt"], expected.attempt);
 }
 
+#[test]
+fn lane_delivery_core_stdout_stays_json_when_runtime_packages_uncommitted_changes() {
+    let fixture = fixture("stdout-purity");
+    let root = fixture.root;
+    fs::write(root.join("README.md"), "delivery terminal fixture\n").expect("fixture file");
+    git_init_for_core(&root);
+    fs::create_dir_all(root.join(".pi/autopilot/main")).expect("plan dir");
+    fs::write(
+        root.join(".pi/autopilot/main/approved-plan.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "units":[
+                {"id":"U1","operator_order":1,"decisions":[],"criteria":["AC1"],"dependencies":[],"predecessor_forward_criteria":[],"downstream_release_edges":["EDGE1"]}
+            ]
+        }))
+        .expect("approved json"),
+    )
+    .expect("approved plan");
+
+    let mut core = CoreProcess::spawn(&root);
+    let launch = core.send_json(serde_json::json!({"v":1,"id":1,"kind":"command","payload":{"raw":"autopilot main","background_capabilities":{"api_version":1,"run":true,"run_is_agent":true,"run_completion_trigger":true,"status":true,"logs":true,"logs_bounded":true,"kill":true}}}));
+    assert_eq!(launch.kind, "spawn");
+    let spawn: CoreToHostSpawnPayload =
+        serde_json::from_value(launch.payload).expect("delivery spawn payload");
+    let spec_path = root
+        .join(".pi/autopilot/main/worktrees/L1/.pi/autopilot/runner/specs/assignment-main-L1.json");
+    let spec: serde_json::Value =
+        serde_json::from_slice(&fs::read(&spec_path).expect("delivery spec"))
+            .expect("delivery spec json");
+    let carrier_path = PathBuf::from(spec["carrier_path"].as_str().expect("carrier path"));
+    let worktree = PathBuf::from(spec["worktree"].as_str().expect("worktree path"));
+    fs::write(
+        worktree.join("README.md"),
+        "delivery terminal fixture changed\n",
+    )
+    .expect("worktree edit");
+    fs::write(worktree.join("Cargo.lock"), "# untracked residue\n").expect("residue");
+    fs::create_dir_all(carrier_path.parent().expect("carrier parent")).expect("carrier dir");
+    fs::write(
+        &carrier_path,
+        serde_json::to_vec_pretty(&delivery_carrier_without_package_for_core(&spec, 2))
+            .expect("delivery carrier"),
+    )
+    .expect("carrier write");
+
+    let accepted = core.send_json(serde_json::json!({"v":1,"id":2,"kind":"task-completed","payload":{"task_id":"task-stdout-purity","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}));
+    assert_eq!(accepted.kind, "spawn");
+    core.shutdown();
+}
+
 fn delivery(
     expected: &DeliveryExpectation,
     commit: Option<Sha>,
@@ -365,6 +418,146 @@ fn ids(values: &[&str]) -> Vec<Id> {
 
 fn id(value: &str) -> Id {
     Id(value.to_owned())
+}
+
+fn delivery_carrier_without_package_for_core(
+    spec: &serde_json::Value,
+    evidence_count: usize,
+) -> serde_json::Value {
+    serde_json::json!({
+        "assignment_id": spec["assignment_id"],
+        "role_id": spec["role_id"],
+        "mode": spec["mode"],
+        "run_revision": spec["run_revision"],
+        "lane_id": spec["lane_id"],
+        "attempt": spec["attempt"],
+        "base_commit": spec["base_commit"],
+        "worktree": spec["worktree"],
+        "action_id": spec["action_id"],
+        "prompt_path": spec["prompt_path"],
+        "prompt_digest": spec["prompt_digest"],
+        "spec_path": spec["spec_path"],
+        "spec_digest": sha256_hex(&fs::read(spec["spec_path"].as_str().expect("spec path")).expect("spec bytes")),
+        "carrier_path": spec["carrier_path"],
+        "boundary_digest": spec["boundary_digest"],
+        "result_contract_digest": spec["result_contract_digest"],
+        "settings_digest": spec["settings_digest"],
+        "context_digest": spec["context_digest"],
+        "skills_digest": spec["skills_digest"],
+        "subscription_digest": spec["subscription_digest"],
+        "actual_changed_paths": ["README.md"],
+        "execution_audit_ref": "audit:delivery",
+        "focused_evidence_refs": (0..evidence_count)
+            .map(|index| serde_json::json!(format!("evidence:{index}")))
+            .collect::<Vec<_>>(),
+        "terminal_status": "done",
+        "hard_boundary_violations": []
+    })
+}
+
+fn git_init_for_core(root: &Path) {
+    git_run(root, &["init", "-b", "main"]);
+    git_run(
+        root,
+        &["config", "user.email", "lane-delivery@example.invalid"],
+    );
+    git_run(root, &["config", "user.name", "Lane Delivery"]);
+    git_run(root, &["add", "."]);
+    git_run(root, &["commit", "-m", "seed"]);
+}
+
+fn git_run(cwd: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .current_dir(cwd)
+        .args(args)
+        .output()
+        .expect("git");
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}{}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    let digest = Sha256::digest(data);
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+struct CoreProcess {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    stdout: BufReader<ChildStdout>,
+}
+
+impl CoreProcess {
+    fn spawn(cwd: &Path) -> Self {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_autopilot-core"))
+            .current_dir(cwd)
+            .env(
+                "AUTOPILOT_NODE_EXECUTABLE",
+                std::env::current_exe().expect("test exe"),
+            )
+            .env(
+                "AUTOPILOT_AGENT_RUNNER_WRAPPER",
+                std::env::current_exe().expect("test exe"),
+            )
+            .env(
+                "AUTOPILOT_VALIDATOR_COMMAND",
+                std::env::current_exe().expect("test exe"),
+            )
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn autopilot-core");
+        let stdin = child.stdin.take().expect("core stdin");
+        let stdout = BufReader::new(child.stdout.take().expect("core stdout"));
+        Self {
+            child,
+            stdin: Some(stdin),
+            stdout,
+        }
+    }
+
+    fn send_json(&mut self, frame: serde_json::Value) -> SeamEnvelope {
+        let stdin = self.stdin.as_mut().expect("core stdin open");
+        writeln!(stdin, "{frame}").expect("write frame");
+        stdin.flush().expect("flush frame");
+        self.read_json_line()
+    }
+
+    fn read_json_line(&mut self) -> SeamEnvelope {
+        let mut line = String::new();
+        let bytes = self.stdout.read_line(&mut line).expect("read core stdout");
+        assert_ne!(bytes, 0, "autopilot-core closed stdout before response");
+        serde_json::from_str(line.trim_end()).unwrap_or_else(|error| {
+            panic!(
+                "autopilot-core stdout line was not JSON: {error}; line={:?}",
+                line.trim_end()
+            )
+        })
+    }
+
+    fn shutdown(mut self) {
+        let _ = self.send_json(serde_json::json!({"v":1,"id":99,"kind":"shutdown","payload":{"reason":"stdout-purity-test"}}));
+        drop(self.stdin.take());
+        let status = self.child.wait().expect("wait autopilot-core");
+        assert!(status.success(), "autopilot-core exited with {status}");
+    }
+}
+
+impl Drop for CoreProcess {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 struct Fixture {

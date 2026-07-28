@@ -1112,12 +1112,18 @@ pub fn establish_delivery_package(
     staged_paths.sort();
     sorted_claimed.sort();
     if staged_paths != sorted_claimed {
-        let _ = git_status_checked(&worktree, &["reset", "--mixed", "HEAD"]);
+        git_status_checked(&worktree, &["reset", "--mixed", "HEAD"])
+            .map_err(|_| DeliveryRejection::GitState)?;
         return Err(DeliveryRejection::GitState);
     }
     git_status_checked(
         &worktree,
-        &["commit", "--no-gpg-sign", "-m", "autopilot delivery package"],
+        &[
+            "commit",
+            "--no-gpg-sign",
+            "-m",
+            "autopilot delivery package",
+        ],
     )
     .map_err(|_| DeliveryRejection::GitState)?;
     let package_commit = git_stdout_checked(&worktree, &["rev-parse", "--verify", "HEAD^{commit}"])
@@ -1274,7 +1280,10 @@ fn canonical_delivery_worktree(
     Ok(actual_worktree)
 }
 
-fn package_facts_for_head(worktree: &Path, head: String) -> Result<PackageFacts, DeliveryRejection> {
+fn package_facts_for_head(
+    worktree: &Path,
+    head: String,
+) -> Result<PackageFacts, DeliveryRejection> {
     let tree = git_stdout_checked(worktree, &["rev-parse", "--verify", "HEAD^{tree}"])
         .map_err(|_| DeliveryRejection::GitState)?;
     Ok(PackageFacts {
@@ -1492,15 +1501,15 @@ fn git_stdout_checked(cwd: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 fn git_status_checked(cwd: &Path, args: &[&str]) -> Result<(), String> {
-    let status = Command::new("git")
+    let output = Command::new("git")
         .current_dir(cwd)
         .args(args)
-        .status()
+        .output()
         .map_err(|error| error.to_string())?;
-    if status.success() {
+    if output.status.success() {
         Ok(())
     } else {
-        Err(format!("git {:?} failed", args))
+        Err(git_failure_message(args, &output, None))
     }
 }
 
@@ -1509,17 +1518,39 @@ fn git_status_checked_with_paths(
     args: &[&str],
     paths: &[String],
 ) -> Result<(), String> {
-    let status = Command::new("git")
+    let output = Command::new("git")
         .current_dir(cwd)
         .args(args)
         .args(paths)
-        .status()
+        .output()
         .map_err(|error| error.to_string())?;
-    if status.success() {
+    if output.status.success() {
         Ok(())
     } else {
-        Err(format!("git {:?} with delivery paths failed", args))
+        Err(git_failure_message(args, &output, Some(paths.len())))
     }
+}
+
+fn git_failure_message(
+    args: &[&str],
+    output: &std::process::Output,
+    path_count: Option<usize>,
+) -> String {
+    let mut message = match path_count {
+        Some(count) => format!("git {:?} with {count} delivery paths failed", args),
+        None => format!("git {:?} failed", args),
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stdout.trim().is_empty() {
+        message.push_str("; stdout=");
+        message.push_str(stdout.trim());
+    }
+    if !stderr.trim().is_empty() {
+        message.push_str("; stderr=");
+        message.push_str(stderr.trim());
+    }
+    message
 }
 
 pub(crate) fn validate_child_boundary(
