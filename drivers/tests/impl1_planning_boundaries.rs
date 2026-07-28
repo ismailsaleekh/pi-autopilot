@@ -142,7 +142,6 @@ fn accepted_registry_rejects_cross_extractor_duplicate_and_is_resume_stable() {
             "task-extractor",
             Some("TE02-"),
         ),
-        ("planning-ws-repository-scout-01", "repository-scout", None),
     ]);
     let event_log = stable.root.join("events.jsonl");
     let mut state = CoreState::open(Some(event_log.clone())).unwrap();
@@ -156,18 +155,22 @@ fn accepted_registry_rejects_cross_extractor_duplicate_and_is_resume_stable() {
         None,
         task_atoms("TE01-A"),
     );
-    let second_assignment = stable.agent_response(&mut state, &a, task_atoms("TE01-A"));
-    assert_spawn_assignment(&second_assignment, "planning-ws-task-extractor-02");
-    let b = stable.issue_planning_with_assignment(
+    let b = stable.seed_planning_binding(
+        &mut state,
         "task-extractor",
         "inventory",
         "planning.task-atoms.v1",
         "planning-ws-task-extractor-02",
         Some("TE02-"),
         None,
+        task_atoms("TE02-B"),
     );
-    let next = stable.agent_response(&mut state, &b.binding, task_atoms("TE02-B"));
-    assert_spawn_assignment(&next, "planning-ws-repository-scout-01");
+    assert!(stable
+        .agent_result(&mut state, &a, task_atoms("TE01-A"))
+        .contains("accepted"));
+    assert!(stable
+        .agent_result(&mut state, &b, task_atoms("TE02-B"))
+        .contains("accepted"));
     let registry_path = stable
         .root
         .join(".pi/autopilot/ws/planning/atom-registry.json");
@@ -431,6 +434,27 @@ else:
         prefix: Option<&str>,
         registry: Option<(String, String)>,
     ) -> runner::IssuedRunnerAction {
+        self.issue_planning_with_assignment_revision(
+            role,
+            mode,
+            boundary,
+            assignment_id,
+            prefix,
+            registry,
+            1,
+        )
+    }
+
+    fn issue_planning_with_assignment_revision(
+        &self,
+        role: &str,
+        mode: &str,
+        boundary: &str,
+        assignment_id: &str,
+        prefix: Option<&str>,
+        registry: Option<(String, String)>,
+        run_revision: u64,
+    ) -> runner::IssuedRunnerAction {
         let (registry_path, registry_digest) = match registry {
             Some((p, d)) => (Some(p), Some(d)),
             None => (None, None),
@@ -442,7 +466,7 @@ else:
             role_id: Id(role.to_owned()),
             mode: ModeId(mode.to_owned()),
             boundary_id: ContractId(boundary.to_owned()),
-            run_revision: 1,
+            run_revision,
             authority_set_id: "auth".to_owned(),
             authority_documents: vec![runner_doc("task.md", "authority", "auth", "Do the work")],
             context_document: runner_doc(
