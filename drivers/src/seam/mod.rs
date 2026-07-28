@@ -376,9 +376,34 @@ fn accept_planning_carrier(
     if let Err(error) = validate_agent_output(&carrier.boundary_id, &carrier.raw_output) {
         return done(id, boundary_status(&error));
     }
+    if let Err(error) = apply_planning_side_effects(&carrier) {
+        return done(id, rejection("planning-postprocess", &error));
+    }
     if let Some(payload) = terminal {
         append_terminal_event(state, payload, &binding)?;
         record_task_completion_control(state, payload)?;
+    }
+    if carrier.boundary_id == "planning.plan-review.v1" {
+        state.append(
+            EventKind("planning:ready-to-execute".to_owned()),
+            vec![
+                Ref(carrier.workstream.clone()),
+                Ref(plan_path(&carrier.workstream).display().to_string()),
+                Ref(assignment_id.0.clone()),
+                Ref(carrier.action_id.clone()),
+                Ref(carrier.boundary_id.clone()),
+                Ref(carrier.spec_digest.clone()),
+                planning_result_consumed_ref(&binding),
+            ],
+        )?;
+        return done(
+            id,
+            format!(
+                "ready-to-execute:workstream={};{}",
+                carrier.workstream,
+                state.summary()
+            ),
+        );
     }
     state.append(
         EventKind("agent:result".to_owned()),
@@ -391,31 +416,6 @@ fn accept_planning_carrier(
             planning_result_consumed_ref(&binding),
         ],
     )?;
-    if carrier.boundary_id == "planning.work-map.v1" {
-        write_work_map(&carrier.workstream, &carrier.raw_output)?;
-    }
-    if carrier.boundary_id == "planning.plan-review.v1" {
-        let work_map = read_work_map(&carrier.workstream)
-            .map_err(|error| format!("CONTEXT_GAP:approved-plan:{error}"))?;
-        let units = parse_approved_units(&work_map)
-            .map_err(|error| format!("CONTEXT_GAP:approved-plan:{error}"))?;
-        write_approved_plan(&carrier.workstream, &units)?;
-        state.append(
-            EventKind("planning:ready-to-execute".to_owned()),
-            vec![
-                Ref(carrier.workstream.clone()),
-                Ref(plan_path(&carrier.workstream).display().to_string()),
-            ],
-        )?;
-        return done(
-            id,
-            format!(
-                "ready-to-execute:workstream={};{}",
-                carrier.workstream,
-                state.summary()
-            ),
-        );
-    }
     if let Some(next) = next_planning_assignment(&carrier.workstream, state) {
         let input_set = read_planning_input_set(&carrier.workstream)
             .map_err(|error| format!("CONTEXT_GAP:planning-manifest:{error}"))?;
@@ -524,11 +524,20 @@ fn route_task_completed(
             Err(error) => {
                 return done(
                     frame.id,
-                    rejection("planning-carrier", &format!("{}:{error}", binding.carrier_path)),
+                    rejection(
+                        "planning-carrier",
+                        &format!("{}:{error}", binding.carrier_path),
+                    ),
                 );
             }
         };
-        return accept_planning_carrier(frame.id, &binding.assignment_id, carrier, state, Some(&payload));
+        return accept_planning_carrier(
+            frame.id,
+            &binding.assignment_id,
+            carrier,
+            state,
+            Some(&payload),
+        );
     }
     append_terminal_event(state, &payload, &binding)?;
     record_task_completion_control(state, &payload)?;

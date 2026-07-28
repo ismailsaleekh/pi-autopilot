@@ -102,7 +102,7 @@ pub fn validate_allocation(
     policy: AllocationPolicy,
 ) -> Result<CanonicalAllocation, AllocationError> {
     reject_ownership(submission)?;
-    if !(3..=6).contains(&submission.lanes.len()) {
+    if !(1..=6).contains(&submission.lanes.len()) {
         return Err(AllocationError::WrongLaneCount {
             actual: submission.lanes.len(),
         });

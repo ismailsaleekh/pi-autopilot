@@ -133,37 +133,29 @@ fn write_work_map(workstream: &str, raw: &str) -> Result<(), AnyError> { let pat
 fn read_work_map(workstream: &str) -> Result<String, String> { fs::read_to_string(work_map_path(workstream)).map_err(|error| error.to_string()) }
 fn write_approved_plan(workstream: &str, units: &[ApprovedUnit]) -> Result<(), AnyError> { let path = plan_path(workstream); if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; } fs::write(path, serde_json::to_vec_pretty(&ApprovedPlanArtifact { units: units.to_vec() })?)?; Ok(()) }
 fn read_approved_plan(workstream: &str) -> Result<Vec<ApprovedUnit>, String> { let text = fs::read_to_string(plan_path(workstream)).map_err(|error| error.to_string())?; let artifact: ApprovedPlanArtifact = serde_json::from_str(&text).map_err(|error| error.to_string())?; if artifact.units.is_empty() { return Err("empty approved plan".to_owned()); } Ok(artifact.units) }
+fn apply_planning_side_effects(carrier: &AgentCarrier) -> Result<(), String> {
+    if carrier.boundary_id == "planning.work-map.v1" { write_work_map(&carrier.workstream, &carrier.raw_output).map_err(|error| format!("CONTEXT_GAP:work-map:{error}"))?; }
+    if carrier.boundary_id == "planning.plan-review.v1" {
+        let work_map = read_work_map(&carrier.workstream).map_err(|error| format!("CONTEXT_GAP:approved-plan:{error}"))?;
+        let units = parse_approved_units(&work_map).map_err(|error| format!("CONTEXT_GAP:approved-plan:{error}"))?;
+        write_approved_plan(&carrier.workstream, &units).map_err(|error| format!("CONTEXT_GAP:approved-plan:{error}"))?;
+    }
+    Ok(())
+}
 fn parse_approved_units(raw: &str) -> Result<Vec<ApprovedUnit>, String> {
-    if raw.trim_start().starts_with('{') {
-        let work_map: kernel::generated::WorkMap = serde_json::from_str(raw).map_err(|error| error.to_string())?;
-        return approved_units_from_work_map(&work_map);
-    }
-    let mut units = Vec::new(); let mut current_id: Option<String> = None; let mut current_criteria = Vec::new(); let mut current_objective = String::new();
-    for line in raw.lines().chain(std::iter::once("### unit")) {
-        let trimmed = line.trim();
-        if trimmed.starts_with("### unit") { if let Some(name) = current_id.take() { if current_criteria.is_empty() || current_objective.is_empty() { return Err(format!("unit {name} missing criteria/objective")); } units.push(plan_unit(&name, units.len() as u32 + 1, &current_criteria)); current_criteria.clear(); current_objective.clear(); } continue; }
-        let normalized = trimmed.trim_start_matches(['-', '*']).trim().trim_matches('*');
-        if let Some((field, value)) = normalized.split_once(':') {
-            let field = field.trim().trim_matches('*').to_ascii_lowercase(); let value = value.trim().trim_matches('*').trim();
-            if field == "id" { current_id = Some(value.to_owned()); }
-            if field == "objective" { current_objective = value.to_owned(); }
-            if field.contains("acceptance criteria") { current_criteria.push(format!("AC-{}", current_id.as_deref().unwrap_or("unit"))); }
-        } else if current_id.is_some() && !trimmed.is_empty() && (trimmed.starts_with('-') || trimmed.starts_with('*')) { current_criteria.push(format!("AC-{}-{}", current_id.as_deref().unwrap_or("unit"), current_criteria.len() + 1)); }
-    }
-    if units.len() < 3 { return Err(format!("expected at least 3 approved units, got {}", units.len())); }
-    Ok(units)
+    let work_map: kernel::generated::WorkMap = serde_json::from_str(raw).map_err(|error| error.to_string())?;
+    approved_units_from_work_map(&work_map)
 }
 fn approved_units_from_work_map(work_map: &kernel::generated::WorkMap) -> Result<Vec<ApprovedUnit>, String> {
-    if work_map.units.len() < 3 { return Err(format!("expected at least 3 approved units, got {}", work_map.units.len())); }
+    if work_map.units.is_empty() { return Err("expected at least 1 approved unit, got 0".to_owned()); }
     work_map.units.iter().enumerate().map(|(index, unit)| {
         if unit.id.0.trim().is_empty() || unit.objective.trim().is_empty() || unit.criteria.is_empty() { return Err(format!("unit {} missing criteria/objective", unit.id.0)); }
         let order = index as u32 + 1;
         Ok(ApprovedUnit { id: unit.id.clone(), operator_order: order, decisions: Vec::new(), criteria: unit.criteria.iter().enumerate().map(|(criterion_index, _)| idv(&format!("AC-{}-{}", unit.id.0, criterion_index + 1))).collect(), dependencies: if index == 0 { Vec::new() } else { vec![work_map.units[index - 1].id.clone()] }, predecessor_forward_criteria: if order <= 1 { Vec::new() } else { vec![idv(&format!("FC{}", order - 1))] }, downstream_release_edges: vec![idv(&format!("EDGE{order}"))] })
     }).collect()
 }
-fn plan_unit(name: &str, order: u32, criteria: &[String]) -> ApprovedUnit { ApprovedUnit { id: idv(name), operator_order: order, decisions: Vec::new(), criteria: criteria.iter().map(|item| idv(item)).collect(), dependencies: if order <= 1 { Vec::new() } else { vec![idv(&format!("U{}", order - 1))] }, predecessor_forward_criteria: if order <= 1 { Vec::new() } else { vec![idv(&format!("FC{}", order - 1))] }, downstream_release_edges: vec![idv(&format!("EDGE{order}"))] } }
 fn allocation_submission_from_plan(workstream: &str, approved: &[ApprovedUnit]) -> Result<AllocationSubmission, String> {
-    if approved.len() < 3 { return Err(format!("expected 3-6 approved units, got {}", approved.len())); }
+    if approved.is_empty() { return Err("expected at least 1 approved unit, got 0".to_owned()); }
     let lanes = approved.iter().take(6).enumerate().map(|(index, unit)| AllocationLaneProposal { lane_id: idv(&format!("L{}", index + 1)), objective: format!("deliver approved unit {}", unit.id.0), ordered_unit_ids: vec![unit.id.clone()], rationale: format!("unit {} from approved plan", unit.id.0), delivery_boundary: DeliveryBoundary("approved-plan-unit".to_owned()), predecessor_forward_criteria: unit.predecessor_forward_criteria.clone(), downstream_release_edges: unit.downstream_release_edges.clone(), context_family_id: idv(&format!("approved-plan:{workstream}")), context_estimate: 100, focused_tests: vec![TestId("cargo test -q".to_owned())], launch_wave: index as u32, continue_existing_logical_lane: None }).collect();
     Ok(AllocationSubmission { lanes, future_units: approved.iter().skip(6).map(|unit| FutureUnit { unit_id: unit.id.clone(), reason: "parallel cap lane limit; retained for future allocation".to_owned() }).collect(), authority_echo: approved.to_vec(), ownership_claims: Vec::new(), overlap_blocks: Vec::new() })
 }
