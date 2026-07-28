@@ -7,6 +7,7 @@ publish = false
 [dependencies]
 kernel = { path = "../kernel" }
 kernel-macros = { path = "../kernel/macros" }
+kdl = { workspace = true }
 linkme = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

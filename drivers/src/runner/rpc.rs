@@ -436,20 +436,6 @@ impl RpcClient {
         Ok(Some(frame))
     }
 
-    pub fn drain_until_settled(&mut self) -> Result<(), RpcError> {
-        loop {
-            match self.next_frame()? {
-                Some(RpcFrame::Event(RpcEvent::AgentSettled)) => return Ok(()),
-                Some(_) => {}
-                None => {
-                    return Err(RpcError::OutOfOrderEvent(
-                        "stdout ended before agent_settled".to_owned(),
-                    ));
-                }
-            }
-        }
-    }
-
     #[must_use]
     pub fn diagnostics(&self) -> RpcDiagnostics {
         self.protocol.diagnostics(&self.stdout)

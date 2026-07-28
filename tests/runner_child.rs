@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use drivers::runner::{child, planning_paths, role_builtin_tool_names, session_id_for};
 use drivers::seam::{self, CoreState};
 use kernel::generated::{ContractId, CoreToHostSpawnPayload, Id, ModeId, SeamEnvelope};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest as ShaDigest, Sha256};
 
 static PATH_LOCK: Mutex<()> = Mutex::new(());
@@ -345,30 +345,17 @@ fn runner_rpc_null_context_percent_blocks_terminal_success() {
 fn runner_rpc_checkpoint_steer_compact_resume_same_session() {
     let root = temp_root("runner-checkpoint-cycle");
     let commands = root.join("commands.jsonl");
-    let handoff = json!({
-        "schema":"autopilot.agent-handoff.v1",
-        "completed":["read TASK-A"],
-        "remaining":["emit final atoms"],
-        "critical_state":{
-            "semantic_lens":"WORK",
-            "authority_coverage":["TASK-A whole file"],
-            "atom_ledger":["planning-main-task-extractor-01-atom-draft"],
-            "duplicate_dispositions":["none"],
-            "unresolved_ambiguities":["none"]
-        },
-        "next_action":"resume and emit final atoms"
-    })
-    .to_string();
+    let handoff = valid_handoff().to_string();
     let accepted = transcript("planning.task-atoms.v1");
     write_fake_pi(
         &root,
         &rpc_fake_pi(
             &format!(
-                "contextPercent = 86; const commandLog = {:?}; function log(cmd) {{ appendFileSync(commandLog, JSON.stringify({{type:cmd.type,message:cmd.message,customInstructions:cmd.customInstructions}})+'\\n'); }} function afterCompact(cmd) {{ log(cmd); send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}}); }} function afterSteer(cmd) {{ log(cmd); const h = message({handoff:?}); send({{type:'message_start'}}); send({{type:'message_end',message:h}}); }}",
+                "contextPercent = 86; let forceNullStats = false; statsData = () => forceNullStats ? ({{ sessionId, contextUsage: {{ tokens:null, contextWindow:100000, percent:null }} }}) : ({{ sessionId, contextUsage: {{ tokens: Math.round(contextPercent * 1000), contextWindow:100000, percent:contextPercent }} }}); const commandLog = {:?}; function log(cmd) {{ appendFileSync(commandLog, JSON.stringify({{type:cmd.type,message:cmd.message,customInstructions:cmd.customInstructions}})+'\\n'); }} function afterCompact(cmd) {{ log(cmd); forceNullStats = true; send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}}); }} function afterSteer(cmd) {{ log(cmd); const h = message({handoff:?}); send({{type:'message_start'}}); send({{type:'message_end',message:h}}); }}",
                 commands
             ),
             &format!(
-                "log(cmd); if (promptCount === 1) {{ const thinking = message('tool phase','gpt-5.5','toolUse'); send({{type:'agent_start'}}); send({{type:'message_start'}}); send({{type:'message_end',message:thinking}}); send({{type:'tool_execution_start',toolName:'read'}}); send({{type:'tool_execution_end',toolName:'read'}}); }} else {{ contextPercent = 10; emitAssistant({accepted:?}); }}"
+                "log(cmd); if (promptCount === 1) {{ const thinking = message('tool phase','gpt-5.5','toolUse'); send({{type:'agent_start'}}); send({{type:'message_start'}}); send({{type:'message_end',message:thinking}}); send({{type:'tool_execution_start',toolName:'read'}}); send({{type:'tool_execution_end',toolName:'read'}}); }} else {{ forceNullStats = false; contextPercent = 10; emitAssistant({accepted:?}); }}"
             ),
         ),
     );
@@ -376,7 +363,7 @@ fn runner_rpc_checkpoint_steer_compact_resume_same_session() {
     with_fake_path(&root, || {
         child::main(&["--spec".to_owned(), spec.display().to_string()])
     })
-    .expect("checkpoint compact resume");
+    .expect("checkpoint compact null-stats resume");
     let log = fs::read_to_string(commands).expect("command log");
     assert!(log.contains("steer"), "{log}");
     assert!(log.contains("prompt"), "{log}");
@@ -387,25 +374,117 @@ fn runner_rpc_checkpoint_steer_compact_resume_same_session() {
 }
 
 #[test]
+fn runner_rpc_checkpoint_resume_rejects_unknown_after_valid_resume_response() {
+    let root = temp_root("runner-checkpoint-null-after-resume");
+    let commands = root.join("commands.jsonl");
+    let handoff = valid_handoff().to_string();
+    let accepted = transcript("planning.task-atoms.v1");
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            &format!(
+                "contextPercent = 86; let forceNullStats = false; statsData = () => forceNullStats ? ({{ sessionId, contextUsage: {{ tokens:null, contextWindow:100000, percent:null }} }}) : ({{ sessionId, contextUsage: {{ tokens: Math.round(contextPercent * 1000), contextWindow:100000, percent:contextPercent }} }}); const commandLog = {:?}; function log(cmd) {{ appendFileSync(commandLog, JSON.stringify({{type:cmd.type,message:cmd.message,customInstructions:cmd.customInstructions}})+'\\n'); }} function afterCompact(cmd) {{ log(cmd); forceNullStats = true; send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}}); }} function afterSteer(cmd) {{ log(cmd); const h = message({handoff:?}); send({{type:'message_start'}}); send({{type:'message_end',message:h}}); }}",
+                commands
+            ),
+            &format!(
+                "log(cmd); if (promptCount === 1) {{ const thinking = message('tool phase','gpt-5.5','toolUse'); send({{type:'agent_start'}}); send({{type:'message_start'}}); send({{type:'message_end',message:thinking}}); send({{type:'tool_execution_start',toolName:'read'}}); send({{type:'tool_execution_end',toolName:'read'}}); }} else {{ emitAssistant({accepted:?}); }}"
+            ),
+        ),
+    );
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("unknown stats after resume terminal must fail loudly");
+    assert!(error.contains("UnknownBlocksTerminalSuccess"), "{error}");
+    assert!(!carrier_path(&root).exists(), "carrier must not be written");
+}
+
+#[test]
+fn runner_rpc_checkpoint_rejects_handoff_over_total_max_bytes_before_compact() {
+    let root = temp_root("runner-handoff-total-bound");
+    let commands = root.join("commands.jsonl");
+    let mut handoff = valid_handoff();
+    handoff
+        .as_object_mut()
+        .expect("handoff object")
+        .insert("padding".to_owned(), json!("x".repeat(66_000)));
+    let handoff = handoff.to_string();
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            &format!(
+                "contextPercent = 86; const commandLog = {:?}; function log(cmd) {{ appendFileSync(commandLog, JSON.stringify({{type:cmd.type}})+'\\n'); }} function afterCompact(cmd) {{ log(cmd); process.exit(47); }} function afterSteer(cmd) {{ log(cmd); const h = message({handoff:?}); send({{type:'message_start'}}); send({{type:'message_end',message:h}}); }}",
+                commands
+            ),
+            "log(cmd); const thinking = message('tool phase','gpt-5.5','toolUse'); send({type:'agent_start'}); send({type:'message_start'}); send({type:'message_end',message:thinking}); send({type:'tool_execution_start',toolName:'read'}); send({type:'tool_execution_end',toolName:'read'});",
+        ),
+    );
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("oversized total handoff rejected");
+    assert!(error.contains("total_max_bytes"), "{error}");
+    assert!(error.contains("observed"), "{error}");
+    let log = fs::read_to_string(commands).expect("command log");
+    assert!(!log.contains("compact"), "{log}");
+    assert!(!carrier_path(&root).exists(), "carrier must not be written");
+}
+
+#[test]
+fn runner_rpc_checkpoint_rejects_handoff_over_entry_max_bytes_before_compact() {
+    let root = temp_root("runner-handoff-entry-bound");
+    let commands = root.join("commands.jsonl");
+    let mut handoff = valid_handoff();
+    handoff["completed"] = json!(["x".repeat(513)]);
+    let handoff = handoff.to_string();
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            &format!(
+                "contextPercent = 86; const commandLog = {:?}; function log(cmd) {{ appendFileSync(commandLog, JSON.stringify({{type:cmd.type}})+'\\n'); }} function afterCompact(cmd) {{ log(cmd); process.exit(47); }} function afterSteer(cmd) {{ log(cmd); const h = message({handoff:?}); send({{type:'message_start'}}); send({{type:'message_end',message:h}}); }}",
+                commands
+            ),
+            "log(cmd); const thinking = message('tool phase','gpt-5.5','toolUse'); send({type:'agent_start'}); send({type:'message_start'}); send({type:'message_end',message:thinking}); send({type:'tool_execution_start',toolName:'read'}); send({type:'tool_execution_end',toolName:'read'});",
+        ),
+    );
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("oversized entry handoff rejected");
+    assert!(error.contains("entry_max_bytes"), "{error}");
+    assert!(error.contains("observed 513"), "{error}");
+    let log = fs::read_to_string(commands).expect("command log");
+    assert!(!log.contains("compact"), "{log}");
+    assert!(!carrier_path(&root).exists(), "carrier must not be written");
+}
+
+#[test]
 fn fake_pi_nonzero_malformed_wrong_model_boundary_and_jsonl_protocol_fail_loudly() {
     let root = temp_root("runner-failures");
 
     write_fake_pi(&root, "#!/usr/bin/env node\nprocess.exit(42);\n");
     let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
-    assert!(with_fake_path(&root, || child::main(&[
-        "--spec".to_owned(),
-        spec.display().to_string()
-    ]))
-    .expect_err("nonzero")
-    .contains("missing rpc responses"));
+    assert!(
+        with_fake_path(&root, || child::main(&[
+            "--spec".to_owned(),
+            spec.display().to_string()
+        ]))
+        .expect_err("nonzero")
+        .contains("missing rpc responses")
+    );
 
     write_fake_pi(&root, "#!/usr/bin/env node\nconsole.log('not json');\n");
-    assert!(with_fake_path(&root, || child::main(&[
-        "--spec".to_owned(),
-        spec.display().to_string()
-    ]))
-    .expect_err("malformed")
-    .contains("JSON"));
+    assert!(
+        with_fake_path(&root, || child::main(&[
+            "--spec".to_owned(),
+            spec.display().to_string()
+        ]))
+        .expect_err("malformed")
+        .contains("JSON")
+    );
 
     write_fake_pi(
         &root,
@@ -417,23 +496,27 @@ fn fake_pi_nonzero_malformed_wrong_model_boundary_and_jsonl_protocol_fail_loudly
             ),
         ),
     );
-    assert!(with_fake_path(&root, || child::main(&[
-        "--spec".to_owned(),
-        spec.display().to_string()
-    ]))
-    .expect_err("wrong model")
-    .contains("provider/model drift"));
+    assert!(
+        with_fake_path(&root, || child::main(&[
+            "--spec".to_owned(),
+            spec.display().to_string()
+        ]))
+        .expect_err("wrong model")
+        .contains("provider/model drift")
+    );
 
     write_fake_pi(
         &root,
         &rpc_fake_pi("", "emitAssistant('no boundary token here');"),
     );
-    assert!(with_fake_path(&root, || child::main(&[
-        "--spec".to_owned(),
-        spec.display().to_string()
-    ]))
-    .expect_err("boundary")
-    .contains("value repair exhausted"));
+    assert!(
+        with_fake_path(&root, || child::main(&[
+            "--spec".to_owned(),
+            spec.display().to_string()
+        ]))
+        .expect_err("boundary")
+        .contains("value repair exhausted")
+    );
 
     write_fake_pi(
         &root,
@@ -445,12 +528,14 @@ fn fake_pi_nonzero_malformed_wrong_model_boundary_and_jsonl_protocol_fail_loudly
             ),
         ),
     );
-    assert!(with_fake_path(&root, || child::main(&[
-        "--spec".to_owned(),
-        spec.display().to_string()
-    ]))
-    .expect_err("agent_settled")
-    .contains("missing rpc responses"));
+    assert!(
+        with_fake_path(&root, || child::main(&[
+            "--spec".to_owned(),
+            spec.display().to_string()
+        ]))
+        .expect_err("agent_settled")
+        .contains("missing rpc responses")
+    );
 
     write_fake_pi(
         &root,
@@ -483,12 +568,14 @@ fn fake_pi_nonzero_malformed_wrong_model_boundary_and_jsonl_protocol_fail_loudly
             ),
         ),
     );
-    assert!(with_fake_path(&root, || child::main(&[
-        "--spec".to_owned(),
-        spec.display().to_string()
-    ]))
-    .expect_err("tool after assistant")
-    .contains("tool activity"));
+    assert!(
+        with_fake_path(&root, || child::main(&[
+            "--spec".to_owned(),
+            spec.display().to_string()
+        ]))
+        .expect_err("tool after assistant")
+        .contains("tool activity")
+    );
 
     write_fake_pi(
         &root,
@@ -521,12 +608,14 @@ fn fake_pi_nonzero_malformed_wrong_model_boundary_and_jsonl_protocol_fail_loudly
         ),
     );
     fs::remove_file(carrier_path(&root)).ok();
-    assert!(with_fake_path(&root, || child::main(&[
-        "--spec".to_owned(),
-        spec.display().to_string()
-    ]))
-    .expect_err("bad stopReason")
-    .contains("stopReason"));
+    assert!(
+        with_fake_path(&root, || child::main(&[
+            "--spec".to_owned(),
+            spec.display().to_string()
+        ]))
+        .expect_err("bad stopReason")
+        .contains("stopReason")
+    );
 }
 
 #[test]
@@ -665,12 +754,14 @@ fn runner_stale_or_linked_carrier_output_and_resource_limits_fail_closed() {
     let stale_path = carrier_path(&root);
     fs::create_dir_all(stale_path.parent().expect("carrier parent")).expect("carrier dir");
     fs::write(stale_path, b"stale").expect("stale carrier");
-    assert!(with_fake_path(&root, || child::main(&[
-        "--spec".to_owned(),
-        spec.display().to_string()
-    ]))
-    .expect_err("stale")
-    .contains("stale carrier rejected"));
+    assert!(
+        with_fake_path(&root, || child::main(&[
+            "--spec".to_owned(),
+            spec.display().to_string()
+        ]))
+        .expect_err("stale")
+        .contains("stale carrier rejected")
+    );
 
     let root = temp_root("runner-bounded");
     write_fake_pi(
@@ -780,10 +871,12 @@ fn runner_real_pi_high_streaming_probe_when_enabled() {
     .expect("real pi streaming run");
     let carrier: Value = serde_json::from_slice(&fs::read(carrier_path(&root)).expect("carrier"))
         .expect("carrier json");
-    assert!(carrier["raw_output"]
-        .as_str()
-        .expect("raw")
-        .contains("\"atoms\""));
+    assert!(
+        carrier["raw_output"]
+            .as_str()
+            .expect("raw")
+            .contains("\"atoms\"")
+    );
     let stats: Value =
         serde_json::from_slice(&fs::read(stats_path).expect("stats")).expect("stats json");
     let total = stats["stdout_total_bytes"].as_u64().expect("total");
@@ -901,6 +994,22 @@ fn carrier_path(root: &Path) -> PathBuf {
         &Id("planning-main-task-extractor-01".to_owned()),
     )
     .carrier_path
+}
+
+fn valid_handoff() -> Value {
+    json!({
+        "schema":"autopilot.agent-handoff.v1",
+        "completed":["read TASK-A"],
+        "remaining":["emit final atoms"],
+        "critical_state":{
+            "semantic_lens":"WORK",
+            "authority_coverage":["TASK-A whole file"],
+            "atom_ledger":["planning-main-task-extractor-01-atom-draft"],
+            "duplicate_dispositions":["none"],
+            "unresolved_ambiguities":["none"]
+        },
+        "next_action":"resume and emit final atoms"
+    })
 }
 
 fn success_fake_pi(output: &str) -> String {

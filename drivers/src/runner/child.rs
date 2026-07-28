@@ -1,10 +1,13 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::checkpoint::{self, AgentHandoff, CheckpointInput, CheckpointSource, ContextBudget};
+use crate::checkpoint::{
+    self, AgentHandoff, CheckpointInput, CheckpointPolicy, CheckpointSource, ContextAction,
+    ContextBudget,
+};
 use crate::runner::rpc::{
     CompactionReason, RpcClient, RpcCommand, RpcCommandKind, RpcDiagnostics, RpcEvent, RpcFrame,
     RpcResponse, RpcSpawnConfig, TerminalMessage,
@@ -189,6 +192,7 @@ impl RpcAssignment {
             "AUTOPILOT_AGENT_RUN_MAX_STDOUT_BYTES",
             DEFAULT_MAX_PI_STDOUT_BYTES,
         );
+        let policy = CheckpointPolicy::parse()?;
         let mut config = RpcSpawnConfig::new(
             PathBuf::from(&spec.cwd.0),
             spec.provider.clone(),
@@ -200,7 +204,6 @@ impl RpcAssignment {
         config.stderr_tail_bytes = stderr_limit;
         config.max_terminal_bytes = stdout_limit.max(DEFAULT_MAX_PI_STDOUT_BYTES);
         let client = RpcClient::spawn(config).map_err(|error| error.to_string())?;
-        let policy = CheckpointPolicy::parse()?;
         let mut runner = Self {
             client,
             next_command: 0,
@@ -362,7 +365,7 @@ impl RpcAssignment {
         if state.awaiting_handoff && state.steer_message_started {
             let handoff = self
                 .policy
-                .validate_handoff(&spec.role_id.0, &record.text)?;
+                .validate_handoff_text(&spec.role_id.0, &record.text)?;
             let checkpoint = self.checkpoint_record(spec, handoff.clone())?;
             self.compact_checkpoint(&checkpoint)?;
             state.compacted = true;
@@ -389,10 +392,60 @@ impl RpcAssignment {
         let budget = context_budget_from_stats(response)?;
         match budget {
             ContextBudget::Unknown => {
-                return Err(
-                    "agent-run context budget unknown blocks new work and terminal success"
-                        .to_owned(),
-                );
+                let decision = checkpoint::observe_context(
+                    ContextBudget::Unknown,
+                    &checkpoint::AssignmentState::<
+                        Option<kernel::generated::Id>,
+                        Option<kernel::generated::Sha>,
+                        Option<kernel::generated::Sha>,
+                    > {
+                        assignment_id: spec.assignment_id.clone(),
+                        lane_id: None,
+                        run_revision: spec.run_revision,
+                        base_commit: None,
+                        current_commit: None,
+                        dirty_paths: Vec::new(),
+                        completed: Vec::new(),
+                        remaining: vec![spec.assignment_id.clone()],
+                        next_action: "continue".to_owned(),
+                        session_ref: kernel::generated::Ref(format!(
+                            "session:{}",
+                            spec.session_id.0
+                        )),
+                    },
+                )
+                .map_err(|error| format!("agent-run context observation failed: {error:?}"))?;
+                if state.compacted {
+                    let handoff = state.handoff.clone().ok_or_else(|| {
+                        "agent-run compacted checkpoint missing retained handoff".to_owned()
+                    })?;
+                    let checkpoint = self.checkpoint_record(spec, handoff)?;
+                    let outcome = decision.apply_action(ContextAction::InjectRetainedHandoff(
+                        checkpoint.resume_overlay.clone(),
+                    ));
+                    return match outcome {
+                        Ok(checkpoint::ContextActionOutcome::ResumeOnly { .. }) => Ok(()),
+                        Ok(checkpoint::ContextActionOutcome::Allowed) => Err(
+                            "agent-run context action allowed non-resume during unknown budget"
+                                .to_owned(),
+                        ),
+                        Err(error) => Err(format!(
+                            "agent-run context budget unknown rejected retained handoff recovery: {error:?}"
+                        )),
+                    };
+                }
+                if state.final_record.is_some() {
+                    if !decision.allows_terminal_success() {
+                        return Err(
+                            "agent-run context budget unknown blocks terminal success: UnknownBlocksTerminalSuccess".to_owned(),
+                        );
+                    }
+                } else if !decision.allows_new_work() {
+                    return Err(
+                        "agent-run context budget unknown blocks new work: UnknownBlocksWork"
+                            .to_owned(),
+                    );
+                }
             }
             ContextBudget::Known(percent) => {
                 let percent_value = percent.as_f64();
@@ -765,199 +818,6 @@ impl RpcAssignment {
     }
 }
 
-#[derive(Debug, Clone)]
-struct CheckpointPolicy {
-    roles: BTreeMap<String, RoleCheckpointPolicy>,
-    slot_sets: BTreeMap<String, Vec<CheckpointSlot>>,
-}
-
-#[derive(Debug, Clone)]
-struct RoleCheckpointPolicy {
-    interruptible: bool,
-    slot_set: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct CheckpointSlot {
-    key: String,
-    value_type: CheckpointSlotType,
-    required: bool,
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum CheckpointSlotType {
-    String,
-    ArrayString,
-}
-
-impl CheckpointPolicy {
-    fn parse() -> Result<Self, String> {
-        let source = include_str!("../../../data/checkpoint-policy.kdl");
-        let mut roles = BTreeMap::new();
-        let mut slot_sets = BTreeMap::new();
-        let mut current_slot_set: Option<String> = None;
-        for raw in source.lines() {
-            let line = raw.trim();
-            if line.starts_with("slot_set ") {
-                let id = quoted_after(line, "slot_set ")?.to_owned();
-                slot_sets.insert(id.clone(), Vec::new());
-                current_slot_set = Some(id);
-                continue;
-            }
-            if line == "}" {
-                current_slot_set = None;
-                continue;
-            }
-            if line.starts_with("slot ") {
-                let set_id = current_slot_set
-                    .as_ref()
-                    .ok_or_else(|| "checkpoint slot outside slot_set".to_owned())?;
-                let key = quoted_after(line, "slot ")?.to_owned();
-                let value_type = match prop_quoted(line, "type")? {
-                    "string" => CheckpointSlotType::String,
-                    "array<string>" => CheckpointSlotType::ArrayString,
-                    other => {
-                        return Err(format!(
-                            "checkpoint slot `{key}` has unsupported type `{other}`"
-                        ));
-                    }
-                };
-                let required = prop_bool_literal(line, "required")?;
-                slot_sets
-                    .get_mut(set_id)
-                    .ok_or_else(|| format!("checkpoint slot_set `{set_id}` disappeared"))?
-                    .push(CheckpointSlot {
-                        key,
-                        value_type,
-                        required,
-                    });
-                continue;
-            }
-            if line.starts_with("role_policy ") {
-                let role_id = quoted_after(line, "role_policy ")?.to_owned();
-                let interruptible = prop_bool_literal(line, "interruptible")?;
-                let slot_set = prop_quoted_optional(line, "slot_set")?.map(str::to_owned);
-                roles.insert(
-                    role_id,
-                    RoleCheckpointPolicy {
-                        interruptible,
-                        slot_set,
-                    },
-                );
-            }
-        }
-        Ok(Self { roles, slot_sets })
-    }
-
-    fn role(&self, role_id: &str) -> Result<&RoleCheckpointPolicy, String> {
-        self.roles
-            .get(role_id)
-            .ok_or_else(|| format!("agent-run unknown checkpoint role `{role_id}`"))
-    }
-
-    fn required_slots(&self, role_id: &str) -> Result<Vec<&CheckpointSlot>, String> {
-        let role = self.role(role_id)?;
-        if !role.interruptible {
-            return Err(format!("agent-run role `{role_id}` is not interruptible"));
-        }
-        let slot_set_id = role
-            .slot_set
-            .as_ref()
-            .ok_or_else(|| format!("agent-run role `{role_id}` missing checkpoint slot_set"))?;
-        let slots = self.slot_sets.get(slot_set_id).ok_or_else(|| {
-            format!("agent-run role `{role_id}` references missing slot_set `{slot_set_id}`")
-        })?;
-        Ok(slots.iter().filter(|slot| slot.required).collect())
-    }
-
-    fn required_slot_names(&self, role_id: &str) -> Result<Vec<String>, String> {
-        Ok(self
-            .required_slots(role_id)?
-            .into_iter()
-            .map(|slot| slot.key.clone())
-            .collect())
-    }
-
-    fn required_slot_names_from_handoff(
-        &self,
-        handoff: &AgentHandoff,
-    ) -> Result<Vec<String>, String> {
-        let mut names = handoff.critical_state.keys().cloned().collect::<Vec<_>>();
-        names.sort();
-        Ok(names)
-    }
-
-    fn validate_handoff(&self, role_id: &str, text: &str) -> Result<AgentHandoff, String> {
-        let value: Value = serde_json::from_str(text)
-            .map_err(|error| format!("agent-run handoff is not strict JSON: {error}"))?;
-        let handoff: AgentHandoff = serde_json::from_value(value.clone())
-            .map_err(|error| format!("agent-run typed handoff deserialize failed: {error}"))?;
-        if handoff.completed.iter().any(|item| item.trim().is_empty())
-            || handoff.remaining.iter().any(|item| item.trim().is_empty())
-            || handoff.next_action.trim().is_empty()
-        {
-            return Err("agent-run handoff contains blank required entries".to_owned());
-        }
-        for (key, value) in &handoff.critical_state {
-            if !json_depth_two(value) {
-                return Err(format!(
-                    "agent-run handoff critical_state slot `{key}` exceeds depth 2"
-                ));
-            }
-        }
-        for slot in self.required_slots(role_id)? {
-            let value = handoff.critical_state.get(&slot.key).ok_or_else(|| {
-                format!(
-                    "agent-run role `{role_id}` missing required critical_state slot `{}`",
-                    slot.key
-                )
-            })?;
-            match slot.value_type {
-                CheckpointSlotType::String => {
-                    if value.as_str().is_none_or(|item| item.trim().is_empty()) {
-                        return Err(format!(
-                            "agent-run critical_state slot `{}` must be a non-empty string",
-                            slot.key
-                        ));
-                    }
-                }
-                CheckpointSlotType::ArrayString => {
-                    let values = value.as_array().ok_or_else(|| {
-                        format!(
-                            "agent-run critical_state slot `{}` must be an array",
-                            slot.key
-                        )
-                    })?;
-                    if values.is_empty()
-                        || values
-                            .iter()
-                            .any(|item| item.as_str().is_none_or(|text| text.trim().is_empty()))
-                    {
-                        return Err(format!(
-                            "agent-run critical_state slot `{}` must contain non-empty strings",
-                            slot.key
-                        ));
-                    }
-                }
-            }
-        }
-        Ok(handoff)
-    }
-}
-
-fn json_depth_two(value: &Value) -> bool {
-    match value {
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => true,
-        Value::Array(items) => items.iter().all(|item| {
-            matches!(
-                item,
-                Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_)
-            )
-        }),
-        Value::Object(_) => false,
-    }
-}
-
 fn context_budget_from_stats(response: &RpcResponse) -> Result<ContextBudget, String> {
     let data = response
         .data
@@ -1051,53 +911,6 @@ fn write_rpc_stats_if_requested(diagnostics: &RpcDiagnostics) -> Result<(), Stri
             .map_err(|error| format!("agent-run stats serialize failed: {error}"))?,
     )
     .map_err(|error| format!("agent-run stats write failed {:?}: {error}", path))
-}
-
-fn quoted_after<'a>(line: &'a str, prefix: &str) -> Result<&'a str, String> {
-    let rest = line
-        .strip_prefix(prefix)
-        .ok_or_else(|| format!("line missing prefix `{prefix}`"))?;
-    let start = rest
-        .find('"')
-        .ok_or_else(|| format!("line missing opening quote: {line}"))?
-        + 1;
-    let end = rest[start..]
-        .find('"')
-        .ok_or_else(|| format!("line missing closing quote: {line}"))?
-        + start;
-    Ok(&rest[start..end])
-}
-
-fn prop_quoted_optional<'a>(line: &'a str, key: &str) -> Result<Option<&'a str>, String> {
-    let needle = format!(" {key}=\"");
-    let Some(start) = line.find(&needle) else {
-        return Ok(None);
-    };
-    let start = start + needle.len();
-    let end = line[start..]
-        .find('"')
-        .ok_or_else(|| format!("line missing closing quote for prop `{key}`: {line}"))?
-        + start;
-    Ok(Some(&line[start..end]))
-}
-
-fn prop_quoted<'a>(line: &'a str, key: &str) -> Result<&'a str, String> {
-    prop_quoted_optional(line, key)?.ok_or_else(|| format!("line missing quoted prop `{key}`"))
-}
-
-fn prop_bool_literal(line: &str, key: &str) -> Result<bool, String> {
-    let needle = format!(" {key}=");
-    let start = line
-        .find(&needle)
-        .ok_or_else(|| format!("line missing bool prop `{key}`"))?
-        + needle.len();
-    if line[start..].starts_with("#true") {
-        Ok(true)
-    } else if line[start..].starts_with("#false") {
-        Ok(false)
-    } else {
-        Err(format!("line prop `{key}` is not #true/#false: {line}"))
-    }
 }
 
 fn parse_args(args: &[String]) -> Result<PathBuf, String> {
