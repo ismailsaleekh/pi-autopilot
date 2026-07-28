@@ -44,6 +44,8 @@ impl CheckpointInput {
         }
     }
 
+    // Public constructor mirrors the serialized execution identity fields; grouping would change callers/API.
+    #[allow(clippy::too_many_arguments)]
     pub fn execution(
         assignment_id: Id,
         run_revision: u64,
@@ -437,12 +439,13 @@ impl CheckpointPolicy {
         };
         policy.validate_shape()?;
         for (role_id, role) in &policy.roles {
-            if let Some(slot_set_id) = &role.slot_set {
-                if !policy.slot_sets.contains_key(slot_set_id) {
+            match &role.slot_set {
+                Some(slot_set_id) if !policy.slot_sets.contains_key(slot_set_id) => {
                     return Err(format!(
                         "role `{role_id}` references unknown slot_set `{slot_set_id}`"
                     ));
                 }
+                _ => {}
             }
         }
         Ok(policy)
@@ -507,10 +510,14 @@ impl CheckpointPolicy {
                 if slot.max_bytes == 0 || slot.max_bytes > bounds.critical_state_value_max_bytes {
                     return Err(format!("slot `{}` has incoherent max_bytes", slot.key));
                 }
-                if let Some(max_entries) = slot.max_entries {
-                    if max_entries == 0 || max_entries > bounds.critical_state_array_max_entries {
+                match slot.max_entries {
+                    Some(max_entries)
+                        if max_entries == 0
+                            || max_entries > bounds.critical_state_array_max_entries =>
+                    {
                         return Err(format!("slot `{}` has incoherent max_entries", slot.key));
                     }
+                    _ => {}
                 }
             }
         }
@@ -567,7 +574,7 @@ impl CheckpointPolicy {
             .map_err(|error| format!("agent-run handoff is not strict JSON: {error}"))?;
         let handoff: AgentHandoff = serde_json::from_value(value)
             .map_err(|error| format!("agent-run typed handoff deserialize failed: {error}"))?;
-        self.validate_handoff_with_total(role_id, handoff, text.as_bytes().len())
+        self.validate_handoff_with_total(role_id, handoff, text.len())
     }
 
     pub fn validate_handoff(
@@ -607,7 +614,7 @@ impl CheckpointPolicy {
         )?;
         enforce_bound(
             "entry_max_bytes",
-            handoff.next_action.as_bytes().len(),
+            handoff.next_action.len(),
             self.bounds.entry_max_bytes,
             "next_action",
         )?;
@@ -714,7 +721,7 @@ fn validate_string_list(
     for (index, value) in values.iter().enumerate() {
         enforce_bound(
             "entry_max_bytes",
-            value.as_bytes().len(),
+            value.len(),
             entry_max_bytes,
             &format!("{field}[{index}]"),
         )?;
@@ -855,6 +862,8 @@ pub enum HandoffSchema {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+// Keep the public enum shape stable for checkpoint callers; boxing the variant would alter matching/construction API.
+#[allow(clippy::large_enum_variant)]
 pub enum ContextDecision {
     Continue,
     SoftWarning,
@@ -964,7 +973,7 @@ pub trait Compactor {
 
 pub trait CheckpointSource {
     fn render_checkpoint(&self, percent: ContextPercent)
-    -> Result<CheckpointRecord, IdentityError>;
+        -> Result<CheckpointRecord, IdentityError>;
 }
 
 pub fn observe_context<B, S>(budget: B, state: &S) -> Result<ContextDecision, CheckpointError>

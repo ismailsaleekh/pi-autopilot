@@ -522,10 +522,13 @@ impl RpcAssignment {
             return self.run_prompt(spec, &resume, PromptPurpose::Resume);
         }
         if state.awaiting_handoff {
-            if let Some(candidate) = &state.final_record {
-                if validate_assistant_value(spec, &candidate.record.text).is_ok() {
+            match &state.final_record {
+                Some(candidate)
+                    if validate_assistant_value(spec, &candidate.record.text).is_ok() =>
+                {
                     return Ok(candidate.record.text.clone());
                 }
+                _ => {}
             }
             self.abort_stale_queue()?;
             let handoff_prompt = self.handoff_prompt(spec)?;
@@ -563,26 +566,20 @@ impl RpcAssignment {
         self.client
             .send_command(command)
             .map_err(|error| error.to_string())?;
-        loop {
-            let frame = self
-                .client
-                .next_frame()
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| "agent-run rpc stream ended before command response".to_owned())?;
-            match frame {
-                RpcFrame::Response(response) if response.id == expected => return Ok(response),
-                RpcFrame::Response(response) => {
-                    return Err(format!(
-                        "agent-run unexpected rpc response id {}; expected {expected}",
-                        response.id
-                    ));
-                }
-                RpcFrame::Event(event) => {
-                    return Err(format!(
-                        "agent-run unexpected rpc event before configuration completed: {event:?}"
-                    ));
-                }
-            }
+        let frame = self
+            .client
+            .next_frame()
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "agent-run rpc stream ended before command response".to_owned())?;
+        match frame {
+            RpcFrame::Response(response) if response.id == expected => Ok(response),
+            RpcFrame::Response(response) => Err(format!(
+                "agent-run unexpected rpc response id {}; expected {expected}",
+                response.id
+            )),
+            RpcFrame::Event(event) => Err(format!(
+                "agent-run unexpected rpc event before configuration completed: {event:?}"
+            )),
         }
     }
 
@@ -730,10 +727,11 @@ impl RpcAssignment {
         if shutdown.escalated {
             return Err("agent-run rpc shutdown escalated after stdin close".to_owned());
         }
-        if let Some(status) = shutdown.status {
-            if !status.success() {
+        match shutdown.status {
+            Some(status) if !status.success() => {
                 return Err(format!("agent-run pi exited nonzero status={status}"));
             }
+            _ => {}
         }
         Ok(())
     }
