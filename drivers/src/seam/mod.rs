@@ -455,17 +455,17 @@ fn route_task_completed(
         append_terminal_event(state, &payload, &binding)?;
         return done(frame.id, state.summary());
     }
-    let carrier_path = PathBuf::from(&binding.carrier_path);
-    let carrier_text = match fs::read_to_string(&carrier_path) {
-        Ok(value) => value,
-        Err(error) => {
-            return done(
-                frame.id,
-                rejection("carrier-read", &format!("{}:{error}", binding.carrier_path)),
-            );
-        }
-    };
     if binding.result_contract.0 == "autopilot.delivery_result.v1" {
+        let carrier_path = PathBuf::from(&binding.carrier_path);
+        let carrier_text = match fs::read_to_string(&carrier_path) {
+            Ok(value) => value,
+            Err(error) => {
+                return done(
+                    frame.id,
+                    rejection("carrier-read", &format!("{}:{error}", binding.carrier_path)),
+                );
+            }
+        };
         let result: DeliveryResult = match serde_json::from_str(&carrier_text) {
             Ok(value) => value,
             Err(error) => {
@@ -511,25 +511,8 @@ fn route_task_completed(
             ),
         );
     }
-    let carrier: AgentCarrier = match serde_json::from_str(&carrier_text) {
-        Ok(value) => value,
-        Err(error) => {
-            return done(
-                frame.id,
-                rejection(
-                    "agent-carrier",
-                    &format!("{}:{error}", binding.carrier_path),
-                ),
-            );
-        }
-    };
-    accept_planning_carrier(
-        frame.id,
-        &payload.assignment_id,
-        carrier,
-        state,
-        Some(&payload),
-    )
+    append_terminal_event(state, &payload, &binding)?;
+    done(frame.id, state.summary())
 }
 
 fn validate_planning_binding(
@@ -630,10 +613,7 @@ fn terminal_consumed_ref(binding: &runner::IssuedRunnerBinding) -> Ref {
 }
 
 fn terminal_status_allowed(status: &str) -> bool {
-    matches!(
-        status,
-        "completed" | "failed" | "killed" | "interrupted" | "canceled" | "cancelled"
-    )
+    matches!(status, "completed" | "failed" | "killed")
 }
 
 fn delivery_expectation_from_binding(

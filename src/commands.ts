@@ -1,6 +1,6 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
-import type { BackgroundAction, CoreToHostFrame, HostToCoreCommandPayload } from "./generated/index.ts";
+import type { BackgroundAction, CoreToHostFrame, HostToCoreCommandPayload, HostToCoreOperatorAnswerPayload } from "./generated/index.ts";
 import { applyCoreEffect, type CoreEffectResult, type HostEffectContext, type HostEffectServices, type OperatorMessageSink } from "./effects.ts";
 import type { BgTaskSnapshot, PiBackgroundTaskClient } from "./background-tasks.ts";
 import { boundedDiagnostic, unavailableCapabilities } from "./background-tasks.ts";
@@ -18,6 +18,8 @@ export const AUTOPILOT_COMMANDS = Object.freeze([
   "autopilot-abort",
 ] as const);
 
+export const AUTOPILOT_OPERATOR_ANSWER_COMMAND = "autopilot-answer" as const;
+
 export interface CommandDefinitionLike {
   readonly description: string;
   handler(args: string, ctx: ExtensionCommandContext): Promise<void>;
@@ -29,6 +31,7 @@ export interface CommandHostLike {
 
 export interface CommandTransportLike {
   request(kind: "command", payload: HostToCoreCommandPayload): Promise<CoreToHostFrame>;
+  request(kind: "operator-answer", payload: HostToCoreOperatorAnswerPayload): Promise<CoreToHostFrame>;
 }
 
 export interface RegisterCommandOptions {
@@ -45,6 +48,15 @@ export function registerAutopilotCommands(pi: CommandHostLike, options: Register
       handler: async (args, ctx) => forwardCommand(name, args, ctx, options),
     });
   }
+  pi.registerCommand(AUTOPILOT_OPERATOR_ANSWER_COMMAND, {
+    description: "Send a D72 operator-answer frame to autopilot-core: /autopilot-answer <question-id> <json-object>.",
+    handler: async (args, ctx) => forwardOperatorAnswer(args, ctx, options),
+  });
+}
+
+async function forwardOperatorAnswer(args: string, ctx: ExtensionCommandContext, options: RegisterCommandOptions): Promise<void> {
+  const frame = await options.transport.request("operator-answer", operatorAnswerPayload(args));
+  await applyAndRecord(frame, ctx, options);
 }
 
 async function forwardCommand(name: string, args: string, ctx: ExtensionCommandContext, options: RegisterCommandOptions): Promise<void> {
@@ -72,6 +84,31 @@ async function commandPayload(name: string, args: string, backgroundTasks: Pick<
       background_capability_diagnostic: boundedDiagnostic(error),
     };
   }
+}
+
+function operatorAnswerPayload(args: string): HostToCoreOperatorAnswerPayload {
+  const trimmed = args.trim();
+  const separator = trimmed.search(/\s/u);
+  if (separator <= 0) {
+    throw new Error("/autopilot-answer requires <question-id> followed by a JSON object answer");
+  }
+  const questionId = trimmed.slice(0, separator);
+  const answerText = trimmed.slice(separator).trim();
+  if (!validId(questionId)) throw new Error(`/autopilot-answer question-id is invalid: ${questionId}`);
+  let answer: unknown;
+  try {
+    answer = JSON.parse(answerText);
+  } catch (error) {
+    throw new Error(`/autopilot-answer answer is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (typeof answer !== "object" || answer === null || Array.isArray(answer)) {
+    throw new Error("/autopilot-answer answer must be a JSON object");
+  }
+  return { question_id: questionId, answer: answer as Record<string, unknown> };
+}
+
+function validId(value: string): boolean {
+  return value.length > 0 && !/[\\/\0]/u.test(value);
 }
 
 function frameRawCommand(name: string, args: string): string {

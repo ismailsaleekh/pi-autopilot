@@ -14,11 +14,14 @@ const MAX_DIAGNOSTIC_CHARS = 240;
 
 export type BackgroundOperation = "capabilities" | "run" | "status" | "logs" | "kill";
 
+export type BgTaskStatus = "running" | "completed" | "failed" | "killed";
+export type BgTerminalTaskStatus = "completed" | "failed" | "killed";
+
 export interface BgTaskSnapshot {
   readonly id: string;
   readonly name?: string;
   readonly command: string;
-  readonly status: "running" | "completed" | "failed" | "killed" | string;
+  readonly status: BgTaskStatus;
   readonly outputPath: string;
   readonly [key: string]: unknown;
 }
@@ -279,7 +282,7 @@ function validateResponse(value: unknown): ValidResponse {
 function validateTerminal(value: unknown): ValidTerminal {
   const object = requireClosedRecord(value, ["schema_version", "task"], "terminal");
   if (object.schema_version !== BG_TERMINAL_SCHEMA) throw new PiBackgroundTaskError("pi-background-tasks terminal schema mismatch");
-  return { schema_version: BG_TERMINAL_SCHEMA, task: requireTaskSnapshot(object.task, "terminal.task") };
+  return { schema_version: BG_TERMINAL_SCHEMA, task: requireTaskSnapshot(object.task, "terminal.task", true) };
 }
 
 function requireCapabilities(value: unknown): BackgroundCapabilities {
@@ -298,13 +301,21 @@ function requireCapabilities(value: unknown): BackgroundCapabilities {
   };
 }
 
-function requireTaskSnapshot(value: unknown, label: string): BgTaskSnapshot {
+function requireTaskSnapshot(value: unknown, label: string, terminal = false): BgTaskSnapshot {
   if (!isRecord(value)) throw new PiBackgroundTaskError(`${label} is not an object`);
   const id = requireString(value.id, `${label}.id`);
   const command = requireString(value.command, `${label}.command`);
-  const status = requireString(value.status, `${label}.status`);
+  const status = requireTaskStatus(value.status, `${label}.status`, terminal);
   const outputPath = requireString(value.outputPath, `${label}.outputPath`);
   return { ...value, id, command, status, outputPath } as BgTaskSnapshot;
+}
+
+function requireTaskStatus(value: unknown, label: string, terminal: boolean): BgTaskStatus {
+  const status = requireString(value, label);
+  if (status === "completed" || status === "failed" || status === "killed") return status;
+  if (!terminal && status === "running") return status;
+  const allowed = terminal ? "completed, failed, killed" : "running, completed, failed, killed";
+  throw new PiBackgroundTaskError(`${label} must be one of ${allowed}; got ${status}`);
 }
 
 function requireClosedRecord(value: unknown, allowed: readonly string[], label: string): Record<string, unknown> {

@@ -87,6 +87,16 @@ test("PiBackgroundTaskClient awaits terminal handlers and rejects malformed term
   await assert.rejects(client.close(), /unknown key extra/u);
 });
 
+test("PiBackgroundTaskClient rejects unmapped background-task statuses", async () => {
+  const bus = eventBus();
+  const client = new PiBackgroundTaskClient(bus);
+  assert.throws(
+    () => bus.emit(BG_TERMINAL_CHANNEL, { schema_version: BG_TERMINAL_SCHEMA, task: taskSnapshot("interrupted") }),
+    /terminal\.task\.status must be one of completed, failed, killed; got interrupted/u,
+  );
+  await assert.rejects(client.close(), /terminal\.task\.status/u);
+});
+
 test("PiBackgroundTaskClient surfaces terminal handler rejection", async () => {
   const bus = eventBus();
   const client = new PiBackgroundTaskClient(bus);

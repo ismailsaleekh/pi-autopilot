@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import { PiBackgroundTaskClient, type BgTaskSnapshot } from "./background-tasks.ts";
@@ -61,6 +63,7 @@ export default function autopilotExtension(pi: ExtensionAPI, options: AutopilotE
       throw new Error(message);
     }
     try {
+      const agentResult = task.status === "completed" ? await completedPlanningAgentResult(binding) : undefined;
       const frame = await transport.request("task-completed", {
         task_id: task.id,
         action_id: binding.action.action_id,
@@ -68,6 +71,10 @@ export default function autopilotExtension(pi: ExtensionAPI, options: AutopilotE
         status: task.status,
       });
       await applyAndRecord(frame, ctx, { backgroundTasks, operatorMessage, onSpawn: rememberSpawn });
+      if (agentResult !== undefined) {
+        const resultFrame = await transport.request("agent-result", agentResult);
+        await applyAndRecord(resultFrame, ctx, { backgroundTasks, operatorMessage, onSpawn: rememberSpawn });
+      }
     } catch (error) {
       await operatorMessage(`Autopilot terminal handling failed for ${correlationLabel(binding)}: ${boundedError(error)}`, "error");
       throw error;
@@ -149,6 +156,86 @@ function bufferUnmatchedTerminal(task: BgTaskSnapshot, unmatchedTerminalTasks: M
     throw new Error(`Autopilot unmatched terminal buffer overflow at ${String(MAX_UNMATCHED_TERMINALS)} tasks; latest task=${task.id}`);
   }
   unmatchedTerminalTasks.set(task.id, task);
+}
+
+async function completedPlanningAgentResult(binding: TaskBinding): Promise<{ readonly assignment_id: string; readonly carrier: Record<string, unknown> } | undefined> {
+  const specPath = specPathFromCommand(binding.action.bg_run.command);
+  const spec = requireRecord(JSON.parse(await readFile(specPath, "utf8")), "agent-run spec");
+  const actionId = requireString(spec["action_id"], "agent-run spec.action_id");
+  const assignmentId = requireString(spec["assignment_id"], "agent-run spec.assignment_id");
+  const boundaryId = requireString(spec["boundary_id"], "agent-run spec.boundary_id");
+  const resultContract = requireString(spec["result_contract"], "agent-run spec.result_contract");
+  if (actionId !== binding.action.action_id || assignmentId !== binding.action.assignment_id) {
+    throw new Error(`Autopilot completed task binding drift: action/assignment expected ${binding.action.action_id}/${binding.action.assignment_id}, got ${actionId}/${assignmentId}`);
+  }
+  if (resultContract === "autopilot.delivery_result.v1") return undefined;
+  const carrierPath = requireString(spec["carrier_path"], "agent-run spec.carrier_path");
+  const carrier = requireRecord(JSON.parse(await readFile(carrierPath, "utf8")), "planning carrier");
+  if (requireString(carrier["action_id"], "planning carrier.action_id") !== actionId
+    || requireString(carrier["assignment_id"], "planning carrier.assignment_id") !== assignmentId
+    || requireString(carrier["boundary_id"], "planning carrier.boundary_id") !== boundaryId) {
+    throw new Error(`Autopilot planning carrier identity drift for ${actionId}/${assignmentId}/${boundaryId}`);
+  }
+  return { assignment_id: assignmentId, carrier };
+}
+
+function specPathFromCommand(command: string): string {
+  const argv = shellWords(command);
+  const index = argv.indexOf("--spec");
+  const specPath = argv[index + 1];
+  if (index < 0 || specPath === undefined || specPath.length === 0) {
+    throw new Error(`Autopilot agent command has no --spec path: ${command}`);
+  }
+  return specPath;
+}
+
+function shellWords(command: string): string[] {
+  const out: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | undefined;
+  for (let index = 0; index < command.length; index += 1) {
+    const ch = command[index] ?? "";
+    if (quote !== undefined) {
+      if (ch === quote) quote = undefined;
+      else if (quote === '"' && ch === "\\") {
+        index += 1;
+        if (index >= command.length) throw new Error("Autopilot agent command ends with an escape");
+        current += command[index] ?? "";
+      } else current += ch;
+      continue;
+    }
+    if (/\s/u.test(ch)) {
+      if (current.length > 0) {
+        out.push(current);
+        current = "";
+      }
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (ch === "\\") {
+      index += 1;
+      if (index >= command.length) throw new Error("Autopilot agent command ends with an escape");
+      current += command[index] ?? "";
+      continue;
+    }
+    current += ch;
+  }
+  if (quote !== undefined) throw new Error("Autopilot agent command has an unterminated quote");
+  if (current.length > 0) out.push(current);
+  return out;
+}
+
+function requireRecord(value: unknown, label: string): Record<string, unknown> {
+  if (typeof value === "object" && value !== null && !Array.isArray(value)) return value as Record<string, unknown>;
+  throw new Error(`Autopilot ${label} is not a JSON object`);
+}
+
+function requireString(value: unknown, label: string): string {
+  if (typeof value === "string" && value.length > 0) return value;
+  throw new Error(`Autopilot ${label} must be a non-empty string`);
 }
 
 function correlationLabel(binding: TaskBinding): string {
