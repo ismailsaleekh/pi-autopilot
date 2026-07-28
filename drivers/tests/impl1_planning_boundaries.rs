@@ -3,9 +3,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use drivers::planning::{
+    self, TaskAnchorRegistry, TaskDocument, TaskDocumentClass, TaskInputSet,
+};
 use drivers::runner::{self, PlanningRunnerRequest, RunnerTaskDocument};
 use drivers::seam::{self, CoreState};
-use kernel::generated::{ContractId, Id, ModeId, Ref, SeamEnvelope};
+use kernel::generated::{
+    ContractId, Id, ModeId, PlanningAtomKind, Ref, SeamEnvelope, TaskAtom, TaskAtoms,
+};
 use serde_json::json;
 use sha2::{Digest as ShaDigest, Sha256};
 
@@ -224,6 +229,63 @@ fn approved_units_preserve_atom_links() {
         approved.contains("TE02-C-002"),
         "approved unit decisions must retain all work-map links: {approved}"
     );
+}
+
+#[test]
+fn task_anchor_registry_accepts_real_section_and_rejects_unverified_sources() {
+    let registry = TaskAnchorRegistry::from_input_set(&task_input_set(&[
+        planning_doc(
+            "TASK.md",
+            TaskDocumentClass::Authority,
+            "# Fixture Task\n\n## 3. Work Breakdown\n\nImplement it.\n\n## 4. Constraints and Banned Shapes\n\nNo silent fallback.\n\n## 5. Definition of Done\n\nFocused tests pass.\n",
+        ),
+        planning_doc(
+            "context.md",
+            TaskDocumentClass::ContextNonAuthority,
+            "# Context\n\nRepository facts.\n",
+        ),
+    ]));
+
+    planning::validate_task_atoms_for_assignment(
+        &atoms_with_source("task://TASK.md#3-work-breakdown"),
+        "TE01-",
+        &registry,
+    )
+    .expect("exact recorded transcript section source must be admitted when the heading exists");
+    planning::validate_task_atoms_for_assignment(
+        &atoms_with_source("TASK.md §3"),
+        "TE01-",
+        &registry,
+    )
+    .expect("prose section source must be admitted only when the section number exists");
+    planning::validate_task_atoms_for_assignment(
+        &atoms_with_source("TASK.md#3-work-breakdown"),
+        "TE01-",
+        &registry,
+    )
+    .expect("bare path section source must be admitted when the path and heading exist");
+
+    assert_source_rejected(&registry, "task://TASK.md#does-not-exist");
+    assert_source_rejected(&registry, "task://NOT-A-DOC.md");
+
+    let ambiguous = TaskAnchorRegistry::from_input_set(&task_input_set(&[
+        planning_doc(
+            "alpha/TASK.md",
+            TaskDocumentClass::Authority,
+            "# Alpha\n\n## 3. Work Breakdown\n\nAlpha.\n",
+        ),
+        planning_doc(
+            "beta/TASK.md",
+            TaskDocumentClass::Authority,
+            "# Beta\n\n## 3. Work Breakdown\n\nBeta.\n",
+        ),
+        planning_doc(
+            "context.md",
+            TaskDocumentClass::ContextNonAuthority,
+            "# Context\n\nRepository facts.\n",
+        ),
+    ]));
+    assert_source_rejected(&ambiguous, "task://TASK.md#3-work-breakdown");
 }
 
 struct Fixture {
@@ -682,6 +744,64 @@ fn carrier_value(binding: &runner::IssuedRunnerBinding, raw: &str) -> serde_json
 
 fn task_atoms(id: &str) -> String {
     json!({"atoms":[{"id":id,"kind":"work","text":"Do the work","sources":[anchor("task.md", "authority", "auth", "Do the work")]}]}).to_string()
+}
+
+fn atoms_with_source(source: &str) -> TaskAtoms {
+    TaskAtoms {
+        atoms: vec![TaskAtom {
+            id: Id("TE01-W1".to_owned()),
+            kind: PlanningAtomKind::Work,
+            text: "Do the work".to_owned(),
+            sources: vec![Ref(source.to_owned())],
+        }],
+    }
+}
+
+fn assert_source_rejected(registry: &TaskAnchorRegistry, source: &str) {
+    let rejection = planning::validate_task_atoms_for_assignment(
+        &atoms_with_source(source),
+        "TE01-",
+        registry,
+    )
+    .expect_err("unverified source must reject");
+    assert_eq!(rejection.boundary_id(), "planning.task-atoms.v1");
+    assert!(
+        rejection.actual().contains("field=atoms.sources"),
+        "rejection must name atoms.sources: {}",
+        rejection.actual()
+    );
+    assert!(
+        rejection.actual().contains(&format!("got={source}")),
+        "rejection must name offending source: {}",
+        rejection.actual()
+    );
+}
+
+fn task_input_set(documents: &[TaskDocument]) -> TaskInputSet {
+    TaskInputSet {
+        authority_set_id: "auth".to_owned(),
+        authority_documents: documents
+            .iter()
+            .filter(|document| document.class == TaskDocumentClass::Authority)
+            .cloned()
+            .collect(),
+        context_documents: documents
+            .iter()
+            .filter(|document| document.class == TaskDocumentClass::ContextNonAuthority)
+            .cloned()
+            .collect(),
+    }
+}
+
+fn planning_doc(path: &str, class: TaskDocumentClass, body: &str) -> TaskDocument {
+    TaskDocument {
+        id: path.to_owned(),
+        path: path.to_owned(),
+        class,
+        authority_set_id: "auth".to_owned(),
+        body: body.to_owned(),
+        digest: sha256_hex(body.as_bytes()),
+    }
 }
 
 fn work_map(links: &[&str]) -> String {

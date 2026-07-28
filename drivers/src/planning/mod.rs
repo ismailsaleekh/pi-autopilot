@@ -1301,20 +1301,227 @@ pub struct TaskAnchorRegistry {
 
 impl TaskAnchorRegistry {
     pub fn from_input_set(input_set: &TaskInputSet) -> Self {
-        let anchors = input_set
+        let documents = input_set
             .authority_documents
             .iter()
             .chain(input_set.context_documents.iter())
-            .flat_map(|document| {
-                let base = format!("task://{}/{}", document.digest, document.path);
-                [base.clone(), format!("{base}#whole-file")]
-            })
-            .collect();
+            .collect::<Vec<_>>();
+        let basename_counts = task_document_basename_counts(&documents);
+        let mut anchors = BTreeSet::new();
+        for document in documents {
+            let section_anchors = task_document_section_anchors(&document.body);
+            let mut selectors = BTreeSet::from([
+                format!("{}/{}", document.digest, document.path),
+                document.path.clone(),
+            ]);
+            if let Some(basename) = task_document_basename(&document.path) {
+                if basename_counts.get(&basename) == Some(&1) {
+                    selectors.insert(basename);
+                }
+            }
+            for selector in selectors {
+                insert_task_document_anchor_forms(
+                    &mut anchors,
+                    &format!("task://{selector}"),
+                    &section_anchors,
+                );
+                insert_task_document_anchor_forms(&mut anchors, &selector, &section_anchors);
+            }
+        }
         Self { anchors }
     }
 
     pub fn has(&self, source: &Ref) -> bool {
-        self.anchors.iter().any(|anchor| anchor == &source.0)
+        self.anchors.contains(&source.0)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TaskSectionAnchor {
+    anchor: String,
+    section_number: Option<String>,
+}
+
+fn task_document_basename_counts(documents: &[&TaskDocument]) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for document in documents {
+        if let Some(basename) = task_document_basename(&document.path) {
+            *counts.entry(basename).or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
+fn task_document_basename(path: &str) -> Option<String> {
+    Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+}
+
+fn insert_task_document_anchor_forms(
+    anchors: &mut BTreeSet<String>,
+    base: &str,
+    section_anchors: &[TaskSectionAnchor],
+) {
+    anchors.insert(base.to_owned());
+    anchors.insert(format!("{base}#whole-file"));
+    for section in section_anchors {
+        anchors.insert(format!("{base}#{}", section.anchor));
+        if let Some(number) = &section.section_number {
+            anchors.insert(format!("{base} §{number}"));
+            anchors.insert(format!("{base}#{} §{number}", section.anchor));
+        }
+    }
+}
+
+fn task_document_section_anchors(body: &str) -> Vec<TaskSectionAnchor> {
+    let mut anchors = Vec::new();
+    let mut heading_counts = BTreeMap::new();
+    let mut active_explicit_anchors = BTreeSet::new();
+    for line in body.lines() {
+        if let Some(marker) = explicit_html_section_anchor(line) {
+            match marker {
+                ExplicitSectionAnchor::Start(anchor) => {
+                    anchors.push(TaskSectionAnchor {
+                        anchor: anchor.clone(),
+                        section_number: None,
+                    });
+                    active_explicit_anchors.insert(anchor);
+                }
+                ExplicitSectionAnchor::End(anchor) => {
+                    active_explicit_anchors.remove(&anchor);
+                }
+                ExplicitSectionAnchor::Point(anchor) => {
+                    anchors.push(TaskSectionAnchor {
+                        anchor,
+                        section_number: None,
+                    });
+                }
+            }
+        }
+        if let Some(title) = markdown_heading_title(line) {
+            let section_number = heading_section_number(title);
+            let slug = markdown_heading_slug(title);
+            if !slug.is_empty() {
+                let anchor = unique_heading_anchor(slug, &mut heading_counts);
+                anchors.push(TaskSectionAnchor {
+                    anchor,
+                    section_number: section_number.clone(),
+                });
+            }
+            if let Some(number) = section_number {
+                for anchor in &active_explicit_anchors {
+                    anchors.push(TaskSectionAnchor {
+                        anchor: anchor.clone(),
+                        section_number: Some(number.clone()),
+                    });
+                }
+            }
+        }
+    }
+    anchors
+}
+
+fn markdown_heading_title(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    let marker_count = trimmed.chars().take_while(|ch| *ch == '#').count();
+    if !(1..=6).contains(&marker_count) {
+        return None;
+    }
+    let after_markers = &trimmed[marker_count..];
+    if !after_markers.starts_with(char::is_whitespace) {
+        return None;
+    }
+    Some(after_markers.trim().trim_end_matches('#').trim_end())
+}
+
+fn markdown_heading_slug(title: &str) -> String {
+    let mut slug = String::new();
+    let mut pending_dash = false;
+    for ch in title.chars().flat_map(char::to_lowercase) {
+        if ch.is_alphanumeric() {
+            if pending_dash && !slug.is_empty() {
+                slug.push('-');
+            }
+            slug.push(ch);
+            pending_dash = false;
+        } else if ch.is_whitespace() || ch == '-' {
+            pending_dash = true;
+        }
+    }
+    slug
+}
+
+fn unique_heading_anchor(slug: String, heading_counts: &mut BTreeMap<String, usize>) -> String {
+    let count = heading_counts.entry(slug.clone()).or_insert(0);
+    let anchor = if *count == 0 {
+        slug.clone()
+    } else {
+        format!("{slug}-{count}")
+    };
+    *count += 1;
+    anchor
+}
+
+fn heading_section_number(title: &str) -> Option<String> {
+    let chars = title.trim_start().chars().collect::<Vec<_>>();
+    if !chars.first().is_some_and(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    let mut index = 0;
+    let mut number = String::new();
+    while index < chars.len() && chars[index].is_ascii_digit() {
+        number.push(chars[index]);
+        index += 1;
+    }
+    while index + 1 < chars.len() && chars[index] == '.' && chars[index + 1].is_ascii_digit() {
+        number.push('.');
+        index += 1;
+        while index < chars.len() && chars[index].is_ascii_digit() {
+            number.push(chars[index]);
+            index += 1;
+        }
+    }
+    if index < chars.len() && chars[index] == '.' {
+        index += 1;
+    }
+    if index == chars.len()
+        || chars[index].is_whitespace()
+        || matches!(chars[index], '-' | ':' | ')')
+    {
+        Some(number)
+    } else {
+        None
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ExplicitSectionAnchor {
+    Start(String),
+    End(String),
+    Point(String),
+}
+
+fn explicit_html_section_anchor(line: &str) -> Option<ExplicitSectionAnchor> {
+    let trimmed = line.trim();
+    let inner = trimmed.strip_prefix("<!--")?.strip_suffix("-->")?.trim();
+    let (token, marker) = inner.split_once(':').map_or((inner, None), |(before, after)| {
+        (before.trim(), Some(after.trim()))
+    });
+    if token.is_empty()
+        || !token
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        return None;
+    }
+    match marker {
+        Some("start") => Some(ExplicitSectionAnchor::Start(token.to_owned())),
+        Some("end") => Some(ExplicitSectionAnchor::End(token.to_owned())),
+        None => Some(ExplicitSectionAnchor::Point(token.to_owned())),
+        Some(_) => None,
     }
 }
 
