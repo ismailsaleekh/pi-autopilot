@@ -1314,10 +1314,10 @@ impl TaskAnchorRegistry {
                 format!("{}/{}", document.digest, document.path),
                 document.path.clone(),
             ]);
-            if let Some(basename) = task_document_basename(&document.path) {
-                if basename_counts.get(&basename) == Some(&1) {
-                    selectors.insert(basename);
-                }
+            if let Some(basename) = task_document_basename(&document.path)
+                && basename_counts.get(&basename) == Some(&1)
+            {
+                selectors.insert(basename);
             }
             for selector in selectors {
                 insert_task_document_anchor_forms(
@@ -1507,9 +1507,11 @@ enum ExplicitSectionAnchor {
 fn explicit_html_section_anchor(line: &str) -> Option<ExplicitSectionAnchor> {
     let trimmed = line.trim();
     let inner = trimmed.strip_prefix("<!--")?.strip_suffix("-->")?.trim();
-    let (token, marker) = inner.split_once(':').map_or((inner, None), |(before, after)| {
-        (before.trim(), Some(after.trim()))
-    });
+    let (token, marker) = inner
+        .split_once(':')
+        .map_or((inner, None), |(before, after)| {
+            (before.trim(), Some(after.trim()))
+        });
     if token.is_empty()
         || !token
             .chars()

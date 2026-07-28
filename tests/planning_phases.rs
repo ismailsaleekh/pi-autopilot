@@ -45,7 +45,7 @@ fn planning_data_declares_p1_to_p6_and_cap() {
     if let Err(error) = declarations.validate_p1_to_p6() {
         panic!("planning declarations failed: {error:?}");
     }
-    assert_eq!(AssignmentPlan::d72_default().total(), 25);
+    assert_eq!(AssignmentPlan::d72_default().total(), 24);
 }
 
 #[test]
@@ -206,7 +206,7 @@ fn transcript(boundary_id: &str) -> String {
 fn assignment_cap_holds() {
     assert_eq!(AssignmentPlan::d72_default().validate(25), Ok(()));
     let too_many = AssignmentPlan {
-        reserved_resolution: 4,
+        reserved_resolution: 5,
         ..AssignmentPlan::d72_default()
     };
     assert_eq!(

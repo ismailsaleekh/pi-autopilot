@@ -170,6 +170,8 @@ fn validator_role_is_mechanically_read_only_and_context_modes_are_registered() {
     );
     let policy = include_str!("../data/context-policy.kdl");
     assert!(!policy.contains("forward-validation"));
+    let registry = drivers::context::policy::ContextPolicyRegistry::package()
+        .expect("context policy registry parses");
     for mode in [
         "forward-release",
         "deep-closure",
@@ -177,8 +179,12 @@ fn validator_role_is_mechanically_read_only_and_context_modes_are_registered() {
         "conflict-review",
         "final-review",
     ] {
+        let resolved = registry
+            .policy(&validator.context_policy)
+            .expect("validator context policy is registered");
+        assert_eq!(resolved.role_id, "validator");
         assert!(
-            policy.contains(&format!("role id=\"validator\" mode=\"{mode}\"")),
+            resolved.modes.contains_key(mode),
             "missing validator context policy for {mode}"
         );
     }
