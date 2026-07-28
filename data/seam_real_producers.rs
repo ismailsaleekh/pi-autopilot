@@ -20,15 +20,7 @@ impl planning::RepositoryEvidence for RepoGrounding {
     }
 }
 
-#[derive(Clone, Debug)]
-struct AgentAssignment {
-    assignment_id: String,
-    role: String,
-    mode: String,
-    boundary_id: Option<String>,
-    ordinal: u8,
-    atom_id_prefix: Option<String>,
-}
+type AgentAssignment = planning::PlanningAgentAssignment;
 #[derive(Debug, Deserialize)]
 struct AgentCarrier {
     schema: String,
@@ -57,23 +49,7 @@ struct AgentCarrier {
 struct ApprovedPlanArtifact { units: Vec<ApprovedUnit> }
 
 fn planning_assignments(workstream: &str) -> Result<Vec<AgentAssignment>, planning::PlanningError> {
-    let mut out = Vec::new();
-    for row in planning::planning_assignment_roles()? {
-        push_assignments(&mut out, workstream, &row);
-    }
-    Ok(out)
-}
-fn push_assignments(out: &mut Vec<AgentAssignment>, workstream: &str, row: &planning::PlanningAssignmentRole) {
-    for index in 1..=row.count {
-        out.push(AgentAssignment {
-            assignment_id: format!("planning-{workstream}-{}-{index:02}", row.role),
-            role: row.role.clone(),
-            mode: row.mode.clone(),
-            boundary_id: Some(row.boundary_id.clone()),
-            ordinal: index,
-            atom_id_prefix: row.atom_namespace.as_ref().map(|namespace| format!("{namespace}{index:02}-")),
-        });
-    }
+    planning::planning_assignments_for_workstream(workstream)
 }
 fn planning_bg_action(workstream: &str, assignment: &AgentAssignment, run_revision: u64, input_set: &planning::TaskInputSet, atom_registry: Option<(String, String)>) -> Result<runner::IssuedRunnerAction, runner::RunnerError> {
     let context = input_set.context_documents.first().ok_or_else(|| runner::RunnerError::InvalidSpec("missing planning context".to_owned()))?;
@@ -151,8 +127,11 @@ fn augment_planning_issue_with_context_documents(issued: &mut runner::IssuedRunn
     Ok(())
 }
 fn next_planning_assignment(workstream: &str, state: &CoreState) -> Result<Option<AgentAssignment>, planning::PlanningError> {
-    let assignments = manifest_assignments(workstream).map_err(planning::PlanningError::ContextGap)?;
-    Ok(assignments.into_iter().find(|assignment| !state.state.refs.contains_key(&Ref(assignment.assignment_id.clone()))))
+    let manifest = read_planning_schedule_manifest(workstream).map_err(planning::PlanningError::ContextGap)?;
+    let refs = planning_refs_from_state(workstream, state);
+    planning::next_planning_wave(&manifest, &refs, manifest.planning_wave_cap)
+        .map_err(|failure| planning::PlanningError::ContextGap(format!("planning-wave:{failure:?}")))
+        .map(|wave| wave.into_iter().next())
 }
 fn validate_agent_output(binding: &runner::IssuedRunnerBinding, raw: &str) -> Result<String, Rejection> {
     let spec = read_runner_spec_for_binding(binding).map_err(|detail| {
@@ -167,11 +146,14 @@ fn validate_agent_output(binding: &runner::IssuedRunnerBinding, raw: &str) -> Re
 }
 fn write_planning_manifest(workstream: &str, input_set: &planning::TaskInputSet, inventory: &planning::Inventory, dossier: &planning::Dossier, assignments: &[AgentAssignment]) -> Result<(), AnyError> {
     let dir = workstream_dir(workstream); fs::create_dir_all(&dir)?;
+    let policy = planning::planning_policy().map_err(|error| context_status("planning-policy", error))?;
+    let schedule = planning::PlanningManifest::from_policy(workstream, &policy).map_err(|error| context_status("planning-policy", error))?;
+    if assignments != schedule.assignments.as_slice() { return Err("CONTEXT_GAP:planning-manifest:assignment schedule drift".into()); }
     let context = input_set.context_documents.first().ok_or("missing context document")?;
     let authority_docs = input_set.authority_documents.iter().map(runner_doc_from_task).map(|doc| serde_json::to_value(doc).expect("runner doc json")).collect::<Vec<_>>();
     let context_docs = input_set.context_documents.iter().map(runner_doc_from_task).map(|doc| serde_json::to_value(doc).expect("runner doc json")).collect::<Vec<_>>();
     let context_doc = runner_doc_from_task(context);
-    let body = serde_json::json!({"workstream":workstream,"authority_set_id":input_set.authority_set_id,"authority_paths":input_set.authority_documents.iter().map(|item| &item.path).collect::<Vec<_>>(),"authority_documents":authority_docs,"context_documents":context_docs,"context":{"path":context.path,"class":"context/non-authority","digest":context.digest},"context_document":context_doc,"file_digests":input_set.authority_documents.iter().chain(input_set.context_documents.iter()).map(|item| serde_json::json!({"path":item.path,"class":format!("{:?}", item.class),"digest":item.digest})).collect::<Vec<_>>(),"atoms":inventory.atoms.len(),"verified_facts":dossier.verified_facts,"assignments":assignments.iter().map(|item| serde_json::json!({"assignment_id":item.assignment_id,"role":item.role,"mode":item.mode,"boundary_id":item.boundary_id,"ordinal":item.ordinal,"atom_id_prefix":item.atom_id_prefix})).collect::<Vec<_>>()});
+    let body = serde_json::json!({"workstream":workstream,"authority_set_id":input_set.authority_set_id,"authority_paths":input_set.authority_documents.iter().map(|item| &item.path).collect::<Vec<_>>(),"authority_documents":authority_docs,"context_documents":context_docs,"context":{"path":context.path,"class":"context/non-authority","digest":context.digest},"context_document":context_doc,"file_digests":input_set.authority_documents.iter().chain(input_set.context_documents.iter()).map(|item| serde_json::json!({"path":item.path,"class":format!("{:?}", item.class),"digest":item.digest})).collect::<Vec<_>>(),"atoms":inventory.atoms.len(),"verified_facts":dossier.verified_facts,"planning_wave_cap":schedule.planning_wave_cap,"planning_max_attempts":schedule.planning_max_attempts,"planning_waves":schedule.waves,"assignments":assignments.iter().map(|item| serde_json::json!({"assignment_id":item.assignment_id,"role":item.role,"mode":item.mode,"boundary_id":item.boundary_id,"ordinal":item.ordinal,"atom_id_prefix":item.atom_id_prefix})).collect::<Vec<_>>()});
     let bytes = serde_json::to_vec_pretty(&body)?;
     let path = dir.join("planning-manifest.json");
     match fs::read(&path) {
@@ -199,24 +181,49 @@ fn read_planning_input_set(workstream: &str) -> Result<planning::TaskInputSet, S
 }
 
 fn manifest_assignments(workstream: &str) -> Result<Vec<AgentAssignment>, String> {
+    Ok(read_planning_schedule_manifest(workstream)?.assignments)
+}
+
+fn read_planning_schedule_manifest(workstream: &str) -> Result<planning::PlanningManifest, String> {
     let value = read_planning_manifest_value(workstream)?;
     let items = value["assignments"].as_array().ok_or_else(|| "manifest missing assignments".to_owned())?;
-    let mut out = Vec::new();
+    let mut assignments = Vec::new();
     for (index, item) in items.iter().enumerate() {
-        if let Some(id) = item.as_str() {
-            out.push(AgentAssignment { assignment_id: id.to_owned(), role: "unknown".to_owned(), mode: "unknown".to_owned(), boundary_id: None, ordinal: u8::try_from(index + 1).unwrap_or(u8::MAX), atom_id_prefix: None });
-            continue;
-        }
-        out.push(AgentAssignment {
+        if item.as_str().is_some() { return Err(format!("manifest assignment {index} uses legacy string form without wave data")); }
+        assignments.push(AgentAssignment {
             assignment_id: item["assignment_id"].as_str().ok_or_else(|| format!("manifest assignment {index} missing assignment_id"))?.to_owned(),
             role: item["role"].as_str().ok_or_else(|| format!("manifest assignment {index} missing role"))?.to_owned(),
             mode: item["mode"].as_str().ok_or_else(|| format!("manifest assignment {index} missing mode"))?.to_owned(),
             boundary_id: item.get("boundary_id").and_then(|value| value.as_str()).map(str::to_owned),
-            ordinal: item.get("ordinal").and_then(|value| value.as_u64()).and_then(|value| u8::try_from(value).ok()).unwrap_or(u8::try_from(index + 1).unwrap_or(u8::MAX)),
+            ordinal: item.get("ordinal").and_then(|value| value.as_u64()).and_then(|value| u8::try_from(value).ok()).ok_or_else(|| format!("manifest assignment {index} missing ordinal"))?,
             atom_id_prefix: item.get("atom_id_prefix").and_then(|value| value.as_str()).map(str::to_owned),
         });
     }
-    Ok(out)
+    let waves_value = value.get("planning_waves").ok_or_else(|| "manifest missing planning_waves".to_owned())?.clone();
+    let waves = serde_json::from_value::<Vec<planning::PlanningWaveDeclaration>>(waves_value).map_err(|error| format!("manifest planning_waves: {error}"))?;
+    let planning_wave_cap = value.get("planning_wave_cap").and_then(|item| item.as_u64()).and_then(|item| usize::try_from(item).ok()).ok_or_else(|| "manifest missing planning_wave_cap".to_owned())?;
+    let planning_max_attempts = value.get("planning_max_attempts").and_then(|item| item.as_u64()).and_then(|item| u8::try_from(item).ok()).ok_or_else(|| "manifest missing planning_max_attempts".to_owned())?;
+    Ok(planning::PlanningManifest { workstream: workstream.to_owned(), planning_wave_cap, planning_max_attempts, assignments, waves })
+}
+
+fn planning_refs_from_state(workstream: &str, state: &CoreState) -> planning::PlanningRefs {
+    let mut refs = planning::PlanningRefs::default();
+    for binding in state.state.refs.keys().filter_map(|reference| runner::decode_binding_ref(&reference.0)) {
+        if binding.workstream.0 != workstream || !binding.result_contract.0.starts_with("planning.") { continue; }
+        let issued = planning::PlanningIssuedRef { assignment_id: binding.assignment_id.0.clone(), action_id: binding.action_id.0.clone(), run_revision: binding.run_revision };
+        refs.issued.push(issued.clone());
+        if planning_result_consumed(state, &binding) {
+            refs.accepted.insert(planning::PlanningAcceptedRef { assignment_id: issued.assignment_id.clone(), action_id: issued.action_id.clone(), run_revision: issued.run_revision });
+        } else if terminal_consumed(state, &binding) {
+            refs.terminal_failures.insert(planning::PlanningTerminalFailureRef { assignment_id: issued.assignment_id.clone(), action_id: issued.action_id.clone(), run_revision: issued.run_revision, status: "terminal-without-planning-result".to_owned() });
+        }
+    }
+    for reference in state.state.refs.keys() {
+        if reference.0 == "planning-resolution-required" || reference.0.starts_with("planning-resolution-required:") {
+            refs.activation_refs.insert("planning-resolution-required".to_owned());
+        }
+    }
+    refs
 }
 
 fn read_runner_spec_for_binding(binding: &runner::IssuedRunnerBinding) -> Result<kernel::generated::AgentRunSpec, String> {
@@ -294,13 +301,21 @@ fn read_work_map(workstream: &str) -> Result<String, String> { fs::read_to_strin
 fn write_approved_plan(workstream: &str, units: &[ApprovedUnit]) -> Result<(), AnyError> { let path = plan_path(workstream); if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; } fs::write(path, serde_json::to_vec_pretty(&ApprovedPlanArtifact { units: units.to_vec() })?)?; Ok(()) }
 fn read_approved_plan(workstream: &str) -> Result<Vec<ApprovedUnit>, String> { let text = fs::read_to_string(plan_path(workstream)).map_err(|error| error.to_string())?; let artifact: ApprovedPlanArtifact = serde_json::from_str(&text).map_err(|error| error.to_string())?; if artifact.units.is_empty() { return Err("empty approved plan".to_owned()); } Ok(artifact.units) }
 fn apply_planning_side_effects(carrier: &AgentCarrier) -> Result<(), String> {
-    if carrier.boundary_id == "planning.work-map.v1" { write_work_map(&carrier.workstream, &carrier.raw_output).map_err(|error| format!("CONTEXT_GAP:work-map:{error}"))?; }
+    if carrier.boundary_id == "planning.work-map.v1" && is_canonical_output_assignment(&carrier.workstream, &carrier.assignment_id, &carrier.boundary_id)? { write_work_map(&carrier.workstream, &carrier.raw_output).map_err(|error| format!("CONTEXT_GAP:work-map:{error}"))?; }
     if carrier.boundary_id == "planning.plan-review.v1" {
         let work_map = read_work_map(&carrier.workstream).map_err(|error| format!("CONTEXT_GAP:approved-plan:{error}"))?;
         let units = parse_approved_units(&work_map).map_err(|error| format!("CONTEXT_GAP:approved-plan:{error}"))?;
         write_approved_plan(&carrier.workstream, &units).map_err(|error| format!("CONTEXT_GAP:approved-plan:{error}"))?;
     }
     Ok(())
+}
+
+fn is_canonical_output_assignment(workstream: &str, assignment_id: &str, boundary_id: &str) -> Result<bool, String> {
+    let manifest = read_planning_schedule_manifest(workstream).map_err(|error| format!("CONTEXT_GAP:planning-manifest:{error}"))?;
+    let assignment = manifest.assignments.iter().find(|assignment| assignment.assignment_id == assignment_id).ok_or_else(|| format!("CONTEXT_GAP:planning-manifest:unknown assignment {assignment_id}"))?;
+    let canonical = manifest.waves.iter().any(|wave| wave.canonical_output && wave.role == assignment.role && wave.ordinals.as_ref().is_none_or(|ordinals| ordinals.contains(&assignment.ordinal)));
+    if canonical && assignment.boundary_id.as_deref() != Some(boundary_id) { return Err(format!("CONTEXT_GAP:planning-manifest:canonical boundary mismatch for {assignment_id}")); }
+    Ok(canonical)
 }
 fn parse_approved_units(raw: &str) -> Result<Vec<ApprovedUnit>, String> {
     let work_map: kernel::generated::WorkMap = serde_json::from_str(raw).map_err(|error| error.to_string())?;

@@ -7,10 +7,11 @@ use std::process::Command;
 use crate::roles::kdl::{attr as kdl_attr, boundary_runtime as runtime_by_id, table_values};
 use kernel::boundary::{BoundaryRuntime, Rejection};
 use kernel::generated::{
-    Id, PlanReview, PlanningAtomRegistry, PlanningAtomRegistryAtom, Questions, Ref, ScoutDossier,
-    SchemaId, TaskAtoms, WorkMap,
+    Id, PlanReview, PlanningAtomRegistry, PlanningAtomRegistryAtom, Questions, Ref, SchemaId,
+    ScoutDossier, TaskAtoms, WorkMap,
 };
 use kernel_macros::acceptance_boundary;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest as ShaDigest, Sha256};
 
 pub const MODEL_BOUNDARIES: [&str; 5] = [
@@ -89,7 +90,7 @@ impl AssignmentPlan {
     pub fn d72_default() -> Self {
         Self {
             task_extractors: 7,
-            scout_and_compiler_first_pass: 11,
+            scout_and_compiler_first_pass: 10,
             context_curator: 1,
             synthesizers: 2,
             reviewer: 1,
@@ -116,7 +117,7 @@ impl AssignmentPlan {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PlanningAssignmentRole {
     pub role: String,
     pub count: u8,
@@ -125,11 +126,164 @@ pub struct PlanningAssignmentRole {
     pub atom_namespace: Option<String>,
 }
 
-pub fn planning_assignment_roles() -> Result<Vec<PlanningAssignmentRole>, PlanningError> {
-    parse_planning_assignment_roles(PLANNING_KDL)
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PlanningWaveDeclaration {
+    pub id: String,
+    pub role: String,
+    pub dependencies: Vec<String>,
+    pub ordinals: Option<Vec<u8>>,
+    pub activation_ref: Option<String>,
+    pub canonical_output: bool,
 }
 
-fn parse_planning_assignment_roles(text: &str) -> Result<Vec<PlanningAssignmentRole>, PlanningError> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlanningPolicy {
+    pub assignment_cap: u8,
+    pub planning_wave_cap: usize,
+    pub planning_max_attempts: u8,
+    pub roles: Vec<PlanningAssignmentRole>,
+    pub waves: Vec<PlanningWaveDeclaration>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PlanningAgentAssignment {
+    pub assignment_id: String,
+    pub role: String,
+    pub mode: String,
+    pub boundary_id: Option<String>,
+    pub ordinal: u8,
+    pub atom_id_prefix: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlanningManifest {
+    pub workstream: String,
+    pub planning_wave_cap: usize,
+    pub planning_max_attempts: u8,
+    pub assignments: Vec<PlanningAgentAssignment>,
+    pub waves: Vec<PlanningWaveDeclaration>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct PlanningIssuedRef {
+    pub assignment_id: String,
+    pub action_id: String,
+    pub run_revision: u64,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct PlanningAcceptedRef {
+    pub assignment_id: String,
+    pub action_id: String,
+    pub run_revision: u64,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct PlanningTerminalFailureRef {
+    pub assignment_id: String,
+    pub action_id: String,
+    pub run_revision: u64,
+    pub status: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PlanningRefs {
+    pub issued: Vec<PlanningIssuedRef>,
+    pub accepted: BTreeSet<PlanningAcceptedRef>,
+    pub terminal_failures: BTreeSet<PlanningTerminalFailureRef>,
+    pub activation_refs: BTreeSet<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PlanningBarrierStatus {
+    Complete,
+    Running {
+        active: Vec<String>,
+        unissued: Vec<String>,
+    },
+    Blocked {
+        failures: Vec<PlanningTerminalFailureRef>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlanningWaveBlocked {
+    pub wave_id: String,
+    pub failed_assignments: Vec<String>,
+    pub attempts: BTreeMap<String, usize>,
+    pub completed_assignments: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PlanningWaveFailure {
+    Blocked(PlanningWaveBlocked),
+}
+
+impl PlanningPolicy {
+    pub fn parse(text: &str) -> Result<Self, PlanningError> {
+        let declarations = PlanningDeclarations::parse(text)?;
+        let roles = parse_planning_assignment_roles(text)?;
+        let planning_wave_cap =
+            parse_top_level_u8(text, "planning_wave_cap ", "default=")? as usize;
+        if planning_wave_cap == 0 {
+            return Err(PlanningError::BadDeclaration(
+                "zero planning_wave_cap".to_owned(),
+            ));
+        }
+        let planning_max_attempts = parse_top_level_u8(text, "planning_launch_attempts ", "max=")?;
+        if planning_max_attempts == 0 {
+            return Err(PlanningError::BadDeclaration(
+                "zero planning_launch_attempts".to_owned(),
+            ));
+        }
+        let waves = parse_planning_waves(text)?;
+        validate_planning_waves(&roles, &waves)?;
+        Ok(Self {
+            assignment_cap: declarations.assignment_cap,
+            planning_wave_cap,
+            planning_max_attempts,
+            roles,
+            waves,
+        })
+    }
+
+    pub fn assignments_for_workstream(
+        &self,
+        workstream: &str,
+    ) -> Result<Vec<PlanningAgentAssignment>, PlanningError> {
+        assignments_for_policy(workstream, self)
+    }
+}
+
+impl PlanningManifest {
+    pub fn from_policy(workstream: &str, policy: &PlanningPolicy) -> Result<Self, PlanningError> {
+        Ok(Self {
+            workstream: workstream.to_owned(),
+            planning_wave_cap: policy.planning_wave_cap,
+            planning_max_attempts: policy.planning_max_attempts,
+            assignments: policy.assignments_for_workstream(workstream)?,
+            waves: policy.waves.clone(),
+        })
+    }
+}
+
+pub fn planning_policy() -> Result<PlanningPolicy, PlanningError> {
+    PlanningPolicy::parse(PLANNING_KDL)
+}
+
+pub fn planning_assignment_roles() -> Result<Vec<PlanningAssignmentRole>, PlanningError> {
+    Ok(planning_policy()?.roles)
+}
+
+pub fn planning_assignments_for_workstream(
+    workstream: &str,
+) -> Result<Vec<PlanningAgentAssignment>, PlanningError> {
+    planning_policy()?.assignments_for_workstream(workstream)
+}
+
+fn parse_planning_assignment_roles(
+    text: &str,
+) -> Result<Vec<PlanningAssignmentRole>, PlanningError> {
     let mut roles = Vec::new();
     for line in text.lines() {
         let trimmed = line.trim();
@@ -146,7 +300,9 @@ fn parse_planning_assignment_roles(text: &str) -> Result<Vec<PlanningAssignmentR
             .parse::<u8>()
             .map_err(|error| PlanningError::BadDeclaration(error.to_string()))?;
         if count == 0 {
-            return Err(PlanningError::BadDeclaration(format!("zero count for {role}")));
+            return Err(PlanningError::BadDeclaration(format!(
+                "zero count for {role}"
+            )));
         }
         roles.push(PlanningAssignmentRole {
             role: role.to_owned(),
@@ -162,6 +318,357 @@ fn parse_planning_assignment_roles(text: &str) -> Result<Vec<PlanningAssignmentR
         ));
     }
     Ok(roles)
+}
+
+fn parse_planning_waves(text: &str) -> Result<Vec<PlanningWaveDeclaration>, PlanningError> {
+    let mut waves = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("planning_wave ") {
+            continue;
+        }
+        let after = trimmed
+            .strip_prefix("planning_wave \"")
+            .ok_or_else(|| PlanningError::BadDeclaration(trimmed.to_owned()))?;
+        let Some((id, attrs)) = after.split_once('"') else {
+            return Err(PlanningError::BadDeclaration(trimmed.to_owned()));
+        };
+        let dependencies = kdl_attr(attrs, "depends=")
+            .map(|value| split_csv(&value))
+            .unwrap_or_default();
+        let ordinals = kdl_attr(attrs, "ordinals=")
+            .map(|value| parse_ordinals(&value))
+            .transpose()?;
+        let canonical_output = match kdl_attr(attrs, "canonical_output=").as_deref() {
+            Some("#true") | Some("true") => true,
+            Some("#false") | Some("false") | None => false,
+            Some(value) => {
+                return Err(PlanningError::BadDeclaration(format!(
+                    "bad canonical_output for {id}: {value}"
+                )));
+            }
+        };
+        waves.push(PlanningWaveDeclaration {
+            id: id.to_owned(),
+            role: parse_attr(attrs, "role=")?,
+            dependencies,
+            ordinals,
+            activation_ref: kdl_attr(attrs, "activation_ref="),
+            canonical_output,
+        });
+    }
+    if waves.is_empty() {
+        return Err(PlanningError::BadDeclaration(
+            "missing planning_wave rows".to_owned(),
+        ));
+    }
+    Ok(waves)
+}
+
+fn validate_planning_waves(
+    roles: &[PlanningAssignmentRole],
+    waves: &[PlanningWaveDeclaration],
+) -> Result<(), PlanningError> {
+    let role_names = roles
+        .iter()
+        .map(|role| role.role.clone())
+        .collect::<BTreeSet<_>>();
+    let mut wave_names = BTreeSet::new();
+    for wave in waves {
+        if !role_names.contains(&wave.role) {
+            return Err(PlanningError::BadDeclaration(format!(
+                "wave {} references unknown role {}",
+                wave.id, wave.role
+            )));
+        }
+        if !wave_names.insert(wave.id.clone()) {
+            return Err(PlanningError::BadDeclaration(format!(
+                "duplicate planning_wave {}",
+                wave.id
+            )));
+        }
+    }
+    let all_wave_names = waves
+        .iter()
+        .map(|wave| wave.id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut seen = BTreeSet::new();
+    for wave in waves {
+        for dependency in &wave.dependencies {
+            if !all_wave_names.contains(dependency) {
+                return Err(PlanningError::BadDeclaration(format!(
+                    "wave {} references unknown dependency {dependency}",
+                    wave.id
+                )));
+            }
+            if !seen.contains(dependency) {
+                return Err(PlanningError::BadDeclaration(format!(
+                    "wave {} dependency {dependency} must appear earlier",
+                    wave.id
+                )));
+            }
+        }
+        seen.insert(wave.id.clone());
+    }
+    Ok(())
+}
+
+fn assignments_for_policy(
+    workstream: &str,
+    policy: &PlanningPolicy,
+) -> Result<Vec<PlanningAgentAssignment>, PlanningError> {
+    let mut by_role = BTreeMap::<String, Vec<PlanningAgentAssignment>>::new();
+    for row in &policy.roles {
+        let assignments = (1..=row.count)
+            .map(|index| PlanningAgentAssignment {
+                assignment_id: format!("planning-{workstream}-{}-{index:02}", row.role),
+                role: row.role.clone(),
+                mode: row.mode.clone(),
+                boundary_id: Some(row.boundary_id.clone()),
+                ordinal: index,
+                atom_id_prefix: row
+                    .atom_namespace
+                    .as_ref()
+                    .map(|namespace| format!("{namespace}{index:02}-")),
+            })
+            .collect::<Vec<_>>();
+        by_role.insert(row.role.clone(), assignments);
+    }
+    let mut out = Vec::new();
+    let mut emitted = BTreeSet::new();
+    for wave in &policy.waves {
+        let role_assignments = by_role
+            .get(&wave.role)
+            .ok_or_else(|| PlanningError::BadDeclaration(format!("missing role {}", wave.role)))?;
+        for assignment in role_assignments
+            .iter()
+            .filter(|assignment| wave_includes_ordinal(wave, assignment.ordinal))
+        {
+            if !emitted.insert(assignment.assignment_id.clone()) {
+                return Err(PlanningError::BadDeclaration(format!(
+                    "assignment {} appears in multiple waves",
+                    assignment.assignment_id
+                )));
+            }
+            out.push(assignment.clone());
+        }
+    }
+    let declared_total = policy
+        .roles
+        .iter()
+        .map(|role| role.count as usize)
+        .sum::<usize>();
+    if out.len() != declared_total {
+        return Err(PlanningError::BadDeclaration(format!(
+            "planning waves cover {} assignments, roles declare {declared_total}",
+            out.len()
+        )));
+    }
+    if out.len() > policy.assignment_cap as usize {
+        return Err(PlanningError::AssignmentCap {
+            total: u8::try_from(out.len()).unwrap_or(u8::MAX),
+            cap: policy.assignment_cap,
+        });
+    }
+    Ok(out)
+}
+
+pub fn barrier_status(
+    manifest: &PlanningManifest,
+    wave: &PlanningWaveDeclaration,
+    refs: &PlanningRefs,
+) -> PlanningBarrierStatus {
+    if wave_is_inactive(wave, refs) {
+        return PlanningBarrierStatus::Complete;
+    }
+    let assignments = manifest
+        .assignments
+        .iter()
+        .filter(|assignment| {
+            assignment.role == wave.role && wave_includes_ordinal(wave, assignment.ordinal)
+        })
+        .collect::<Vec<_>>();
+    let completed = assignments
+        .iter()
+        .filter(|assignment| assignment_is_accepted(&assignment.assignment_id, refs))
+        .count();
+    if completed == assignments.len() {
+        return PlanningBarrierStatus::Complete;
+    }
+    let failures = assignments
+        .iter()
+        .flat_map(|assignment| assignment_failures(&assignment.assignment_id, refs))
+        .collect::<Vec<_>>();
+    if !failures.is_empty() {
+        return PlanningBarrierStatus::Blocked { failures };
+    }
+    let active = assignments
+        .iter()
+        .filter(|assignment| assignment_is_active(&assignment.assignment_id, refs))
+        .map(|assignment| assignment.assignment_id.clone())
+        .collect::<Vec<_>>();
+    let unissued = assignments
+        .iter()
+        .filter(|assignment| {
+            !assignment_is_accepted(&assignment.assignment_id, refs)
+                && !assignment_is_issued(&assignment.assignment_id, refs)
+        })
+        .map(|assignment| assignment.assignment_id.clone())
+        .collect::<Vec<_>>();
+    PlanningBarrierStatus::Running { active, unissued }
+}
+
+pub fn next_planning_wave(
+    manifest: &PlanningManifest,
+    refs: &PlanningRefs,
+    cap: usize,
+) -> Result<Vec<PlanningAgentAssignment>, PlanningWaveFailure> {
+    let effective_cap = cap.min(manifest.planning_wave_cap);
+    for wave in &manifest.waves {
+        let status = barrier_status(manifest, wave, refs);
+        match status {
+            PlanningBarrierStatus::Complete => continue,
+            PlanningBarrierStatus::Blocked { failures } => {
+                return Err(PlanningWaveFailure::Blocked(blocked_wave(
+                    manifest, wave, refs, failures,
+                )));
+            }
+            PlanningBarrierStatus::Running { active, unissued } => {
+                let open_slots = effective_cap.saturating_sub(active.len());
+                let selected_ids = unissued
+                    .into_iter()
+                    .take(open_slots)
+                    .collect::<BTreeSet<_>>();
+                let selected = manifest
+                    .assignments
+                    .iter()
+                    .filter(|assignment| selected_ids.contains(&assignment.assignment_id))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                return Ok(selected);
+            }
+        }
+    }
+    Ok(Vec::new())
+}
+
+fn blocked_wave(
+    manifest: &PlanningManifest,
+    wave: &PlanningWaveDeclaration,
+    refs: &PlanningRefs,
+    failures: Vec<PlanningTerminalFailureRef>,
+) -> PlanningWaveBlocked {
+    let failed_assignments = failures
+        .iter()
+        .map(|failure| failure.assignment_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let attempts = failed_assignments
+        .iter()
+        .map(|assignment_id| {
+            (
+                assignment_id.clone(),
+                refs.issued
+                    .iter()
+                    .filter(|issued| issued.assignment_id == *assignment_id)
+                    .count(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let completed_assignments = manifest
+        .assignments
+        .iter()
+        .filter(|assignment| {
+            assignment.role == wave.role && wave_includes_ordinal(wave, assignment.ordinal)
+        })
+        .filter(|assignment| assignment_is_accepted(&assignment.assignment_id, refs))
+        .map(|assignment| assignment.assignment_id.clone())
+        .collect::<Vec<_>>();
+    PlanningWaveBlocked {
+        wave_id: wave.id.clone(),
+        failed_assignments,
+        attempts,
+        completed_assignments,
+    }
+}
+
+fn assignment_is_issued(assignment_id: &str, refs: &PlanningRefs) -> bool {
+    refs.issued
+        .iter()
+        .any(|issued| issued.assignment_id == assignment_id)
+}
+
+fn assignment_is_accepted(assignment_id: &str, refs: &PlanningRefs) -> bool {
+    refs.accepted.iter().any(|accepted| {
+        accepted.assignment_id == assignment_id
+            && refs.issued.iter().any(|issued| {
+                issued.assignment_id == accepted.assignment_id
+                    && issued.action_id == accepted.action_id
+                    && issued.run_revision == accepted.run_revision
+            })
+    })
+}
+
+fn assignment_is_active(assignment_id: &str, refs: &PlanningRefs) -> bool {
+    refs.issued.iter().any(|issued| {
+        issued.assignment_id == assignment_id
+            && !accepted_exact(issued, refs)
+            && !terminal_failure_exact(issued, refs)
+    })
+}
+
+fn assignment_failures(
+    assignment_id: &str,
+    refs: &PlanningRefs,
+) -> Vec<PlanningTerminalFailureRef> {
+    refs.terminal_failures
+        .iter()
+        .filter(|failure| failure.assignment_id == assignment_id)
+        .filter(|failure| {
+            refs.issued.iter().any(|issued| {
+                issued.assignment_id == failure.assignment_id
+                    && issued.action_id == failure.action_id
+                    && issued.run_revision == failure.run_revision
+            })
+        })
+        .filter(|failure| {
+            !refs.accepted.iter().any(|accepted| {
+                accepted.assignment_id == failure.assignment_id
+                    && accepted.action_id == failure.action_id
+                    && accepted.run_revision == failure.run_revision
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+fn accepted_exact(issued: &PlanningIssuedRef, refs: &PlanningRefs) -> bool {
+    refs.accepted.contains(&PlanningAcceptedRef {
+        assignment_id: issued.assignment_id.clone(),
+        action_id: issued.action_id.clone(),
+        run_revision: issued.run_revision,
+    })
+}
+
+fn terminal_failure_exact(issued: &PlanningIssuedRef, refs: &PlanningRefs) -> bool {
+    refs.terminal_failures.iter().any(|failure| {
+        failure.assignment_id == issued.assignment_id
+            && failure.action_id == issued.action_id
+            && failure.run_revision == issued.run_revision
+    })
+}
+
+fn wave_is_inactive(wave: &PlanningWaveDeclaration, refs: &PlanningRefs) -> bool {
+    wave.activation_ref
+        .as_ref()
+        .is_some_and(|activation_ref| !refs.activation_refs.contains(activation_ref))
+}
+
+fn wave_includes_ordinal(wave: &PlanningWaveDeclaration, ordinal: u8) -> bool {
+    wave.ordinals
+        .as_ref()
+        .is_none_or(|ordinals| ordinals.contains(&ordinal))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -901,7 +1408,11 @@ fn validate_work_map_links(
         }
     }
     if !unknown.is_empty() {
-        let allowed = atom_ids.iter().map(|id| id.0.as_str()).collect::<Vec<_>>().join(",");
+        let allowed = atom_ids
+            .iter()
+            .map(|id| id.0.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
         return reject_value(
             runtime,
             "planning.work-map.v1",
@@ -931,7 +1442,10 @@ pub fn atom_registry_bytes(
         .map_err(|error| PlanningError::ContextGap(format!("atom registry json:{error}")))
 }
 
-pub fn load_atom_registry_ids(path: &Path, expected_digest: &str) -> Result<BTreeSet<Id>, PlanningError> {
+pub fn load_atom_registry_ids(
+    path: &Path,
+    expected_digest: &str,
+) -> Result<BTreeSet<Id>, PlanningError> {
     reject_link_components_for_absolute(path)
         .map_err(|error| PlanningError::ContextGap(format!("atom-registry-path:{error}")))?;
     let metadata = fs::symlink_metadata(path)
@@ -973,7 +1487,9 @@ pub fn sorted_registry_atoms(
     let mut global = BTreeMap::new();
     for (assignment_order, carrier_order, producer_assignment_id, atoms) in records {
         for (atom_order, atom) in atoms.atoms.into_iter().enumerate() {
-            if let Some(previous) = global.insert(atom.id.0.clone(), producer_assignment_id.0.clone()) {
+            if let Some(previous) =
+                global.insert(atom.id.0.clone(), producer_assignment_id.0.clone())
+            {
                 return Err(PlanningError::ContextGap(format!(
                     "atom-registry-duplicate:{}:{}:{}",
                     atom.id.0, previous, producer_assignment_id.0
@@ -1279,6 +1795,41 @@ fn parse_cap(attrs: &str) -> Result<u8, PlanningError> {
         Ok(cap) => Ok(cap),
         Err(error) => Err(PlanningError::BadDeclaration(error.to_string())),
     }
+}
+fn parse_top_level_u8(text: &str, prefix: &str, attr_name: &str) -> Result<u8, PlanningError> {
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(attrs) = trimmed.strip_prefix(prefix) {
+            return parse_attr(attrs, attr_name)?
+                .parse::<u8>()
+                .map_err(|error| PlanningError::BadDeclaration(error.to_string()));
+        }
+    }
+    Err(PlanningError::BadDeclaration(format!(
+        "missing {}",
+        prefix.trim()
+    )))
+}
+fn parse_ordinals(raw: &str) -> Result<Vec<u8>, PlanningError> {
+    let ordinals = split_csv(raw)
+        .into_iter()
+        .map(|value| {
+            value
+                .parse::<u8>()
+                .map_err(|error| PlanningError::BadDeclaration(error.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if ordinals.is_empty() {
+        return Err(PlanningError::BadDeclaration("empty ordinals".to_owned()));
+    }
+    Ok(ordinals)
+}
+fn split_csv(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 fn parse_attr(attrs: &str, name: &str) -> Result<String, PlanningError> {
     kdl_attr(attrs, name).ok_or_else(|| PlanningError::BadDeclaration(name.to_owned()))
