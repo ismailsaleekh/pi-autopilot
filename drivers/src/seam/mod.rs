@@ -1100,7 +1100,6 @@ fn controlled_spawn(
         action_ref(&action)?,
     ];
     refs.extend(record_context_prompt_for_action(state, &action));
-    refs.extend(observe_checkpoint_for_action(state, &action));
     if let Some(watchdog) = arm_watchdog_if_needed(state, action.run_revision)? {
         refs.push(Ref(format!("watchdog:armed:{}", watchdog.action_id.0)));
         refs.push(action_ref(&watchdog)?);
@@ -2068,10 +2067,6 @@ fn record_context_prompt_for_action(state: &CoreState, action: &BackgroundAction
             Ref(format!("module-unreachable:prompt-render:{error:?}")),
         ],
     }
-}
-
-fn observe_checkpoint_for_action(_state: &CoreState, _action: &BackgroundAction) -> Vec<Ref> {
-    Vec::new()
 }
 
 fn record_delivery_transcript(
