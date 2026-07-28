@@ -929,7 +929,7 @@ fn args_valid(spec: &str, args: &[String]) -> bool {
         "none" => args.is_empty(),
         "workstream" => args.len() == 1,
         "close-request-v1" => parse_close_request_args(args).is_ok(),
-        "workstream task-paths..." => args.len() == 5,
+        "workstream task-paths..." => args.len() >= 2,
         "request..." => !args.is_empty(),
         "show|parallel-cap" => {
             (args.len() == 1 && args[0] == "show")

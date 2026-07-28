@@ -716,7 +716,7 @@ fn validate_planning_request(request: &PlanningRunnerRequest) -> Result<(), Runn
             request.boundary_id.0
         )));
     }
-    if request.authority_documents.len() != 3
+    if request.authority_documents.is_empty()
         || request.context_document.class != "context/non-authority"
     {
         return Err(RunnerError::InvalidSpec(
