@@ -466,6 +466,57 @@ pub enum LaneState {
     RepairQueued,
 }
 
+/// Closed task atom kinds used by the task-extractor role.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlanningAtomKind {
+    #[serde(rename = "acceptance")]
+    Acceptance,
+    #[serde(rename = "constraint")]
+    Constraint,
+    #[serde(rename = "decision")]
+    Decision,
+    #[serde(rename = "premise")]
+    Premise,
+    #[serde(rename = "question")]
+    Question,
+    #[serde(rename = "reference")]
+    Reference,
+    #[serde(rename = "work")]
+    Work,
+}
+
+/// D72 closed material-question classes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlanningQuestionClass {
+    #[serde(rename = "dod-hole")]
+    DodHole,
+    #[serde(rename = "invalidated-decision")]
+    InvalidatedDecision,
+    #[serde(rename = "material-underdetermination")]
+    MaterialUnderdetermination,
+    #[serde(rename = "missing-material-decision")]
+    MissingMaterialDecision,
+    #[serde(rename = "unsafe-irreversible")]
+    UnsafeIrreversible,
+}
+
+/// Closed model-facing plan review verdicts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlanningReviewVerdict {
+    #[serde(rename = "advisory")]
+    Advisory,
+    #[serde(rename = "blocked")]
+    Blocked,
+    #[serde(rename = "blocker")]
+    Blocker,
+    #[serde(rename = "fail")]
+    Fail,
+    #[serde(rename = "needs-fix")]
+    NeedsFix,
+    #[serde(rename = "pass")]
+    Pass,
+}
+
 /// D77 §3.1 closed Producer enum plus Host from D78 §7.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Producer {
@@ -723,6 +774,7 @@ pub struct AgentRunSpec {
     pub result_contract_digest: Digest,
     #[serde(rename = "carrier_path")]
     pub carrier_path: Path,
+    /// Stable pi --session-id derived from typed assignment identity; reused for value-repair turns and resume.
     #[serde(rename = "session_id")]
     pub session_id: Id,
     #[serde(rename = "settings_digest")]
@@ -794,7 +846,6 @@ pub struct AgentRunSpec {
 
 /// Allocator model proposal; package validates totality, dependencies, cap, and no invented ownership (D76 §7).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AllocationLaneProposal {
     #[serde(rename = "lane_id")]
     pub lane_id: Id,
@@ -1713,7 +1764,6 @@ pub struct ControlFrameCounts {
 
 /// Implementer/Fixer terminal delivery carrier pending package acceptance (D76 §8.2).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct DeliveryResult {
     #[serde(rename = "assignment_id")]
     pub assignment_id: Id,
@@ -1947,7 +1997,6 @@ pub struct FinalVerificationPass {
 
 /// Validator/Bughunter/Fixer finding with semantic scheduling effect (D76 §5.3 and D74 §11.2).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Finding {
     #[serde(rename = "finding_id")]
     pub finding_id: Id,
@@ -1971,7 +2020,6 @@ pub struct Finding {
 
 /// Embedded v2 validation finding with deterministic validation-id ordinal identifier.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct FindingV2 {
     #[serde(rename = "finding_id")]
     pub finding_id: Id,
@@ -2081,6 +2129,45 @@ pub struct Phase2PiConsumerBinding {
     pub binding_sha256: Digest,
 }
 
+/// Model-facing plan review verdicts. Verdict is closed; finding text is optional and advisory unless the verdict requires explanation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanReview {
+    /// Criterion verdicts.
+    #[serde(rename = "verdicts")]
+    pub verdicts: Vec<PlanReviewVerdict>,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanReviewVerdict {
+    #[serde(rename = "criterion_id")]
+    pub criterion_id: Id,
+    #[serde(rename = "verdict")]
+    pub verdict: PlanningReviewVerdict,
+    #[serde(rename = "finding")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finding: Option<String>,
+}
+
+/// Model-facing contradiction/question nominations. Empty questions are valid when no material unresolved issue remains.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Questions {
+    /// Material operator questions; [] is an accepted empty set.
+    #[serde(rename = "questions")]
+    pub questions: Vec<PlanningQuestion>,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanningQuestion {
+    #[serde(rename = "class")]
+    pub class: PlanningQuestionClass,
+    #[serde(rename = "evidence")]
+    pub evidence: String,
+    #[serde(rename = "consequence")]
+    pub consequence: String,
+}
+
 /// Strict package-authored YAML frontmatter for role definitions (D76 §2.2).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2143,6 +2230,25 @@ pub struct RunIdentity {
     pub workstream: Id,
 }
 
+/// Model-facing repository scout dossier. Shape is small; path values are checked against the pinned repository commit by the planning driver.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScoutDossier {
+    /// Repository findings grounded in current evidence.
+    #[serde(rename = "findings")]
+    pub findings: Vec<ScoutFinding>,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScoutFinding {
+    #[serde(rename = "path")]
+    pub path: Path,
+    #[serde(rename = "observation")]
+    pub observation: String,
+    #[serde(rename = "evidence_ref")]
+    pub evidence_ref: Ref,
+}
+
 /// D78 §3.1 newline-delimited JSON frame envelope over stdio.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2165,6 +2271,28 @@ pub struct StateCache {
     pub sequence: u64,
     #[serde(rename = "state_hash")]
     pub state_hash: Digest,
+}
+
+/// Model-facing task atom submission. Shape is deliberately small: structure is enforced by the submit tool; source values are checked against task authority anchors by the planning driver.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TaskAtoms {
+    /// Task atoms; may be empty only when no task authority text exists.
+    #[serde(rename = "atoms")]
+    pub atoms: Vec<TaskAtom>,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TaskAtom {
+    #[serde(rename = "id")]
+    pub id: Id,
+    #[serde(rename = "kind")]
+    pub kind: PlanningAtomKind,
+    #[serde(rename = "text")]
+    pub text: String,
+    /// Task-document anchors supplied by the package.
+    #[serde(rename = "sources")]
+    pub sources: Vec<Ref>,
 }
 
 /// Core-classified task-pack document copied into child runner specs. The digest is over the exact admitted file bytes; body_digest is over the model-visible body only.
@@ -2438,7 +2566,6 @@ pub struct ValidationResultV2 {
 
 /// Only payload accepted by the Validator terminal tool. Assistant-text JSON without the terminal tool is not a carrier.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ValidationSubmissionV2 {
     #[serde(rename = "schema")]
     pub schema: SchemaId,
@@ -2462,7 +2589,6 @@ pub struct ValidationSubmissionV2 {
 
 /// Generated record item.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CriterionResultV2 {
     #[serde(rename = "criterion_id")]
     pub criterion_id: Id,
@@ -2485,7 +2611,6 @@ pub struct CriterionResultV2 {
 
 /// Independent validation verdict bundle for forward, closure, conflict, delta, or final review (D76 §9.2).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ValidationVerdict {
     #[serde(rename = "assignment_id")]
     pub assignment_id: Id,
@@ -2509,7 +2634,6 @@ pub struct ValidationVerdict {
 
 /// Generated record item.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CriterionResult {
     #[serde(rename = "criterion_id")]
     pub criterion_id: Id,
@@ -2525,6 +2649,28 @@ pub struct CriterionResult {
     pub semantic_surface_ids: Vec<Id>,
     #[serde(rename = "forward_edge_ids")]
     pub forward_edge_ids: Vec<Id>,
+}
+
+/// Model-facing work map. Link values are checked against the accepted atom registry by the planning driver.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkMap {
+    /// Executable plan units.
+    #[serde(rename = "units")]
+    pub units: Vec<PlanUnit>,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanUnit {
+    #[serde(rename = "id")]
+    pub id: Id,
+    #[serde(rename = "objective")]
+    pub objective: String,
+    #[serde(rename = "criteria")]
+    pub criteria: Vec<String>,
+    /// Atom ids accepted from task_atoms.
+    #[serde(rename = "links")]
+    pub links: Vec<Id>,
 }
 
 /// D78 §3.2 — command complete; Host returns to idle.
@@ -2694,5 +2840,10 @@ pub const ALLOCATION_LANE_PROPOSAL_ADMITS: &str = "Return a lane proposal that g
 pub const DELIVERY_RESULT_ADMITS: &str = "Submit exactly one terminal delivery carrier for your assigned role, mode, assignment, attempt, and run revision. Report the exact base, worktree, resulting commit/tree or preservation checkpoint as applicable, actual changed paths, execution audit reference, and required focused evidence. Do not claim validation, merge, package state mutation, or success hidden behind missing evidence. If any hard boundary was violated or required evidence is missing, say so instead of reporting DONE.";
 pub const FINDING_ADMITS: &str = "For each material issue, record one effect: forward-blocking, closure-blocking-forward-safe, or advisory. Tie the finding to exact criteria or forward edges and evidence. Do not use severity alone to decide scheduling, do not hide a mandatory blocker as advisory, and do not report a source repair requirement without the evidence that makes it mandatory.";
 pub const FINDING_V2_ADMITS: &str = "For each material issue, emit one deterministic finding id, classify kind/effect honestly, tie it to declared criteria/edges/evidence, and never hide a required blocker as advisory.";
+pub const PLAN_REVIEW_ADMITS: &str = "Plan review output must assign a verdict to each criterion using pass, blocker, advisory, fail, blocked, or needs-fix. It must include at least one verdict. Call autopilot_submit_review as the final action.";
+pub const QUESTIONS_ADMITS: &str = "Question output must be an explicit questions array, which may be empty, or structured nominations. Each nomination must include class, evidence, and consequence. The class field is closed to: invalidated-decision, missing-material-decision, material-underdetermination, dod-hole, unsafe-irreversible.";
+pub const SCOUT_DOSSIER_ADMITS: &str = "Repository scout and dossier output must cite current evidence and avoid work planning. Call autopilot_submit_scout_report as the final action with findings containing path, observation, and evidence_ref.";
+pub const TASK_ATOMS_ADMITS: &str = "Task extractor output must name operator-task atoms with source anchors and no repository findings. Call autopilot_submit_atoms as the final action with atoms containing id, kind, text, and sources.";
 pub const VALIDATION_SUBMISSION_V2_ADMITS: &str = "Call autopilot_emit_status exactly once with this closed JSON object. Verdict every required criterion exactly once, cite only declared evidence refs, embed every finding, and do not claim PASS/READY when Core would compute a material blocker.";
 pub const VALIDATION_VERDICT_ADMITS: &str = "Verdict every required criterion independently as PASS, FAIL, or BLOCKED, and attach evidence refs, finding refs, covered paths, semantic surfaces, and forward-edge ids. Do not issue an overall PASS while any required criterion is unverdicted, stale, failed, or blocked. Use FORWARD_READY, FORWARD_BLOCKED, or BLOCKED only for forward validation, and PASS, NEEDS_FIX, or BLOCKED only for closure/final validation.";
+pub const WORK_MAP_ADMITS: &str = "Plan compiler and synthesizer output must contain one or more units. Each unit must have an objective, acceptance criteria, and traceable links by real atom id. Call autopilot_submit_plan_cluster or autopilot_submit_synthesis as the final action.";

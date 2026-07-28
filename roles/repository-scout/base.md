@@ -28,4 +28,4 @@ If context is insufficient, emit the declared context gap or checkpoint behavior
 
 ## Terminal result
 
-Terminalize only through `autopilot_submit_scout_report`. The terminal result must name the role/mode/assignment, exact evidence, unresolved gaps or findings, and must not claim completion when a required contract is unmet.
+Terminalize only through `autopilot_submit_scout_report` as the final action. Submit the typed scout dossier payload; do not return a prose dossier, markdown, or assistant-text JSON as the carrier.

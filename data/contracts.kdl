@@ -502,6 +502,63 @@ artifact "state_cache" schema="autopilot.state_cache.v1" producer="Package" mode
     field "state_hash" type="digest" required=#true
 }
 
+artifact "task_atoms" schema="planning.task-atoms.v1" producer="Model" model_produced=#true {
+    doc "Model-facing task atom submission. Shape is deliberately small: structure is enforced by the submit tool; source values are checked against task authority anchors by the planning driver."
+    admits "Task extractor output must name operator-task atoms with source anchors and no repository findings. Call autopilot_submit_atoms as the final action with atoms containing id, kind, text, and sources."
+    list "atoms" item="task_atom" required=#true doc="Task atoms; may be empty only when no task authority text exists."
+    record "task_atom" {
+        field "id" type="id" required=#true
+        field "kind" type="planning_atom_kind" required=#true
+        field "text" type="string" required=#true
+        list "sources" item="ref" required=#true doc="Task-document anchors supplied by the package."
+    }
+}
+
+artifact "scout_dossier" schema="planning.scout-dossier.v1" producer="Model" model_produced=#true {
+    doc "Model-facing repository scout dossier. Shape is small; path values are checked against the pinned repository commit by the planning driver."
+    admits "Repository scout and dossier output must cite current evidence and avoid work planning. Call autopilot_submit_scout_report as the final action with findings containing path, observation, and evidence_ref."
+    list "findings" item="scout_finding" required=#true doc="Repository findings grounded in current evidence."
+    record "scout_finding" {
+        field "path" type="path" required=#true
+        field "observation" type="string" required=#true
+        field "evidence_ref" type="ref" required=#true
+    }
+}
+
+artifact "questions" schema="planning.questions.v1" producer="Model" model_produced=#true {
+    doc "Model-facing contradiction/question nominations. Empty questions are valid when no material unresolved issue remains."
+    admits "Question output must be an explicit questions array, which may be empty, or structured nominations. Each nomination must include class, evidence, and consequence. The class field is closed to: invalidated-decision, missing-material-decision, material-underdetermination, dod-hole, unsafe-irreversible."
+    list "questions" item="planning_question" required=#true doc="Material operator questions; [] is an accepted empty set."
+    record "planning_question" {
+        field "class" type="planning_question_class" required=#true
+        field "evidence" type="string" required=#true
+        field "consequence" type="string" required=#true
+    }
+}
+
+artifact "work_map" schema="planning.work-map.v1" producer="Model" model_produced=#true {
+    doc "Model-facing work map. Link values are checked against the accepted atom registry by the planning driver."
+    admits "Plan compiler and synthesizer output must contain one or more units. Each unit must have an objective, acceptance criteria, and traceable links by real atom id. Call autopilot_submit_plan_cluster or autopilot_submit_synthesis as the final action."
+    list "units" item="plan_unit" required=#true doc="Executable plan units."
+    record "plan_unit" {
+        field "id" type="id" required=#true
+        field "objective" type="string" required=#true
+        list "criteria" item="string" required=#true
+        list "links" item="id" required=#true doc="Atom ids accepted from task_atoms."
+    }
+}
+
+artifact "plan_review" schema="planning.plan-review.v1" producer="Model" model_produced=#true {
+    doc "Model-facing plan review verdicts. Verdict is closed; finding text is optional and advisory unless the verdict requires explanation."
+    admits "Plan review output must assign a verdict to each criterion using pass, blocker, advisory, fail, blocked, or needs-fix. It must include at least one verdict. Call autopilot_submit_review as the final action."
+    list "verdicts" item="plan_review_verdict" required=#true doc="Criterion verdicts."
+    record "plan_review_verdict" {
+        field "criterion_id" type="id" required=#true
+        field "verdict" type="planning_review_verdict" required=#true
+        field "finding" type="string" required=#false
+    }
+}
+
 artifact "allocation_lane_proposal" schema="autopilot.allocation_lane_proposal.v1" producer="Model" model_produced=#true {
     doc "Allocator model proposal; package validates totality, dependencies, cap, and no invented ownership (D76 §7)."
     admits "Return a lane proposal that groups only approved plan units. Preserve every unit id, dependency, predecessor forward criterion, downstream release edge, and verification obligation exactly as supplied. Do not invent file ownership or modify plan authority. Include ordered unit ids, one delivery boundary, context family id and estimate, focused tests, and launch wave."
@@ -997,6 +1054,36 @@ scheduler_order 1 key="launch_wave" direction="ascending"
 scheduler_order 2 key="longest remaining dependency path" direction="descending"
 scheduler_order 3 key="earliest operator-plan unit order" direction="ascending"
 scheduler_order 4 key="lane id" direction="lexicographic"
+
+enum "planning_atom_kind" {
+    doc "Closed task atom kinds used by the task-extractor role."
+    value "work"
+    value "decision"
+    value "constraint"
+    value "acceptance"
+    value "premise"
+    value "question"
+    value "reference"
+}
+
+enum "planning_question_class" {
+    doc "D72 closed material-question classes."
+    value "invalidated-decision"
+    value "missing-material-decision"
+    value "material-underdetermination"
+    value "dod-hole"
+    value "unsafe-irreversible"
+}
+
+enum "planning_review_verdict" {
+    doc "Closed model-facing plan review verdicts."
+    value "pass"
+    value "blocker"
+    value "advisory"
+    value "fail"
+    value "blocked"
+    value "needs-fix"
+}
 
 enum "run_phase" {
     doc "D76 §5.3 — orthogonal run phase."

@@ -7,6 +7,7 @@ publish = false
 [dependencies]
 kdl.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 assert_cmd = "2"

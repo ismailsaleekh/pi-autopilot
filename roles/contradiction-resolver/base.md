@@ -28,4 +28,4 @@ If context is insufficient, emit the declared context gap or checkpoint behavior
 
 ## Terminal result
 
-Terminalize only through `autopilot_submit_resolution`. The terminal result must name the role/mode/assignment, exact evidence, unresolved gaps or findings, and must not claim completion when a required contract is unmet.
+Terminalize only through `autopilot_submit_resolution` as the final action. Submit the typed questions payload, using `questions: []` when no material question remains; do not return prose as the carrier.

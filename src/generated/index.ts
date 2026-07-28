@@ -54,6 +54,9 @@ export type FindingEffect = "forward-blocking" | "closure-blocking-forward-safe"
 export type FindingKindV2 = "source-defect" | "test-defect" | "contract-defect" | "evidence-gap" | "context-gap" | "unsafe-boundary" | "advisory";
 export type ForwardVerdict = "FORWARD_READY" | "FORWARD_BLOCKED" | "BLOCKED";
 export type LaneState = "allocated" | "implementing" | "forward-validating-1" | "forward-fixing" | "forward-validating-2" | "forward-ready" | "release-queued" | "forward-integrated" | "deep-validating" | "closure-needs-fix" | "repair-queued" | "closed";
+export type PlanningAtomKind = "work" | "decision" | "constraint" | "acceptance" | "premise" | "question" | "reference";
+export type PlanningQuestionClass = "invalidated-decision" | "missing-material-decision" | "material-underdetermination" | "dod-hole" | "unsafe-irreversible";
+export type PlanningReviewVerdict = "pass" | "blocker" | "advisory" | "fail" | "blocked" | "needs-fix";
 export type Producer = "Model" | "Git" | "Operator" | "Filesystem" | "Provider" | "BackgroundTask" | "Package" | "Host";
 export type RosterSlot = "control" | "reasoning" | "extraction" | "coding" | "review";
 export type RunHealth = "healthy" | "degraded" | "paused" | "unsafe-halt";
@@ -754,6 +757,26 @@ export interface Phase2PiConsumerBinding {
   binding_sha256: Digest;
 }
 
+export interface PlanReview {
+  verdicts: PlanReviewVerdict[];
+}
+
+export interface PlanReviewVerdict {
+  criterion_id: Id;
+  verdict: PlanningReviewVerdict;
+  finding?: string;
+}
+
+export interface Questions {
+  questions: PlanningQuestion[];
+}
+
+export interface PlanningQuestion {
+  class: PlanningQuestionClass;
+  evidence: string;
+  consequence: string;
+}
+
 export interface RoleFrontmatter {
   schema: SchemaId;
   id: Id;
@@ -782,6 +805,16 @@ export interface RunIdentity {
   workstream: Id;
 }
 
+export interface ScoutDossier {
+  findings: ScoutFinding[];
+}
+
+export interface ScoutFinding {
+  path: Path;
+  observation: string;
+  evidence_ref: Ref;
+}
+
 export interface SeamEnvelope {
   v: number;
   id: number;
@@ -792,6 +825,17 @@ export interface SeamEnvelope {
 export interface StateCache {
   sequence: number;
   state_hash: Digest;
+}
+
+export interface TaskAtoms {
+  atoms: TaskAtom[];
+}
+
+export interface TaskAtom {
+  id: Id;
+  kind: PlanningAtomKind;
+  text: string;
+  sources: Ref[];
 }
 
 export interface TaskDocument {
@@ -968,6 +1012,17 @@ export interface CriterionResult {
   covered_paths: Path[];
   semantic_surface_ids: Id[];
   forward_edge_ids: Id[];
+}
+
+export interface WorkMap {
+  units: PlanUnit[];
+}
+
+export interface PlanUnit {
+  id: Id;
+  objective: string;
+  criteria: string[];
+  links: Id[];
 }
 
 export interface CoreToHostDonePayload {

@@ -134,6 +134,10 @@ fn read_work_map(workstream: &str) -> Result<String, String> { fs::read_to_strin
 fn write_approved_plan(workstream: &str, units: &[ApprovedUnit]) -> Result<(), AnyError> { let path = plan_path(workstream); if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; } fs::write(path, serde_json::to_vec_pretty(&ApprovedPlanArtifact { units: units.to_vec() })?)?; Ok(()) }
 fn read_approved_plan(workstream: &str) -> Result<Vec<ApprovedUnit>, String> { let text = fs::read_to_string(plan_path(workstream)).map_err(|error| error.to_string())?; let artifact: ApprovedPlanArtifact = serde_json::from_str(&text).map_err(|error| error.to_string())?; if artifact.units.is_empty() { return Err("empty approved plan".to_owned()); } Ok(artifact.units) }
 fn parse_approved_units(raw: &str) -> Result<Vec<ApprovedUnit>, String> {
+    if raw.trim_start().starts_with('{') {
+        let work_map: kernel::generated::WorkMap = serde_json::from_str(raw).map_err(|error| error.to_string())?;
+        return approved_units_from_work_map(&work_map);
+    }
     let mut units = Vec::new(); let mut current_id: Option<String> = None; let mut current_criteria = Vec::new(); let mut current_objective = String::new();
     for line in raw.lines().chain(std::iter::once("### unit")) {
         let trimmed = line.trim();
@@ -148,6 +152,14 @@ fn parse_approved_units(raw: &str) -> Result<Vec<ApprovedUnit>, String> {
     }
     if units.len() < 3 { return Err(format!("expected at least 3 approved units, got {}", units.len())); }
     Ok(units)
+}
+fn approved_units_from_work_map(work_map: &kernel::generated::WorkMap) -> Result<Vec<ApprovedUnit>, String> {
+    if work_map.units.len() < 3 { return Err(format!("expected at least 3 approved units, got {}", work_map.units.len())); }
+    work_map.units.iter().enumerate().map(|(index, unit)| {
+        if unit.id.0.trim().is_empty() || unit.objective.trim().is_empty() || unit.criteria.is_empty() { return Err(format!("unit {} missing criteria/objective", unit.id.0)); }
+        let order = index as u32 + 1;
+        Ok(ApprovedUnit { id: unit.id.clone(), operator_order: order, decisions: Vec::new(), criteria: unit.criteria.iter().enumerate().map(|(criterion_index, _)| idv(&format!("AC-{}-{}", unit.id.0, criterion_index + 1))).collect(), dependencies: if index == 0 { Vec::new() } else { vec![work_map.units[index - 1].id.clone()] }, predecessor_forward_criteria: if order <= 1 { Vec::new() } else { vec![idv(&format!("FC{}", order - 1))] }, downstream_release_edges: vec![idv(&format!("EDGE{order}"))] })
+    }).collect()
 }
 fn plan_unit(name: &str, order: u32, criteria: &[String]) -> ApprovedUnit { ApprovedUnit { id: idv(name), operator_order: order, decisions: Vec::new(), criteria: criteria.iter().map(|item| idv(item)).collect(), dependencies: if order <= 1 { Vec::new() } else { vec![idv(&format!("U{}", order - 1))] }, predecessor_forward_criteria: if order <= 1 { Vec::new() } else { vec![idv(&format!("FC{}", order - 1))] }, downstream_release_edges: vec![idv(&format!("EDGE{order}"))] } }
 fn allocation_submission_from_plan(workstream: &str, approved: &[ApprovedUnit]) -> Result<AllocationSubmission, String> {

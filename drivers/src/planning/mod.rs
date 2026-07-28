@@ -1,9 +1,13 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 
 use crate::roles::kdl::{attr as kdl_attr, boundary_runtime as runtime_by_id, table_values};
 use kernel::boundary::{BoundaryRuntime, Rejection};
+use kernel::generated::{
+    Id, PlanReview, Questions, Ref, ScoutDossier, TaskAtoms, WorkMap,
+};
 use kernel_macros::acceptance_boundary;
 use sha2::{Digest as ShaDigest, Sha256};
 
@@ -164,7 +168,7 @@ impl PlanningDeclarations {
     pub fn parse(text: &str) -> Result<Self, PlanningError> {
         let mut cap = None;
         let mut phases = Vec::new();
-        for line in text.lines() {
+        for line in text.split('\n') {
             let trimmed = line.trim();
             if let Some(after) = trimmed.strip_prefix("assignment_cap ") {
                 cap = Some(parse_cap(after)?);
@@ -364,7 +368,7 @@ fn validate_repo_relative_path(raw_path: &Path) -> Result<PathBuf, PlanningError
     let raw = raw_path
         .to_str()
         .ok_or_else(|| PlanningError::TaskPath("non-utf8-path".to_owned()))?;
-    if raw.contains('\\') {
+    if raw.find('\\').is_some() {
         return Err(PlanningError::TaskPath(format!("backslash:{raw}")));
     }
     let mut out = PathBuf::new();
@@ -389,7 +393,7 @@ fn classify_task_document(rel: &Path, bytes: &[u8]) -> Result<TaskDocument, Plan
     if bytes.get(0..3) == Some(&[0xEF, 0xBB, 0xBF][..]) {
         return Err(PlanningError::TaskHeader(format!("bom:{}", rel.display())));
     }
-    if bytes.contains(&b'\r') {
+    if bytes.iter().position(|byte| *byte == b'\r').is_some() {
         return Err(PlanningError::TaskHeader(format!("crlf:{}", rel.display())));
     }
     let text = std::str::from_utf8(bytes)
@@ -566,40 +570,35 @@ pub fn boundary_runtime(id: &'static str) -> BoundaryRuntime {
     runtime_by_id(id)
 }
 
-#[acceptance_boundary(id = "planning.task-atoms.v1", producer = Producer::Model, visible = true, admits = "Task extractor output must name operator-task atoms with source anchors and no repository findings.", mode = BoundaryMode::Enforce)]
+#[acceptance_boundary(id = "planning.task-atoms.v1", producer = Producer::Model, visible = true, admits = "Task extractor output must name operator-task atoms with source anchors and no repository findings. Call autopilot_submit_atoms as the final action with atoms containing id, kind, text, and sources.", mode = BoundaryMode::Enforce)]
 pub fn accept_task_atoms(raw: &str, runtime: &BoundaryRuntime) -> Result<String, Rejection> {
-    accept_contains(raw, "atom", runtime)
+    let atoms = parse_model_payload::<TaskAtoms>(raw, runtime, "planning.task-atoms.v1")?;
+    validate_task_atoms_shape(&atoms, runtime)?;
+    Ok(raw.to_owned())
 }
-#[acceptance_boundary(id = "planning.scout-dossier.v1", producer = Producer::Model, visible = true, admits = "Repository scout and dossier output must cite current evidence and avoid work planning.", mode = BoundaryMode::Enforce)]
+#[acceptance_boundary(id = "planning.scout-dossier.v1", producer = Producer::Model, visible = true, admits = "Repository scout and dossier output must cite current evidence and avoid work planning. Call autopilot_submit_scout_report as the final action with findings containing path, observation, and evidence_ref.", mode = BoundaryMode::Enforce)]
 pub fn accept_scout_dossier(raw: &str, runtime: &BoundaryRuntime) -> Result<String, Rejection> {
-    accept_contains(raw, "evidence", runtime)
+    let dossier = parse_model_payload::<ScoutDossier>(raw, runtime, "planning.scout-dossier.v1")?;
+    validate_scout_dossier_shape(&dossier, runtime)?;
+    Ok(raw.to_owned())
 }
-#[acceptance_boundary(id = "planning.questions.v1", producer = Producer::Model, visible = true, admits = "Question output must be either an explicit empty set (`questions: []`) or structured nominations. Each nomination must include class, evidence, and consequence fields. The class field is closed to: invalidated-decision, missing-material-decision, material-underdetermination, dod-hole, unsafe-irreversible.", mode = BoundaryMode::Enforce)]
+#[acceptance_boundary(id = "planning.questions.v1", producer = Producer::Model, visible = true, admits = "Question output must be an explicit questions array, which may be empty, or structured nominations. Each nomination must include class, evidence, and consequence. The class field is closed to: invalidated-decision, missing-material-decision, material-underdetermination, dod-hole, unsafe-irreversible.", mode = BoundaryMode::Enforce)]
 pub fn accept_questions(raw: &str, runtime: &BoundaryRuntime) -> Result<String, Rejection> {
-    if accepts_question_output(raw) {
-        Ok(raw.to_owned())
-    } else {
-        runtime.reject(raw)?;
-        Ok(raw.to_owned())
-    }
+    let questions = parse_model_payload::<Questions>(raw, runtime, "planning.questions.v1")?;
+    validate_questions_shape(&questions, runtime)?;
+    Ok(raw.to_owned())
 }
-#[acceptance_boundary(id = "planning.work-map.v1", producer = Producer::Model, visible = true, admits = "Plan compiler and synthesizer output must contain one or more unit sections. Each unit must have an objective, acceptance criteria, and a traceable link by exact task phrase, atom id, source anchor, backlink, or verified evidence/fact.", mode = BoundaryMode::Enforce)]
+#[acceptance_boundary(id = "planning.work-map.v1", producer = Producer::Model, visible = true, admits = "Plan compiler and synthesizer output must contain one or more units. Each unit must have an objective, acceptance criteria, and traceable links by real atom id. Call autopilot_submit_plan_cluster or autopilot_submit_synthesis as the final action.", mode = BoundaryMode::Enforce)]
 pub fn accept_work_map(raw: &str, runtime: &BoundaryRuntime) -> Result<String, Rejection> {
-    if accepts_work_map(raw) {
-        Ok(raw.to_owned())
-    } else {
-        runtime.reject(raw)?;
-        Ok(raw.to_owned())
-    }
+    let work_map = parse_model_payload::<WorkMap>(raw, runtime, "planning.work-map.v1")?;
+    validate_work_map_shape(&work_map, runtime)?;
+    Ok(raw.to_owned())
 }
-#[acceptance_boundary(id = "planning.plan-review.v1", producer = Producer::Model, visible = true, admits = "Plan review output must assign a verdict to each finding, using pass, blocker, advisory, fail, blocked, or needs-fix. It must include at least one verdict and must not give an overall pass while a substantive finding is left unclassified.", mode = BoundaryMode::Enforce)]
+#[acceptance_boundary(id = "planning.plan-review.v1", producer = Producer::Model, visible = true, admits = "Plan review output must assign a verdict to each criterion using pass, blocker, advisory, fail, blocked, or needs-fix. It must include at least one verdict. Call autopilot_submit_review as the final action.", mode = BoundaryMode::Enforce)]
 pub fn accept_plan_review(raw: &str, runtime: &BoundaryRuntime) -> Result<String, Rejection> {
-    if accepts_plan_review(raw) {
-        Ok(raw.to_owned())
-    } else {
-        runtime.reject(raw)?;
-        Ok(raw.to_owned())
-    }
+    let review = parse_model_payload::<PlanReview>(raw, runtime, "planning.plan-review.v1")?;
+    validate_plan_review_shape(&review, runtime)?;
+    Ok(raw.to_owned())
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -623,195 +622,414 @@ pub enum PlanningError {
     IndexTaskInput(String),
 }
 
-fn accept_contains(
+pub fn accept_task_atoms_payload(atoms: TaskAtoms) -> Result<TaskAtoms, Rejection> {
+    let runtime = boundary_runtime("planning.task-atoms.v1");
+    validate_task_atoms_shape(&atoms, &runtime)?;
+    Ok(atoms)
+}
+
+pub fn accept_scout_dossier_payload(dossier: ScoutDossier) -> Result<ScoutDossier, Rejection> {
+    let runtime = boundary_runtime("planning.scout-dossier.v1");
+    validate_scout_dossier_shape(&dossier, &runtime)?;
+    Ok(dossier)
+}
+
+pub fn accept_questions_payload(questions: Questions) -> Result<Questions, Rejection> {
+    let runtime = boundary_runtime("planning.questions.v1");
+    validate_questions_shape(&questions, &runtime)?;
+    Ok(questions)
+}
+
+pub fn accept_work_map_payload(work_map: WorkMap) -> Result<WorkMap, Rejection> {
+    let runtime = boundary_runtime("planning.work-map.v1");
+    validate_work_map_shape(&work_map, &runtime)?;
+    Ok(work_map)
+}
+
+pub fn accept_plan_review_payload(review: PlanReview) -> Result<PlanReview, Rejection> {
+    let runtime = boundary_runtime("planning.plan-review.v1");
+    validate_plan_review_shape(&review, &runtime)?;
+    Ok(review)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskAnchorRegistry {
+    anchors: BTreeSet<String>,
+}
+
+impl TaskAnchorRegistry {
+    pub fn from_input_set(input_set: &TaskInputSet) -> Self {
+        let anchors = input_set
+            .authority_documents
+            .iter()
+            .chain(input_set.context_documents.iter())
+            .flat_map(|document| {
+                let base = format!("task://{}/{}", document.digest, document.path);
+                [base.clone(), format!("{base}#whole-file")]
+            })
+            .collect();
+        Self { anchors }
+    }
+
+    pub fn has(&self, source: &Ref) -> bool {
+        self.anchors.iter().any(|anchor| anchor == &source.0)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepoRelPath(PathBuf);
+
+impl RepoRelPath {
+    pub fn parse(raw: &str) -> Result<Self, PlanningError> {
+        validate_repo_relative_path(Path::new(raw)).map(Self)
+    }
+
+    pub fn as_path(&self) -> &Path {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PinnedRepo {
+    pub repo_root: PathBuf,
+    pub base_commit: String,
+}
+
+pub fn accept_task_atoms_with_anchors(
+    atoms: TaskAtoms,
+    anchors: &TaskAnchorRegistry,
+) -> Result<TaskAtoms, Rejection> {
+    let runtime = boundary_runtime("planning.task-atoms.v1");
+    validate_task_atoms_shape(&atoms, &runtime)?;
+    for atom in &atoms.atoms {
+        for source in &atom.sources {
+            if !anchors.has(source) {
+                return reject_value(
+                    &runtime,
+                    "planning.task-atoms.v1",
+                    "atoms.sources",
+                    "a real task-document anchor supplied by package authority",
+                    &source.0,
+                    "Use only task:// anchors from the task authority manifest.",
+                );
+            }
+        }
+    }
+    Ok(atoms)
+}
+
+pub fn accept_scout_dossier_at_base(
+    dossier: ScoutDossier,
+    repo: &PinnedRepo,
+) -> Result<ScoutDossier, Rejection> {
+    let runtime = boundary_runtime("planning.scout-dossier.v1");
+    validate_scout_dossier_shape(&dossier, &runtime)?;
+    for finding in &dossier.findings {
+        let rel = match RepoRelPath::parse(&finding.path.0) {
+            Ok(rel) => rel,
+            Err(error) => {
+                return reject_value(
+                    &runtime,
+                    "planning.scout-dossier.v1",
+                    "findings.path",
+                    "repository-relative UTF-8 path with no absolute root, parent component, or backslash",
+                    &format!("{:?}", error),
+                    "Cite a path relative to the pinned repository root.",
+                );
+            }
+        };
+        if !repo_path_exists_at_commit(repo, rel.as_path()) {
+            return reject_value(
+                &runtime,
+                "planning.scout-dossier.v1",
+                "findings.path",
+                "path exists in the repository at the pinned base commit",
+                &finding.path.0,
+                "Re-read the pinned checkout and cite an existing file or directory.",
+            );
+        }
+    }
+    Ok(dossier)
+}
+
+pub fn accept_work_map_for_atoms(
+    work_map: WorkMap,
+    atom_ids: &BTreeSet<Id>,
+) -> Result<WorkMap, Rejection> {
+    let runtime = boundary_runtime("planning.work-map.v1");
+    validate_work_map_shape(&work_map, &runtime)?;
+    for unit in &work_map.units {
+        for link in &unit.links {
+            if atom_ids.get(link).is_none() {
+                return reject_value(
+                    &runtime,
+                    "planning.work-map.v1",
+                    "units.links",
+                    "an atom id accepted by planning.task-atoms.v1",
+                    &link.0,
+                    "Link each plan unit to a real accepted atom id.",
+                );
+            }
+        }
+    }
+    Ok(work_map)
+}
+
+fn parse_model_payload<T: serde::de::DeserializeOwned>(
     raw: &str,
-    required: &str,
     runtime: &BoundaryRuntime,
-) -> Result<String, Rejection> {
-    if raw.contains(required) {
-        Ok(raw.to_owned())
-    } else {
-        runtime.reject(raw)?;
-        Ok(raw.to_owned())
-    }
+    boundary_id: &'static str,
+) -> Result<T, Rejection> {
+    serde_json::from_str::<T>(raw).map_err(|error| {
+        force_rejection(
+            runtime,
+            boundary_id,
+            "payload",
+            "JSON matching the generated terminating-tool schema",
+            &format!("json:{error}"),
+            "Call the declared autopilot_submit_* tool; do not return prose as the carrier.",
+        )
+    })
 }
-enum MarkdownLine<'a> {
-    Heading(&'a str),
-    Bullet(&'a str),
-    Text(&'a str),
-}
-fn classify_markdown_line(line: &str) -> MarkdownLine<'_> {
-    let trimmed = line.trim();
-    match trimmed.as_bytes().first() {
-        Some(b'#') => MarkdownLine::Heading(trimmed.trim_start_matches('#').trim_start()),
-        Some(b'-' | b'*') => MarkdownLine::Bullet(trimmed[1..].trim_start()),
-        _ => MarkdownLine::Text(trimmed),
-    }
-}
-fn accepts_work_map(raw: &str) -> bool {
-    let (mut units, mut seen, mut objective, mut criteria, mut link) =
-        (0_u8, false, false, false, false);
-    for line in raw.lines().chain(std::iter::once("### unit")) {
-        let trimmed = line.trim();
-        if matches!(classify_markdown_line(trimmed), MarkdownLine::Heading(text) if text.eq_ignore_ascii_case("unit"))
-        {
-            if seen {
-                if !(objective && criteria && link) {
-                    return false;
-                }
-                units = units.saturating_add(1);
-            }
-            seen = true;
-            objective = false;
-            criteria = false;
-            link = false;
-            continue;
+
+fn validate_task_atoms_shape(
+    atoms: &TaskAtoms,
+    runtime: &BoundaryRuntime,
+) -> Result<(), Rejection> {
+    for atom in &atoms.atoms {
+        if is_blank(&atom.id.0) {
+            reject_value(
+                runtime,
+                "planning.task-atoms.v1",
+                "atoms.id",
+                "non-empty atom id",
+                &atom.id.0,
+                "Use the stable atom id supplied or derived for this task atom.",
+            )?;
         }
-        if let Some((field, value)) = structured_field(trimmed) {
-            objective |= field == "objective" && !value.is_empty();
-            criteria |= field == "acceptance-criteria";
-            link |= has_trace_field(&field) && !value.is_empty();
+        if is_blank(&atom.text) {
+            reject_value(
+                runtime,
+                "planning.task-atoms.v1",
+                "atoms.text",
+                "non-empty task-authority text",
+                &atom.text,
+                "Summarize the operator-task statement instead of leaving the atom blank.",
+            )?;
         }
-    }
-    units > 0
-}
-fn has_trace_field(field: &str) -> bool {
-    [
-        "exact-task-phrase",
-        "atom-id",
-        "source-anchor",
-        "source",
-        "anchor",
-        "backlink",
-        "evidence",
-        "verified-fact",
-    ]
-    .contains(&field)
-        || field.contains("task-phrase")
-        || field.contains("atom")
-}
-fn accepts_plan_review(raw: &str) -> bool {
-    let (mut verdicts, mut overall_pass, mut unclassified) = (0_u8, false, false);
-    for line in raw.lines().map(str::trim).filter(|line| !line.is_empty()) {
-        if let Some(pass) = verdict_is_pass(line) {
-            verdicts = verdicts.saturating_add(1);
-            overall_pass |= pass;
-        } else {
-            unclassified |= substantive_finding(line);
+        if atom.sources.is_empty() {
+            reject_value(
+                runtime,
+                "planning.task-atoms.v1",
+                "atoms.sources",
+                "at least one task-document anchor",
+                "[]",
+                "Attach the source anchor that supports the atom.",
+            )?;
         }
     }
-    verdicts > 0 && !(overall_pass && unclassified)
+    Ok(())
 }
-fn verdict_is_pass(line: &str) -> Option<bool> {
-    let lower = line
-        .trim_start_matches(['-', '*', '>'])
-        .trim_start()
-        .to_ascii_lowercase();
-    let rest = lower
-        .strip_prefix("verdict ")
-        .or_else(|| lower.strip_prefix("verdict:"))?;
-    let class = rest
-        .split(|ch: char| !ch.is_ascii_alphabetic() && ch != '-')
-        .find(|part| !part.is_empty())?;
-    matches!(
-        class,
-        "pass" | "blocker" | "advisory" | "fail" | "blocked" | "needs-fix"
-    )
-    .then_some(class == "pass")
-}
-fn substantive_finding(line: &str) -> bool {
-    let text = match classify_markdown_line(line) {
-        MarkdownLine::Bullet(text) => text,
-        MarkdownLine::Text(text) if named_finding(text) => text,
-        _ => return false,
-    }
-    .to_ascii_lowercase();
-    [
-        "must",
-        "missing",
-        "omission",
-        "blocker",
-        "substantive",
-        "fail",
-        "unsafe",
-        "incomplete",
-        "not covered",
-    ]
-    .iter()
-    .any(|word| text.contains(word))
-}
-fn named_finding(text: &str) -> bool {
-    text.split(|ch: char| ch.is_ascii_whitespace() || ch == ':')
-        .next()
-        .is_some_and(|word| {
-            ["finding", "issue"]
-                .iter()
-                .any(|name| word.eq_ignore_ascii_case(name))
-        })
-}
-fn accepts_question_output(raw: &str) -> bool {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    let (mut classes, mut evidence, mut consequence) = (0_u8, false, false);
-    for (field, value) in trimmed.lines().filter_map(structured_field) {
-        if field == "class" || field == "admissible-class" {
-            classes = classes.saturating_add(1);
-            if question_class_from_d72(&value).is_err() {
-                return false;
-            }
+
+fn validate_scout_dossier_shape(
+    dossier: &ScoutDossier,
+    runtime: &BoundaryRuntime,
+) -> Result<(), Rejection> {
+    for finding in &dossier.findings {
+        if is_blank(&finding.path.0) {
+            reject_value(
+                runtime,
+                "planning.scout-dossier.v1",
+                "findings.path",
+                "non-empty repository-relative path",
+                &finding.path.0,
+                "Cite the repository path that supports this finding.",
+            )?;
         }
-        evidence |= field.contains("evidence") && !value.is_empty();
-        consequence |= field.contains("consequence") && !value.is_empty();
+        if is_blank(&finding.observation) {
+            reject_value(
+                runtime,
+                "planning.scout-dossier.v1",
+                "findings.observation",
+                "non-empty repository observation",
+                &finding.observation,
+                "State the fact observed in the repository.",
+            )?;
+        }
+        if is_blank(&finding.evidence_ref.0) {
+            reject_value(
+                runtime,
+                "planning.scout-dossier.v1",
+                "findings.evidence_ref",
+                "non-empty evidence ref",
+                &finding.evidence_ref.0,
+                "Attach the evidence reference produced by the scout read.",
+            )?;
+        }
     }
-    if classes > 0 {
-        evidence && consequence
-    } else {
-        accepts_empty_question_text(trimmed)
-    }
+    Ok(())
 }
-fn accepts_empty_question_text(raw: &str) -> bool {
-    let compact = raw
-        .split_whitespace()
-        .collect::<String>()
-        .to_ascii_lowercase();
-    if [
-        "questions:[]",
-        "question_nominations:[]",
-        "question-nominations:[]",
-        "nominations:[]",
-    ]
-    .contains(&compact.as_str())
-    {
-        return true;
+
+fn validate_questions_shape(
+    questions: &Questions,
+    runtime: &BoundaryRuntime,
+) -> Result<(), Rejection> {
+    for question in &questions.questions {
+        if is_blank(&question.evidence) {
+            reject_value(
+                runtime,
+                "planning.questions.v1",
+                "questions.evidence",
+                "non-empty evidence summary",
+                &question.evidence,
+                "Name the evidence gap or contradiction that makes the question material.",
+            )?;
+        }
+        if is_blank(&question.consequence) {
+            reject_value(
+                runtime,
+                "planning.questions.v1",
+                "questions.consequence",
+                "non-empty material consequence",
+                &question.consequence,
+                "Explain what cannot safely be planned without the answer.",
+            )?;
+        }
     }
-    let tokens: Vec<String> = raw
-        .split(|character: char| !character.is_ascii_alphanumeric())
-        .map(str::to_ascii_lowercase)
-        .collect();
-    let has = |words: &[&str]| tokens.iter().any(|token| words.contains(&token.as_str()));
-    has(&["no", "none", "zero"])
-        && has(&["question", "questions", "nomination", "nominations"])
-        && has(&[
-            "qualifying",
-            "qualifies",
-            "qualify",
-            "admissible",
-            "material",
-        ])
+    Ok(())
 }
-fn structured_field(line: &str) -> Option<(String, String)> {
-    let trimmed = line.trim().trim_start_matches(['-', '*', '>']).trim_start();
-    let (field, value) = trimmed.split_once(':')?;
-    Some((
-        field
-            .trim()
-            .trim_matches('*')
-            .to_ascii_lowercase()
-            .replace(' ', "-"),
-        value.trim().trim_matches('`').to_ascii_lowercase(),
+
+fn validate_work_map_shape(work_map: &WorkMap, runtime: &BoundaryRuntime) -> Result<(), Rejection> {
+    if work_map.units.is_empty() {
+        reject_value(
+            runtime,
+            "planning.work-map.v1",
+            "units",
+            "one or more plan units",
+            "[]",
+            "Submit at least one executable plan unit.",
+        )?;
+    }
+    for unit in &work_map.units {
+        if is_blank(&unit.id.0) {
+            reject_value(
+                runtime,
+                "planning.work-map.v1",
+                "units.id",
+                "non-empty unit id",
+                &unit.id.0,
+                "Use a stable id for each plan unit.",
+            )?;
+        }
+        if is_blank(&unit.objective) {
+            reject_value(
+                runtime,
+                "planning.work-map.v1",
+                "units.objective",
+                "non-empty unit objective",
+                &unit.objective,
+                "State the unit objective.",
+            )?;
+        }
+        if unit.criteria.is_empty() {
+            reject_value(
+                runtime,
+                "planning.work-map.v1",
+                "units.criteria",
+                "one or more acceptance criteria",
+                "[]",
+                "Attach criteria that make the unit verifiable.",
+            )?;
+        }
+        if unit.links.is_empty() {
+            reject_value(
+                runtime,
+                "planning.work-map.v1",
+                "units.links",
+                "one or more atom links",
+                "[]",
+                "Link the unit to accepted atom ids.",
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_plan_review_shape(
+    review: &PlanReview,
+    runtime: &BoundaryRuntime,
+) -> Result<(), Rejection> {
+    if review.verdicts.is_empty() {
+        reject_value(
+            runtime,
+            "planning.plan-review.v1",
+            "verdicts",
+            "at least one criterion verdict",
+            "[]",
+            "Verdict each supplied review criterion.",
+        )?;
+    }
+    for verdict in &review.verdicts {
+        if is_blank(&verdict.criterion_id.0) {
+            reject_value(
+                runtime,
+                "planning.plan-review.v1",
+                "verdicts.criterion_id",
+                "non-empty criterion id",
+                &verdict.criterion_id.0,
+                "Name the criterion being reviewed.",
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn repo_path_exists_at_commit(repo: &PinnedRepo, rel: &Path) -> bool {
+    let object = format!("{}:{}", repo.base_commit, rel.display());
+    Command::new("git")
+        .current_dir(&repo.repo_root)
+        .args(["cat-file", "-e", &object])
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn reject_value<T>(
+    runtime: &BoundaryRuntime,
+    boundary_id: &'static str,
+    field: &str,
+    expected: &str,
+    got: &str,
+    hint: &str,
+) -> Result<T, Rejection> {
+    Err(force_rejection(
+        runtime,
+        boundary_id,
+        field,
+        expected,
+        got,
+        hint,
     ))
+}
+
+fn force_rejection(
+    runtime: &BoundaryRuntime,
+    boundary_id: &'static str,
+    field: &str,
+    expected: &str,
+    got: &str,
+    hint: &str,
+) -> Rejection {
+    let detail = format!(
+        "boundary_id={boundary_id}; field={field}; expected={expected}; got={got}; hint={hint}"
+    );
+    match runtime.reject(detail) {
+        Err(rejection) => rejection,
+        Ok(()) => panic!("model boundary {boundary_id} unexpectedly ran outside enforce mode"),
+    }
+}
+
+fn is_blank(value: &str) -> bool {
+    value.chars().all(char::is_whitespace)
 }
 fn parse_cap(attrs: &str) -> Result<u8, PlanningError> {
     match parse_attr(attrs, "default=")?.parse::<u8>() {

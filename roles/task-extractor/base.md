@@ -28,4 +28,4 @@ If context is insufficient, emit the declared context gap or checkpoint behavior
 
 ## Terminal result
 
-Terminalize only through `autopilot_submit_atoms`. The terminal result must name the role/mode/assignment, exact evidence, unresolved gaps or findings, and must not claim completion when a required contract is unmet.
+Terminalize only through `autopilot_submit_atoms` as the final action. Submit the typed atoms payload; do not return a prose atom list, markdown, or assistant-text JSON as the carrier.

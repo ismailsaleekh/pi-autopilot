@@ -70,6 +70,11 @@ fn model_boundaries_are_enforced_or_loudly_reported_in_record_phase() {
 }
 
 #[test]
+fn boundary_coverage() {
+    model_boundaries_are_enforced_or_loudly_reported_in_record_phase();
+}
+
+#[test]
 fn provenance_less_fixture_is_rejected() {
     let fixture = TranscriptRecord {
         schema: "autopilot.transcript.v1".to_owned(),
