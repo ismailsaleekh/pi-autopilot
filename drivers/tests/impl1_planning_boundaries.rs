@@ -156,41 +156,27 @@ fn accepted_registry_rejects_cross_extractor_duplicate_and_is_resume_stable() {
         None,
         task_atoms("TE01-A"),
     );
-    let b = stable.seed_planning_binding(
+    let next = stable.agent_response(&mut state, &a, task_atoms("TE01-A"));
+    assert_spawn_assignment(&next, "planning-ws-task-extractor-02");
+    let next = stable.agent_response_from_spec(
         &mut state,
-        "task-extractor",
-        "inventory",
-        "planning.task-atoms.v1",
-        "planning-ws-task-extractor-02",
-        Some("TE02-"),
-        None,
+        &stable.planning_spec_path("planning-ws-task-extractor-02"),
         task_atoms("TE02-B"),
     );
-    assert!(stable
-        .agent_result(&mut state, &a, task_atoms("TE01-A"))
-        .contains("accepted"));
-    assert!(stable
-        .agent_result(&mut state, &b, task_atoms("TE02-B"))
-        .contains("accepted"));
+    assert_spawn_assignment(&next, "planning-ws-repository-scout-01");
     let registry_path = stable
         .root
         .join(".pi/autopilot/ws/planning/atom-registry.json");
     let before = fs::read(&registry_path).unwrap();
     let mut replayed = CoreState::open(Some(event_log)).unwrap();
-    let scout = stable.seed_planning_binding(
+    let next = stable.agent_response_from_spec(
         &mut replayed,
-        "repository-scout",
-        "initial-grounding",
-        "planning.scout-dossier.v1",
-        "planning-ws-repository-scout-01",
-        None,
-        None,
+        &stable.planning_spec_path("planning-ws-repository-scout-01"),
         scout_dossier(),
     );
-    let next = stable.agent_response(&mut replayed, &scout, scout_dossier());
-    assert_eq!(
-        next.kind, "spawn",
-        "scout result should advance planning: {next:?}"
+    assert!(
+        response_status(&next).contains("accepted"),
+        "scout result should be accepted after resume: {next:?}"
     );
     let after = fs::read(&registry_path).unwrap();
     assert_eq!(
@@ -412,7 +398,16 @@ else:
             };
             json!({"assignment_id":id,"role":role,"mode":mode,"boundary_id":boundary_id,"ordinal":index + 1,"atom_id_prefix":prefix})
         }).collect::<Vec<_>>();
-        fs::write(self.root.join(".pi/autopilot/ws/planning-manifest.json"), serde_json::to_vec_pretty(&json!({"workstream":"ws","authority_set_id":"auth","authority_documents":[authority],"context_documents":[context],"context_document":context,"assignments":rows})).unwrap()).unwrap();
+        let mut waves = vec![
+            json!({"id":"P1.extract","role":"task-extractor","dependencies":[],"ordinals":null,"activation_ref":null,"canonical_output":false}),
+        ];
+        if assignments
+            .iter()
+            .any(|(_, role, _)| *role == "repository-scout")
+        {
+            waves.push(json!({"id":"P2.scout","role":"repository-scout","dependencies":["P1.extract"],"ordinals":null,"activation_ref":null,"canonical_output":false}));
+        }
+        fs::write(self.root.join(".pi/autopilot/ws/planning-manifest.json"), serde_json::to_vec_pretty(&json!({"workstream":"ws","authority_set_id":"auth","authority_documents":[authority],"context_documents":[context],"context_document":context,"assignments":rows,"planning_wave_cap":7,"planning_max_attempts":2,"planning_waves":waves})).unwrap()).unwrap();
     }
 
     fn seed_planning_binding(
@@ -517,6 +512,33 @@ else:
         seam::handle_line(&frame.to_string(), state).unwrap()
     }
 
+    fn agent_response_from_spec(
+        &self,
+        state: &mut CoreState,
+        spec_path: &Path,
+        raw: String,
+    ) -> SeamEnvelope {
+        let carrier = carrier_value_from_spec(spec_path, &raw);
+        let carrier_path = carrier
+            .get("carrier_path")
+            .and_then(serde_json::Value::as_str)
+            .unwrap();
+        fs::create_dir_all(Path::new(carrier_path).parent().unwrap()).unwrap();
+        fs::write(carrier_path, serde_json::to_vec_pretty(&carrier).unwrap()).unwrap();
+        let assignment_id = carrier
+            .get("assignment_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap();
+        let frame = json!({"v":1,"id":1,"kind":"agent-result","payload":{"assignment_id":assignment_id,"carrier":carrier}});
+        seam::handle_line(&frame.to_string(), state).unwrap()
+    }
+
+    fn planning_spec_path(&self, assignment_id: &str) -> PathBuf {
+        self.root
+            .join(".pi/autopilot/ws/planning/specs")
+            .join(format!("{assignment_id}.json"))
+    }
+
     fn agent_result(
         &self,
         state: &mut CoreState,
@@ -573,6 +595,22 @@ fn response_status(response: &SeamEnvelope) -> String {
         .to_owned()
 }
 
+fn assert_spawn_assignment(response: &SeamEnvelope, assignment_id: &str) {
+    assert_eq!(
+        response.kind, "spawn",
+        "expected spawn response: {response:?}"
+    );
+    assert_eq!(
+        response
+            .payload
+            .get("action")
+            .and_then(|action| action.get("assignment_id"))
+            .and_then(serde_json::Value::as_str),
+        Some(assignment_id),
+        "spawn should launch the next planning assignment: {response:?}"
+    );
+}
+
 fn has_attempt_event(events: &[serde_json::Value], event: &str) -> bool {
     events
         .iter()
@@ -587,6 +625,33 @@ fn carrier_raw_output(binding: &runner::IssuedRunnerBinding) -> String {
         .and_then(serde_json::Value::as_str)
         .unwrap()
         .to_owned()
+}
+
+fn carrier_value_from_spec(spec_path: &Path, raw: &str) -> serde_json::Value {
+    let spec: serde_json::Value = serde_json::from_slice(&fs::read(spec_path).unwrap()).unwrap();
+    json!({
+        "schema":"autopilot.planning_carrier.v1",
+        "action_id":spec["action_id"],
+        "assignment_id":spec["assignment_id"],
+        "run_revision":spec["run_revision"],
+        "workstream":spec["workstream"],
+        "role_id":spec["role_id"],
+        "mode":spec["mode"],
+        "boundary_id":spec["boundary_id"],
+        "result_contract":spec["result_contract"],
+        "prompt_path":spec["prompt_path"],
+        "prompt_digest":spec["prompt_digest"],
+        "boundary_digest":spec["boundary_digest"],
+        "result_contract_digest":spec["result_contract_digest"],
+        "settings_digest":spec["settings_digest"],
+        "context_digest":spec["context_digest"],
+        "skills_digest":spec["skills_digest"],
+        "subscription_digest":spec["subscription_digest"],
+        "spec_digest":sha256_hex(&fs::read(spec_path).unwrap()),
+        "spec_path":spec["spec_path"],
+        "carrier_path":spec["carrier_path"],
+        "raw_output":raw,
+    })
 }
 
 fn carrier_value(binding: &runner::IssuedRunnerBinding, raw: &str) -> serde_json::Value {
