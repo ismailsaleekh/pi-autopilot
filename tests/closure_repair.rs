@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf};
+use std::{fs, path::PathBuf, time::SystemTime};
 
 use drivers::{
     closure::{
@@ -238,7 +238,12 @@ fn fixture(name: &str) -> Fixture {
     let mut platform = SimPlatform::new(0x6_2);
     platform.advance(name.len() as u64);
     let tick = kernel::platform::Platform::clock(&platform).read().0;
-    let root = std::env::temp_dir().join(format!("pi-autopilot-{name}-{tick}"));
+    let nonce = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("system time after epoch")
+        .as_nanos();
+    let pid = std::process::id();
+    let root = std::env::temp_dir().join(format!("pi-autopilot-{name}-{tick}-{pid}-{nonce}"));
     if root.exists() {
         fs::remove_dir_all(&root).expect("clean fixture root");
     }

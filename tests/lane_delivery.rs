@@ -12,7 +12,8 @@ use drivers::dispatch::{DispatchInput, LaneReadiness, launch_lanes, select_ready
 use drivers::runner::{
     DeliveryExpectation, DeliveryRejection, PackageFacts, RunnerAssignment, RunnerTransportFacts,
     accept_delivery, accept_delivery_with_package_facts, delivery_bg_action_with_facts,
-    delivery_issue_with_facts, package_delivery_commit, refuse_agent_git_mutation,
+    delivery_issue_with_facts, establish_delivery_package, package_delivery_commit,
+    refuse_agent_git_mutation,
 };
 use drivers::{sim::SimPlatform, vcs::GitVcs};
 use kernel::generated::{
@@ -127,6 +128,110 @@ fn lane_delivery_launch_uses_recorded_tip_at_dispatch_and_package_owned_commit_d
         accept_delivery(&[forged_tree], &expected),
         Err(DeliveryRejection::GitState)
     );
+}
+
+#[test]
+fn lane_delivery_rejects_tracked_dirty_runner_artifact_but_tolerates_untracked_residue() {
+    let fixture = fixture("tracked-runner-residue");
+    let vcs = GitVcs::new(&fixture.root);
+    let source = fixture.root.join("source");
+    vcs.init_fixture(&source).expect("seed repo");
+    fs::create_dir_all(source.join(".pi/autopilot/runner")).expect("runner dir");
+    fs::write(
+        source.join(".pi/autopilot/runner/tracked.txt"),
+        "tracked at base\n",
+    )
+    .expect("tracked runner seed");
+    let base = Sha(commit(&vcs, &source, "seed tracked runner artifact"));
+
+    let worktree = fixture.root.join("worktree");
+    vcs.prepare(
+        &worktree,
+        &source,
+        &base.0,
+        &["keep.txt", ".pi/autopilot/runner/tracked.txt"],
+    )
+    .expect("runner worktree");
+    let worktree = fs::canonicalize(&worktree).expect("canonical worktree");
+    fs::write(worktree.join("keep.txt"), "lane edit\n").expect("lane edit");
+    let package_commit =
+        package_delivery_commit(&vcs, &worktree, "package delivery").expect("package commit");
+    let package_tree = Sha(vcs
+        .read_tip(&worktree, "HEAD^{tree}")
+        .expect("read package tree"));
+    fs::write(
+        worktree.join(".pi/autopilot/runner/tracked.txt"),
+        "dirty tracked runner artifact\n",
+    )
+    .expect("dirty tracked runner artifact");
+    fs::create_dir_all(worktree.join(".pi/autopilot/runner/carriers")).expect("carrier dir");
+    fs::write(
+        worktree.join(".pi/autopilot/runner/carriers/c.json"),
+        "{}\n",
+    )
+    .expect("untracked runner residue");
+
+    let expected = expectation(&worktree, &base, 2);
+    let package = PackageFacts {
+        package_commit: package_commit.clone(),
+        package_tree: package_tree.clone(),
+    };
+    assert_eq!(
+        accept_delivery_with_package_facts(&[delivery(&expected, None, None)], &expected, &package),
+        Err(DeliveryRejection::GitState),
+        "tracked runner artifact modifications must block delivery"
+    );
+
+    git_run(
+        &worktree,
+        &["checkout", "--", ".pi/autopilot/runner/tracked.txt"],
+    );
+    let accepted = accept_delivery_with_package_facts(
+        &[delivery(&expected, None, None)],
+        &expected,
+        &PackageFacts {
+            package_commit,
+            package_tree,
+        },
+    )
+    .expect("untracked runner residue is tolerated");
+    assert_eq!(accepted.changed_paths, vec!["keep.txt".to_owned()]);
+}
+
+#[test]
+fn lane_delivery_packages_quoted_unicode_space_and_nested_paths_exactly() {
+    let fixture = fixture("unicode-delivery-paths");
+    let vcs = GitVcs::new(&fixture.root);
+    let source = fixture.root.join("source");
+    let base = Sha(vcs.init_fixture(&source).expect("seed repo"));
+    let worktree = fixture.root.join("worktree");
+    let claimed = vec![
+        "docs/file with spaces.txt".to_owned(),
+        "docs/unicodé-☃.txt".to_owned(),
+        "nested/deep/plain.txt".to_owned(),
+        "docs/quote\"file.txt".to_owned(),
+    ];
+    let profile = claimed.iter().map(String::as_str).collect::<Vec<_>>();
+    vcs.prepare(&worktree, &source, &base.0, &profile)
+        .expect("runner worktree");
+    let worktree = fs::canonicalize(&worktree).expect("canonical worktree");
+    for path in &claimed {
+        let full = worktree.join(path);
+        fs::create_dir_all(full.parent().expect("claimed parent")).expect("claimed dir");
+        fs::write(&full, format!("content for {path}\n")).expect("claimed file");
+    }
+
+    let expected = expectation(&worktree, &base, 2);
+    let mut result = delivery(&expected, None, None);
+    result.actual_changed_paths = claimed.iter().cloned().map(ContractPath).collect();
+    let package = establish_delivery_package(&result, &expected).expect("runtime package");
+    let accepted = accept_delivery_with_package_facts(&[result], &expected, &package)
+        .expect("delivery accepted");
+    let mut actual = accepted.changed_paths;
+    let mut expected_paths = claimed;
+    actual.sort();
+    expected_paths.sort();
+    assert_eq!(actual, expected_paths);
 }
 
 #[test]

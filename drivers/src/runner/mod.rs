@@ -1098,17 +1098,13 @@ pub fn establish_delivery_package(
         .map_err(|_| DeliveryRejection::GitState)?;
     git_status_checked_with_paths(&worktree, &["add", "--"], &claimed)
         .map_err(|_| DeliveryRejection::GitState)?;
-    let staged = git_stdout_checked(
+    let staged = git_stdout_bytes_checked(
         &worktree,
-        &["diff", "--cached", "--name-only", "HEAD", "--"],
+        &["diff", "--cached", "--name-only", "-z", "HEAD", "--"],
     )
     .map_err(|_| DeliveryRejection::GitState)?;
-    let mut staged_paths = staged
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    let mut sorted_claimed = claimed.clone();
+    let mut staged_paths = git_nul_paths(&staged);
+    let mut sorted_claimed = path_bytes(&claimed);
     staged_paths.sort();
     sorted_claimed.sort();
     if staged_paths != sorted_claimed {
@@ -1393,35 +1389,33 @@ fn verify_delivery_git_state(
         ],
     )
     .map_err(|_| DeliveryRejection::GitState)?;
-    let status = git_stdout_checked(
+    let status = git_stdout_bytes_checked(
         &actual_worktree,
-        &["status", "--porcelain", "--untracked-files=all"],
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
     )
     .map_err(|_| DeliveryRejection::GitState)?;
-    if status.lines().any(status_line_blocks_delivery) {
+    if status_records_block_delivery(&status) {
         return Err(DeliveryRejection::GitState);
     }
-    let diff = git_stdout_checked(
+    let diff = git_stdout_bytes_checked(
         &actual_worktree,
         &[
             "diff",
             "--name-only",
+            "-z",
             &expected.base_commit.0,
             &package_commit.0,
             "--",
         ],
     )
     .map_err(|_| DeliveryRejection::GitState)?;
-    let mut actual = diff
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    let mut claimed = result
+    let mut actual = git_nul_paths(&diff);
+    let claimed_paths = result
         .actual_changed_paths
         .iter()
         .map(|path| path.0.clone())
         .collect::<Vec<_>>();
+    let mut claimed = path_bytes(&claimed_paths);
     actual.sort();
     claimed.sort();
     if actual != claimed {
@@ -1430,16 +1424,22 @@ fn verify_delivery_git_state(
     Ok(())
 }
 
-fn status_line_blocks_delivery(line: &str) -> bool {
-    if status_line_is_runner_artifact(line) {
-        return false;
-    }
-    !line.starts_with("?? ")
+fn status_records_block_delivery(status: &[u8]) -> bool {
+    git_nul_paths(status)
+        .iter()
+        .any(|record| record.get(..2) != Some(b"??"))
 }
 
-fn status_line_is_runner_artifact(line: &str) -> bool {
-    line.get(3..)
-        .is_some_and(|path| path.starts_with(".pi/autopilot/runner/"))
+fn path_bytes(paths: &[String]) -> Vec<Vec<u8>> {
+    paths.iter().map(|path| path.as_bytes().to_vec()).collect()
+}
+
+fn git_nul_paths(output: &[u8]) -> Vec<Vec<u8>> {
+    output
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| path.to_vec())
+        .collect()
 }
 
 fn verify_distinct_git_worktree(worktree: &Path, base_commit: &Sha) -> Result<(), RunnerError> {
@@ -1489,6 +1489,15 @@ fn verify_distinct_git_worktree(worktree: &Path, base_commit: &Sha) -> Result<()
 }
 
 fn git_stdout_checked(cwd: &Path, args: &[&str]) -> Result<String, String> {
+    let output = git_output_checked(cwd, args)?;
+    String::from_utf8(output.stdout).map_err(|error| error.to_string())
+}
+
+fn git_stdout_bytes_checked(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    Ok(git_output_checked(cwd, args)?.stdout)
+}
+
+fn git_output_checked(cwd: &Path, args: &[&str]) -> Result<std::process::Output, String> {
     let output = Command::new("git")
         .current_dir(cwd)
         .args(args)
@@ -1497,7 +1506,7 @@ fn git_stdout_checked(cwd: &Path, args: &[&str]) -> Result<String, String> {
     if !output.status.success() {
         return Err(format!("git {:?} failed", args));
     }
-    String::from_utf8(output.stdout).map_err(|error| error.to_string())
+    Ok(output)
 }
 
 fn git_status_checked(cwd: &Path, args: &[&str]) -> Result<(), String> {
