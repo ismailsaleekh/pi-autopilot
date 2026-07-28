@@ -414,6 +414,13 @@ fn send_agent_carrier_with_work_map(
         "carrier_path":carrier_path,
         "raw_output":raw_output
     });
+    fs::create_dir_all(carrier_path.parent().expect("planning carrier directory"))
+        .expect("planning carrier fixture directory");
+    fs::write(
+        &carrier_path,
+        serde_json::to_vec(&carrier).expect("planning carrier serialize"),
+    )
+    .expect("planning carrier fixture file");
     send_frame(
         serde_json::json!({"v":1,"id":id,"kind":"agent-result","payload":{"assignment_id":assignment_id,"carrier":carrier}}),
         event_log,
@@ -446,17 +453,18 @@ fn planning_replay_output(
         planning_output(boundary_id)
     };
     match boundary_id {
-        "planning.task-atoms.v1" => namespace_legacy_task_atom_ids(&raw, spec),
+        "planning.task-atoms.v1" => namespace_legacy_task_atoms(&raw, spec),
         "planning.work-map.v1" => namespace_legacy_work_map_links(&raw, spec, spec_path),
         _ => raw,
     }
 }
 
-fn namespace_legacy_task_atom_ids(raw: &str, spec: &serde_json::Value) -> String {
+fn namespace_legacy_task_atoms(raw: &str, spec: &serde_json::Value) -> String {
     let prefix = spec["atom_id_prefix"]
         .as_str()
         .expect("task atom replay spec must carry atom_id_prefix");
     let mut value: serde_json::Value = serde_json::from_str(raw).expect("task atoms replay json");
+    let source_map = legacy_task_source_map(&value, spec);
     let atoms = value["atoms"]
         .as_array_mut()
         .expect("task atoms replay records must expose atoms[]");
@@ -472,8 +480,88 @@ fn namespace_legacy_task_atom_ids(raw: &str, spec: &serde_json::Value) -> String
             format!("{prefix}{id}")
         };
         atom["id"] = serde_json::Value::String(full_id);
+
+        let sources = atom["sources"]
+            .as_array_mut()
+            .expect("task atoms replay sources must be arrays");
+        for source in sources {
+            let raw_source = source
+                .as_str()
+                .expect("task atoms replay sources must be strings")
+                .to_owned();
+            let recorded_selector = task_source_document_selector(&raw_source);
+            let bound_anchor = source_map
+                .get(&recorded_selector)
+                .unwrap_or_else(|| {
+                    panic!("task atom replay source {raw_source} was not present in source map")
+                })
+                .clone();
+            *source = serde_json::Value::String(bound_anchor);
+        }
     }
     serde_json::to_string(&value).expect("task atoms replay json serialize")
+}
+
+fn legacy_task_source_map(
+    value: &serde_json::Value,
+    spec: &serde_json::Value,
+) -> BTreeMap<String, String> {
+    let atoms = value["atoms"]
+        .as_array()
+        .expect("task atoms replay records must expose atoms[]");
+    let mut recorded_selectors = Vec::<String>::new();
+    for atom in atoms {
+        let sources = atom["sources"]
+            .as_array()
+            .expect("task atoms replay sources must be arrays");
+        for source in sources {
+            let selector = task_source_document_selector(
+                source
+                    .as_str()
+                    .expect("task atoms replay sources must be strings"),
+            );
+            if !recorded_selectors.contains(&selector) {
+                recorded_selectors.push(selector);
+            }
+        }
+    }
+
+    let authority_documents = spec["authority_documents"]
+        .as_array()
+        .expect("task atom replay spec must carry authority_documents[]");
+    assert!(
+        recorded_selectors.len() <= authority_documents.len(),
+        "task atom replay cites {} task documents but spec binds only {} authority documents",
+        recorded_selectors.len(),
+        authority_documents.len()
+    );
+    recorded_selectors
+        .into_iter()
+        .enumerate()
+        .map(|(index, selector)| {
+            let document = &authority_documents[index];
+            let digest = document["digest"]
+                .as_str()
+                .expect("task atom replay authority document digest");
+            let path = document["path"]
+                .as_str()
+                .expect("task atom replay authority document path");
+            assert!(!digest.is_empty(), "task atom replay authority digest is empty");
+            assert!(!path.is_empty(), "task atom replay authority path is empty");
+            (selector, format!("task://{digest}/{path}#whole-file"))
+        })
+        .collect()
+}
+
+fn task_source_document_selector(source: &str) -> String {
+    let without_scheme = source.strip_prefix("task://").unwrap_or(source);
+    let document = without_scheme
+        .split_once('#')
+        .map(|(document, _)| document)
+        .or_else(|| without_scheme.split_once(" §").map(|(document, _)| document))
+        .unwrap_or(without_scheme);
+    assert!(!document.is_empty(), "task atom replay source document is empty");
+    document.to_owned()
 }
 
 fn namespace_legacy_work_map_links(
@@ -517,6 +605,7 @@ fn atom_local_to_full_ids(spec: &serde_json::Value, spec_path: &Path) -> BTreeMa
     let specs_dir = spec_path.parent().expect("planning spec directory");
     let mut prefix_by_assignment = BTreeMap::new();
     let mut local_to_full = BTreeMap::new();
+    let mut local_fingerprints = BTreeMap::new();
     let atoms = registry["atoms"]
         .as_array()
         .expect("work-map replay registry must expose atoms[]");
@@ -554,11 +643,20 @@ fn atom_local_to_full_ids(spec: &serde_json::Value, spec_path: &Path) -> BTreeMa
             !local_id.is_empty(),
             "registry atom id must retain local suffix"
         );
-        if let Some(previous) = local_to_full.insert(local_id.clone(), full_id.clone()) {
-            panic!(
-                "legacy replay atom id {local_id} is ambiguous between {previous} and {full_id}"
+        let fingerprint = serde_json::json!({
+            "kind": atom["kind"].clone(),
+            "text": atom["text"].clone(),
+            "sources": atom["sources"].clone(),
+        });
+        if let Some(previous_fingerprint) = local_fingerprints.get(&local_id) {
+            assert_eq!(
+                previous_fingerprint, &fingerprint,
+                "legacy replay atom id {local_id} is ambiguous between non-equivalent registry atoms"
             );
+            continue;
         }
+        local_fingerprints.insert(local_id.clone(), fingerprint);
+        local_to_full.insert(local_id, full_id);
     }
     local_to_full
 }

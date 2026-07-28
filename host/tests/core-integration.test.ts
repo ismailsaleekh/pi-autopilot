@@ -271,11 +271,33 @@ function assertPlanningManifestGrounded(root) {
   const head = gitHead(root);
   assert.equal(manifest.workstream, "main");
   assert.equal(manifest.atoms, 3);
-  assert.equal(manifest.assignments.length, 25, "D72 P1-P6 assignment plan should be complete, not stubbed");
+  assert.equal(
+    manifest.assignments.length,
+    expectedPlanningAssignmentCount(),
+    "D72 P1-P6 assignment plan should match data/planning.kdl assignment_role counts, not be stubbed",
+  );
   assert.ok(
     manifest.verified_facts.some((fact) => fact === `repo-file:src/fixture.ts:head=${head}:line=export function autopilotFixture() { return 'real repository evidence'; }`),
     `manifest did not include source evidence from git HEAD: ${JSON.stringify(manifest.verified_facts)}`,
   );
+}
+
+function expectedPlanningAssignmentCount() {
+  const planning = readFileSync(join(PACKAGE_ROOT, "data", "planning.kdl"), "utf8");
+  let total = 0;
+  let roles = 0;
+  for (const line of planning.split(/\r?\n/u)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("assignment_role ")) continue;
+    const countToken = trimmed.split(/\s+/u).find((token) => token.startsWith("count="));
+    assert.equal(typeof countToken, "string", `assignment_role missing count: ${trimmed}`);
+    const count = Number(countToken.slice("count=".length));
+    assert.ok(Number.isInteger(count) && count > 0, `assignment_role has invalid count: ${trimmed}`);
+    total += count;
+    roles += 1;
+  }
+  assert.notEqual(roles, 0, "data/planning.kdl must declare assignment_role rows");
+  return total;
 }
 
 function gitHead(cwd) {
@@ -336,13 +358,15 @@ function planningCarrierForAction(action) {
   for (const key of ["boundary_digest", "result_contract_digest", "settings_digest", "context_digest", "skills_digest", "subscription_digest"]) {
     if (typeof spec[key] === "string") carrier[key] = spec[key];
   }
+  mkdirSync(dirname(spec.carrier_path), { recursive: true });
+  writeFileSync(spec.carrier_path, JSON.stringify(carrier), "utf8");
   return carrier;
 }
 
 function replayOutputForSpec(spec, specPath) {
   const raw = transcript(spec.boundary_id);
   if (spec.boundary_id === "planning.task-atoms.v1") {
-    return namespaceLegacyTaskAtomIds(raw, spec);
+    return namespaceLegacyTaskAtoms(raw, spec);
   }
   if (spec.boundary_id === "planning.work-map.v1") {
     return namespaceLegacyWorkMapLinks(raw, spec, specPath);
@@ -350,16 +374,67 @@ function replayOutputForSpec(spec, specPath) {
   return raw;
 }
 
-function namespaceLegacyTaskAtomIds(raw, spec) {
+function namespaceLegacyTaskAtoms(raw, spec) {
   const prefix = requireString(spec.atom_id_prefix, "task atom replay spec atom_id_prefix");
   const value = JSON.parse(raw);
+  const sourceMap = legacyTaskSourceMap(value, spec);
   assert.ok(Array.isArray(value.atoms), "task atoms replay records must expose atoms[]");
   for (const atom of value.atoms) {
     const id = requireString(atom.id, "task atoms replay id");
     assert.notEqual(id, "", "task atoms replay id must be non-empty");
     atom.id = id.startsWith(prefix) ? id : `${prefix}${id}`;
+
+    assert.ok(Array.isArray(atom.sources), "task atoms replay sources must be arrays");
+    atom.sources = atom.sources.map((rawSource) => {
+      const source = requireString(rawSource, "task atoms replay source");
+      const selector = taskSourceDocumentSelector(source);
+      const mapped = sourceMap.get(selector);
+      assert.notEqual(mapped, undefined, `task atom replay source ${source} was not present in source map`);
+      return mapped;
+    });
   }
   return JSON.stringify(value);
+}
+
+function legacyTaskSourceMap(value, spec) {
+  assert.ok(Array.isArray(value.atoms), "task atoms replay records must expose atoms[]");
+  const recordedSelectors = [];
+  for (const atom of value.atoms) {
+    assert.ok(Array.isArray(atom.sources), "task atoms replay sources must be arrays");
+    for (const rawSource of atom.sources) {
+      const source = requireString(rawSource, "task atoms replay source");
+      const selector = taskSourceDocumentSelector(source);
+      if (!recordedSelectors.includes(selector)) recordedSelectors.push(selector);
+    }
+  }
+
+  assert.ok(Array.isArray(spec.authority_documents), "task atom replay spec must carry authority_documents[]");
+  assert.ok(
+    recordedSelectors.length <= spec.authority_documents.length,
+    `task atom replay cites ${recordedSelectors.length} task documents but spec binds only ${spec.authority_documents.length} authority documents`,
+  );
+  return new Map(recordedSelectors.map((selector, index) => {
+    const document = spec.authority_documents[index];
+    const digest = requireString(document.digest, "task atom replay authority document digest");
+    const path = requireString(document.path, "task atom replay authority document path");
+    assert.notEqual(digest, "", "task atom replay authority digest is empty");
+    assert.notEqual(path, "", "task atom replay authority path is empty");
+    return [selector, `task://${digest}/${path}#whole-file`];
+  }));
+}
+
+function taskSourceDocumentSelector(source) {
+  const withoutScheme = source.startsWith("task://") ? source.slice("task://".length) : source;
+  const hashIndex = withoutScheme.indexOf("#");
+  const sectionIndex = withoutScheme.indexOf(" §");
+  let document = withoutScheme;
+  if (hashIndex !== -1 && (sectionIndex === -1 || hashIndex < sectionIndex)) {
+    document = withoutScheme.slice(0, hashIndex);
+  } else if (sectionIndex !== -1) {
+    document = withoutScheme.slice(0, sectionIndex);
+  }
+  assert.notEqual(document, "", "task atom replay source document is empty");
+  return document;
 }
 
 function namespaceLegacyWorkMapLinks(raw, spec, specPath) {
@@ -387,6 +462,7 @@ function atomLocalToFullIds(spec, specPath) {
   const specsDir = dirname(specPath);
   const prefixByAssignment = new Map();
   const localToFull = new Map();
+  const localFingerprints = new Map();
   for (const atom of registry.atoms) {
     const fullId = requireString(atom.id, "work-map replay registry atom id");
     const producerAssignmentId = requireString(atom.producer_assignment_id, "work-map replay registry producer_assignment_id");
@@ -400,8 +476,17 @@ function atomLocalToFullIds(spec, specPath) {
     assert.ok(fullId.startsWith(prefix), `registry atom id ${fullId} does not match producer prefix ${prefix}`);
     const localId = fullId.slice(prefix.length);
     assert.notEqual(localId, "", "registry atom id must retain local suffix");
-    const previous = localToFull.get(localId);
-    assert.equal(previous, undefined, `legacy replay atom id ${localId} is ambiguous between ${previous} and ${fullId}`);
+    const fingerprint = JSON.stringify({ kind: atom.kind, text: atom.text, sources: atom.sources });
+    const previousFingerprint = localFingerprints.get(localId);
+    if (previousFingerprint !== undefined) {
+      assert.equal(
+        previousFingerprint,
+        fingerprint,
+        `legacy replay atom id ${localId} is ambiguous between non-equivalent registry atoms`,
+      );
+      continue;
+    }
+    localFingerprints.set(localId, fingerprint);
     localToFull.set(localId, fullId);
   }
   return localToFull;
