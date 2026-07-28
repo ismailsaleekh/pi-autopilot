@@ -159,7 +159,7 @@ fn lane_readiness_from_events(lanes: &[AllocationLaneProposal], approved: &[Appr
     lanes.iter().map(|lane| { let units = lane.ordered_unit_ids.iter().filter_map(|id| approved.iter().find(|unit| unit.id == *id)).collect::<Vec<_>>(); LaneReadiness { lane_id: lane.lane_id.clone(), predecessor_gates_met: units.iter().flat_map(|unit| &unit.predecessor_forward_criteria).all(|gate| state.state.refs.contains_key(&Ref(format!("gate:{}", gate.0))) || unit_has_no_predecessor(gate, approved)), blockers_clear: !state.state.refs.contains_key(&Ref(format!("blocker:{}", lane.lane_id.0))), unit_free: lane.ordered_unit_ids.iter().all(|unit| !state.state.refs.contains_key(&Ref(format!("unit-active:{}", unit.0)))), route_ready: true, preflight_passed: git_stdout(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")), &["rev-parse", "--verify", "HEAD"]).is_ok(), pressure_delay: false } }).collect()
 }
 fn unit_has_no_predecessor(_gate: &Id, _approved: &[ApprovedUnit]) -> bool { false }
-fn active_implementers(state: &CoreState) -> usize { state.state.refs.keys().filter(|reference| reference.0.starts_with("unit-active:")).count() }
+fn active_implementers(state: &CoreState) -> usize { state.state.refs.keys().filter_map(|reference| runner::decode_binding_ref(&reference.0)).filter(|binding| binding.role_id.0 == "implementer" && !terminal_consumed(state, binding)).count() }
 fn assignment(workstream: &str, lane_id: &Id) -> Result<RunnerAssignment, AnyError> {
     let cwd = fs::canonicalize(std::env::current_dir()?)?;
     let base = git_stdout(&cwd, &["rev-parse", "--verify", "HEAD^{commit}"]).map_err(|error| format!("CONTEXT_GAP:base-commit:{error}"))?;
@@ -182,14 +182,17 @@ fn assignment(workstream: &str, lane_id: &Id) -> Result<RunnerAssignment, AnyErr
 }
 fn prepare_delivery_worktree(repo: &Path, workstream: &str, lane_id: &Id, base: &Sha) -> Result<PathBuf, String> {
     let worktree = repo.join(".pi/autopilot").join(workstream).join("worktrees").join(&lane_id.0);
+    let branch = lane_branch_ref(workstream, lane_id, 1);
     runner::reject_link_components_for_path(&worktree).map_err(|error| error.to_string())?;
+    if git_stdout(repo, &["rev-parse", "--verify", &branch]).is_err() { git_status(repo, &["update-ref", &branch, &base.0])?; }
     if !worktree.exists() {
         if let Some(parent) = worktree.parent() { fs::create_dir_all(parent).map_err(|error| error.to_string())?; }
+        let checkout = branch.strip_prefix("refs/heads/").ok_or_else(|| format!("lane branch is not under refs/heads: {branch}"))?;
         let output = Command::new("git")
             .current_dir(repo)
-            .args(["worktree", "add", "--detach"])
+            .args(["worktree", "add"])
             .arg(&worktree)
-            .arg(&base.0)
+            .arg(checkout)
             .output()
             .map_err(|error| error.to_string())?;
         if !output.status.success() { return Err(format!("git worktree add failed: {}", String::from_utf8_lossy(&output.stderr))); }
@@ -201,8 +204,11 @@ fn prepare_delivery_worktree(repo: &Path, workstream: &str, lane_id: &Id, base: 
     runner::reject_link_components_for_path(&marker).map_err(|error| error.to_string())?;
     let marker_metadata = fs::symlink_metadata(&marker).map_err(|error| error.to_string())?;
     if !marker_metadata.file_type().is_file() { return Err("delivery path is not a linked git worktree".to_owned()); }
+    let symref = git_stdout(&canonical, &["symbolic-ref", "-q", "HEAD"])?;
+    if symref.trim() != branch { return Err(format!("delivery worktree branch drift: expected {branch}, got {}", symref.trim())); }
     let head = git_stdout(&canonical, &["rev-parse", "--verify", "HEAD^{commit}"])?;
-    if head.trim() != base.0 { return Err(format!("delivery worktree head drift: expected {}, got {}", base.0, head.trim())); }
+    let branch_tip = git_stdout(repo.as_path(), &["rev-parse", "--verify", &branch])?;
+    if head.trim() != branch_tip.trim() { return Err(format!("delivery worktree head drift: expected {}, got {}", branch_tip.trim(), head.trim())); }
     let status = git_stdout(&canonical, &["status", "--porcelain"])?;
     if !status.trim().is_empty() { return Err("delivery worktree is dirty before launch".to_owned()); }
     Ok(canonical)
