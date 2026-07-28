@@ -1,8 +1,8 @@
 use drivers::checkpoint::{
-    compact_and_resume, observe_context, AgentHandoff, AssignmentIdentity, CheckpointInput,
-    CheckpointRecord, CompactionOutcome, Compactor, ContextAction, ContextActionError,
-    ContextActionOutcome, ContextBudget, ContextBudgetError, ContextDecision, ExecutionIdentity,
-    HandoffSchema, PreservationEvidence, ResumeOverlay, SideEffects,
+    AgentHandoff, AssignmentIdentity, CheckpointInput, CheckpointRecord, CompactionOutcome,
+    Compactor, ContextAction, ContextActionError, ContextActionOutcome, ContextBudget,
+    ContextBudgetError, ContextDecision, ExecutionIdentity, HandoffSchema, PreservationEvidence,
+    ResumeOverlay, SideEffects, compact_and_resume, observe_context,
 };
 use kernel::failure::{Failure, HardBoundary};
 use kernel::generated::{Id, Ref, Sha};
