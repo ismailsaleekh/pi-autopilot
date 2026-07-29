@@ -1537,3 +1537,45 @@ fn attempt_events(root: &Path, assignment_id: &str) -> Vec<String> {
         .filter_map(|row| row["event"].as_str().map(str::to_owned))
         .collect()
 }
+
+/// Pi closes a successful auto-retry from inside the replacement turn.
+///
+/// Verified against `agent-session.js`: `auto_retry_end {success:true}` is
+/// emitted on the first non-error assistant `message_end` (line 379), which
+/// arrives while the replacement turn is still running. The `success:false`
+/// form is emitted post-turn (line 769). Production hit the first ordering and
+/// was killed by an unhandled transition, discarding a run Pi had already
+/// recovered.
+#[test]
+fn auto_retry_closed_inside_replacement_turn_is_accepted() {
+    let root = temp_root("runner-autoretry-midturn");
+    let accepted = transcript("planning.task-atoms.v1");
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            "",
+            &format!(
+                "send({{type:'agent_start'}}); \
+                 send({{type:'message_start'}}); \
+                 send({{type:'message_end', message:{{role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[], stopReason:'error', errorMessage:'Codex error: Our servers are currently overloaded. Please try again later.'}}}}); \
+                 send({{type:'agent_end',willRetry:true}}); \
+                 send({{type:'auto_retry_start'}}); \
+                 send({{type:'agent_start'}}); \
+                 send({{type:'message_start'}}); \
+                 send({{type:'message_end', message: message({accepted:?})}}); \
+                 send({{type:'auto_retry_end',success:true}}); \
+                 send({{type:'agent_end',willRetry:false}}); \
+                 send({{type:'agent_settled'}});"
+            ),
+        ),
+    );
+    let spec = next_scenario_spec(&root);
+    with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect("a retry Pi closed mid-turn must be accepted, not rejected as out-of-order");
+    assert!(
+        carrier_path(&root).exists(),
+        "the recovered assistant result must still produce a carrier"
+    );
+}

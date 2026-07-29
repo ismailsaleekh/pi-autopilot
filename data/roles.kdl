@@ -4,7 +4,7 @@ role "onboard" {
   version 1
   modes "thin-intake"
   model_slot "reasoning"
-  thinking "max"
+  thinking "xhigh"
   tools "read" "context_budget" "autopilot_submit_onboard"
   repository "bounded read-only"
   git "read-only"
@@ -73,7 +73,7 @@ role "contradiction-resolver" {
   version 1
   modes "fact-resolution"
   model_slot "reasoning"
-  thinking "max"
+  thinking "xhigh"
   tools "read" "grep" "find" "ls" "context_budget" "autopilot_submit_resolution"
   repository "exact evidence scope, read-only"
   git "read-only"
@@ -90,7 +90,7 @@ role "plan-compiler" {
   version 1
   modes "initial-plan" "unit-spec-patch" "cluster-amendment"
   model_slot "reasoning"
-  thinking "max"
+  thinking "xhigh"
   tools "read" "grep" "find" "ls" "context_budget" "autopilot_submit_plan_cluster"
   repository "planning artifacts read-only"
   git "read-only"
@@ -107,7 +107,7 @@ role "context-synthesizer" {
   version 1
   modes "initial-dossier" "dossier-delta"
   model_slot "reasoning"
-  thinking "max"
+  thinking "xhigh"
   tools "read" "grep" "find" "ls" "context_budget" "autopilot_submit_synthesis"
   repository "complete Scout ledger read-only"
   git "read-only"
@@ -124,7 +124,7 @@ role "plan-synthesizer" {
   version 1
   modes "initial-plan" "affected-scope"
   model_slot "reasoning"
-  thinking "max"
+  thinking "xhigh"
   tools "read" "grep" "find" "ls" "context_budget" "autopilot_submit_synthesis"
   repository "complete compiler/trace ledger read-only"
   git "read-only"
@@ -159,7 +159,7 @@ role "context-curator" {
   version 1
   modes "discovery-navigation" "planning-context" "execution-context"
   model_slot "reasoning"
-  thinking "max"
+  thinking "xhigh"
   tools "read" "context_catalog_query" "autopilot_submit_context" "context_budget"
   repository "bounded catalog/artifact read-only"
   git "read-only"
@@ -176,7 +176,7 @@ role "execution-allocator" {
   version 1
   modes "initial-allocation" "delta-allocation"
   model_slot "reasoning"
-  thinking "max"
+  thinking "xhigh"
   tools "read" "autopilot_submit_allocation" "context_budget"
   repository "Allocation Dossier only"
   git "read-only"

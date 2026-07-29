@@ -9,7 +9,7 @@ slot "control" {
 slot "reasoning" {
   provider "openai-codex"
   model "gpt-5.6-sol"
-  thinking "max"
+  thinking "xhigh"
   route "subscription"
   roles "onboard" "contradiction-resolver" "plan-compiler" "context-synthesizer" "plan-synthesizer" "context-curator" "execution-allocator"
 }

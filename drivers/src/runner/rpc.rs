@@ -841,6 +841,16 @@ impl EventOrder {
                 | RpcEvent::ExtensionUiRequest
                 | RpcEvent::ExtensionError,
             ) => EventOrderState::Running,
+            // Pi closes a successful auto-retry from inside the replacement
+            // turn, not after it. `agent-session.js` emits `auto_retry_end`
+            // on the first non-error assistant `message_end`, which arrives
+            // while the turn is still running; the `success:false` form is
+            // emitted post-turn instead. Both are legal, so `Running` must
+            // accept retry closure or a run Pi already recovered is killed.
+            (
+                EventOrderState::Running,
+                RpcEvent::AutoRetryStart | RpcEvent::AutoRetryEnd { .. },
+            ) => EventOrderState::Running,
             (
                 EventOrderState::Running,
                 RpcEvent::CompactionStart {

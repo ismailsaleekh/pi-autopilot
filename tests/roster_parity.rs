@@ -19,7 +19,7 @@ fn roster_matches_d76_section_3_exactly() {
             row("coding", "openai-codex/gpt-5.5", "high"),
             row("control", "openai-codex/gpt-5.6-terra", "high"),
             row("extraction", "openai-codex/gpt-5.5", "high"),
-            row("reasoning", "openai-codex/gpt-5.6-sol", "max"),
+            row("reasoning", "openai-codex/gpt-5.6-sol", "xhigh"),
             row("review", "openai-codex/gpt-5.5", "xhigh"),
         ]
     );

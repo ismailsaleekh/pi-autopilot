@@ -405,6 +405,10 @@ impl RpcAssignment {
             state.upstream_capacity_failure = Some(detail);
             return self.request_stats(state);
         }
+        // A usable assistant message means Pi's own auto-retry already replaced
+        // an earlier refusal in this same cycle. Pi's recovery is authoritative,
+        // so the superseded refusal must not outlive it.
+        state.upstream_capacity_failure = None;
         let record = assistant_from_terminal(message)?;
         if record.stop_reason == "tooluse" {
             self.request_stats(state)?;
