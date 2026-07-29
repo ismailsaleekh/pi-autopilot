@@ -113,6 +113,7 @@ pub struct PlanningRunnerRequest {
     pub authority_set_id: String,
     pub authority_documents: Vec<RunnerTaskDocument>,
     pub context_document: RunnerTaskDocument,
+    pub context_documents: Vec<RunnerTaskDocument>,
     pub mode_parameter: Option<String>,
     pub atom_id_prefix: Option<String>,
     pub atom_registry_path: Option<String>,
@@ -741,9 +742,7 @@ fn validate_planning_request(request: &PlanningRunnerRequest) -> Result<(), Runn
             request.boundary_id.0
         )));
     }
-    if request.authority_documents.is_empty()
-        || request.context_document.class != "context/non-authority"
-    {
+    if request.authority_documents.is_empty() || request.context_documents.is_empty() {
         return Err(RunnerError::InvalidSpec(
             "planning input pack drift".to_owned(),
         ));
@@ -751,11 +750,18 @@ fn validate_planning_request(request: &PlanningRunnerRequest) -> Result<(), Runn
     for document in &request.authority_documents {
         validate_runner_task_document(document, "authority", &request.authority_set_id)?;
     }
-    validate_runner_task_document(
-        &request.context_document,
-        "context/non-authority",
-        &request.authority_set_id,
-    )?;
+    for document in &request.context_documents {
+        validate_runner_task_document(
+            document,
+            "context/non-authority",
+            &request.authority_set_id,
+        )?;
+    }
+    if request.context_documents.first() != Some(&request.context_document) {
+        return Err(RunnerError::InvalidSpec(
+            "planning context alias drift".to_owned(),
+        ));
+    }
     match request.boundary_id.0.as_str() {
         "planning.task-atoms.v1" => {
             let Some(prefix) = &request.atom_id_prefix else {
@@ -864,7 +870,7 @@ fn planning_binding_digests(
     let context_digest = sha_json(&serde_json::json!({
         "authority_set_id": request.authority_set_id,
         "authority_documents": request.authority_documents,
-        "context_document": request.context_document,
+        "context_documents": request.context_documents,
     }))?;
     Ok(BindingDigests {
         boundary_digest: contract_digest(&request.boundary_id.0)?,
@@ -1001,7 +1007,7 @@ fn planning_assignment_digest(request: &PlanningRunnerRequest) -> Result<String,
         "run_revision": request.run_revision,
         "authority_set_id": request.authority_set_id,
         "authority_documents": request.authority_documents.iter().map(document_binding_summary).collect::<Vec<_>>(),
-        "context_document": document_binding_summary(&request.context_document),
+        "context_documents": request.context_documents.iter().map(document_binding_summary).collect::<Vec<_>>(),
         "atom_id_prefix": request.atom_id_prefix,
         "atom_registry_path": request.atom_registry_path,
         "atom_registry_digest": request.atom_registry_digest,
@@ -1030,7 +1036,7 @@ fn planning_assignment_text(
         "atom_id_prefix": request.atom_id_prefix,
         "atom_registry": request.atom_registry_path.as_ref().zip(request.atom_registry_digest.as_ref()).map(|(path, digest)| serde_json::json!({"path": path, "digest": digest})),
         "bound_authority_documents": request.authority_documents.iter().map(document_binding_summary).collect::<Vec<_>>(),
-        "bound_context_documents": [document_binding_summary(&request.context_document)],
+        "bound_context_documents": request.context_documents.iter().map(document_binding_summary).collect::<Vec<_>>(),
     }))
     .map_err(|error| RunnerError::InvalidSpec(format!("planning assignment json: {error}")))
 }
@@ -1069,7 +1075,7 @@ fn planning_context_manifest_text(
         "policy": policy.id,
         "mode": mode.id,
         "authority": request.authority_documents.iter().map(document_binding_summary).collect::<Vec<_>>(),
-        "context": document_binding_summary(&request.context_document),
+        "context_documents": request.context_documents.iter().map(document_binding_summary).collect::<Vec<_>>(),
         "atom_registry_path": request.atom_registry_path,
         "atom_registry_digest": request.atom_registry_digest,
     });
@@ -1166,13 +1172,17 @@ fn fill_context_tier(
                     ));
                 }
             }
-            "repository-context" => target.push(context_item_for_document(
-                request,
-                tier,
-                &category.id,
-                0,
-                &request.context_document,
-            )),
+            "repository-context" => {
+                for (index, document) in request.context_documents.iter().enumerate() {
+                    target.push(context_item_for_document(
+                        request,
+                        tier,
+                        &category.id,
+                        index,
+                        document,
+                    ));
+                }
+            }
             "task-atoms" => {
                 if let (Some(path), Some(digest)) = (
                     request.atom_registry_path.as_deref(),

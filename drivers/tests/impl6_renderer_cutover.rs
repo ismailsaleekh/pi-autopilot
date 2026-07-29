@@ -58,6 +58,33 @@ fn extractor_prompt_carries_its_assigned_lens() {
 }
 
 #[test]
+fn renderer_prompt_binds_every_context_document_by_path_and_digest() {
+    let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+    let fixture = Fixture::new("multi-context-bindings");
+    fixture.install_transport();
+    let repo = fixture.install_multi_context_task_pack();
+    std::env::set_current_dir(&repo).unwrap();
+
+    let mut state = CoreState::open(None).unwrap();
+    let response = command("autopilot-plan ws A1.md A2.md A3.md A4.md A5.md A6.md C1.md C2.md", &mut state);
+    assert_eq!(response.kind, "spawn", "unexpected response: {response:?}");
+    let spawn: CoreToHostSpawnPayload = serde_json::from_value(response.payload).unwrap();
+    let spec_path = spec_path_from_command(&spawn.action.bg_run.command.0);
+    let spec: serde_json::Value = serde_json::from_slice(&fs::read(&spec_path).unwrap()).unwrap();
+    let prompt = fs::read_to_string(spec["prompt_path"].as_str().unwrap()).unwrap();
+    let manifest: serde_json::Value = serde_json::from_slice(&fs::read(repo.join(".pi/autopilot/ws/planning-manifest.json")).unwrap()).unwrap();
+    let contexts = manifest["context_documents"].as_array().unwrap();
+    assert_eq!(contexts.len(), 2);
+
+    for context in contexts {
+        let path = context["path"].as_str().unwrap();
+        let digest = context["digest"].as_str().unwrap();
+        assert!(prompt.contains(path), "prompt missing context path {path}: {prompt}");
+        assert!(prompt.contains(digest), "prompt missing context digest {digest}: {prompt}");
+    }
+}
+
+#[test]
 fn no_package_rendered_sidecar_remains() {
     let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
     let fixture = Fixture::new("no-sidecar");
@@ -132,6 +159,7 @@ impl Fixture {
     }
 
     fn issue_extractor(&self, assignment_id: &str, mode_parameter: &str) -> runner::IssuedRunnerAction {
+        let context_document = runner_doc("context.md", "context/non-authority", "auth", "Repo context");
         runner::planning_issue(&PlanningRunnerRequest {
             workstream: "ws".to_owned(),
             action_id: Id(format!("action-{assignment_id}")),
@@ -142,7 +170,8 @@ impl Fixture {
             run_revision: 1,
             authority_set_id: "auth".to_owned(),
             authority_documents: vec![runner_doc("task.md", "authority", "auth", "Do the work")],
-            context_document: runner_doc("context.md", "context/non-authority", "auth", "Repo context"),
+            context_document: context_document.clone(),
+            context_documents: vec![context_document],
             mode_parameter: Some(mode_parameter.to_owned()),
             atom_id_prefix: Some(format!("TE{}-", assignment_id.rsplit('-').next().unwrap())),
             atom_registry_path: None,
@@ -158,6 +187,24 @@ impl Fixture {
         fs::write(repo.join("context.md"), "[context/non-authority]\nauthority_set_id: auth\n\n# Context\nRepository facts.\n").unwrap();
         vcs.stage_all(&repo).unwrap();
         vcs.snapshot(&repo, "task pack").unwrap();
+        repo
+    }
+
+    fn install_multi_context_task_pack(&self) -> PathBuf {
+        let repo = self.root.join("repo");
+        let vcs = GitVcs::new(&self.root);
+        vcs.init_fixture(&repo).unwrap();
+        for index in 1..=6 {
+            fs::write(
+                repo.join(format!("A{index}.md")),
+                format!("[authority]\nauthority_set_id: auth\n\n# Authority {index}\nA{index}\n"),
+            )
+            .unwrap();
+        }
+        fs::write(repo.join("C1.md"), "[context/non-authority]\nauthority_set_id: auth\n\n# Context 1\nCTX1\n").unwrap();
+        fs::write(repo.join("C2.md"), "[context/non-authority]\nauthority_set_id: auth\n\n# Context 2\nCTX2\n").unwrap();
+        vcs.stage_all(&repo).unwrap();
+        vcs.snapshot(&repo, "multi context task pack").unwrap();
         repo
     }
 }

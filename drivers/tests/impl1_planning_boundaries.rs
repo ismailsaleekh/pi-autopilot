@@ -529,6 +529,12 @@ else:
             Some((p, d)) => (Some(p), Some(d)),
             None => (None, None),
         };
+        let context_document = runner_doc(
+            "context.md",
+            "context/non-authority",
+            "auth",
+            "Repo context",
+        );
         let request = PlanningRunnerRequest {
             workstream: "ws".to_owned(),
             action_id: Id(format!("action-{assignment_id}")),
@@ -539,12 +545,8 @@ else:
             run_revision,
             authority_set_id: "auth".to_owned(),
             authority_documents: vec![runner_doc("task.md", "authority", "auth", "Do the work")],
-            context_document: runner_doc(
-                "context.md",
-                "context/non-authority",
-                "auth",
-                "Repo context",
-            ),
+            context_document: context_document.clone(),
+            context_documents: vec![context_document],
             mode_parameter: first_mode_parameter_for(role),
             atom_id_prefix: prefix.map(str::to_owned),
             atom_registry_path: registry_path,

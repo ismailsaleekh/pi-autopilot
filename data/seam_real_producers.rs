@@ -88,6 +88,7 @@ fn planning_bg_action(workstream: &str, assignment: &AgentAssignment, run_revisi
         authority_set_id: input_set.authority_set_id.clone(),
         authority_documents: input_set.authority_documents.iter().map(runner_doc_from_task).collect(),
         context_document: runner_doc_from_task(context),
+        context_documents: input_set.context_documents.iter().map(runner_doc_from_task).collect(),
         mode_parameter,
         atom_id_prefix: assignment.atom_id_prefix.clone(),
         atom_registry_path: atom_registry.as_ref().map(|(path, _)| path.clone()),
