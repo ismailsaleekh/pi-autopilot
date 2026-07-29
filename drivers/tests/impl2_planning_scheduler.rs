@@ -140,6 +140,36 @@ fn planning_scheduler_respects_role_barrier_and_partial_topup() {
 }
 
 #[test]
+fn issued_unacknowledged_assignment_occupies_wave_slot() {
+    let manifest = manifest("scheduler-issued-unacknowledged");
+    let p1 = by_role(&manifest, "task-extractor");
+    let issued = p1
+        .iter()
+        .enumerate()
+        .map(|(index, assignment)| PlanningIssuedRef {
+            assignment_id: assignment.assignment_id.clone(),
+            action_id: format!("action-{index}"),
+            run_revision: 1,
+        })
+        .collect::<Vec<_>>();
+    let refs = PlanningRefs {
+        issued,
+        launch_acks: BTreeSet::new(),
+        accepted: BTreeSet::new(),
+        terminal_failures: BTreeSet::new(),
+        activation_refs: BTreeSet::new(),
+    };
+
+    let next = next_planning_wave(&manifest, &refs, 64)
+        .expect("issued unacknowledged wave remains schedulable");
+    assert_eq!(
+        next,
+        Vec::new(),
+        "already-issued unconsumed assignments must not be re-issued"
+    );
+}
+
+#[test]
 fn planning_failed_member_pauses_without_erasing_siblings() {
     let manifest = manifest("scheduler-blocked");
     let p1 = by_role(&manifest, "task-extractor");
