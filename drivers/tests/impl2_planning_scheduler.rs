@@ -1,9 +1,9 @@
 use std::collections::BTreeSet;
 
 use drivers::planning::{
-    next_planning_wave, planning_policy, PlanningAcceptedRef, PlanningError, PlanningIssuedRef,
-    PlanningManifest, PlanningPolicy, PlanningRefs, PlanningTerminalFailureRef,
-    PlanningWaveFailure,
+    PlanningAcceptedRef, PlanningError, PlanningIssuedRef, PlanningManifest, PlanningPolicy,
+    PlanningRefs, PlanningTerminalFailureRef, PlanningWaveFailure, next_planning_wave,
+    planning_policy,
 };
 
 fn manifest(workstream: &str) -> PlanningManifest {
@@ -111,12 +111,14 @@ fn planning_scheduler_respects_role_barrier_and_partial_topup() {
     assert_eq!(next[0].assignment_id, p1[4].assignment_id);
     assert_eq!(next[1].assignment_id, p1[5].assignment_id);
     assert_eq!(next[2].assignment_id, p1[6].assignment_id);
-    assert!(next
-        .iter()
-        .all(|assignment| assignment.role == "task-extractor"));
-    assert!(next
-        .iter()
-        .all(|assignment| assignment.role != "repository-scout"));
+    assert!(
+        next.iter()
+            .all(|assignment| assignment.role == "task-extractor")
+    );
+    assert!(
+        next.iter()
+            .all(|assignment| assignment.role != "repository-scout")
+    );
 }
 
 #[test]
@@ -166,9 +168,11 @@ fn planning_failed_member_pauses_without_erasing_siblings() {
             assert_eq!(blocked.attempts.get(&p1[6].assignment_id).copied(), Some(1));
             assert_eq!(blocked.completed_assignments.len(), 6);
             for accepted in p1.iter().take(6) {
-                assert!(blocked
-                    .completed_assignments
-                    .contains(&accepted.assignment_id));
+                assert!(
+                    blocked
+                        .completed_assignments
+                        .contains(&accepted.assignment_id)
+                );
             }
         }
     }
@@ -230,9 +234,10 @@ fn scout_wave_blocked_until_every_p1_member_accepted() {
         .expect("dependency-blocked scout leaves P1 schedulable");
 
     assert_eq!(next.len(), 7);
-    assert!(next
-        .iter()
-        .all(|assignment| assignment.role == "task-extractor"));
+    assert!(
+        next.iter()
+            .all(|assignment| assignment.role == "task-extractor")
+    );
 }
 
 #[test]
@@ -256,9 +261,11 @@ fn compile_wave_requires_all_three_declared_dependencies() {
     let blocked_by_active_resolution = next_planning_wave(&manifest, &two_dependency_refs, 64)
         .expect("active P3 dependency blocks compile and schedules resolution");
     assert_eq!(blocked_by_active_resolution.len(), 3);
-    assert!(blocked_by_active_resolution
-        .iter()
-        .all(|assignment| assignment.role == "contradiction-resolver"));
+    assert!(
+        blocked_by_active_resolution
+            .iter()
+            .all(|assignment| assignment.role == "contradiction-resolver")
+    );
 
     let inactive_resolution_refs = accept_roles(
         &manifest,
@@ -268,9 +275,11 @@ fn compile_wave_requires_all_three_declared_dependencies() {
         next_planning_wave(&manifest, &inactive_resolution_refs, 64)
             .expect("inactive P3 dependency is complete for compile");
     assert_eq!(compile_after_inactive_resolution.len(), 5);
-    assert!(compile_after_inactive_resolution
-        .iter()
-        .all(|assignment| assignment.role == "plan-compiler"));
+    assert!(
+        compile_after_inactive_resolution
+            .iter()
+            .all(|assignment| assignment.role == "plan-compiler")
+    );
 
     let mut all_dependency_refs = accept_roles(
         &manifest,
@@ -287,9 +296,11 @@ fn compile_wave_requires_all_three_declared_dependencies() {
     let compile_after_all_dependencies = next_planning_wave(&manifest, &all_dependency_refs, 64)
         .expect("all compile dependencies satisfied");
     assert_eq!(compile_after_all_dependencies.len(), 5);
-    assert!(compile_after_all_dependencies
-        .iter()
-        .all(|assignment| assignment.role == "plan-compiler"));
+    assert!(
+        compile_after_all_dependencies
+            .iter()
+            .all(|assignment| assignment.role == "plan-compiler")
+    );
 }
 
 #[test]
@@ -364,7 +375,9 @@ fn planning_resume_recomputes_identical_wave_from_event_refs() {
             .map(|assignment| assignment.assignment_id.clone())
             .collect::<Vec<_>>()
     );
-    assert!(before_restart
-        .iter()
-        .all(|assignment| assignment.assignment_id != p1[0].assignment_id));
+    assert!(
+        before_restart
+            .iter()
+            .all(|assignment| assignment.assignment_id != p1[0].assignment_id)
+    );
 }

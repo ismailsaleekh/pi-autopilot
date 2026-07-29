@@ -789,8 +789,14 @@ fn validate_planning_request(request: &PlanningRunnerRequest) -> Result<(), Runn
             }
         }
         "planning.work-map.v1" => {
-            if request.atom_registry_path.as_deref().is_none_or(str::is_empty)
-                || request.atom_registry_digest.as_deref().is_none_or(str::is_empty)
+            if request
+                .atom_registry_path
+                .as_deref()
+                .is_none_or(str::is_empty)
+                || request
+                    .atom_registry_digest
+                    .as_deref()
+                    .is_none_or(str::is_empty)
             {
                 return Err(RunnerError::InvalidSpec(
                     "work-map assignment missing atom registry binding".to_owned(),
@@ -2054,7 +2060,13 @@ pub(crate) fn task_anchor_registry_from_spec(
     }
     let authority_documents = authority_documents
         .iter()
-        .map(|document| planning_task_document_from_contract(document, crate::planning::TaskDocumentClass::Authority, authority_set_id))
+        .map(|document| {
+            planning_task_document_from_contract(
+                document,
+                crate::planning::TaskDocumentClass::Authority,
+                authority_set_id,
+            )
+        })
         .collect::<Vec<_>>();
     let context_documents = context_documents
         .iter()
@@ -2098,7 +2110,11 @@ pub(crate) fn atom_registry_binding_from_spec<'a>(
         runtime.reject("boundary_id=planning.work-map.v1; field=atom_registry_path; expected=spec-bound atom registry path; got=missing; hint=refuse unbound work-map assignment".to_owned())?;
         unreachable!("runtime.reject returns Err in enforce mode")
     };
-    let Some(digest) = spec.atom_registry_digest.as_ref().map(|digest| digest.0.as_str()) else {
+    let Some(digest) = spec
+        .atom_registry_digest
+        .as_ref()
+        .map(|digest| digest.0.as_str())
+    else {
         runtime.reject("boundary_id=planning.work-map.v1; field=atom_registry_digest; expected=spec-bound atom registry digest; got=missing; hint=refuse unbound work-map assignment".to_owned())?;
         unreachable!("runtime.reject returns Err in enforce mode")
     };
