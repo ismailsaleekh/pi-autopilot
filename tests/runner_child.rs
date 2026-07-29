@@ -212,8 +212,11 @@ fn autopilot_plan_preserves_multiple_context_documents_in_manifest_spec_and_prom
         root.join(".pi/autopilot/main/planning/prompts/planning-main-task-extractor-01.md"),
     )
     .expect("planning prompt");
-    assert!(prompt.contains("CTX1"), "{prompt}");
-    assert!(prompt.contains("CTX2"), "{prompt}");
+    // Context bodies are no longer eagerly inlined: the renderer binds them through the
+    // context manifest as path+digest required-reads. Both documents must still be reachable
+    // from the prompt by path (their bodies are asserted on spec/manifest above).
+    assert!(prompt.contains("C1.md"), "{prompt}");
+    assert!(prompt.contains("C2.md"), "{prompt}");
 }
 
 #[test]

@@ -3,9 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use drivers::planning::{
-    self, TaskAnchorRegistry, TaskDocument, TaskDocumentClass, TaskInputSet,
-};
+use drivers::planning::{self, TaskAnchorRegistry, TaskDocument, TaskDocumentClass, TaskInputSet};
 use drivers::runner::{self, PlanningRunnerRequest, RunnerTaskDocument};
 use drivers::seam::{self, CoreState};
 use kernel::generated::{
@@ -547,7 +545,7 @@ else:
                 "auth",
                 "Repo context",
             ),
-            mode_parameter: None,
+            mode_parameter: first_mode_parameter_for(role),
             atom_id_prefix: prefix.map(str::to_owned),
             atom_registry_path: registry_path,
             atom_registry_digest: registry_digest,
@@ -759,12 +757,9 @@ fn atoms_with_source(source: &str) -> TaskAtoms {
 }
 
 fn assert_source_rejected(registry: &TaskAnchorRegistry, source: &str) {
-    let rejection = planning::validate_task_atoms_for_assignment(
-        &atoms_with_source(source),
-        "TE01-",
-        registry,
-    )
-    .expect_err("unverified source must reject");
+    let rejection =
+        planning::validate_task_atoms_for_assignment(&atoms_with_source(source), "TE01-", registry)
+            .expect_err("unverified source must reject");
     assert_eq!(rejection.boundary_id(), "planning.task-atoms.v1");
     assert!(
         rejection.actual().contains("field=atoms.sources"),
@@ -871,4 +866,16 @@ fn make_executable(path: &Path) {
         permissions.set_mode(0o755);
         fs::set_permissions(path, permissions).unwrap();
     }
+}
+
+/// Derive the lens the package itself would bind for the first assignment of `role`.
+/// Uses the real allocator so this fixture can never drift from production behavior.
+fn first_mode_parameter_for(role: &str) -> Option<String> {
+    let roles = drivers::roles::RoleRegistry::package().expect("role registry");
+    let role = roles.get(role).expect("role is registered");
+    drivers::roles::allocate_mode_parameters(role, role.mode_parameters.len().max(1))
+        .expect("mode parameter allocation")
+        .first()
+        .cloned()
+        .flatten()
 }
