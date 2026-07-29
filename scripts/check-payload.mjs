@@ -204,6 +204,7 @@ function main() {
     { path: coreBinEntry, reason: 'package.json bin.autopilot-core' },
     { path: runnerBinEntry, reason: 'package.json bin.autopilot-agent-run' },
     { path: 'src/generated/index.ts', reason: 'generated seam types' },
+    { path: 'src/generated/child-extension.ts', reason: 'generated child submit tools' },
     ...hostRuntimeSources.map((path) => ({ path, reason: 'Host runtime source' })),
     ...hostRuntimeSources.flatMap(runtimeInputsFromSource),
   ];

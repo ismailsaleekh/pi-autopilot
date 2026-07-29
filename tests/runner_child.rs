@@ -8,12 +8,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use drivers::runner::{
-    child, planning_context_digest, planning_paths, role_builtin_tool_names, session_id_for,
+    child, planning_context_digest, planning_paths, role_tool_names, session_id_for,
+    settings_digest,
 };
 use drivers::seam::{self, CoreState};
-use kernel::generated::{
-    ContractId, CoreToHostSpawnPayload, Id, ModeId, SeamEnvelope, TaskDocument,
-};
+use kernel::generated::{ContractId, Id, ModeId, SeamEnvelope, TaskDocument};
 use serde_json::{Value, json};
 use sha2::{Digest as ShaDigest, Sha256};
 
@@ -32,7 +31,7 @@ fn fake_pi_journey_writes_identity_carrier_and_isolated_exact_args() {
                 "writeFileSync({:?}, JSON.stringify({{ argv: process.argv.slice(2), cwd: process.cwd(), env: {{ OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY, OPENAI_API_KEY: process.env.OPENAI_API_KEY }} }}));",
                 argv_path
             ),
-            &format!("emitAssistant({accepted:?});"),
+            &format!("emitCarrier({accepted:?});"),
         ),
     );
     let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
@@ -75,10 +74,12 @@ fn fake_pi_journey_writes_identity_carrier_and_isolated_exact_args() {
         "session dir must be absolute: {}",
         argv[5]
     );
+    assert_eq!(argv[6], "--no-extensions");
+    assert_eq!(argv[7], "-e");
+    assert_eq!(PathBuf::from(&argv[8]), child_addon_path());
     assert_eq!(
-        argv[6..17],
+        argv[9..19],
         [
-            "--no-extensions",
             "--no-skills",
             "--no-prompt-templates",
             "--no-themes",
@@ -92,7 +93,7 @@ fn fake_pi_journey_writes_identity_carrier_and_isolated_exact_args() {
         ]
     );
     assert!(argv.contains(&"--tools".to_owned()));
-    assert!(argv.contains(&"read,grep,find,ls".to_owned()));
+    assert!(argv.contains(&"read,grep,find,ls,autopilot_submit_atoms".to_owned()));
     assert!(!argv.contains(&"-p".to_owned()));
     assert_eq!(argv_record["env"]["OPENROUTER_API_KEY"], Value::Null);
     assert_eq!(argv_record["env"]["OPENAI_API_KEY"], Value::Null);
@@ -100,6 +101,158 @@ fn fake_pi_journey_writes_identity_carrier_and_isolated_exact_args() {
         PathBuf::from(argv_record["cwd"].as_str().expect("cwd")),
         root
     );
+}
+
+#[test]
+fn declared_planning_terminal_tools_survive_runtime_resolution() {
+    let atoms = role_tool_names("task-extractor").expect("task extractor tools");
+    assert!(atoms.iter().any(|tool| tool == "autopilot_submit_atoms"));
+    let curator = role_tool_names("context-curator").expect("context curator tools");
+    assert!(
+        curator
+            .iter()
+            .any(|tool| tool == "autopilot_submit_context")
+    );
+    assert!(
+        !curator.iter().any(|tool| tool == "context_catalog_query"),
+        "removed phantom capabilities must not reappear at runtime"
+    );
+}
+
+#[test]
+fn child_registration_receipt_is_required_before_first_prompt() {
+    let root = temp_root("runner-missing-tool-receipt");
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi("const suppressReceipt = true;", "process.exit(91);"),
+    );
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("missing receipt must fail before prompt");
+    assert!(
+        error.contains("registration receipt count was 0"),
+        "{error}"
+    );
+}
+
+#[test]
+fn registered_but_not_active_terminal_tool_is_rejected_before_prompt() {
+    let root = temp_root("runner-inactive-terminal-tool");
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            "activeTools = activeTools.filter(name => name !== 'autopilot_submit_atoms');",
+            "process.exit(92);",
+        ),
+    );
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("inactive terminal tool must fail before prompt");
+    assert!(
+        error.contains("active tools drift before prompt"),
+        "{error}"
+    );
+}
+
+#[test]
+fn tool_schema_identity_error_does_not_consume_value_repair() {
+    let root = temp_root("runner-tool-schema-identity");
+    let accepted = transcript("planning.task-atoms.v1");
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            "",
+            &format!("emitCarrier({accepted:?}, 'gpt-5.5', {{schema_digest:'deadbeef'}});"),
+        ),
+    );
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("wrong schema digest is an identity error");
+    assert!(
+        error.contains("identity rejected before value repair"),
+        "{error}"
+    );
+    assert_eq!(
+        attempt_events(&root, "planning-main-task-extractor-01"),
+        ["started", "identity-rejected"]
+    );
+}
+
+#[test]
+fn wrong_tool_name_is_identity_error_even_with_expected_boundary_and_schema() {
+    let root = temp_root("runner-wrong-terminal-tool");
+    let accepted = transcript("planning.task-atoms.v1");
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            "const overrideToolName = 'autopilot_submit_context';",
+            &format!("emitCarrier({accepted:?});"),
+        ),
+    );
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("wrong tool name must fail despite expected details");
+    assert!(
+        error.contains("identity rejected before value repair"),
+        "{error}"
+    );
+    assert_eq!(
+        attempt_events(&root, "planning-main-task-extractor-01"),
+        ["started", "identity-rejected"]
+    );
+}
+
+#[test]
+fn errored_submit_result_is_never_a_carrier() {
+    let root = temp_root("runner-submit-is-error");
+    let accepted = transcript("planning.task-atoms.v1");
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            "const submitIsError = true;",
+            &format!("emitCarrier({accepted:?});"),
+        ),
+    );
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("isError submit result must fail");
+    assert!(error.contains("isError=true"), "{error}");
+    assert!(!carrier_path(&root).exists());
+}
+
+#[test]
+fn duplicate_tool_result_details_must_match_exactly() {
+    let root = temp_root("runner-tool-result-details-drift");
+    let accepted = transcript("planning.task-atoms.v1");
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            "const toolResultSchemaDigest = 'different';",
+            &format!("emitCarrier({accepted:?});"),
+        ),
+    );
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("two RPC copies of details must match");
+    assert!(error.contains("details drift"), "{error}");
+    assert!(!carrier_path(&root).exists());
+}
+
+#[test]
+fn settings_digest_tracks_the_declared_launch_channel() {
+    assert_ne!(settings_digest(true), settings_digest(false));
 }
 
 #[test]
@@ -180,6 +333,7 @@ fn autopilot_plan_preserves_multiple_context_documents_in_manifest_spec_and_prom
             "AUTOPILOT_AGENT_RUNNER_WRAPPER",
             std::env::current_exe().expect("current exe"),
         );
+        std::env::set_var("AUTOPILOT_CHILD_ADDON_PATH", child_addon_path());
     }
 
     let previous = std::env::current_dir().expect("current dir");
@@ -254,7 +408,7 @@ fn fake_pi_boundary_retry_reuses_session_and_succeeds() {
                 argv_path
             ),
             &format!(
-                "writeFileSync({:?}, String(promptCount)); if (promptCount === 2 && !cmd.message.includes('field:    raw_output')) process.exit(43); emitAssistant(promptCount === 1 ? 'not-json' : {accepted:?});",
+                "writeFileSync({:?}, String(promptCount)); if (promptCount === 2 && !cmd.message.includes('field:    payload')) process.exit(43); emitCarrier(promptCount === 1 ? {{atoms:[{{id:'wrong-id',kind:'work',text:'x',sources:[]}}]}} : {accepted:?});",
                 count_path
             ),
         ),
@@ -303,7 +457,7 @@ fn runner_rpc_will_retry_is_progress_until_agent_settled() {
         &rpc_fake_pi(
             "",
             &format!(
-                "send({{type:'agent_start'}}); send({{type:'agent_end',willRetry:true}}); send({{type:'auto_retry_start'}}); send({{type:'auto_retry_end',success:true}}); emitAssistant({accepted:?});"
+                "send({{type:'agent_start'}}); send({{type:'agent_end',willRetry:true}}); send({{type:'auto_retry_start'}}); send({{type:'auto_retry_end',success:true}}); emitCarrier({accepted:?});"
             ),
         ),
     );
@@ -354,7 +508,7 @@ fn runner_rpc_null_context_percent_blocks_terminal_success() {
         &root,
         &rpc_fake_pi(
             "statsData = () => ({ sessionId, contextUsage: { tokens:null, contextWindow:100000, percent:null } });",
-            &format!("emitAssistant({:?});", transcript("planning.task-atoms.v1")),
+            &format!("emitCarrier({:?});", transcript("planning.task-atoms.v1")),
         ),
     );
     let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
@@ -379,7 +533,7 @@ fn runner_rpc_checkpoint_steer_compact_resume_same_session() {
                 commands
             ),
             &format!(
-                "log(cmd); if (promptCount === 1) {{ const thinking = message('tool phase','gpt-5.5','toolUse'); send({{type:'agent_start'}}); send({{type:'message_start'}}); send({{type:'message_end',message:thinking}}); send({{type:'tool_execution_start',toolName:'read'}}); send({{type:'tool_execution_end',toolName:'read'}}); }} else {{ forceNullStats = false; contextPercent = 10; emitAssistant({accepted:?}); }}"
+                "log(cmd); if (promptCount === 1) {{ const thinking = message('tool phase','gpt-5.5','toolUse'); send({{type:'agent_start'}}); send({{type:'message_start'}}); send({{type:'message_end',message:thinking}}); emitReadTool(); }} else {{ forceNullStats = false; contextPercent = 10; emitCarrier({accepted:?}); }}"
             ),
         ),
     );
@@ -411,7 +565,7 @@ fn runner_rpc_checkpoint_resume_rejects_unknown_after_valid_resume_response() {
                 commands
             ),
             &format!(
-                "log(cmd); if (promptCount === 1) {{ const thinking = message('tool phase','gpt-5.5','toolUse'); send({{type:'agent_start'}}); send({{type:'message_start'}}); send({{type:'message_end',message:thinking}}); send({{type:'tool_execution_start',toolName:'read'}}); send({{type:'tool_execution_end',toolName:'read'}}); }} else {{ emitAssistant({accepted:?}); }}"
+                "log(cmd); if (promptCount === 1) {{ const thinking = message('tool phase','gpt-5.5','toolUse'); send({{type:'agent_start'}}); send({{type:'message_start'}}); send({{type:'message_end',message:thinking}}); emitReadTool(); }} else {{ emitCarrier({accepted:?}); }}"
             ),
         ),
     );
@@ -441,7 +595,7 @@ fn runner_rpc_checkpoint_rejects_handoff_over_total_max_bytes_before_compact() {
                 "contextPercent = 86; const commandLog = {:?}; function log(cmd) {{ appendFileSync(commandLog, JSON.stringify({{type:cmd.type}})+'\\n'); }} function afterCompact(cmd) {{ log(cmd); process.exit(47); }} function afterSteer(cmd) {{ log(cmd); const h = message({handoff:?}); send({{type:'message_start'}}); send({{type:'message_end',message:h}}); }}",
                 commands
             ),
-            "log(cmd); const thinking = message('tool phase','gpt-5.5','toolUse'); send({type:'agent_start'}); send({type:'message_start'}); send({type:'message_end',message:thinking}); send({type:'tool_execution_start',toolName:'read'}); send({type:'tool_execution_end',toolName:'read'});",
+            "log(cmd); const thinking = message('tool phase','gpt-5.5','toolUse'); send({type:'agent_start'}); send({type:'message_start'}); send({type:'message_end',message:thinking}); emitReadTool();",
         ),
     );
     let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
@@ -470,7 +624,7 @@ fn runner_rpc_checkpoint_rejects_handoff_over_entry_max_bytes_before_compact() {
                 "contextPercent = 86; const commandLog = {:?}; function log(cmd) {{ appendFileSync(commandLog, JSON.stringify({{type:cmd.type}})+'\\n'); }} function afterCompact(cmd) {{ log(cmd); process.exit(47); }} function afterSteer(cmd) {{ log(cmd); const h = message({handoff:?}); send({{type:'message_start'}}); send({{type:'message_end',message:h}}); }}",
                 commands
             ),
-            "log(cmd); const thinking = message('tool phase','gpt-5.5','toolUse'); send({type:'agent_start'}); send({type:'message_start'}); send({type:'message_end',message:thinking}); send({type:'tool_execution_start',toolName:'read'}); send({type:'tool_execution_end',toolName:'read'});",
+            "log(cmd); const thinking = message('tool phase','gpt-5.5','toolUse'); send({type:'agent_start'}); send({type:'message_start'}); send({type:'message_end',message:thinking}); emitReadTool();",
         ),
     );
     let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
@@ -515,7 +669,7 @@ fn fake_pi_nonzero_malformed_wrong_model_boundary_and_jsonl_protocol_fail_loudly
         &rpc_fake_pi(
             "",
             &format!(
-                "emitAssistant({:?}, 'wrong');",
+                "emitCarrier({:?}, 'wrong');",
                 transcript("planning.task-atoms.v1")
             ),
         ),
@@ -531,7 +685,10 @@ fn fake_pi_nonzero_malformed_wrong_model_boundary_and_jsonl_protocol_fail_loudly
 
     write_fake_pi(
         &root,
-        &rpc_fake_pi("", "emitAssistant('no boundary token here');"),
+        &rpc_fake_pi(
+            "",
+            "emitCarrier({atoms:[{id:'wrong',kind:'work',text:'x',sources:[]}]});",
+        ),
     );
     let boundary_spec = next_scenario_spec(&root);
     assert!(
@@ -575,13 +732,13 @@ fn fake_pi_nonzero_malformed_wrong_model_boundary_and_jsonl_protocol_fail_loudly
         ),
     );
     let dedupe_spec = next_scenario_spec(&root);
+    let duplicate_error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), dedupe_spec.display().to_string()])
+    })
+    .expect_err("assistant text is never a planning carrier");
     assert!(
-        with_fake_path(&root, || child::main(&[
-            "--spec".to_owned(),
-            dedupe_spec.display().to_string()
-        ]))
-        .is_ok(),
-        "duplicate identical terminal event is de-duplicated"
+        duplicate_error.contains("terminating submit tool result is required"),
+        "{duplicate_error}"
     );
     fs::remove_file(carrier_path(&root)).ok();
 
@@ -610,20 +767,20 @@ fn fake_pi_nonzero_malformed_wrong_model_boundary_and_jsonl_protocol_fail_loudly
         &rpc_fake_pi(
             "",
             &format!(
-                "const toolUse = message('thinking', 'gpt-5.5', 'toolUse'); const final = message({:?}); send({{type:'agent_start'}}); send({{type:'message_start'}}); send({{type:'message_end', message:toolUse}}); send({{type:'tool_execution_start',toolName:'read'}}); send({{type:'tool_execution_end',toolName:'read'}}); send({{type:'message_end', message:final}}); send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}});",
+                "const toolUse = message('thinking', 'gpt-5.5', 'toolUse'); const final = message({:?}); send({{type:'agent_start'}}); send({{type:'message_start'}}); send({{type:'message_end', message:toolUse}}); emitReadTool(); send({{type:'message_end', message:final}}); send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}});",
                 transcript("planning.task-atoms.v1")
             ),
         ),
     );
     fs::remove_file(carrier_path(&root)).ok();
     let tool_cycle_spec = next_scenario_spec(&root);
+    let text_error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), tool_cycle_spec.display().to_string()])
+    })
+    .expect_err("planning assistant text must be rejected after tool activity");
     assert!(
-        with_fake_path(&root, || child::main(&[
-            "--spec".to_owned(),
-            tool_cycle_spec.display().to_string()
-        ]))
-        .is_ok(),
-        "real Pi 0.82 agent_end messages shape should parse"
+        text_error.contains("terminating submit tool result is required"),
+        "{text_error}"
     );
 
     write_fake_pi(
@@ -842,7 +999,7 @@ fn runner_streaming_pi_jsonl_discards_message_update_chatter_but_keeps_final_eve
         &rpc_fake_pi(
             "",
             &format!(
-                "send({{type:'agent_start'}}); for (let i=0; i<400; i++) {{ const msg = message('scratch '+i+' '+ 'x'.repeat(2048), 'gpt-5.5', 'toolUse'); send({{type:'message_update', message:msg, assistantMessageEvent:{{type:'thinking_delta',delta:'x'}}}}); }} const finalMessage = message({accepted:?}); send({{type:'message_start'}}); send({{type:'message_end', message:finalMessage}}); send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}});"
+                "send({{type:'agent_start'}}); for (let i=0; i<400; i++) {{ const msg = message('scratch '+i+' '+ 'x'.repeat(2048), 'gpt-5.5', 'toolUse'); send({{type:'message_update', message:msg, assistantMessageEvent:{{type:'thinking_delta',delta:'x'}}}}); }} emitCarrierResult({accepted:?}); send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}});"
             ),
         ),
     );
@@ -979,7 +1136,7 @@ fn write_planning_spec_inner(
     let paths = planning_paths(root, "main", &assignment_id);
     fs::create_dir_all(paths.prompt_path.parent().expect("prompt parent")).expect("prompt dir");
     fs::write(&paths.prompt_path, prompt).expect("prompt");
-    let tools = role_builtin_tool_names("task-extractor").expect("tools");
+    let tools = role_tool_names("task-extractor").expect("tools");
     let authority_documents = vec![
         doc("TASK-A.md", "authority", "AUTHORITY-A-SENTINEL"),
         doc("TASK-B.md", "authority", "AUTHORITY-B-SENTINEL"),
@@ -1002,7 +1159,7 @@ fn write_planning_spec_inner(
         &ContractId(boundary.to_owned()),
     );
     let spec = json!({
-        "schema":"autopilot.agent_run_spec.v2",
+        "schema":"autopilot.agent_run_spec.v3",
         "assignment_kind":"planning-review",
         "action_id":"action-planning-main-task-extractor-01",
         "assignment_id":"planning-main-task-extractor-01",
@@ -1028,7 +1185,7 @@ fn write_planning_spec_inner(
         "result_contract_digest":contract_digest(boundary),
         "carrier_path":paths.carrier_path,
         "session_id":session_id.0,
-        "settings_digest":sha256_hex(SETTINGS_IDENTITY.as_bytes()),
+        "settings_digest":settings_digest(true),
         "context_digest":context_digest,
         "skills_digest":sha256_hex(SKILLS_IDENTITY.as_bytes()),
         "subscription_digest":subscription_digest("openai-codex", model, "high"),
@@ -1036,7 +1193,9 @@ fn write_planning_spec_inner(
         "authority_set_id":"set-a",
         "authority_documents":authority_documents,
         "context_document":context_document,
-        "context_documents":context_documents
+        "context_documents":context_documents,
+        "runtime_extension_path":child_addon_path(),
+        "runtime_extension_digest":sha256_hex(&fs::read(child_addon_path()).expect("child addon"))
     });
     let spec = mutate(spec);
     fs::create_dir_all(paths.spec_path.parent().expect("spec parent")).expect("spec dir");
@@ -1050,6 +1209,10 @@ fn write_planning_spec_inner(
 
 fn doc(path: &str, class: &str, body: &str) -> Value {
     json!({"path":path,"class":class,"digest":task_document_digest(class, "set-a", body),"body_digest":sha256_hex(body.as_bytes()),"body":body})
+}
+
+fn child_addon_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/generated/child-extension.ts")
 }
 
 fn carrier_path(root: &Path) -> PathBuf {
@@ -1078,12 +1241,13 @@ fn valid_handoff() -> Value {
 }
 
 fn success_fake_pi(output: &str) -> String {
-    rpc_fake_pi("", &format!("emitAssistant({output:?});"))
+    rpc_fake_pi("", &format!("emitCarrier({output:?});"))
 }
 
 fn rpc_fake_pi(setup: &str, on_prompt: &str) -> String {
     format!(
         r#"#!/usr/bin/env node
+import {{ createHash }} from 'node:crypto';
 import {{ appendFileSync, readFileSync, writeFileSync }} from 'node:fs';
 let promptCount = 0;
 let contextPercent = 10;
@@ -1091,6 +1255,22 @@ const sessionId = process.argv[process.argv.indexOf('--session-id') + 1];
 const sessionDirIndex = process.argv.indexOf('--session-dir');
 if (sessionDirIndex === -1) {{ process.stderr.write('fake pi: --session-dir is required\n'); process.exit(64); }}
 const sessionDir = process.argv[sessionDirIndex + 1];
+const addonIndex = process.argv.indexOf('-e');
+const addonPath = addonIndex === -1 ? undefined : process.argv[addonIndex + 1];
+const toolsIndex = process.argv.indexOf('--tools');
+if (toolsIndex === -1) {{ process.stderr.write('fake pi: --tools is required\n'); process.exit(64); }}
+const requestedTools = process.argv[toolsIndex + 1].split(',').filter(Boolean);
+const submitBindings = {{
+  autopilot_submit_atoms: ['planning.task-atoms.v1', '77d000b816b3c14dcdefeba0c23d4f4f9f8bedaf5b281081f1cea138e525e091'],
+  autopilot_submit_context: ['planning.scout-dossier.v1', '30f69b47c83079ce00ea22cab308e9a26eb7b24cae045aa1dd008221b45da618'],
+  autopilot_submit_plan_cluster: ['planning.work-map.v1', 'd60fa316fa8d5f2baf1d1a764028bdaf5676e094ec23710c53917e760cfe939a'],
+  autopilot_submit_resolution: ['planning.questions.v1', 'a716699618f28675f8872ff8d039c40e8443c07cd6a94f907921ee2b9dd88abc'],
+  autopilot_submit_review: ['planning.plan-review.v1', '073f22c10d42166d5ec5d0a6465a1fa8f0df8fc1af2ce6a0702bed9b955786d8'],
+  autopilot_submit_scout_report: ['planning.scout-dossier.v1', '30f69b47c83079ce00ea22cab308e9a26eb7b24cae045aa1dd008221b45da618'],
+  autopilot_submit_synthesis: ['planning.work-map.v1', 'd60fa316fa8d5f2baf1d1a764028bdaf5676e094ec23710c53917e760cfe939a'],
+}};
+let activeTools = requestedTools.filter(name => !name.startsWith('autopilot_submit_') || (addonPath !== undefined && submitBindings[name]));
+const terminalTool = activeTools.find(name => name.startsWith('autopilot_submit_'));
 // Model real Pi's session store: a session file keyed by (sessionDir, sessionId)
 // is reopened when it already exists, and its retained messages become context.
 const sessionPath = `${{sessionDir}}/${{sessionId}}.jsonl`;
@@ -1100,6 +1280,28 @@ function persist(entry) {{ storedMessages.push(JSON.stringify(entry)); appendFil
 function send(value) {{ process.stdout.write(JSON.stringify(value) + '\n'); }}
 function message(text, model='gpt-5.5', stopReason='stop') {{ return {{ role:'assistant', provider:'openai-codex', model, content:[{{type:'text', text}}], stopReason }}; }}
 function emitAssistant(text, model='gpt-5.5', stopReason='stop') {{ const msg = message(text, model, stopReason); send({{type:'agent_start'}}); send({{type:'message_start'}}); send({{type:'message_end', message: msg}}); send({{type:'agent_end', willRetry:false}}); send({{type:'agent_settled'}}); }}
+function emitCarrier(payload, model='gpt-5.5', overrides={{}}) {{
+  if (!terminalTool) return emitAssistant('declared terminal tool is unavailable', model);
+  send({{type:'agent_start'}});
+  emitCarrierResult(payload, model, overrides);
+  send({{type:'agent_end',willRetry:false}});
+  send({{type:'agent_settled'}});
+}}
+function emitCarrierResult(payload, model='gpt-5.5', overrides={{}}) {{
+  const [boundary_id, schema_digest] = submitBindings[terminalTool];
+  const details = {{boundary_id, schema_digest, binding:process.env.AUTOPILOT_CARRIER_BINDING ?? '', payload:typeof payload === 'string' ? JSON.parse(payload) : payload, ...overrides}};
+  const resultTool = typeof overrideToolName === 'string' ? overrideToolName : terminalTool;
+  const callId = 'call_fake_submit_' + promptCount;
+  send({{type:'message_start'}});
+  send({{type:'message_end',message:{{role:'assistant',provider:'openai-codex',model,content:[{{type:'toolCall',id:callId,name:resultTool,arguments:details.payload}}],stopReason:'toolUse'}}}});
+  send({{type:'tool_execution_start',toolCallId:callId,toolName:resultTool,args:details.payload}});
+  const submitError = typeof submitIsError === 'boolean' ? submitIsError : false;
+  send({{type:'tool_execution_end',toolCallId:callId,toolName:resultTool,result:{{content:[{{type:'text',text:'submitted'}}],details,terminate:true}},isError:submitError}});
+  const copiedDetails = typeof toolResultSchemaDigest === 'string' ? {{...details,schema_digest:toolResultSchemaDigest}} : details;
+  send({{type:'message_start'}});
+  send({{type:'message_end',message:{{role:'toolResult',toolCallId:callId,toolName:resultTool,content:[{{type:'text',text:'submitted'}}],details:copiedDetails,isError:submitError}}}});
+}}
+function emitReadTool() {{ const callId='call_fake_read'; send({{type:'tool_execution_start',toolCallId:callId,toolName:'read',args:{{}}}}); send({{type:'tool_execution_end',toolCallId:callId,toolName:'read',result:{{content:[{{type:'text',text:'ok'}}],details:{{}},terminate:false}},isError:false}}); }}
 // Reproduces an upstream capacity refusal exactly as observed in production:
 // a non-stop terminal with a provider errorMessage, no assistant text, and no
 // tokens billed.
@@ -1113,6 +1315,10 @@ function handle(cmd) {{
   if (cmd.type === 'set_auto_compaction') return send({{id:cmd.id,type:'response',command:'set_auto_compaction',success:true}});
   if (cmd.type === 'get_state') return send({{id:cmd.id,type:'response',command:'get_state',success:true,data:{{model:{{id:'gpt-5.5',provider:'openai-codex'}},thinkingLevel:'high',sessionId,autoCompactionEnabled:false,messageCount:storedMessages.length,pendingMessageCount:0}}}});
   if (cmd.type === 'get_session_stats') return send({{id:cmd.id,type:'response',command:'get_session_stats',success:true,data:statsData()}});
+  if (cmd.type === 'get_entries') {{
+    const entries = addonPath === undefined || (typeof suppressReceipt !== 'undefined' && suppressReceipt) ? [] : [{{type:'custom',customType:'pi-autopilot:child-tools',data:{{self_digest:createHash('sha256').update(readFileSync(addonPath)).digest('hex'),binding:process.env.AUTOPILOT_CARRIER_BINDING ?? '',active_tools:[...activeTools].sort()}},id:'receipt-1',parentId:null,timestamp:new Date(0).toISOString()}}];
+    return send({{id:cmd.id,type:'response',command:'get_entries',success:true,data:{{entries,leafId:entries[0]?.id ?? null}}}});
+  }}
   if (cmd.type === 'abort') return send({{id:cmd.id,type:'response',command:'abort',success:true}});
   if (cmd.type === 'compact') {{ send({{type:'compaction_start',reason:'manual'}}); send({{type:'compaction_end',reason:'manual',aborted:false,willRetry:false}}); send({{id:cmd.id,type:'response',command:'compact',success:true,data:{{summary:'ok'}}}}); if (typeof afterCompact === 'function') afterCompact(cmd); return; }}
   if (cmd.type === 'steer') {{ send({{id:cmd.id,type:'response',command:'steer',success:true}}); send({{type:'queue_update',steering:[cmd.message],followUp:[]}}); if (typeof afterSteer === 'function') afterSteer(cmd); return; }}
@@ -1224,7 +1430,6 @@ fn temp_root(name: &str) -> PathBuf {
     fs::canonicalize(&root).expect("canonical temp root")
 }
 
-const SETTINGS_IDENTITY: &str = "agent-run-settings:session-id,no-extensions,no-skills,no-prompt-templates,no-themes,no-context-files:v1";
 const SKILLS_IDENTITY: &str = "agent-run-skills:disabled:v1";
 
 fn contract_digest(contract_id: &str) -> String {
@@ -1324,7 +1529,7 @@ fn distinct_top_level_runs_do_not_share_child_pi_sessions() {
     let accepted = transcript("planning.task-atoms.v1");
     write_fake_pi(
         &root,
-        &rpc_fake_pi("", &format!("emitAssistant({accepted:?});")),
+        &rpc_fake_pi("", &format!("emitCarrier({accepted:?});")),
     );
 
     let first = write_planning_spec_for_run(
@@ -1376,7 +1581,7 @@ fn fresh_assignment_rejects_inherited_child_session_history() {
     let accepted = transcript("planning.task-atoms.v1");
     write_fake_pi(
         &root,
-        &rpc_fake_pi("", &format!("emitAssistant({accepted:?});")),
+        &rpc_fake_pi("", &format!("emitCarrier({accepted:?});")),
     );
     let spec = write_planning_spec_for_run(
         &root,
@@ -1457,7 +1662,7 @@ fn upstream_capacity_refusal_is_retried_and_then_succeeds() {
         &rpc_fake_pi(
             "",
             &format!(
-                "if (promptCount === 1) {{ emitCapacityRefusal(); }} else {{ emitAssistant({accepted:?}); }}"
+                "if (promptCount === 1) {{ emitCapacityRefusal(); }} else {{ emitCarrier({accepted:?}); }}"
             ),
         ),
     );
@@ -1503,8 +1708,8 @@ fn persistent_upstream_capacity_refusal_fails_loudly_after_retries() {
     );
 }
 
-/// A content failure must NOT be treated as a capacity refusal: it carries
-/// assistant text and must reach the value-repair path instead.
+/// Assistant text cannot be mistaken for a capacity refusal or a planning
+/// carrier. It is an identity-channel error and must not consume value repair.
 #[test]
 fn content_failure_is_not_misclassified_as_capacity_refusal() {
     let root = temp_root("runner-content-not-capacity");
@@ -1522,8 +1727,12 @@ fn content_failure_is_not_misclassified_as_capacity_refusal() {
         "content failure must not be classified as upstream capacity: {error}"
     );
     assert!(
-        error.contains("value repair exhausted"),
-        "content failure must use the value-repair path: {error}"
+        error.contains("terminating submit tool result is required"),
+        "planning text must fail on the carrier channel: {error}"
+    );
+    assert_eq!(
+        attempt_events(&root, "planning-main-task-extractor-01"),
+        ["started"]
     );
 }
 
@@ -1562,7 +1771,7 @@ fn auto_retry_closed_inside_replacement_turn_is_accepted() {
                  send({{type:'auto_retry_start'}}); \
                  send({{type:'agent_start'}}); \
                  send({{type:'message_start'}}); \
-                 send({{type:'message_end', message: message({accepted:?})}}); \
+                 emitCarrierResult({accepted:?}); \
                  send({{type:'auto_retry_end',success:true}}); \
                  send({{type:'agent_end',willRetry:false}}); \
                  send({{type:'agent_settled'}});"

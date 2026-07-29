@@ -427,9 +427,9 @@ artifact "task_document" schema="autopilot.task_document.v1" producer="Package" 
     field "body" type="string" required=#true
 }
 
-artifact "agent_run_spec" schema="autopilot.agent_run_spec.v2" producer="Package" model_produced=#false {
+artifact "agent_run_spec" schema="autopilot.agent_run_spec.v3" producer="Package" model_produced=#false {
     doc "Strict parent-Core written child runner specification for the package-contained autopilot-agent-run wrapper and Rust agent-run mode."
-    field "schema" type="schema-id" required=#true constant="autopilot.agent_run_spec.v2"
+    field "schema" type="schema-id" required=#true constant="autopilot.agent_run_spec.v3"
     field "assignment_kind" type="validation_assignment_kind" required=#true doc="Explicit assignment class; no runner infers planning/delivery/validation from result_contract."
     field "action_id" type="id" required=#true
     field "assignment_id" type="id" required=#true
@@ -472,8 +472,8 @@ artifact "agent_run_spec" schema="autopilot.agent_run_spec.v2" producer="Package
     field "assignment_digest" type="digest" required=#false nullable=#true
     field "context_manifest_path" type="path" required=#false nullable=#true
     field "context_manifest_digest" type="digest" required=#false nullable=#true
-    field "runtime_extension_path" type="path" required=#false nullable=#true
-    field "runtime_extension_digest" type="digest" required=#false nullable=#true
+    field "runtime_extension_path" type="path" required=#false nullable=#true doc="Required for planning assignments and forbidden for legacy assistant-text delivery assignments; absolute path to the explicitly loaded child-only submit-tool add-on."
+    field "runtime_extension_digest" type="digest" required=#false nullable=#true doc="Required exactly when runtime_extension_path is present; must equal the codegen-anchored digest of the file that actually loads."
     list "producer_assignment_ids" item="id" required=#false nullable=#true
     field "validation_id" type="id" required=#false nullable=#true
     field "validation_attempt" type="u32" required=#false nullable=#true
@@ -524,6 +524,7 @@ artifact "agent_handoff" schema="autopilot.agent-handoff.v1" producer="Model" mo
 artifact "task_atoms" schema="planning.task-atoms.v1" producer="Model" model_produced=#true {
     doc "Model-facing task atom submission. Shape is deliberately small: structure is enforced by the submit tool; source values are checked against task authority anchors by the planning driver."
     admits "Task extractor output must use the exact runner-issued atom id prefix for every atoms[].id, name operator-task atoms with source anchors, and include no repository findings. Call autopilot_submit_atoms as the final action with atoms containing id, kind, text, and sources."
+    submit_tool "autopilot_submit_atoms" label="Submit task atoms"
     list "atoms" item="task_atom" required=#true doc="Task atoms; may be empty only when no task authority text exists."
     record "task_atom" {
         field "id" type="id" required=#true
@@ -551,7 +552,9 @@ artifact "planning_atom_registry" schema="autopilot.planning_atom_registry.v1" p
 
 artifact "scout_dossier" schema="planning.scout-dossier.v1" producer="Model" model_produced=#true {
     doc "Model-facing repository scout dossier. Shape is small; path values are checked against the pinned repository commit by the planning driver."
-    admits "Repository scout and dossier output must cite current evidence and avoid work planning. Call autopilot_submit_scout_report as the final action with findings containing path, observation, and evidence_ref."
+    admits "Repository scout and dossier output must cite current evidence and avoid work planning. Call autopilot_submit_scout_report as the final action with findings containing path, observation, and evidence_ref. A context-curation assignment calls autopilot_submit_context instead, with the same findings shape."
+    submit_tool "autopilot_submit_scout_report" label="Submit scout dossier"
+    submit_tool "autopilot_submit_context" label="Submit curated context dossier"
     list "findings" item="scout_finding" required=#true doc="Repository findings grounded in current evidence."
     record "scout_finding" {
         field "path" type="path" required=#true
@@ -562,7 +565,8 @@ artifact "scout_dossier" schema="planning.scout-dossier.v1" producer="Model" mod
 
 artifact "questions" schema="planning.questions.v1" producer="Model" model_produced=#true {
     doc "Model-facing contradiction/question nominations. Empty questions are valid when no material unresolved issue remains."
-    admits "Question output must be an explicit questions array, which may be empty, or structured nominations. Each nomination must include class, evidence, and consequence. The class field is closed to: invalidated-decision, missing-material-decision, material-underdetermination, dod-hole, unsafe-irreversible."
+    admits "Question output must be an explicit questions array, which may be empty, or structured nominations. Each nomination must include class, evidence, and consequence. The class field is closed to: invalidated-decision, missing-material-decision, material-underdetermination, dod-hole, unsafe-irreversible. Call autopilot_submit_resolution as the final action."
+    submit_tool "autopilot_submit_resolution" label="Submit planning questions"
     list "questions" item="planning_question" required=#true doc="Material operator questions; [] is an accepted empty set."
     record "planning_question" {
         field "class" type="planning_question_class" required=#true
@@ -574,6 +578,8 @@ artifact "questions" schema="planning.questions.v1" producer="Model" model_produ
 artifact "work_map" schema="planning.work-map.v1" producer="Model" model_produced=#true {
     doc "Model-facing work map. Link values are checked against the accepted atom registry by the planning driver."
     admits "Plan compiler and synthesizer output must contain one or more units. Each unit must have an objective, acceptance criteria, and traceable links by real atom id. Call autopilot_submit_plan_cluster or autopilot_submit_synthesis as the final action."
+    submit_tool "autopilot_submit_plan_cluster" label="Submit work map"
+    submit_tool "autopilot_submit_synthesis" label="Submit synthesized work map"
     list "units" item="plan_unit" required=#true doc="Executable plan units."
     record "plan_unit" {
         field "id" type="id" required=#true
@@ -586,6 +592,7 @@ artifact "work_map" schema="planning.work-map.v1" producer="Model" model_produce
 artifact "plan_review" schema="planning.plan-review.v1" producer="Model" model_produced=#true {
     doc "Model-facing plan review verdicts. Verdict is closed; finding text is optional and advisory unless the verdict requires explanation."
     admits "Plan review output must assign a verdict to each criterion using pass, blocker, advisory, fail, blocked, or needs-fix. It must include at least one verdict. Call autopilot_submit_review as the final action."
+    submit_tool "autopilot_submit_review" label="Submit plan review"
     list "verdicts" item="plan_review_verdict" required=#true doc="Criterion verdicts."
     record "plan_review_verdict" {
         field "criterion_id" type="id" required=#true

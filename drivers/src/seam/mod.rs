@@ -1794,7 +1794,7 @@ fn validation_issue_for_delivery(
         ),
         boundary_digest: sha256_hex_local(crate::validation::BOUNDARY_ID.as_bytes()),
         result_contract_digest: sha256_hex_local(crate::validation::BOUNDARY_ID.as_bytes()),
-        settings_digest: runner::settings_digest(),
+        settings_digest: runner::settings_digest(false),
         context_digest: sha256_hex_local(
             serde_json::to_string(&spec)
                 .map_err(|error| error.to_string())?

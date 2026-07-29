@@ -24,7 +24,7 @@ const OUTPUT_PATHS = {
 };
 
 const ALLOWED_NODES = {
-  contracts: new Set(['schema', 'version', 'doc', 'type', 'artifact', 'field', 'list', 'group', 'record', 'enum', 'value', 'frame', 'constant', 'pattern', 'admits', 'artifact_category', 'resource_gate', 'scheduler_order']),
+  contracts: new Set(['schema', 'version', 'doc', 'type', 'artifact', 'field', 'list', 'group', 'record', 'enum', 'value', 'frame', 'constant', 'pattern', 'admits', 'submit_tool', 'artifact_category', 'resource_gate', 'scheduler_order']),
   workflow: new Set(['schema', 'version', 'doc', 'machine', 'initial', 'state', 'transition', 'axis', 'value', 'attribute', 'verdict_set', 'total_verdicts', 'capacity_class']),
   roles: new Set(['role', 'schema', 'version', 'modes', 'mode_parameters', 'model_slot', 'thinking', 'tools', 'repository', 'git', 'network', 'package_state', 'operator_checkout', 'context_policy', 'result_contract', 'checkpoint_contract', 'terminal_path', 'boundary_prompts']),
   roster: new Set(['slot', 'provider', 'model', 'thinking', 'route', 'roles']),
@@ -170,7 +170,7 @@ function parseContracts() {
       types.push({ name: node.args[0], doc: node.props.doc ?? '' });
     } else if (node.name === 'artifact') {
       requireArgs(node, 1, 'contracts');
-      const artifact = { name: node.args[0], schema: requireProp(node, 'schema', 'contracts'), producer: requireProp(node, 'producer', 'contracts'), modelProduced: scalarText(requireProp(node, 'model_produced', 'contracts')), doc: '', admits: [], fields: [] };
+      const artifact = { name: node.args[0], schema: requireProp(node, 'schema', 'contracts'), producer: requireProp(node, 'producer', 'contracts'), modelProduced: scalarText(requireProp(node, 'model_produced', 'contracts')), doc: '', admits: [], submitTools: [], fields: [] };
       artifacts.push(artifact);
       currentArtifact = artifact;
     } else if (node.name === 'enum') {
@@ -188,6 +188,9 @@ function parseContracts() {
     } else if (node.name === 'admits' && currentArtifact) {
       requireArgs(node, 1, 'contracts');
       currentArtifact.admits.push(node.args[0]);
+    } else if (node.name === 'submit_tool' && currentArtifact) {
+      requireArgs(node, 1, 'contracts');
+      currentArtifact.submitTools.push({ name: node.args[0], label: requireProp(node, 'label', 'contracts') });
     } else if ((node.name === 'field' || node.name === 'list') && currentArtifact) {
       requireArgs(node, 1, 'contracts');
       const type = node.name === 'list' ? requireProp(node, 'item', 'contracts') : requireProp(node, 'type', 'contracts');
@@ -358,9 +361,10 @@ function docHeader(title, sources) {
 function renderContracts(model) {
   const artifactRows = model.artifacts.map((artifact) => [artifact.name, artifact.schema, artifact.producer, artifact.modelProduced, artifact.doc]);
   const fieldRows = model.artifacts.flatMap((artifact) => artifact.fields.map((field) => [artifact.name, field.shape, field.name, field.type, field.required, field.nullable, field.doc]));
+  const submitRows = model.artifacts.flatMap((artifact) => artifact.submitTools.map((tool) => [artifact.name, artifact.schema, tool.name, tool.label]));
   const enumRows = model.enums.map((entry) => [entry.name, entry.values.join(', ')]);
   const frameRows = model.frames.map((frame) => [frame.kind, frame.direction, frame.fields.join('; ')]);
-  return `${docHeader('Generated artifact contracts', [SOURCE_PATHS.contracts])}## Artifacts\n\n${table(['Artifact', 'Schema', 'Producer', 'Model produced', 'Doc'], artifactRows)}\n\n## Fields and lists\n\n${table(['Artifact', 'Shape', 'Path', 'Type/item', 'Required', 'Nullable', 'Doc'], fieldRows)}\n\n## Enums\n\n${table(['Enum', 'Values'], enumRows)}\n\n## Seam frames\n\n${table(['Kind', 'Direction', 'Fields'], frameRows)}\n`;
+  return `${docHeader('Generated artifact contracts', [SOURCE_PATHS.contracts])}## Artifacts\n\n${table(['Artifact', 'Schema', 'Producer', 'Model produced', 'Doc'], artifactRows)}\n\n## Fields and lists\n\n${table(['Artifact', 'Shape', 'Path', 'Type/item', 'Required', 'Nullable', 'Doc'], fieldRows)}\n\n## Submit tools\n\n${table(['Artifact', 'Boundary', 'Tool', 'Label'], submitRows)}\n\n## Enums\n\n${table(['Enum', 'Values'], enumRows)}\n\n## Seam frames\n\n${table(['Kind', 'Direction', 'Fields'], frameRows)}\n`;
 }
 
 function renderWorkflow(model) {

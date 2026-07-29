@@ -90,6 +90,9 @@ struct Artifact {
     model_produced: bool,
     doc: String,
     admits: Option<String>,
+    /// (tool name, label) pairs; tool name, boundary, and parameter schema
+    /// therefore have exactly one source.
+    submit_tools: Vec<(String, String)>,
     items: Vec<Item>,
 }
 
@@ -349,6 +352,7 @@ fn parse_artifact(node: &KdlNode, source: &str) -> Result<Artifact, CodegenError
     let children = children(node, source)?;
     let mut doc = None;
     let mut admits = None;
+    let mut submit_tools = Vec::new();
     let mut items = Vec::new();
     for child in children.nodes() {
         match name(child) {
@@ -367,6 +371,20 @@ fn parse_artifact(node: &KdlNode, source: &str) -> Result<Artifact, CodegenError
                     )));
                 }
                 admits = Some(text);
+                ensure_no_children(child, source)?;
+            }
+            "submit_tool" => {
+                ensure_entries(child, 1, &["label"], source)?;
+                let tool = arg_string(child, 0, source)?.to_owned();
+                if !tool
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+                {
+                    return Err(CodegenError::Input(format!(
+                        "submit_tool `{tool}` in artifact `{artifact_name}` must match [a-z0-9_]+"
+                    )));
+                }
+                submit_tools.push((tool, prop_string(child, "label", source)?.to_owned()));
                 ensure_no_children(child, source)?;
             }
             "field" => items.push(Item::Field(parse_field(child, source)?)),
@@ -390,12 +408,18 @@ fn parse_artifact(node: &KdlNode, source: &str) -> Result<Artifact, CodegenError
             "model-produced artifact `{artifact_name}` is missing non-empty admits text"
         )));
     }
+    if !submit_tools.is_empty() && !schema.starts_with("planning.") {
+        return Err(CodegenError::Input(format!(
+            "artifact `{artifact_name}` declares submit_tool but is not a planning boundary"
+        )));
+    }
     Ok(Artifact {
         name: artifact_name,
         schema,
         model_produced,
         doc,
         admits,
+        submit_tools,
         items,
     })
 }
@@ -845,6 +869,10 @@ fn emit_all(contracts: &Contracts) -> Result<Vec<OutputFile>, CodegenError> {
             path: PathBuf::from("src/generated/tool-schemas.ts"),
             content: tool_schemas,
         },
+        OutputFile {
+            path: PathBuf::from("src/generated/child-extension.ts"),
+            content: format!("// {GENERATED_MARKER}\n{CHILD_EXTENSION_BODY}"),
+        },
     ];
 
     let mut artifacts = contracts.artifacts.clone();
@@ -860,6 +888,8 @@ fn emit_all(contracts: &Contracts) -> Result<Vec<OutputFile>, CodegenError> {
     outputs.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(outputs)
 }
+
+const CHILD_EXTENSION_BODY: &str = include_str!("../templates/child-extension.ts.tmpl");
 
 fn emit_rust_typescript(contracts: &Contracts) -> Result<(String, String), CodegenError> {
     let mut rust = String::new();
@@ -964,7 +994,12 @@ fn emit_rust_typescript(contracts: &Contracts) -> Result<(String, String), Codeg
     rust.push_str("pub const CONTRACT_SCHEMA: &str = ");
     rust.push_str(&format!("\"{}\";\n", escape_rust_string(&contracts.schema)));
     rust.push_str("pub const CONTRACT_VERSION: u64 = ");
-    rust.push_str(&format!("{};\n\n", contracts.version));
+    rust.push_str(&format!("{};\n", contracts.version));
+    let child_addon = format!("// {GENERATED_MARKER}\n{CHILD_EXTENSION_BODY}");
+    rust.push_str(&format!(
+        "pub const CHILD_ADDON_DIGEST: &str =\n    \"{}\";\n\n",
+        sha256_hex(child_addon.as_bytes())
+    ));
     let mut admits = BTreeMap::new();
     for artifact in &contracts.artifacts {
         if let Some(text) = &artifact.admits {
@@ -978,6 +1013,37 @@ fn emit_rust_typescript(contracts: &Contracts) -> Result<(String, String), Codeg
             escape_rust_string(&text)
         ));
     }
+
+    // (tool name, boundary id) pairs: the single source deciding which tool
+    // names exist and which boundary each terminates. A role naming a tool
+    // absent here is refused at registry load, never silently dropped.
+    let enums = contracts
+        .enums
+        .iter()
+        .map(|entry| (entry.name.as_str(), entry.values.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let records = record_items_by_name(contracts);
+    let mut submit_rows = Vec::new();
+    for artifact in &contracts.artifacts {
+        let schema = json_schema_for_items(&artifact.items, &records, &enums)?;
+        let canonical = serde_json::to_string(&schema)
+            .map_err(|error| CodegenError::Input(format!("tool schema digest failed: {error}")))?;
+        let digest = sha256_hex(canonical.as_bytes());
+        for (tool, _) in &artifact.submit_tools {
+            submit_rows.push(format!(
+                "    (\n        \"{}\",\n        \"{}\",\n        \"{}\",\n    ),",
+                escape_rust_string(tool),
+                escape_rust_string(&artifact.schema),
+                digest
+            ));
+        }
+    }
+    submit_rows.sort();
+    rust.push_str(&format!(
+        "\npub const SUBMIT_TOOLS: [(&str, &str, &str); {}] = [\n{}\n];\n",
+        submit_rows.len(),
+        submit_rows.join("\n")
+    ));
 
     let host_to_core = frame_names
         .iter()
@@ -1051,17 +1117,42 @@ fn emit_tool_schemas(contracts: &Contracts) -> Result<String, CodegenError> {
             "export const {const_name} = {schema_json} as unknown as TSchema;\n"
         ));
         out.push_str(&format!("export const {digest_name} = \"{digest}\";\n\n"));
-        descriptors.push((artifact.schema.clone(), const_name, digest_name));
-    }
-    out.push_str("export const PLANNING_TOOL_SCHEMAS = {\n");
-    for (boundary, const_name, digest_name) in descriptors {
-        out.push_str(&format!(
-            "  \"{}\": {{ boundary_id: \"{}\", schema_digest: {digest_name}, parameters: {const_name} }},\n",
-            escape_ts_string(&boundary),
-            escape_ts_string(&boundary)
+        descriptors.push((
+            artifact.schema.clone(),
+            const_name,
+            digest_name,
+            artifact.submit_tools.clone(),
         ));
     }
-    out.push_str("} as const satisfies Record<string, ToolSchemaDescriptor>;\n");
+    out.push_str("export const PLANNING_TOOL_SCHEMAS = {\n");
+    for (boundary, const_name, digest_name, _) in &descriptors {
+        out.push_str(&format!(
+            "  \"{}\": {{ boundary_id: \"{}\", schema_digest: {digest_name}, parameters: {const_name} }},\n",
+            escape_ts_string(boundary),
+            escape_ts_string(boundary)
+        ));
+    }
+    out.push_str("} as const satisfies Record<string, ToolSchemaDescriptor>;\n\n");
+
+    // Every terminating submit tool; child agents register exactly these.
+    let mut rows = descriptors
+        .iter()
+        .flat_map(|(boundary, params, digest, tools)| {
+            tools.iter().map(move |(name, label)| {
+                format!(
+                    "  {{ name: \"{}\", label: \"{}\", boundary_id: \"{}\", schema_digest: {digest}, parameters: {params} }},",
+                    escape_ts_string(name),
+                    escape_ts_string(label),
+                    escape_ts_string(boundary)
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    rows.sort();
+    out.push_str(&format!(
+        "export interface SubmitToolDescriptor {{\n  name: string;\n  label: string;\n  boundary_id: string;\n  schema_digest: string;\n  parameters: TSchema;\n}}\n\nexport const SUBMIT_TOOLS: readonly SubmitToolDescriptor[] = [\n{}\n] as const;\n",
+        rows.join("\n")
+    ));
     Ok(out)
 }
 

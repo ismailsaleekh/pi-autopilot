@@ -23,6 +23,7 @@ export class RunnerInstallError extends Error {
 export interface RunnerResolution {
   readonly nodeExecutable: string;
   readonly runnerWrapper: string;
+  readonly childAddon: string;
 }
 
 export function resolveAgentRunner(options: ResolveRunnerOptions = {}): string {
@@ -42,10 +43,8 @@ export function resolveAgentRunner(options: ResolveRunnerOptions = {}): string {
 }
 
 export function resolveRunnerTransport(options: ResolveRunnerOptions = {}): RunnerResolution {
-  return {
-    nodeExecutable: process.execPath,
-    runnerWrapper: resolveAgentRunner(options),
-  };
+  const packageJsonPath = options.packageJsonPath ?? defaultPackageJsonPath(); const childAddon = resolve(dirname(packageJsonPath), "src/generated/child-extension.ts");
+  assertReadableRegularFile(childAddon, packageJsonPath); return { nodeExecutable: process.execPath, runnerWrapper: resolveAgentRunner({ packageJsonPath }), childAddon };
 }
 
 function defaultPackageJsonPath(): string {

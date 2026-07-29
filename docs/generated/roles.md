@@ -8,21 +8,21 @@ Sources: `data/roles.kdl`, `roles/**`.
 
 | Role | Model slot | Thinking | Modes | Tools | Terminal path |
 | --- | --- | --- | --- | --- | --- |
-| onboard | reasoning | max | thin-intake | read, context_budget, autopilot_submit_onboard | autopilot_submit_onboard |
-| orchestrator | control | high | planning-control, execution-control | bg_run, bg_status, bg_logs, bg_kill, context_budget, controller_action_ack | Controller action acknowledgement |
-| task-extractor | extraction | high | inventory | read, grep, find, ls, context_budget, autopilot_submit_atoms | autopilot_submit_atoms |
-| repository-scout | coding | high | initial-grounding, targeted-followup | read, grep, find, ls, context_budget, autopilot_submit_scout_report | autopilot_submit_scout_report |
-| contradiction-resolver | reasoning | max | fact-resolution | read, grep, find, ls, context_budget, autopilot_submit_resolution | autopilot_submit_resolution |
-| plan-compiler | reasoning | max | initial-plan, unit-spec-patch, cluster-amendment | read, grep, find, ls, context_budget, autopilot_submit_plan_cluster | autopilot_submit_plan_cluster |
-| context-synthesizer | reasoning | max | initial-dossier, dossier-delta | read, grep, find, ls, context_budget, autopilot_submit_synthesis | autopilot_submit_synthesis |
-| plan-synthesizer | reasoning | max | initial-plan, affected-scope | read, grep, find, ls, context_budget, autopilot_submit_synthesis | autopilot_submit_synthesis |
-| plan-reviewer | review | xhigh | full-review, delta-review | read, grep, find, ls, bash, context_budget, autopilot_submit_review | autopilot_submit_review |
-| context-curator | reasoning | max | discovery-navigation, planning-context, execution-context | read, context_catalog_query, autopilot_submit_context, context_budget | autopilot_submit_context |
-| execution-allocator | reasoning | max | initial-allocation, delta-allocation | read, autopilot_submit_allocation, context_budget | autopilot_submit_allocation |
-| implementer | coding | high | lane-delivery | read, grep, find, ls, bash, edit, write, context_budget, autopilot_request_context, autopilot_emit_status | autopilot_emit_status |
-| validator | review | xhigh | forward-release, deep-closure, delta-revalidation, conflict-review, final-review | read, grep, find, ls, bash, context_budget, autopilot_emit_status | autopilot_emit_status |
-| fixer-integrator | coding | high | forward-critical, closure-repair, failed-test, conflict-resolution | read, grep, find, ls, bash, edit, write, context_budget, autopilot_request_context, autopilot_emit_status | autopilot_emit_status |
-| bughunter | review | xhigh | final-bughunt | read, grep, find, ls, bash, context_budget, autopilot_emit_status | autopilot_emit_status |
+| onboard | reasoning | xhigh | thin-intake | read, autopilot_submit_onboard | autopilot_submit_onboard |
+| orchestrator | control | high | planning-control, execution-control | bg_run, bg_status, bg_logs, bg_kill, controller_action_ack | Controller action acknowledgement |
+| task-extractor | extraction | high | inventory | read, grep, find, ls, autopilot_submit_atoms | autopilot_submit_atoms |
+| repository-scout | coding | high | initial-grounding, targeted-followup | read, grep, find, ls, autopilot_submit_scout_report | autopilot_submit_scout_report |
+| contradiction-resolver | reasoning | xhigh | fact-resolution | read, grep, find, ls, autopilot_submit_resolution | autopilot_submit_resolution |
+| plan-compiler | reasoning | xhigh | initial-plan, unit-spec-patch, cluster-amendment | read, grep, find, ls, autopilot_submit_plan_cluster | autopilot_submit_plan_cluster |
+| context-synthesizer | reasoning | xhigh | initial-dossier, dossier-delta | read, grep, find, ls, autopilot_submit_synthesis | autopilot_submit_synthesis |
+| plan-synthesizer | reasoning | xhigh | initial-plan, affected-scope | read, grep, find, ls, autopilot_submit_synthesis | autopilot_submit_synthesis |
+| plan-reviewer | review | xhigh | full-review, delta-review | read, grep, find, ls, bash, autopilot_submit_review | autopilot_submit_review |
+| context-curator | reasoning | xhigh | discovery-navigation, planning-context, execution-context | read, autopilot_submit_context | autopilot_submit_context |
+| execution-allocator | reasoning | xhigh | initial-allocation, delta-allocation | read, autopilot_submit_allocation | autopilot_submit_allocation |
+| implementer | coding | high | lane-delivery | read, grep, find, ls, bash, edit, write, autopilot_emit_status | autopilot_emit_status |
+| validator | review | xhigh | forward-release, deep-closure, delta-revalidation, conflict-review, final-review | read, grep, find, ls, autopilot_request_test, autopilot_emit_status | autopilot_emit_status |
+| fixer-integrator | coding | high | forward-critical, closure-repair, failed-test, conflict-resolution | read, grep, find, ls, bash, edit, write, autopilot_emit_status | autopilot_emit_status |
+| bughunter | review | xhigh | final-bughunt | read, grep, find, ls, bash, autopilot_emit_status | autopilot_emit_status |
 
 ## Role files
 

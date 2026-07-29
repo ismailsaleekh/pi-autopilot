@@ -29,7 +29,7 @@ Sources: `data/contracts.kdl`.
 | autopilot_transcript_v2 | autopilot.transcript.v2 | Package | false | Receipt-backed non-authoritative replay transcript fixture. V1 transcripts remain compatibility-only. |
 | autopilot_evidence_envelope_manifest | autopilot.evidence_envelope_manifest.v1 | Package | false | Closed evidence envelope manifest. Members are exactly refs reachable from authoritative evidence events; scans/globs/prefixes are forbidden. |
 | task_document | autopilot.task_document.v1 | Package | false | Core-classified task-pack document copied into child runner specs. The digest is over the exact admitted file bytes; body_digest is over the model-visible body only. |
-| agent_run_spec | autopilot.agent_run_spec.v2 | Package | false | Strict parent-Core written child runner specification for the package-contained autopilot-agent-run wrapper and Rust agent-run mode. |
+| agent_run_spec | autopilot.agent_run_spec.v3 | Package | false | Strict parent-Core written child runner specification for the package-contained autopilot-agent-run wrapper and Rust agent-run mode. |
 | run_identity | autopilot.run_identity.v1 | Package | false | Clean v2 runtime identity namespace (D76 §5.1). |
 | event_row | autopilot.event_row.v1 | Package | false | Append-only event row; events.jsonl is the sole state authority (D76 §5.4 + D77 Closure B). |
 | state_cache | autopilot.state_cache.v1 | Package | false | Disposable cache only, never an authority. State is fold(events); this cache may be deleted at any instant with zero semantic loss and any mismatch forces full replay (D77 Closure B). |
@@ -403,8 +403,8 @@ Sources: `data/contracts.kdl`.
 | agent_run_spec | field | assignment_digest | digest | false | true |  |
 | agent_run_spec | field | context_manifest_path | path | false | true |  |
 | agent_run_spec | field | context_manifest_digest | digest | false | true |  |
-| agent_run_spec | field | runtime_extension_path | path | false | true |  |
-| agent_run_spec | field | runtime_extension_digest | digest | false | true |  |
+| agent_run_spec | field | runtime_extension_path | path | false | true | Required for planning assignments and forbidden for legacy assistant-text delivery assignments; absolute path to the explicitly loaded child-only submit-tool add-on. |
+| agent_run_spec | field | runtime_extension_digest | digest | false | true | Required exactly when runtime_extension_path is present; must equal the codegen-anchored digest of the file that actually loads. |
 | agent_run_spec | list | producer_assignment_ids | id | false | true |  |
 | agent_run_spec | field | validation_id | id | false | true |  |
 | agent_run_spec | field | validation_attempt | u32 | false | true |  |
@@ -817,6 +817,18 @@ Sources: `data/contracts.kdl`.
 | lifecycle_report | field | close_receipt | artifact_link | true |  |  |
 | lifecycle_report | list | cleanup_receipts | artifact_link | true |  |  |
 | lifecycle_report | field | disposition | string | true |  |  |
+
+## Submit tools
+
+| Artifact | Boundary | Tool | Label |
+| --- | --- | --- | --- |
+| task_atoms | planning.task-atoms.v1 | autopilot_submit_atoms | Submit task atoms |
+| scout_dossier | planning.scout-dossier.v1 | autopilot_submit_scout_report | Submit scout dossier |
+| scout_dossier | planning.scout-dossier.v1 | autopilot_submit_context | Submit curated context dossier |
+| questions | planning.questions.v1 | autopilot_submit_resolution | Submit planning questions |
+| work_map | planning.work-map.v1 | autopilot_submit_plan_cluster | Submit work map |
+| work_map | planning.work-map.v1 | autopilot_submit_synthesis | Submit synthesized work map |
+| plan_review | planning.plan-review.v1 | autopilot_submit_review | Submit plan review |
 
 ## Enums
 

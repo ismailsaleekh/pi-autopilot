@@ -242,6 +242,10 @@ fn task_path_classification_exact_four_path_command_spawns_and_hlo_replacement_d
             "AUTOPILOT_AGENT_RUNNER_WRAPPER",
             std::env::current_exe().expect("exe"),
         );
+        std::env::set_var(
+            "AUTOPILOT_CHILD_ADDON_PATH",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/generated/child-extension.ts"),
+        );
     }
     std::env::set_current_dir(&root).expect("chdir root");
     let mut state = CoreState::open(None).expect("state");
@@ -380,6 +384,10 @@ fn task_path_classification_rejects_root_and_ancestor_symlink_escapes_without_mu
             "AUTOPILOT_AGENT_RUNNER_WRAPPER",
             std::env::current_exe().expect("exe"),
         );
+        std::env::set_var(
+            "AUTOPILOT_CHILD_ADDON_PATH",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/generated/child-extension.ts"),
+        );
     }
     std::env::set_current_dir(&root).expect("chdir root");
     let mut state = CoreState::open(None).expect("state");
@@ -422,6 +430,10 @@ fn task_path_classification_terminal_events_require_core_issued_action_assignmen
         std::env::set_var(
             "AUTOPILOT_AGENT_RUNNER_WRAPPER",
             std::env::current_exe().expect("exe"),
+        );
+        std::env::set_var(
+            "AUTOPILOT_CHILD_ADDON_PATH",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/generated/child-extension.ts"),
         );
     }
     std::env::set_current_dir(&root).expect("chdir root");
@@ -548,6 +560,10 @@ fn task_path_classification_delivery_runtime_packages_uncommitted_lane_changes_a
             std::env::current_exe().expect("exe"),
         );
         std::env::set_var(
+            "AUTOPILOT_CHILD_ADDON_PATH",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/generated/child-extension.ts"),
+        );
+        std::env::set_var(
             "AUTOPILOT_VALIDATOR_COMMAND",
             std::env::current_exe().expect("exe"),
         );
@@ -646,6 +662,10 @@ fn task_path_classification_delivery_runtime_adopts_existing_agent_commit_withou
             std::env::current_exe().expect("exe"),
         );
         std::env::set_var(
+            "AUTOPILOT_CHILD_ADDON_PATH",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/generated/child-extension.ts"),
+        );
+        std::env::set_var(
             "AUTOPILOT_VALIDATOR_COMMAND",
             std::env::current_exe().expect("exe"),
         );
@@ -725,6 +745,10 @@ fn task_path_classification_delivery_terminal_carrier_is_core_accepted_and_incom
         std::env::set_var(
             "AUTOPILOT_AGENT_RUNNER_WRAPPER",
             std::env::current_exe().expect("exe"),
+        );
+        std::env::set_var(
+            "AUTOPILOT_CHILD_ADDON_PATH",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/generated/child-extension.ts"),
         );
         std::env::set_var(
             "AUTOPILOT_VALIDATOR_COMMAND",

@@ -44,8 +44,8 @@ const EXACT_COMMANDS = Object.freeze([
 
 const EXACT_TOOLS = Object.freeze([
   "autopilot_submit_atoms",
+  "autopilot_submit_context",
   "autopilot_submit_plan_cluster",
-  "autopilot_submit_questions",
   "autopilot_submit_resolution",
   "autopilot_submit_review",
   "autopilot_submit_scout_report",

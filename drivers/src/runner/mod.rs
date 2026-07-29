@@ -1,5 +1,6 @@
 use std::env;
 use std::fs;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
@@ -25,7 +26,6 @@ pub mod rpc;
 const ROLES_KDL: &str = include_str!("../../../data/roles.kdl");
 const DEFAULT_BG_TIMEOUT_SECONDS: u32 = 3600;
 const DEFAULT_REQUIRED_FOCUSED_EVIDENCE: u32 = 2;
-const SETTINGS_IDENTITY: &str = "agent-run-settings:session-id,no-extensions,no-skills,no-prompt-templates,no-themes,no-context-files:v1";
 const SKILLS_IDENTITY: &str = "agent-run-skills:disabled:v1";
 const TASK_ATOMS_ADMITS: &str = kernel::generated::TASK_ATOMS_ADMITS;
 const SCOUT_DOSSIER_ADMITS: &str = kernel::generated::SCOUT_DOSSIER_ADMITS;
@@ -271,7 +271,7 @@ pub struct RoleRuntime {
     pub model: String,
     pub thinking: String,
     pub route: String,
-    pub built_in_tools: Vec<String>,
+    pub declared_tools: Vec<String>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -337,6 +337,19 @@ pub fn planning_issue(request: &PlanningRunnerRequest) -> Result<IssuedRunnerAct
     validate_planning_request(request)?;
     let facts = RunnerTransportFacts::from_env()?;
     let route = route_for_role(&request.role_id.0)?;
+    let tools = role_tool_names(&request.role_id.0)?;
+    let (terminal_tool, _) = terminal_submit_tool(&request.role_id.0)?.ok_or_else(|| {
+        RunnerError::InvalidSpec(format!(
+            "planning role {} has no terminating submit tool",
+            request.role_id.0
+        ))
+    })?;
+    if !tools.iter().any(|tool| tool == terminal_tool) {
+        return Err(RunnerError::InvalidSpec(format!(
+            "planning terminal tool {terminal_tool} is absent from allowed tools"
+        )));
+    }
+    let (addon_path, addon_digest) = child_addon()?;
     let cwd = canonical_current_dir()?;
     let paths = planning_paths(&cwd, &request.workstream, &request.assignment_id);
     reject_link_components_for_path(&paths.carrier_path)?;
@@ -355,7 +368,7 @@ pub fn planning_issue(request: &PlanningRunnerRequest) -> Result<IssuedRunnerAct
     let prompt_digest = sha256_hex(rendered.text.as_bytes());
     let binding_digests = planning_binding_digests(request, &route)?;
     let spec = AgentRunSpec {
-        schema: kernel::generated::SchemaId("autopilot.agent_run_spec.v2".to_owned()),
+        schema: kernel::generated::SchemaId("autopilot.agent_run_spec.v3".to_owned()),
         assignment_kind: ValidationAssignmentKind::PlanningReview,
         action_id: request.action_id.clone(),
         assignment_id: request.assignment_id.clone(),
@@ -369,10 +382,7 @@ pub fn planning_issue(request: &PlanningRunnerRequest) -> Result<IssuedRunnerAct
         thinking: kernel::generated::ThinkingLevel(route.thinking.clone()),
         route: "subscription".to_owned(),
         cwd: to_contract_path(&cwd)?,
-        allowed_tools: role_builtin_tool_names(&request.role_id.0)?
-            .into_iter()
-            .map(ToolName)
-            .collect(),
+        allowed_tools: tools.into_iter().map(ToolName).collect(),
         spec_path: to_contract_path(&paths.spec_path)?,
         prompt_path: to_contract_path(&paths.prompt_path)?,
         prompt_digest: Digest(prompt_digest.clone()),
@@ -415,8 +425,8 @@ pub fn planning_issue(request: &PlanningRunnerRequest) -> Result<IssuedRunnerAct
         assignment_digest: None,
         context_manifest_path: None,
         context_manifest_digest: None,
-        runtime_extension_path: None,
-        runtime_extension_digest: None,
+        runtime_extension_path: Some(to_contract_path(&addon_path)?),
+        runtime_extension_digest: Some(Digest(addon_digest)),
         producer_assignment_ids: None,
         validation_id: None,
         validation_attempt: None,
@@ -512,7 +522,7 @@ pub fn delivery_issue_with_facts(
     let prompt_digest = sha256_hex(prompt.as_bytes());
     let binding_digests = delivery_binding_digests(assignment, &route, &worktree_text)?;
     let spec = AgentRunSpec {
-        schema: kernel::generated::SchemaId("autopilot.agent_run_spec.v2".to_owned()),
+        schema: kernel::generated::SchemaId("autopilot.agent_run_spec.v3".to_owned()),
         assignment_kind: ValidationAssignmentKind::Delivery,
         action_id: assignment.action_id.clone(),
         assignment_id: assignment.assignment_id.clone(),
@@ -526,7 +536,7 @@ pub fn delivery_issue_with_facts(
         thinking: kernel::generated::ThinkingLevel(route.thinking.clone()),
         route: "subscription".to_owned(),
         cwd: ContractPath(worktree_text.clone()),
-        allowed_tools: role_builtin_tool_names(&assignment.role_id.0)?
+        allowed_tools: role_tool_names(&assignment.role_id.0)?
             .into_iter()
             .map(ToolName)
             .collect(),
@@ -684,35 +694,85 @@ pub fn role_runtime(role_id: &str) -> Result<RoleRuntime, RunnerError> {
             model: slot.model.clone(),
             thinking: slot.thinking.clone(),
             route: slot.route.clone(),
-            built_in_tools: values(&block.fields, "tools")
-                .into_iter()
-                .filter(|tool| is_builtin_tool(tool))
-                .collect(),
+            declared_tools: values(&block.fields, "tools"),
         });
     }
     Err(RunnerError::Roster(format!("missing role {role_id}")))
 }
 
-pub fn role_builtin_tool_names(role_id: &str) -> Result<Vec<String>, RunnerError> {
+/// Runtime tools for one role.
+///
+/// Planning roles receive every declared capability verbatim. The pre-prompt
+/// active-set receipt makes an unknown or unavailable name a loud error.
+/// Delivery is intentionally still on its legacy assistant-text channel; its
+/// built-in-only projection remains isolated here until that declared channel
+/// is cut over in its own change.
+pub fn role_tool_names(role_id: &str) -> Result<Vec<String>, RunnerError> {
     let runtime = role_runtime(role_id)?;
-    if runtime.built_in_tools.is_empty() {
+    let planning = planning_boundary_for_role(role_id)?.is_some();
+    let tools = if planning {
+        runtime.declared_tools
+    } else {
+        runtime
+            .declared_tools
+            .into_iter()
+            .filter(|tool| legacy_delivery_builtin(tool))
+            .collect::<Vec<_>>()
+    };
+    if tools.is_empty() {
         return Err(RunnerError::Roster(format!(
-            "role {role_id} has no Pi built-in tools"
+            "role {role_id} has no runtime tools"
         )));
     }
-    Ok(runtime.built_in_tools)
+    Ok(tools)
 }
 
-pub fn expected_boundary_for_role(role_id: &str) -> Option<&'static str> {
-    match role_id {
-        "task-extractor" => Some("planning.task-atoms.v1"),
-        "repository-scout" | "context-curator" => Some("planning.scout-dossier.v1"),
-        "plan-compiler" | "plan-synthesizer" => Some("planning.work-map.v1"),
-        "plan-reviewer" => Some("planning.plan-review.v1"),
-        "contradiction-resolver" => Some("planning.questions.v1"),
-        "implementer" | "fixer-integrator" => Some("autopilot.delivery_result.v1"),
-        _ => None,
+fn planning_boundary_for_role(role_id: &str) -> Result<Option<String>, RunnerError> {
+    let rows = crate::planning::planning_assignment_roles()
+        .map_err(|error| RunnerError::InvalidSpec(format!("planning roles: {error:?}")))?;
+    Ok(rows
+        .into_iter()
+        .find(|row| row.role == role_id)
+        .map(|row| row.boundary_id))
+}
+
+fn terminal_submit_tool(
+    role_id: &str,
+) -> Result<Option<(&'static str, &'static str)>, RunnerError> {
+    let boundary = planning_boundary_for_role(role_id)?;
+    let Some(boundary) = boundary else {
+        return Ok(None);
+    };
+    let role = crate::roles::RoleRegistry::package()
+        .map_err(|error| RunnerError::Roster(format!("{error:?}")))?
+        .get(role_id)
+        .map_err(|error| RunnerError::Roster(format!("{error:?}")))?
+        .clone();
+    if !role.tools.iter().any(|tool| tool == &role.terminal_path) {
+        return Err(RunnerError::InvalidSpec(format!(
+            "planning terminal tool {} is absent from role {} tools",
+            role.terminal_path, role_id
+        )));
     }
+    kernel::generated::SUBMIT_TOOLS
+        .iter()
+        .find(|(tool, declared_boundary, _)| {
+            *tool == role.terminal_path && *declared_boundary == boundary
+        })
+        .map(|(tool, _, digest)| Some((*tool, *digest)))
+        .ok_or_else(|| {
+            RunnerError::InvalidSpec(format!(
+                "planning terminal tool {} has no generated binding for {}",
+                role.terminal_path, boundary
+            ))
+        })
+}
+
+fn legacy_delivery_builtin(tool: &str) -> bool {
+    matches!(
+        tool,
+        "read" | "grep" | "find" | "ls" | "bash" | "edit" | "write"
+    )
 }
 
 /// Derive the physical Pi child-session identity for one assignment.
@@ -763,6 +823,37 @@ fn run_identity_for(workstream: &str) -> Result<EvidenceIdentity, RunnerError> {
 /// allows a later run to reopen an earlier run's session.
 pub fn session_dir_for(run_root: &Path) -> PathBuf {
     run_root.join("pi-sessions")
+}
+
+/// Locate and digest the package-contained child-only Pi add-on.
+///
+/// The runner wrapper is already a validated absolute package fact. Moving two
+/// parents up reaches that package root without inferring from a file name. The
+/// code that actually loads this file reports its own digest before any prompt;
+/// the child compares that receipt with this value, closing the read/spawn gap.
+fn child_addon() -> Result<(PathBuf, String), RunnerError> {
+    let path =
+        PathBuf::from(env::var_os("AUTOPILOT_CHILD_ADDON_PATH").ok_or_else(|| {
+            RunnerError::MissingTransport("AUTOPILOT_CHILD_ADDON_PATH".to_owned())
+        })?);
+    if !path.is_absolute() {
+        return Err(RunnerError::InvalidTransport(format!(
+            "child add-on path is not absolute: {path:?}"
+        )));
+    }
+    reject_link_components_for_path(&path)?;
+    require_regular_file(&path)?;
+    let mut file = fs::File::open(&path).map_err(io_error)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(io_error)?;
+    let digest = sha256_hex(&bytes);
+    if digest != kernel::generated::CHILD_ADDON_DIGEST {
+        return Err(RunnerError::InvalidTransport(format!(
+            "child add-on digest mismatch: expected {}, got {digest}",
+            kernel::generated::CHILD_ADDON_DIGEST
+        )));
+    }
+    Ok((path, digest))
 }
 
 fn delivery_contract_id() -> ContractId {
@@ -822,13 +913,13 @@ fn validate_planning_request(request: &PlanningRunnerRequest) -> Result<(), Runn
             request.role_id.0, request.mode.0
         )));
     }
-    let expected = expected_boundary_for_role(&request.role_id.0).ok_or_else(|| {
+    let expected = planning_boundary_for_role(&request.role_id.0)?.ok_or_else(|| {
         RunnerError::InvalidSpec(format!(
             "role has no planning boundary: {}",
             request.role_id.0
         ))
     })?;
-    if expected == "autopilot.delivery_result.v1" || request.boundary_id.0 != expected {
+    if request.boundary_id.0 != expected {
         return Err(RunnerError::InvalidSpec(format!(
             "boundary drift: expected {expected}, got {}",
             request.boundary_id.0
@@ -962,7 +1053,10 @@ fn validate_delivery_assignment(assignment: &RunnerAssignment) -> Result<(), Run
             assignment.role_id.0, assignment.mode.0
         )));
     }
-    if expected_boundary_for_role(&assignment.role_id.0) != Some("autopilot.delivery_result.v1") {
+    if !matches!(
+        assignment.role_id.0.as_str(),
+        "implementer" | "fixer-integrator"
+    ) {
         return Err(RunnerError::InvalidSpec(format!(
             "delivery role drift: {}",
             assignment.role_id.0
@@ -1021,7 +1115,7 @@ fn planning_binding_digests(
     Ok(BindingDigests {
         boundary_digest: contract_digest(&request.boundary_id.0)?,
         result_contract_digest: contract_digest(&request.boundary_id.0)?,
-        settings_digest: sha256_hex(SETTINGS_IDENTITY.as_bytes()),
+        settings_digest: settings_digest(true),
         context_digest,
         skills_digest: sha256_hex(SKILLS_IDENTITY.as_bytes()),
         subscription_digest: subscription_digest(route),
@@ -1057,7 +1151,7 @@ fn delivery_binding_digests(
     Ok(BindingDigests {
         boundary_digest: contract_digest(contract)?,
         result_contract_digest: contract_digest(contract)?,
-        settings_digest: sha256_hex(SETTINGS_IDENTITY.as_bytes()),
+        settings_digest: settings_digest(false),
         context_digest,
         skills_digest: sha256_hex(SKILLS_IDENTITY.as_bytes()),
         subscription_digest: subscription_digest(route),
@@ -1081,8 +1175,8 @@ pub(crate) fn contract_digest(contract_id: &str) -> Result<String, RunnerError> 
     Ok(sha256_hex(format!("{contract_id}\0{text}").as_bytes()))
 }
 
-pub(crate) fn settings_digest() -> String {
-    sha256_hex(SETTINGS_IDENTITY.as_bytes())
+pub fn settings_digest(with_addon: bool) -> String {
+    sha256_hex(rpc::settings_identity(with_addon).as_bytes())
 }
 
 pub(crate) fn skills_digest() -> String {
@@ -1605,13 +1699,6 @@ fn absolute_path(path: &Path) -> Result<PathBuf, RunnerError> {
             Err(_) => Ok(joined),
         }
     }
-}
-
-fn is_builtin_tool(tool: &str) -> bool {
-    matches!(
-        tool,
-        "read" | "grep" | "find" | "ls" | "bash" | "edit" | "write"
-    )
 }
 
 fn shell_quote(value: &str) -> String {

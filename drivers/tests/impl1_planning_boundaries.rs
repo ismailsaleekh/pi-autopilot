@@ -319,6 +319,14 @@ impl Fixture {
             std::env::set_var("AUTOPILOT_NODE_EXECUTABLE", &node);
             std::env::set_var("AUTOPILOT_AGENT_RUNNER_WRAPPER", &wrapper);
             std::env::set_var(
+                "AUTOPILOT_CHILD_ADDON_PATH",
+                Path::new(env!("CARGO_MANIFEST_DIR")).join(concat!(
+                    "../src/generated/child-",
+                    "ext",
+                    "ension.ts"
+                )),
+            );
+            std::env::set_var(
                 "PATH",
                 format!(
                     "{}:{}",
@@ -341,6 +349,7 @@ impl Fixture {
             serde_json::to_string(&self.root.join("fake-pi-count").display().to_string()).unwrap();
         let out_dir_text = serde_json::to_string(&out_dir.display().to_string()).unwrap();
         fs::write(&pi, format!(r#"#!/usr/bin/env python3
+import hashlib
 import json
 import os
 import sys
@@ -378,6 +387,13 @@ thinking = arg_value("--thinking")
 session_id = arg_value("--session-id")
 mode = arg_value("--mode")
 session_dir = arg_value("--session-dir")
+addon_path = arg_value("-e")
+active_tools = sorted(filter(None, arg_value("--tools").split(",")))
+submit_tools = [tool for tool in active_tools if tool.startswith("autopilot_submit_")]
+bindings = {{
+    "autopilot_submit_atoms": ("planning.task-atoms.v1", "77d000b816b3c14dcdefeba0c23d4f4f9f8bedaf5b281081f1cea138e525e091"),
+    "autopilot_submit_plan_cluster": ("planning.work-map.v1", "d60fa316fa8d5f2baf1d1a764028bdaf5676e094ec23710c53917e760cfe939a"),
+}}
 if not session_dir:
     sys.stderr.write("fake pi: --session-dir is required\n")
     sys.exit(64)
@@ -399,6 +415,10 @@ if mode == "rpc":
             emit({{"type":"response","id":command_id,"command":command_type,"success":True}})
         elif command_type == "get_state":
             emit({{"type":"response","id":command_id,"command":command_type,"success":True,"data":{{"sessionId":session_id,"model":{{"provider":provider,"id":model}},"thinkingLevel":thinking,"autoCompactionEnabled":False,"messageCount":len(stored_messages)}}}})
+        elif command_type == "get_entries":
+            with open(addon_path, "rb") as handle:
+                addon_digest = hashlib.sha256(handle.read()).hexdigest()
+            emit({{"type":"response","id":command_id,"command":command_type,"success":True,"data":{{"entries":[{{"type":"custom","customType":"pi-autopilot:child-tools","data":{{"self_digest":addon_digest,"binding":os.environ.get("AUTOPILOT_CARRIER_BINDING", ""),"active_tools":active_tools}},"id":"receipt-1","parentId":None}}],"leafId":"receipt-1"}}}})
         elif command_type == "prompt":
             content = next_output()
             entry = json.dumps({{"role":"user","content":command.get("message")}}, separators=(",", ":"))
@@ -407,10 +427,18 @@ if mode == "rpc":
             with open(session_path, "a", encoding="utf-8") as handle:
                 handle.write(entry + "\n")
             emit({{"type":"response","id":command_id,"command":command_type,"success":True}})
+            tool = submit_tools[0]
+            boundary, schema_digest = bindings[tool]
+            details = {{"boundary_id":boundary,"schema_digest":schema_digest,"binding":os.environ.get("AUTOPILOT_CARRIER_BINDING", ""),"payload":json.loads(content)}}
+            call_id = "call_fake_submit"
             emit({{"type":"agent_start"}})
             emit({{"type":"turn_start"}})
             emit({{"type":"message_start"}})
-            emit({{"type":"message_end","message":{{"role":"assistant","provider":provider,"model":model,"stopReason":"stop","content":[{{"type":"text","text":content}}]}}}})
+            emit({{"type":"message_end","message":{{"role":"assistant","provider":provider,"model":model,"stopReason":"toolUse","content":[{{"type":"toolCall","id":call_id,"name":tool,"arguments":details["payload"]}}]}}}})
+            emit({{"type":"tool_execution_start","toolCallId":call_id,"toolName":tool,"args":details["payload"]}})
+            emit({{"type":"tool_execution_end","toolCallId":call_id,"toolName":tool,"result":{{"content":[{{"type":"text","text":"submitted"}}],"details":details,"terminate":True}},"isError":False}})
+            emit({{"type":"message_start"}})
+            emit({{"type":"message_end","message":{{"role":"toolResult","toolCallId":call_id,"toolName":tool,"content":[{{"type":"text","text":"submitted"}}],"details":details,"isError":False}}}})
             emit({{"type":"turn_end"}})
             emit({{"type":"agent_end","willRetry":False}})
             emit({{"type":"agent_settled"}})

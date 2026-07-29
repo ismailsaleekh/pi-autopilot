@@ -8,9 +8,11 @@ Sources: `data/workflow.kdl`.
 
 | Machine | Initial | States | Transitions | Doc |
 | --- | --- | --- | --- | --- |
-| run | planning | 7 | 6 | D76 §5.3 run phase machine. Health and outcome are orthogonal axes, not states. |
+| run | planning | 7 | 8 | D76 §5.3 run phase machine. Health and outcome are orthogonal axes, not states. |
 | lane | allocated | 12 | 17 | D76 §5.3 lane semantic state machine, with D74 §11.3 forward-ready/forward-integrated distinct from closed and D74 §12.2 two forward validation rounds. |
 | candidate | queued | 10 | 24 | D76 §5.3 candidate state machine for serialized release, repair, conflict, and finalization candidates. |
+| evidence-assignment | issued | 7 | 10 | Evidence-ingress v1 assignment machine. Each assignment revision is immutable; newer revisions are separate instances. |
+| evidence-envelope | open | 2 | 1 | Closed evidence envelope machine. Additional evidence creates a new manifest revision. |
 
 ## States
 
@@ -45,16 +47,27 @@ Sources: `data/workflow.kdl`.
 | candidate | needs-fix | false |  |
 | candidate | failed | true |  |
 | candidate | superseded | true |  |
+| evidence-assignment | issued | false |  |
+| evidence-assignment | running | false |  |
+| evidence-assignment | terminal-observed | false |  |
+| evidence-assignment | failed | true |  |
+| evidence-assignment | accepted | true |  |
+| evidence-assignment | rejected | true |  |
+| evidence-assignment | superseded | true |  |
+| evidence-envelope | open | false |  |
+| evidence-envelope | closed | true |  |
 
 ## Transitions
 
 | Machine | From | To | Evidence | Verdict | Route |
 | --- | --- | --- | --- | --- | --- |
-| run | planning | ready-to-execute | plan-approval |  |  |
+| run | planning | ready-to-execute | planning.ready-to-execute.v1 |  |  |
 | run | ready-to-execute | allocating | execution-command |  |  |
 | run | allocating | executing | allocation-accepted |  |  |
 | run | executing | final-verification | all-lanes-closed |  |  |
 | run | final-verification | ready-to-close | final-verification-pass |  |  |
+| run | final-verification | executing | final-verification-invalidated |  |  |
+| run | ready-to-close | executing | final-verification-invalidated |  |  |
 | run | ready-to-close | terminal | result-ref-archived |  |  |
 | lane | allocated | implementing | lane-launch-action |  |  |
 | lane | implementing | forward-validating-1 | delivery-result |  |  |
@@ -97,6 +110,17 @@ Sources: `data/workflow.kdl`.
 | candidate | ready-to-commit | committed | run-main-cas |  |  |
 | candidate | ready-to-commit | failed | run-main-cas-failed |  |  |
 | candidate | ready-to-commit | superseded | candidate-supersession |  |  |
+| evidence-assignment | issued | running | evidence.task-bound.v1 |  |  |
+| evidence-assignment | issued | failed | producer-spawn-failed |  |  |
+| evidence-assignment | running | terminal-observed | evidence.task-terminal.v1 |  |  |
+| evidence-assignment | running | failed | evidence.task-terminal.v1 |  |  |
+| evidence-assignment | terminal-observed | accepted | evidence.accepted.v1 |  |  |
+| evidence-assignment | terminal-observed | rejected | evidence.rejected.v1 |  |  |
+| evidence-assignment | issued | superseded | evidence.superseded.v1 |  |  |
+| evidence-assignment | failed | superseded | evidence.superseded.v1 |  |  |
+| evidence-assignment | rejected | superseded | evidence.superseded.v1 |  |  |
+| evidence-assignment | accepted | superseded | evidence.superseded.v1 |  |  |
+| evidence-envelope | open | closed | evidence.envelope-closed.v1 |  |  |
 
 ## Verdict sets
 

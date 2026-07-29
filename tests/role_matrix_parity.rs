@@ -1,3 +1,4 @@
+use drivers::planning::planning_assignment_roles;
 use drivers::roles::RoleRegistry;
 
 #[test]
@@ -157,7 +158,6 @@ fn validator_role_is_mechanically_read_only_and_context_modes_are_registered() {
             "grep".to_owned(),
             "find".to_owned(),
             "ls".to_owned(),
-            "context_budget".to_owned(),
             "autopilot_request_test".to_owned(),
             "autopilot_emit_status".to_owned(),
         ]
@@ -187,6 +187,55 @@ fn validator_role_is_mechanically_read_only_and_context_modes_are_registered() {
             resolved.modes.contains_key(mode),
             "missing validator context policy for {mode}"
         );
+    }
+}
+
+#[test]
+fn every_planning_terminal_has_one_generated_tool_boundary_binding() {
+    let registry = RoleRegistry::package().expect("role registry loads");
+    for assignment in planning_assignment_roles().expect("planning roles") {
+        let role = registry.get(&assignment.role).expect("planning role");
+        assert!(
+            role.tools.iter().any(|tool| tool == &role.terminal_path),
+            "{} terminal {} is not declared in role tools",
+            role.id,
+            role.terminal_path
+        );
+        let matches = kernel::generated::SUBMIT_TOOLS
+            .iter()
+            .filter(|(tool, boundary, _)| {
+                *tool == role.terminal_path && *boundary == assignment.boundary_id
+            })
+            .count();
+        assert_eq!(
+            matches, 1,
+            "{} terminal {} must have one generated binding to {}",
+            role.id, role.terminal_path, assignment.boundary_id
+        );
+    }
+}
+
+#[test]
+fn retained_undeliverable_tools_are_declared_as_known_incomplete() {
+    let registry = RoleRegistry::package().expect("role registry loads");
+    let record = include_str!("../data/known-incomplete-tools.kdl");
+    let retained = [
+        ("validator", "autopilot_request_test"),
+        ("onboard", "autopilot_submit_onboard"),
+        ("execution-allocator", "autopilot_submit_allocation"),
+    ];
+
+    assert_eq!(
+        record
+            .lines()
+            .filter(|line| line.starts_with("tool \""))
+            .count(),
+        retained.len()
+    );
+    for (role_id, tool) in retained {
+        let role = registry.get(role_id).expect("retained role");
+        assert!(role.tools.iter().any(|declared| declared == tool));
+        assert!(record.contains(&format!("tool \"{tool}\" role=\"{role_id}\"")));
     }
 }
 

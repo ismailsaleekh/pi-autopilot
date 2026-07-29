@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -10,7 +10,7 @@ use crate::checkpoint::{
 };
 use crate::runner::rpc::{
     CompactionReason, RpcClient, RpcCommand, RpcCommandKind, RpcDiagnostics, RpcEvent, RpcFrame,
-    RpcResponse, RpcSpawnConfig, TerminalMessage,
+    RpcResponse, RpcSpawnConfig, TerminalMessage, ToolCarrierDetails,
 };
 
 use kernel::failure::{Failure, OperatorDecision, RetryPolicy};
@@ -21,6 +21,9 @@ use sha2::{Digest as ShaDigest, Sha256};
 const DEFAULT_MAX_PI_STDOUT_BYTES: usize = 1024 * 1024;
 const DEFAULT_MAX_PI_STDERR_BYTES: usize = 256 * 1024;
 const MAX_VALUE_ATTEMPTS: u32 = 3;
+const RUNTIME_ADDON_DIGEST_FIELD: &str = concat!("runtime_", "ext", "ension_digest");
+#[rustfmt::skip]
+fn runtime_addon(spec: &AgentRunSpec) -> Option<(&kernel::generated::Path, &kernel::generated::Digest)> { spec.runtime_extension_path.as_ref().zip(spec.runtime_extension_digest.as_ref()) }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 struct ValueRejection {
@@ -35,6 +38,32 @@ struct AssistantRecord {
     provider: String,
     model: String,
     stop_reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ToolTerminal {
+    tool_name: String,
+    tool_call_id: String,
+    details: ToolCarrierDetails,
+    details_value: Value,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum CarrierSource {
+    Assistant(String),
+    Tool(ToolTerminal),
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+enum CarrierRejection {
+    Identity(String),
+    Value(ValueRejection),
+}
+
+impl From<ValueRejection> for CarrierRejection {
+    fn from(value: ValueRejection) -> Self {
+        Self::Value(value)
+    }
 }
 
 pub fn main(args: &[String]) -> Result<(), String> {
@@ -86,17 +115,23 @@ fn run_value_attempts(
     let mut attempt_prompt = prompt;
     for attempt in 1..=MAX_VALUE_ATTEMPTS {
         append_attempt_event(spec, attempt, "started", None)?;
-        let assistant = run_prompt_with_capacity_retry(runner, spec, &attempt_prompt, attempt)?;
-        match write_carrier(spec_path, spec_digest, spec, &assistant) {
+        let source = run_prompt_with_capacity_retry(runner, spec, &attempt_prompt, attempt)?;
+        match write_carrier(spec_path, spec_digest, spec, &source) {
             Ok(()) => {
                 append_attempt_event(spec, attempt, "accepted", None)?;
                 return Ok(());
             }
-            Err(rejection) if attempt < MAX_VALUE_ATTEMPTS => {
+            Err(CarrierRejection::Identity(detail)) => {
+                append_attempt_event(spec, attempt, "identity-rejected", None)?;
+                return Err(format!(
+                    "agent-run carrier identity rejected before value repair: {detail}"
+                ));
+            }
+            Err(CarrierRejection::Value(rejection)) if attempt < MAX_VALUE_ATTEMPTS => {
                 append_attempt_event(spec, attempt, "value-rejected", Some(&rejection))?;
                 attempt_prompt = render_repair_prompt(spec, &rejection);
             }
-            Err(rejection) => {
+            Err(CarrierRejection::Value(rejection)) => {
                 append_attempt_event(spec, attempt, "paused-after-exhaustion", Some(&rejection))?;
                 return Err(paused_after_exhaustion(spec, &rejection));
             }
@@ -120,7 +155,7 @@ fn run_prompt_with_capacity_retry(
     spec: &AgentRunSpec,
     prompt: &str,
     attempt: u32,
-) -> Result<String, String> {
+) -> Result<CarrierSource, String> {
     let policy = CapacityRetryPolicy::parse()?;
     let mut last = String::new();
     for retry in 0..=policy.max_retries {
@@ -172,6 +207,9 @@ struct CycleState {
     pending_stats: BTreeSet<String>,
     final_record: Option<CycleTerminal>,
     terminal_count: usize,
+    tool_terminal: Option<ToolTerminal>,
+    tool_terminal_count: usize,
+    tool_result_details: Option<Value>,
     tool_after_terminal: bool,
     awaiting_handoff: bool,
     steer_response_seen: bool,
@@ -191,6 +229,9 @@ impl CycleState {
             pending_stats: BTreeSet::new(),
             final_record: None,
             terminal_count: 0,
+            tool_terminal: None,
+            tool_terminal_count: 0,
+            tool_result_details: None,
             tool_after_terminal: false,
             awaiting_handoff: matches!(purpose, PromptPurpose::Handoff),
             steer_response_seen: false,
@@ -230,6 +271,10 @@ impl RpcAssignment {
         );
         config.stderr_tail_bytes = stderr_limit;
         config.max_terminal_bytes = stdout_limit.max(DEFAULT_MAX_PI_STDOUT_BYTES);
+        if let Some((path, _)) = runtime_addon(spec) {
+            config.runtime_addon = Some(PathBuf::from(&path.0));
+            config.carrier_binding = Some(carrier_binding(spec));
+        }
         let client = RpcClient::spawn(config).map_err(|error| error.to_string())?;
         let mut runner = Self {
             client,
@@ -247,6 +292,11 @@ impl RpcAssignment {
         let state_id = runner.next_id("state");
         let state = runner.command_response(RpcCommand::get_state(state_id))?;
         runner.validate_state(spec, &state)?;
+        if runtime_addon(spec).is_some() {
+            let entries_id = runner.next_id("entries");
+            let entries = runner.command_response(RpcCommand::get_entries(entries_id))?;
+            runner.validate_child_receipt(spec, &entries)?;
+        }
         Ok(runner)
     }
 
@@ -255,7 +305,7 @@ impl RpcAssignment {
         &mut self,
         spec: &AgentRunSpec,
         prompt: &str,
-    ) -> Result<String, PromptFailure> {
+    ) -> Result<CarrierSource, PromptFailure> {
         let capacity_before = self.last_capacity_refusal.take();
         let result = self.run_prompt(spec, prompt, PromptPurpose::Normal);
         match result {
@@ -272,7 +322,7 @@ impl RpcAssignment {
         spec: &AgentRunSpec,
         prompt: &str,
         purpose: PromptPurpose,
-    ) -> Result<String, String> {
+    ) -> Result<CarrierSource, String> {
         let prompt_id = self.next_id("prompt");
         self.client
             .send_command(RpcCommand::prompt(prompt_id.clone(), prompt.to_owned()))
@@ -368,14 +418,47 @@ impl RpcAssignment {
                 Ok(())
             }
             RpcEvent::MessageEnd { message } => self.handle_message_end(spec, state, message),
-            RpcEvent::ToolExecutionStart | RpcEvent::ToolExecutionEnd => {
-                if state.final_record.is_some() {
+            RpcEvent::ToolExecutionStart => {
+                if state.final_record.is_some() || state.tool_terminal.is_some() {
                     state.tool_after_terminal = true;
                 }
-                if matches!(event, RpcEvent::ToolExecutionEnd) {
-                    self.request_stats(state)?;
-                }
                 Ok(())
+            }
+            RpcEvent::ToolExecutionEnd {
+                tool_call_id,
+                tool_name,
+                details,
+                is_error,
+                terminate,
+            } => {
+                if state.final_record.is_some() || state.tool_terminal.is_some() {
+                    state.tool_after_terminal = true;
+                }
+                if kernel::generated::SUBMIT_TOOLS
+                    .iter()
+                    .any(|(name, _, _)| *name == tool_name)
+                {
+                    if is_error || !terminate {
+                        return Err(format!(
+                            "agent-run terminating submit tool {tool_name} completed with isError={is_error} terminate={terminate}"
+                        ));
+                    }
+                    let details_value = details.ok_or_else(|| {
+                        format!("agent-run submit tool {tool_name} returned no details")
+                    })?;
+                    let parsed: ToolCarrierDetails = serde_json::from_value(details_value.clone())
+                        .map_err(|error| {
+                            format!("agent-run submit tool {tool_name} details malformed: {error}")
+                        })?;
+                    state.tool_terminal_count = state.tool_terminal_count.saturating_add(1);
+                    state.tool_terminal = Some(ToolTerminal {
+                        tool_name,
+                        tool_call_id,
+                        details: parsed,
+                        details_value,
+                    });
+                }
+                self.request_stats(state)
             }
             RpcEvent::AgentEnd { will_retry } => {
                 let _ = will_retry;
@@ -394,6 +477,14 @@ impl RpcAssignment {
         state: &mut CycleState,
         message: TerminalMessage,
     ) -> Result<(), String> {
+        if message.role == "toolResult" {
+            if let Some(details) = message.details
+                && state.tool_result_details.replace(details).is_some()
+            {
+                return Err("agent-run received duplicate toolResult details".to_owned());
+            }
+            return Ok(());
+        }
         if message.role != "assistant" {
             return Ok(());
         }
@@ -411,6 +502,7 @@ impl RpcAssignment {
         state.upstream_capacity_failure = None;
         let record = assistant_from_terminal(message)?;
         if record.stop_reason == "tooluse" {
+            validate_assistant_identity(&record, &spec.provider, &spec.model)?;
             self.request_stats(state)?;
             return Ok(());
         }
@@ -487,7 +579,7 @@ impl RpcAssignment {
                         )),
                     };
                 }
-                if state.final_record.is_some() {
+                if state.final_record.is_some() || state.tool_terminal.is_some() {
                     if !decision.allows_terminal_success() {
                         return Err(
                             "agent-run context budget unknown blocks terminal success: UnknownBlocksTerminalSuccess".to_owned(),
@@ -560,7 +652,11 @@ impl RpcAssignment {
         Ok(())
     }
 
-    fn finish_cycle(&mut self, spec: &AgentRunSpec, state: CycleState) -> Result<String, String> {
+    fn finish_cycle(
+        &mut self,
+        spec: &AgentRunSpec,
+        state: CycleState,
+    ) -> Result<CarrierSource, String> {
         // Surface a launch-side refusal ahead of output-shape checks: there is
         // no assistant output to judge, and the caller retries on this marker.
         if let Some(detail) = state.upstream_capacity_failure {
@@ -568,9 +664,34 @@ impl RpcAssignment {
             return Err(format!("agent-run upstream capacity refusal: {detail}"));
         }
         if state.tool_after_terminal {
-            return Err(
-                "agent-run Pi JSONL had tool activity after terminal assistant result".to_owned(),
-            );
+            return Err("agent-run Pi JSONL had tool activity after terminal result".to_owned());
+        }
+        if state.tool_terminal_count > 0 {
+            if state.tool_terminal_count != 1 {
+                return Err(format!(
+                    "agent-run Pi JSONL contained {} terminating submit results; expected exactly one",
+                    state.tool_terminal_count
+                ));
+            }
+            if state.final_record.is_some() {
+                return Err(
+                    "agent-run Pi JSONL contained both tool and assistant terminal results"
+                        .to_owned(),
+                );
+            }
+            let terminal = state
+                .tool_terminal
+                .ok_or_else(|| "agent-run terminating tool count without carrier".to_owned())?;
+            let duplicate = state.tool_result_details.ok_or_else(|| {
+                "agent-run terminating tool missing message_end(toolResult) details".to_owned()
+            })?;
+            if duplicate != terminal.details_value {
+                return Err(format!(
+                    "agent-run tool details drift between tool_execution_end and toolResult for {}",
+                    terminal.tool_call_id
+                ));
+            }
+            return Ok(CarrierSource::Tool(terminal));
         }
         if let Some(handoff) = state.handoff {
             let checkpoint = self.checkpoint_record(spec, handoff)?;
@@ -583,9 +704,10 @@ impl RpcAssignment {
         if state.awaiting_handoff {
             match &state.final_record {
                 Some(candidate)
-                    if validate_assistant_value(spec, &candidate.record.text).is_ok() =>
+                    if runtime_addon(spec).is_none()
+                        && validate_assistant_value(spec, &candidate.record.text).is_ok() =>
                 {
-                    return Ok(candidate.record.text.clone());
+                    return Ok(CarrierSource::Assistant(candidate.record.text.clone()));
                 }
                 _ => {}
             }
@@ -594,7 +716,13 @@ impl RpcAssignment {
             return self.run_prompt(spec, &handoff_prompt, PromptPurpose::Handoff);
         }
         if state.terminal_count == 0 {
-            return Err("agent-run Pi JSONL contained no final assistant result".to_owned());
+            return Err("agent-run Pi JSONL contained no final carrier result".to_owned());
+        }
+        if runtime_addon(spec).is_some() {
+            return Err(
+                "agent-run planning child returned assistant text; a terminating submit tool result is required"
+                    .to_owned(),
+            );
         }
         if state.terminal_count != 1 {
             return Err(format!(
@@ -608,7 +736,7 @@ impl RpcAssignment {
         if record.record.text.trim().is_empty() {
             return Err("agent-run Pi JSONL contained empty final assistant result".to_owned());
         }
-        Ok(record.record.text)
+        Ok(CarrierSource::Assistant(record.record.text))
     }
 
     fn request_stats(&mut self, state: &mut CycleState) -> Result<(), String> {
@@ -640,6 +768,88 @@ impl RpcAssignment {
                 "agent-run unexpected rpc event before configuration completed: {event:?}"
             )),
         }
+    }
+
+    fn validate_child_receipt(
+        &self,
+        spec: &AgentRunSpec,
+        response: &RpcResponse,
+    ) -> Result<(), String> {
+        let (_, expected_digest) = runtime_addon(spec)
+            .ok_or_else(|| "agent-run child add-on receipt without expected digest".to_owned())?;
+        let data = response
+            .data
+            .as_ref()
+            .ok_or_else(|| "agent-run get_entries missing data".to_owned())?;
+        let value: Value = serde_json::from_str(data)
+            .map_err(|error| format!("agent-run get_entries malformed data: {error}"))?;
+        let entries = value
+            .get("entries")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "agent-run get_entries missing entries".to_owned())?;
+        let receipts = entries
+            .iter()
+            .filter(|entry| {
+                entry.get("customType").and_then(Value::as_str) == Some("pi-autopilot:child-tools")
+            })
+            .collect::<Vec<_>>();
+        if receipts.len() != 1 {
+            return Err(format!(
+                "agent-run child add-on registration receipt count was {}; expected exactly one",
+                receipts.len()
+            ));
+        }
+        let receipt = receipts[0]
+            .get("data")
+            .and_then(Value::as_object)
+            .ok_or_else(|| "agent-run child add-on receipt missing data".to_owned())?;
+        let self_digest = receipt.get("self_digest").and_then(Value::as_str);
+        if self_digest != Some(expected_digest.0.as_str()) {
+            return Err(format!(
+                "agent-run child add-on digest mismatch: expected {}, got {self_digest:?}",
+                expected_digest.0
+            ));
+        }
+        let receipt_binding = receipt.get("binding").and_then(Value::as_str);
+        if receipt_binding != Some(carrier_binding(spec).as_str()) {
+            return Err(format!(
+                "agent-run child add-on binding receipt mismatch: expected {}, got {receipt_binding:?}",
+                carrier_binding(spec)
+            ));
+        }
+        let mut active = receipt
+            .get("active_tools")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "agent-run child add-on receipt missing active_tools".to_owned())?
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| "agent-run active tool is not a string".to_owned())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        active.sort();
+        let mut expected = spec
+            .allowed_tools
+            .iter()
+            .map(|tool| tool.0.clone())
+            .collect::<Vec<_>>();
+        expected.sort();
+        if active != expected {
+            return Err(format!(
+                "agent-run active tools drift before prompt: expected {expected:?}, got {active:?}"
+            ));
+        }
+        let (terminal_tool, _) = super::terminal_submit_tool(&spec.role_id.0)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "agent-run planning role has no terminal submit tool".to_owned())?;
+        if !active.iter().any(|tool| tool == terminal_tool) {
+            return Err(format!(
+                "agent-run terminal tool {terminal_tool} is not active before prompt"
+            ));
+        }
+        Ok(())
     }
 
     fn validate_state(&self, spec: &AgentRunSpec, response: &RpcResponse) -> Result<(), String> {
@@ -1129,7 +1339,7 @@ fn parse_args(args: &[String]) -> Result<PathBuf, String> {
 }
 
 fn validate_spec(strict: &AgentRunSpec, spec_path: &Path) -> Result<(), String> {
-    if strict.schema.0 != "autopilot.agent_run_spec.v2" {
+    if strict.schema.0 != "autopilot.agent_run_spec.v3" {
         return Err(format!(
             "unsupported agent-run spec schema: {}",
             strict.schema.0
@@ -1147,6 +1357,7 @@ fn validate_spec(strict: &AgentRunSpec, spec_path: &Path) -> Result<(), String> 
     }
     validate_route_and_role(strict)?;
     validate_paths(strict, spec_path)?;
+    validate_runtime_addon(strict)?;
     validate_digests(strict)?;
     validate_session_identity(strict)?;
     validate_delivery_identity(strict)?;
@@ -1208,8 +1419,7 @@ fn validate_route_and_role(strict: &AgentRunSpec) -> Result<(), String> {
     {
         return Err("agent-run refuses OpenRouter/API-key route substitution".to_owned());
     }
-    let tools =
-        super::role_builtin_tool_names(&strict.role_id.0).map_err(|error| error.to_string())?;
+    let tools = super::role_tool_names(&strict.role_id.0).map_err(|error| error.to_string())?;
     let actual_tools = strict
         .allowed_tools
         .iter()
@@ -1221,13 +1431,27 @@ fn validate_route_and_role(strict: &AgentRunSpec) -> Result<(), String> {
             tools, actual_tools
         ));
     }
-    let expected_boundary =
-        super::expected_boundary_for_role(&strict.role_id.0).ok_or_else(|| {
-            format!(
-                "agent-run role has no result boundary: {}",
+    let expected_boundary = if strict.result_contract.0 == "autopilot.delivery_result.v1" {
+        if !matches!(
+            strict.role_id.0.as_str(),
+            "implementer" | "fixer-integrator"
+        ) {
+            return Err(format!(
+                "agent-run role has no delivery boundary: {}",
                 strict.role_id.0
-            )
-        })?;
+            ));
+        }
+        "autopilot.delivery_result.v1".to_owned()
+    } else {
+        super::planning_boundary_for_role(&strict.role_id.0)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| {
+                format!(
+                    "agent-run role has no planning boundary: {}",
+                    strict.role_id.0
+                )
+            })?
+    };
     if strict.boundary_id.0 != expected_boundary || strict.result_contract.0 != expected_boundary {
         return Err(format!(
             "agent-run result contract drift: expected {expected_boundary}, got boundary={} result={}",
@@ -1262,6 +1486,57 @@ fn validate_paths(strict: &AgentRunSpec, spec_path: &Path) -> Result<(), String>
     Ok(())
 }
 
+fn validate_runtime_addon(strict: &AgentRunSpec) -> Result<(), String> {
+    let planning = strict.result_contract.0 != "autopilot.delivery_result.v1";
+    match runtime_addon(strict) {
+        Some((path, expected)) if planning => {
+            let path = path_value("runtime_addon_path", &path.0)?;
+            super::reject_link_components_for_path(&path).map_err(|error| error.to_string())?;
+            super::require_regular_file(&path).map_err(|error| error.to_string())?;
+            let mut file = fs::File::open(&path)
+                .map_err(|error| format!("agent-run child add-on open failed: {error}"))?;
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)
+                .map_err(|error| format!("agent-run child add-on read failed: {error}"))?;
+            let actual = sha256_hex(&bytes);
+            if expected.0 != kernel::generated::CHILD_ADDON_DIGEST {
+                return Err(format!(
+                    "agent-run child add-on authority digest drift: expected {}, got {}",
+                    kernel::generated::CHILD_ADDON_DIGEST,
+                    expected.0
+                ));
+            }
+            if actual != expected.0 {
+                return Err(format!(
+                    "agent-run child add-on digest mismatch: expected {}, got {actual}",
+                    expected.0
+                ));
+            }
+            Ok(())
+        }
+        None if !planning => Ok(()),
+        _ if planning => {
+            Err("agent-run planning spec requires child add-on path and digest".to_owned())
+        }
+        _ => Err("agent-run delivery spec must not load child add-on".to_owned()),
+    }
+}
+
+fn carrier_binding(spec: &AgentRunSpec) -> String {
+    sha256_hex(
+        format!(
+            "autopilot.tool-carrier.v1\0{}\0{}\0{}\0{}\0{}\0{}",
+            spec.run_id.0,
+            spec.action_id.0,
+            spec.assignment_id.0,
+            spec.run_revision,
+            spec.boundary_id.0,
+            spec.prompt_digest.0
+        )
+        .as_bytes(),
+    )
+}
+
 fn validate_digests(strict: &AgentRunSpec) -> Result<(), String> {
     let route = super::route_for_role(&strict.role_id.0).map_err(|error| error.to_string())?;
     let expected_boundary =
@@ -1271,7 +1546,7 @@ fn validate_digests(strict: &AgentRunSpec) -> Result<(), String> {
     let expected_subscription = super::subscription_digest(&route);
     if strict.boundary_digest.0 != expected_boundary
         || strict.result_contract_digest.0 != expected_result
-        || strict.settings_digest.0 != super::settings_digest()
+        || strict.settings_digest.0 != super::settings_digest(runtime_addon(strict).is_some())
         || strict.skills_digest.0 != super::skills_digest()
         || strict.subscription_digest.0 != expected_subscription
     {
@@ -1452,7 +1727,7 @@ fn validate_doc(
     Ok(())
 }
 
-fn validate_terminal_assistant(
+fn validate_assistant_identity(
     record: &AssistantRecord,
     expected_provider: &str,
     expected_model: &str,
@@ -1463,6 +1738,15 @@ fn validate_terminal_assistant(
             record.provider, record.model
         ));
     }
+    Ok(())
+}
+
+fn validate_terminal_assistant(
+    record: &AssistantRecord,
+    expected_provider: &str,
+    expected_model: &str,
+) -> Result<(), String> {
+    validate_assistant_identity(record, expected_provider, expected_model)?;
     if record.stop_reason != "stop" {
         return Err(format!(
             "agent-run terminal assistant stopReason was not stop: {}",
@@ -1500,8 +1784,13 @@ fn value_rejection(
 }
 
 fn render_repair_prompt(spec: &AgentRunSpec, rejection: &ValueRejection) -> String {
+    let action = if runtime_addon(spec).is_some() {
+        "The prior submission is not accepted. Call the declared terminating submit tool again with corrected values."
+    } else {
+        "Re-emit with corrected values."
+    };
     format!(
-        "Your {} call was rejected.\n  field:    {}\n  expected: {}\n  got:      {}\nRe-emit with corrected values.",
+        "Your {} submission was rejected.\n  field:    {}\n  expected: {}\n  got:      {}\n{action}",
         spec.boundary_id.0, rejection.field, rejection.expected, rejection.got
     )
 }
@@ -1611,9 +1900,14 @@ fn write_carrier(
     spec_path: &Path,
     spec_digest: &str,
     spec: &AgentRunSpec,
-    assistant: &str,
-) -> Result<(), ValueRejection> {
+    source: &CarrierSource,
+) -> Result<(), CarrierRejection> {
     if spec.result_contract.0 == "autopilot.delivery_result.v1" {
+        let CarrierSource::Assistant(assistant) = source else {
+            return Err(CarrierRejection::Identity(
+                "delivery assignment returned a planning submit tool".to_owned(),
+            ));
+        };
         let mut carrier: DeliveryResult = serde_json::from_str(assistant).map_err(|error| {
             value_rejection(
                 "carrier",
@@ -1623,46 +1917,87 @@ fn write_carrier(
         })?;
         validate_delivery_carrier(spec, &carrier)?;
         bind_delivery_carrier(spec_path, spec_digest, spec, &mut carrier)?;
-        write_json_new(&spec.carrier_path.0, &carrier).map_err(|error| {
-            value_rejection("carrier_path", "create-once writable carrier path", error)
-        })
-    } else {
-        crate::runner::validate_child_boundary(spec, assistant).map_err(|error| {
-            value_rejection(
-                "raw_output",
-                format!("{} admitted value", error.boundary_id()),
-                error.actual().to_owned(),
-            )
-        })?;
-        let carrier = serde_json::json!({
-            "schema": "autopilot.planning_carrier.v1",
-            "action_id": spec.action_id.0,
-            "assignment_id": spec.assignment_id.0,
-            "run_revision": spec.run_revision,
-            "workstream": spec.workstream.0,
-            "role_id": spec.role_id.0,
-            "mode": spec.mode.0,
-            "boundary_id": spec.boundary_id.0,
-            "result_contract": spec.result_contract.0,
-            "prompt_path": spec.prompt_path.0,
-            "prompt_digest": spec.prompt_digest.0,
-            "boundary_digest": spec.boundary_digest.0,
-            "result_contract_digest": spec.result_contract_digest.0,
-            "settings_digest": spec.settings_digest.0,
-            "context_digest": spec.context_digest.0,
-            "skills_digest": spec.skills_digest.0,
-            "subscription_digest": spec.subscription_digest.0,
-            "spec_digest": spec_digest,
-            "spec_path": super::path_to_string(spec_path).map_err(|error| {
-                value_rejection("spec_path", "absolute runner spec path", error.to_string())
-            })?,
-            "carrier_path": spec.carrier_path.0,
-            "raw_output": assistant,
-        });
-        write_json_new(&spec.carrier_path.0, &carrier).map_err(|error| {
-            value_rejection("carrier_path", "create-once writable carrier path", error)
-        })
+        return write_json_new(&spec.carrier_path.0, &carrier)
+            .map_err(|error| {
+                value_rejection("carrier_path", "create-once writable carrier path", error)
+            })
+            .map_err(Into::into);
     }
+
+    let CarrierSource::Tool(terminal) = source else {
+        return Err(CarrierRejection::Identity(
+            "planning assignment returned assistant text instead of a submit tool".to_owned(),
+        ));
+    };
+    let (expected_tool, expected_schema) = super::terminal_submit_tool(&spec.role_id.0)
+        .map_err(|error| CarrierRejection::Identity(error.to_string()))?
+        .ok_or_else(|| {
+            CarrierRejection::Identity("planning role has no terminal submit tool".to_owned())
+        })?;
+    if terminal.tool_name != expected_tool
+        || terminal.details.boundary_id != spec.boundary_id.0
+        || terminal.details.schema_digest != expected_schema
+        || terminal.details.binding != carrier_binding(spec)
+    {
+        return Err(CarrierRejection::Identity(format!(
+            "tool/boundary/schema/binding drift: expected {expected_tool}/{}/{expected_schema}/{}, got {}/{}/{}/{}",
+            spec.boundary_id.0,
+            carrier_binding(spec),
+            terminal.tool_name,
+            terminal.details.boundary_id,
+            terminal.details.schema_digest,
+            terminal.details.binding
+        )));
+    }
+    let raw_output = serde_json::to_string(&terminal.details.payload).map_err(|error| {
+        CarrierRejection::Value(value_rejection(
+            "payload",
+            "serializable tool payload",
+            error.to_string(),
+        ))
+    })?;
+    crate::runner::validate_child_boundary(spec, &raw_output).map_err(|error| {
+        value_rejection(
+            "payload",
+            format!("{} admitted value", error.boundary_id()),
+            error.actual().to_owned(),
+        )
+    })?;
+    let carrier = serde_json::json!({
+        "schema": "autopilot.planning_carrier.v1",
+        "action_id": spec.action_id.0,
+        "assignment_id": spec.assignment_id.0,
+        "run_revision": spec.run_revision,
+        "workstream": spec.workstream.0,
+        "role_id": spec.role_id.0,
+        "mode": spec.mode.0,
+        "boundary_id": spec.boundary_id.0,
+        "result_contract": spec.result_contract.0,
+        "prompt_path": spec.prompt_path.0,
+        "prompt_digest": spec.prompt_digest.0,
+        "boundary_digest": spec.boundary_digest.0,
+        "result_contract_digest": spec.result_contract_digest.0,
+        "settings_digest": spec.settings_digest.0,
+        "context_digest": spec.context_digest.0,
+        "skills_digest": spec.skills_digest.0,
+        "subscription_digest": spec.subscription_digest.0,
+        (RUNTIME_ADDON_DIGEST_FIELD): runtime_addon(spec).map(|(_, value)| &value.0),
+        "spec_digest": spec_digest,
+        "spec_path": super::path_to_string(spec_path).map_err(|error| {
+            value_rejection("spec_path", "absolute runner spec path", error.to_string())
+        })?,
+        "carrier_path": spec.carrier_path.0,
+        "carrier_channel": "tool",
+        "tool_name": terminal.tool_name,
+        "tool_schema_digest": terminal.details.schema_digest,
+        "carrier_binding": terminal.details.binding,
+        "raw_output": raw_output,
+    });
+    write_json_new(&spec.carrier_path.0, &carrier)
+        .map_err(|error| {
+            value_rejection("carrier_path", "create-once writable carrier path", error)
+        })
+        .map_err(Into::into)
 }
 
 fn validate_existing_planning_carrier(
@@ -1671,6 +2006,11 @@ fn validate_existing_planning_carrier(
     spec: &AgentRunSpec,
     value: &Value,
 ) -> Result<(), ValueRejection> {
+    let (_, runtime_digest) = runtime_addon(spec)
+        .ok_or_else(|| value_rejection(RUNTIME_ADDON_DIGEST_FIELD, "bound digest", "missing"))?;
+    let (terminal_tool, schema_digest) = super::terminal_submit_tool(&spec.role_id.0)
+        .map_err(|error| value_rejection("tool_name", "declared terminal tool", error.to_string()))?
+        .ok_or_else(|| value_rejection("tool_name", "declared terminal tool", "missing"))?;
     for (field, expected) in [
         ("schema", "autopilot.planning_carrier.v1".to_owned()),
         ("action_id", spec.action_id.0.clone()),
@@ -1692,6 +2032,11 @@ fn validate_existing_planning_carrier(
         ("context_digest", spec.context_digest.0.clone()),
         ("skills_digest", spec.skills_digest.0.clone()),
         ("subscription_digest", spec.subscription_digest.0.clone()),
+        (RUNTIME_ADDON_DIGEST_FIELD, runtime_digest.0.clone()),
+        ("carrier_channel", "tool".to_owned()),
+        ("tool_name", terminal_tool.to_owned()),
+        ("tool_schema_digest", schema_digest.to_owned()),
+        ("carrier_binding", carrier_binding(spec)),
         ("spec_digest", spec_digest.to_owned()),
         (
             "spec_path",

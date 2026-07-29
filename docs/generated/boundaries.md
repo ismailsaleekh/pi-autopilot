@@ -13,3 +13,6 @@ Sources: `data/boundary-modes.kdl`.
 | planning.plan-review.v1 | enforce | W4 live subscription transcript recorded 2026-07-27; flip is one-way |
 | allocation.lane-proposal.v1 | enforce | W5 live subscription transcript recorded 2026-07-27; flip is one-way |
 | validation.verdict.v1 | enforce | W6 live subscription transcript recorded 2026-07-27; flip is one-way |
+| evidence.ingress.v1 | enforce | package-issued attested assignment/report/sidecar ingress has a production consumer and rejects arbitrary import |
+| validation.verdict.v2 | record | v2 Validator vertical source is present; flip to enforce only after a real subscription transcript |
+| finalization.external-attested-evidence.v1 | enforce | external attestation is strict advisory-only and cannot satisfy final gates |

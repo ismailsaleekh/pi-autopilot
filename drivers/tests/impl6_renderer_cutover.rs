@@ -312,6 +312,14 @@ impl Fixture {
             std::env::set_var("AUTOPILOT_NODE_EXECUTABLE", &node);
             std::env::set_var("AUTOPILOT_AGENT_RUNNER_WRAPPER", &wrapper);
             std::env::set_var(
+                "AUTOPILOT_CHILD_ADDON_PATH",
+                Path::new(env!("CARGO_MANIFEST_DIR")).join(concat!(
+                    "../src/generated/child-",
+                    "ext",
+                    "ension.ts"
+                )),
+            );
+            std::env::set_var(
                 "PATH",
                 format!(
                     "{}:{}",

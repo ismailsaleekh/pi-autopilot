@@ -26,6 +26,10 @@ pub struct RpcSpawnConfig {
     /// session for the same assignment.
     pub session_dir: PathBuf,
     pub tools: Vec<String>,
+    /// Explicit child-only add-on. `None` is the legacy assistant-text channel.
+    pub runtime_addon: Option<PathBuf>,
+    /// Parent-issued assignment binding echoed by a terminating submit tool.
+    pub carrier_binding: Option<String>,
     pub pi_executable: OsString,
     pub stderr_tail_bytes: usize,
     pub max_terminal_bytes: usize,
@@ -50,6 +54,8 @@ impl RpcSpawnConfig {
             session_id,
             session_dir,
             tools,
+            runtime_addon: None,
+            carrier_binding: None,
             pi_executable: OsString::from("pi"),
             stderr_tail_bytes: DEFAULT_STDERR_TAIL_BYTES,
             max_terminal_bytes: DEFAULT_MAX_TERMINAL_BYTES,
@@ -90,6 +96,11 @@ impl RpcCommand {
     #[must_use]
     pub fn get_session_stats(id: impl Into<String>) -> Self {
         Self::bare(id, RpcCommandKind::GetSessionStats)
+    }
+
+    #[must_use]
+    pub fn get_entries(id: impl Into<String>) -> Self {
+        Self::bare(id, RpcCommandKind::GetEntries)
     }
 
     #[must_use]
@@ -150,6 +161,8 @@ pub enum RpcCommandKind {
     GetState,
     #[serde(rename = "get_session_stats")]
     GetSessionStats,
+    #[serde(rename = "get_entries")]
+    GetEntries,
     #[serde(rename = "abort")]
     Abort,
 }
@@ -163,6 +176,7 @@ impl RpcCommandKind {
             Self::SetAutoCompaction => "set_auto_compaction",
             Self::GetState => "get_state",
             Self::GetSessionStats => "get_session_stats",
+            Self::GetEntries => "get_entries",
             Self::Abort => "abort",
         }
     }
@@ -201,7 +215,13 @@ pub enum RpcEvent {
     BashExecutionUpdateDiscarded,
     ToolExecutionStart,
     ToolExecutionUpdateDiscarded,
-    ToolExecutionEnd,
+    ToolExecutionEnd {
+        tool_call_id: String,
+        tool_name: String,
+        details: Option<Value>,
+        is_error: bool,
+        terminate: bool,
+    },
     QueueUpdate {
         steering: usize,
         follow_up: usize,
@@ -225,6 +245,14 @@ pub enum RpcEvent {
     ExtensionUiRequest,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ToolCarrierDetails {
+    pub boundary_id: String,
+    pub schema_digest: String,
+    pub binding: String,
+    pub payload: Value,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct TerminalMessage {
     pub role: String,
@@ -236,6 +264,8 @@ pub struct TerminalMessage {
     /// Retained because it is the only evidence distinguishing an upstream
     /// capacity refusal from a genuine content failure.
     pub error_message: Option<String>,
+    /// Tool-result details duplicated by Pi after `tool_execution_end`.
+    pub details: Option<Value>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -341,6 +371,87 @@ impl std::fmt::Display for RpcError {
 
 impl std::error::Error for RpcError {}
 
+#[derive(Debug, Clone, Copy)]
+enum LaunchFlag {
+    Bare(&'static str),
+    Value(&'static str, LaunchValue),
+    OptionalAddon,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum LaunchValue {
+    RpcMode,
+    SessionId,
+    SessionDir,
+    Provider,
+    Model,
+    Thinking,
+    Tools,
+}
+
+/// Single source for both child argv and the settings identity digest.
+const LAUNCH_FLAGS: &[LaunchFlag] = &[
+    LaunchFlag::Value("--mode", LaunchValue::RpcMode),
+    LaunchFlag::Value("--session-id", LaunchValue::SessionId),
+    LaunchFlag::Value("--session-dir", LaunchValue::SessionDir),
+    LaunchFlag::Bare("--no-extensions"),
+    LaunchFlag::OptionalAddon,
+    LaunchFlag::Bare("--no-skills"),
+    LaunchFlag::Bare("--no-prompt-templates"),
+    LaunchFlag::Bare("--no-themes"),
+    LaunchFlag::Bare("--no-context-files"),
+    LaunchFlag::Value("--provider", LaunchValue::Provider),
+    LaunchFlag::Value("--model", LaunchValue::Model),
+    LaunchFlag::Value("--thinking", LaunchValue::Thinking),
+    LaunchFlag::Value("--tools", LaunchValue::Tools),
+];
+
+/// Stable identity of the launch shape. Dynamic values are represented by
+/// their authority class, while a flag-name or channel change rotates it.
+pub(crate) fn settings_identity(with_addon: bool) -> String {
+    let mut tokens = Vec::new();
+    for flag in LAUNCH_FLAGS {
+        match flag {
+            LaunchFlag::Bare(name) => tokens.push((*name).to_owned()),
+            LaunchFlag::Value(name, value) => tokens.push(format!("{name}=<{value:?}>")),
+            LaunchFlag::OptionalAddon if with_addon => tokens.push("-e=<RuntimeAddon>".to_owned()),
+            LaunchFlag::OptionalAddon => {}
+        }
+    }
+    format!("agent-run-settings:{}:v2", tokens.join(","))
+}
+
+/// Materialize the single declared launch shape for process spawning and
+/// layer-local mutation tests.
+#[must_use]
+pub fn launch_arguments(config: &RpcSpawnConfig) -> Vec<OsString> {
+    let mut args = Vec::new();
+    for flag in LAUNCH_FLAGS {
+        match flag {
+            LaunchFlag::Bare(name) => args.push(OsString::from(name)),
+            LaunchFlag::OptionalAddon => {
+                if let Some(path) = &config.runtime_addon {
+                    args.push(OsString::from("-e"));
+                    args.push(path.as_os_str().to_owned());
+                }
+            }
+            LaunchFlag::Value(name, value) => {
+                args.push(OsString::from(name));
+                args.push(match value {
+                    LaunchValue::RpcMode => OsString::from("rpc"),
+                    LaunchValue::SessionId => OsString::from(&config.session_id),
+                    LaunchValue::SessionDir => config.session_dir.as_os_str().to_owned(),
+                    LaunchValue::Provider => OsString::from(&config.provider),
+                    LaunchValue::Model => OsString::from(&config.model),
+                    LaunchValue::Thinking => OsString::from(&config.thinking),
+                    LaunchValue::Tools => OsString::from(config.tools.join(",")),
+                });
+            }
+        }
+    }
+    args
+}
+
 pub struct RpcClient {
     child: Child,
     stdin: Option<ChildStdin>,
@@ -363,25 +474,11 @@ impl RpcClient {
         let mut command = Command::new(&config.pi_executable);
         command
             .current_dir(&config.cwd)
-            .arg("--mode")
-            .arg("rpc")
-            .arg("--session-id")
-            .arg(&config.session_id)
-            .arg("--session-dir")
-            .arg(&config.session_dir)
-            .arg("--no-extensions")
-            .arg("--no-skills")
-            .arg("--no-prompt-templates")
-            .arg("--no-themes")
-            .arg("--no-context-files")
-            .arg("--provider")
-            .arg(&config.provider)
-            .arg("--model")
-            .arg(&config.model)
-            .arg("--thinking")
-            .arg(&config.thinking)
-            .arg("--tools")
-            .arg(config.tools.join(","))
+            .args(launch_arguments(&config));
+        if let Some(binding) = &config.carrier_binding {
+            command.env("AUTOPILOT_CARRIER_BINDING", binding);
+        }
+        command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -666,7 +763,26 @@ impl RpcProtocol {
                 RpcEvent::MessageEnd { message }
             }
             "tool_execution_start" => RpcEvent::ToolExecutionStart,
-            "tool_execution_end" => RpcEvent::ToolExecutionEnd,
+            "tool_execution_end" => {
+                if text.len() > self.max_terminal_bytes {
+                    return Err(RpcError::TerminalPayloadTooLarge {
+                        bytes: text.len(),
+                        limit: self.max_terminal_bytes,
+                    });
+                }
+                let parsed: ToolExecutionEnd = serde_json::from_str(text).map_err(|error| {
+                    RpcError::MalformedFrame(format!("tool_execution_end: {error}"))
+                })?;
+                self.terminal_payload_bytes =
+                    self.terminal_payload_bytes.saturating_add(text.len());
+                RpcEvent::ToolExecutionEnd {
+                    tool_call_id: parsed.tool_call_id,
+                    tool_name: parsed.tool_name,
+                    details: parsed.result.details,
+                    is_error: parsed.is_error,
+                    terminate: parsed.result.terminate,
+                }
+            }
             "queue_update" => {
                 let parsed: QueueUpdate = serde_json::from_str(text)
                     .map_err(|error| RpcError::MalformedFrame(format!("queue_update: {error}")))?;
@@ -835,7 +951,7 @@ impl EventOrder {
                 | RpcEvent::MessageEnd { .. }
                 | RpcEvent::ToolExecutionStart
                 | RpcEvent::ToolExecutionUpdateDiscarded
-                | RpcEvent::ToolExecutionEnd
+                | RpcEvent::ToolExecutionEnd { .. }
                 | RpcEvent::BashExecutionUpdateDiscarded
                 | RpcEvent::QueueUpdate { .. }
                 | RpcEvent::ExtensionUiRequest
@@ -1010,6 +1126,25 @@ struct MessageEnd {
 }
 
 #[derive(Deserialize)]
+struct ToolExecutionEnd {
+    #[serde(rename = "toolCallId")]
+    tool_call_id: String,
+    #[serde(rename = "toolName")]
+    tool_name: String,
+    result: ToolExecutionResult,
+    #[serde(rename = "isError")]
+    is_error: bool,
+}
+
+#[derive(Deserialize)]
+struct ToolExecutionResult {
+    #[serde(default)]
+    details: Option<Value>,
+    #[serde(default)]
+    terminate: bool,
+}
+
+#[derive(Deserialize)]
 struct AgentMessage {
     role: String,
     provider: Option<String>,
@@ -1019,6 +1154,7 @@ struct AgentMessage {
     content: Option<Vec<MessageContent>>,
     #[serde(rename = "errorMessage")]
     error_message: Option<String>,
+    details: Option<Value>,
 }
 
 impl AgentMessage {
@@ -1030,6 +1166,7 @@ impl AgentMessage {
             stop_reason: self.stop_reason,
             text: self.content.map(extract_text),
             error_message: self.error_message,
+            details: self.details,
         }
     }
 }

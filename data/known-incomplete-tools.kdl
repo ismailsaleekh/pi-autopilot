@@ -1,0 +1,6 @@
+schema "autopilot.known-incomplete-tools.v1"
+version 1
+
+tool "autopilot_request_test" role="validator" status="declared-undeliverable" disposition="retain" classification="unbuilt-mediated-channel" rationale="Validator is denied bash and must retain its declared least-privilege test-request route pending implementation."
+tool "autopilot_submit_onboard" role="onboard" status="declared-undeliverable" disposition="retain" classification="unbuilt-terminal-channel" rationale="Removing the declared terminal path requires an operator-approved replacement channel."
+tool "autopilot_submit_allocation" role="execution-allocator" status="declared-undeliverable" disposition="retain" classification="superseded-role-terminal" rationale="Core currently synthesizes allocation submissions; deleting the frozen role or terminal path requires operator approval."

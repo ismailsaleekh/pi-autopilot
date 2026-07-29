@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use drivers::runner::rpc::{
     CompactionReason, JsonlReader, RpcClient, RpcCommand, RpcCommandKind, RpcError, RpcEvent,
-    RpcFrame, RpcProtocol, RpcSpawnConfig,
+    RpcFrame, RpcProtocol, RpcSpawnConfig, launch_arguments,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -338,6 +338,35 @@ fn runner_rpc_spawn_uses_exact_rpc_flags_and_removes_metered_api_environment() {
 }
 
 #[test]
+fn launch_arguments_include_explicit_child_addon_once() {
+    let root = temp_root("runner-launch-addon");
+    let mut config = test_spawn_config(&root);
+    config.runtime_addon = Some(root.join("child-addon.ts"));
+    let args = launch_arguments(&config);
+    let positions = args
+        .iter()
+        .enumerate()
+        .filter(|(_, arg)| arg.to_string_lossy() == "-e")
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    assert_eq!(positions.len(), 1);
+    assert_eq!(args[positions[0] + 1], root.join("child-addon.ts"));
+}
+
+#[test]
+fn launch_arguments_allowlist_contains_declared_terminal_tool() {
+    let root = temp_root("runner-launch-tools");
+    let mut config = test_spawn_config(&root);
+    config.tools.push("autopilot_submit_atoms".to_owned());
+    let args = launch_arguments(&config);
+    let tools = args
+        .windows(2)
+        .find(|pair| pair[0].to_string_lossy() == "--tools")
+        .expect("--tools value");
+    assert_eq!(tools[1], "read,ls,autopilot_submit_atoms");
+}
+
+#[test]
 fn runner_rpc_shutdown_closes_stdin_and_reaps_process() {
     let root = temp_root("runner-rpc-shutdown-clean");
     write_fake_pi(&root, &stdin_exit_fake_pi());
@@ -358,8 +387,8 @@ fn runner_rpc_shutdown_escalates_hung_process() {
     assert!(shutdown.escalated);
 }
 
-fn spawn_fake_client(root: &Path, max_terminal_bytes: usize) -> RpcClient {
-    let mut config = RpcSpawnConfig::new(
+fn test_spawn_config(root: &Path) -> RpcSpawnConfig {
+    RpcSpawnConfig::new(
         root.to_path_buf(),
         "openai-codex".to_owned(),
         "gpt-5.5".to_owned(),
@@ -367,7 +396,11 @@ fn spawn_fake_client(root: &Path, max_terminal_bytes: usize) -> RpcClient {
         "session-123".to_owned(),
         root.join("run-sessions"),
         vec!["read".to_owned(), "ls".to_owned()],
-    );
+    )
+}
+
+fn spawn_fake_client(root: &Path, max_terminal_bytes: usize) -> RpcClient {
+    let mut config = test_spawn_config(root);
     config.pi_executable = root.join("pi").into_os_string();
     config.max_terminal_bytes = max_terminal_bytes;
     RpcClient::spawn(config).expect("spawn fake rpc pi")

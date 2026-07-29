@@ -614,6 +614,10 @@ impl CoreProcess {
                 std::env::current_exe().expect("test exe"),
             )
             .env(
+                "AUTOPILOT_CHILD_ADDON_PATH",
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/generated/child-extension.ts"),
+            )
+            .env(
                 "AUTOPILOT_VALIDATOR_COMMAND",
                 std::env::current_exe().expect("test exe"),
             )

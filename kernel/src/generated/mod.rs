@@ -856,9 +856,11 @@ pub struct AgentRunSpec {
     #[serde(rename = "context_manifest_digest")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_manifest_digest: Option<Digest>,
+    /// Required for planning assignments and forbidden for legacy assistant-text delivery assignments; absolute path to the explicitly loaded child-only submit-tool add-on.
     #[serde(rename = "runtime_extension_path")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime_extension_path: Option<Path>,
+    /// Required exactly when runtime_extension_path is present; must equal the codegen-anchored digest of the file that actually loads.
     #[serde(rename = "runtime_extension_digest")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime_extension_digest: Option<Digest>,
@@ -2923,6 +2925,8 @@ pub struct HostToCoreTaskCompletedPayload {
 
 pub const CONTRACT_SCHEMA: &str = "autopilot.contracts.v1";
 pub const CONTRACT_VERSION: u64 = 1;
+pub const CHILD_ADDON_DIGEST: &str =
+    "76661dad2db2c9c2bdd3248adaf45e4ed671ffeab51272e2c6f8d17367bef465";
 
 pub const AGENT_HANDOFF_ADMITS: &str = "When checkpointed, return one autopilot.agent-handoff.v1 object with exactly these required fields: schema, completed, remaining, critical_state, and next_action. Put finished obligations in completed, unfinished obligations in remaining, role-required scalar or array-of-scalar slots in critical_state, and the immediate resume instruction in next_action; do not invent completion.";
 pub const ALLOCATION_LANE_PROPOSAL_ADMITS: &str = "Return a lane proposal that groups only approved plan units. Preserve every unit id, dependency, predecessor forward criterion, downstream release edge, and verification obligation exactly as supplied. Do not invent file ownership or modify plan authority. Include ordered unit ids, one delivery boundary, context family id and estimate, focused tests, and launch wave.";
@@ -2930,9 +2934,47 @@ pub const DELIVERY_RESULT_ADMITS: &str = "Submit exactly one terminal delivery c
 pub const FINDING_ADMITS: &str = "For each material issue, record one effect: forward-blocking, closure-blocking-forward-safe, or advisory. Tie the finding to exact criteria or forward edges and evidence. Do not use severity alone to decide scheduling, do not hide a mandatory blocker as advisory, and do not report a source repair requirement without the evidence that makes it mandatory.";
 pub const FINDING_V2_ADMITS: &str = "For each material issue, emit one deterministic finding id, classify kind/effect honestly, tie it to declared criteria/edges/evidence, and never hide a required blocker as advisory.";
 pub const PLAN_REVIEW_ADMITS: &str = "Plan review output must assign a verdict to each criterion using pass, blocker, advisory, fail, blocked, or needs-fix. It must include at least one verdict. Call autopilot_submit_review as the final action.";
-pub const QUESTIONS_ADMITS: &str = "Question output must be an explicit questions array, which may be empty, or structured nominations. Each nomination must include class, evidence, and consequence. The class field is closed to: invalidated-decision, missing-material-decision, material-underdetermination, dod-hole, unsafe-irreversible.";
-pub const SCOUT_DOSSIER_ADMITS: &str = "Repository scout and dossier output must cite current evidence and avoid work planning. Call autopilot_submit_scout_report as the final action with findings containing path, observation, and evidence_ref.";
+pub const QUESTIONS_ADMITS: &str = "Question output must be an explicit questions array, which may be empty, or structured nominations. Each nomination must include class, evidence, and consequence. The class field is closed to: invalidated-decision, missing-material-decision, material-underdetermination, dod-hole, unsafe-irreversible. Call autopilot_submit_resolution as the final action.";
+pub const SCOUT_DOSSIER_ADMITS: &str = "Repository scout and dossier output must cite current evidence and avoid work planning. Call autopilot_submit_scout_report as the final action with findings containing path, observation, and evidence_ref. A context-curation assignment calls autopilot_submit_context instead, with the same findings shape.";
 pub const TASK_ATOMS_ADMITS: &str = "Task extractor output must use the exact runner-issued atom id prefix for every atoms[].id, name operator-task atoms with source anchors, and include no repository findings. Call autopilot_submit_atoms as the final action with atoms containing id, kind, text, and sources.";
 pub const VALIDATION_SUBMISSION_V2_ADMITS: &str = "Call autopilot_emit_status exactly once with this closed JSON object. Verdict every required criterion exactly once, cite only declared evidence refs, embed every finding, and do not claim PASS/READY when Core would compute a material blocker.";
 pub const VALIDATION_VERDICT_ADMITS: &str = "Verdict every required criterion independently as PASS, FAIL, or BLOCKED, and attach evidence refs, finding refs, covered paths, semantic surfaces, and forward-edge ids. Do not issue an overall PASS while any required criterion is unverdicted, stale, failed, or blocked. Use FORWARD_READY, FORWARD_BLOCKED, or BLOCKED only for forward validation, and PASS, NEEDS_FIX, or BLOCKED only for closure/final validation.";
 pub const WORK_MAP_ADMITS: &str = "Plan compiler and synthesizer output must contain one or more units. Each unit must have an objective, acceptance criteria, and traceable links by real atom id. Call autopilot_submit_plan_cluster or autopilot_submit_synthesis as the final action.";
+
+pub const SUBMIT_TOOLS: [(&str, &str, &str); 7] = [
+    (
+        "autopilot_submit_atoms",
+        "planning.task-atoms.v1",
+        "77d000b816b3c14dcdefeba0c23d4f4f9f8bedaf5b281081f1cea138e525e091",
+    ),
+    (
+        "autopilot_submit_context",
+        "planning.scout-dossier.v1",
+        "30f69b47c83079ce00ea22cab308e9a26eb7b24cae045aa1dd008221b45da618",
+    ),
+    (
+        "autopilot_submit_plan_cluster",
+        "planning.work-map.v1",
+        "d60fa316fa8d5f2baf1d1a764028bdaf5676e094ec23710c53917e760cfe939a",
+    ),
+    (
+        "autopilot_submit_resolution",
+        "planning.questions.v1",
+        "a716699618f28675f8872ff8d039c40e8443c07cd6a94f907921ee2b9dd88abc",
+    ),
+    (
+        "autopilot_submit_review",
+        "planning.plan-review.v1",
+        "073f22c10d42166d5ec5d0a6465a1fa8f0df8fc1af2ce6a0702bed9b955786d8",
+    ),
+    (
+        "autopilot_submit_scout_report",
+        "planning.scout-dossier.v1",
+        "30f69b47c83079ce00ea22cab308e9a26eb7b24cae045aa1dd008221b45da618",
+    ),
+    (
+        "autopilot_submit_synthesis",
+        "planning.work-map.v1",
+        "d60fa316fa8d5f2baf1d1a764028bdaf5676e094ec23710c53917e760cfe939a",
+    ),
+];

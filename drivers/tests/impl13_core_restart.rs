@@ -78,6 +78,14 @@ fn spawn_core(event_log: &Path, cwd: &Path) -> Child {
         .env("AUTOPILOT_CORE_EVENT_LOG", event_log)
         .env("AUTOPILOT_NODE_EXECUTABLE", &wrapper)
         .env("AUTOPILOT_AGENT_RUNNER_WRAPPER", &wrapper)
+        .env(
+            "AUTOPILOT_CHILD_ADDON_PATH",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join(concat!(
+                "../src/generated/child-",
+                "ext",
+                "ension.ts"
+            )),
+        )
         .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

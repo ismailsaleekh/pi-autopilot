@@ -110,6 +110,7 @@ export class CoreTransport {
         ...process.env,
         AUTOPILOT_NODE_EXECUTABLE: runner.nodeExecutable,
         AUTOPILOT_AGENT_RUNNER_WRAPPER: runner.runnerWrapper,
+        AUTOPILOT_CHILD_ADDON_PATH: runner.childAddon,
       },
     });
     this.child = child;

@@ -92,6 +92,14 @@ fn with_repo<T>(name: &str, f: impl FnOnce(&Path, &mut CoreState) -> T) -> T {
             "AUTOPILOT_AGENT_RUNNER_WRAPPER",
             std::env::current_exe().expect("exe"),
         );
+        std::env::set_var(
+            "AUTOPILOT_CHILD_ADDON_PATH",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join(concat!(
+                "../src/generated/child-",
+                "ext",
+                "ension.ts"
+            )),
+        );
     }
     std::env::set_current_dir(&root).expect("chdir");
     let mut state = CoreState::open(None).expect("state");

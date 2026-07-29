@@ -225,3 +225,21 @@ export const PLANNING_TOOL_SCHEMAS = {
   "planning.work-map.v1": { boundary_id: "planning.work-map.v1", schema_digest: WORK_MAP_TOOL_SCHEMA_DIGEST, parameters: WORK_MAP_TOOL_PARAMETERS },
   "planning.plan-review.v1": { boundary_id: "planning.plan-review.v1", schema_digest: PLAN_REVIEW_TOOL_SCHEMA_DIGEST, parameters: PLAN_REVIEW_TOOL_PARAMETERS },
 } as const satisfies Record<string, ToolSchemaDescriptor>;
+
+export interface SubmitToolDescriptor {
+  name: string;
+  label: string;
+  boundary_id: string;
+  schema_digest: string;
+  parameters: TSchema;
+}
+
+export const SUBMIT_TOOLS: readonly SubmitToolDescriptor[] = [
+  { name: "autopilot_submit_atoms", label: "Submit task atoms", boundary_id: "planning.task-atoms.v1", schema_digest: TASK_ATOMS_TOOL_SCHEMA_DIGEST, parameters: TASK_ATOMS_TOOL_PARAMETERS },
+  { name: "autopilot_submit_context", label: "Submit curated context dossier", boundary_id: "planning.scout-dossier.v1", schema_digest: SCOUT_DOSSIER_TOOL_SCHEMA_DIGEST, parameters: SCOUT_DOSSIER_TOOL_PARAMETERS },
+  { name: "autopilot_submit_plan_cluster", label: "Submit work map", boundary_id: "planning.work-map.v1", schema_digest: WORK_MAP_TOOL_SCHEMA_DIGEST, parameters: WORK_MAP_TOOL_PARAMETERS },
+  { name: "autopilot_submit_resolution", label: "Submit planning questions", boundary_id: "planning.questions.v1", schema_digest: QUESTIONS_TOOL_SCHEMA_DIGEST, parameters: QUESTIONS_TOOL_PARAMETERS },
+  { name: "autopilot_submit_review", label: "Submit plan review", boundary_id: "planning.plan-review.v1", schema_digest: PLAN_REVIEW_TOOL_SCHEMA_DIGEST, parameters: PLAN_REVIEW_TOOL_PARAMETERS },
+  { name: "autopilot_submit_scout_report", label: "Submit scout dossier", boundary_id: "planning.scout-dossier.v1", schema_digest: SCOUT_DOSSIER_TOOL_SCHEMA_DIGEST, parameters: SCOUT_DOSSIER_TOOL_PARAMETERS },
+  { name: "autopilot_submit_synthesis", label: "Submit synthesized work map", boundary_id: "planning.work-map.v1", schema_digest: WORK_MAP_TOOL_SCHEMA_DIGEST, parameters: WORK_MAP_TOOL_PARAMETERS },
+] as const;

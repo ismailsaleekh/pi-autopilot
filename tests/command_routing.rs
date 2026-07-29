@@ -611,6 +611,10 @@ fn spawn_core(event_log: &Path, cwd: Option<&Path>) -> Child {
         .env("AUTOPILOT_CORE_EVENT_LOG", event_log)
         .env("AUTOPILOT_NODE_EXECUTABLE", &exe)
         .env("AUTOPILOT_AGENT_RUNNER_WRAPPER", &exe)
+        .env(
+            "AUTOPILOT_CHILD_ADDON_PATH",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/generated/child-extension.ts"),
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
