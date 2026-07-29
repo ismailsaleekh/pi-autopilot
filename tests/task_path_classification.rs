@@ -489,11 +489,13 @@ fn task_path_classification_terminal_events_require_core_issued_action_assignmen
         &mut state,
         serde_json::json!({"v":1,"id":10,"kind":"task-completed","payload":{"task_id":"task-real-1","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}),
     );
-    assert_eq!(completed.kind, "spawn-wave", "{}", completed.payload);
-    let next = first_wave_action(&completed.payload);
-    assert_eq!(
-        next.action.assignment_id.0,
-        "planning-main-task-extractor-02"
+    // The rest of the P1 wave is already in flight, so accepting one member is a plain
+    // acceptance; the next wave only launches once every member of this one is consumed.
+    assert_eq!(completed.kind, "done", "{}", completed.payload);
+    assert!(
+        done_status(&completed).contains("agent-result:accepted:planning.task-atoms.v1"),
+        "{}",
+        completed.payload
     );
 
     let accepted = send_frame(

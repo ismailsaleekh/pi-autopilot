@@ -655,9 +655,17 @@ fn command(frame: SeamEnvelope, state: &mut CoreState) -> Result<SeamEnvelope, A
 fn route_plan(id: u64, args: &[String], state: &mut CoreState) -> Result<SeamEnvelope, AnyError> {
     let dossier = p2_ground(&RepoGrounding { repo: current_dir()? }, &inventory)?;
     let assignments = planning_assignments(&args[0], &plan);
-    let issue = planning_bg_action(assignments.first().unwrap(), state.state.revision);
-    append_runner_invocation(state, &issue.binding)?;
-    spawn(id, issue.action)
+    let actions = planning_wave_actions(&args[0], &assignments, state)?;
+    spawn_wave(id, actions)
+}
+fn planning_wave_actions(workstream: &str, assignments: &[AgentAssignment], state: &mut CoreState) -> Result<Vec<BackgroundAction>, AnyError> {
+    let mut actions = Vec::new();
+    for assignment in assignments {
+        let issue = planning_bg_action(assignment, state.state.revision);
+        append_runner_invocation(state, &issue.binding)?;
+        actions.push(issue.action);
+    }
+    Ok(actions)
 }
 fn route_run(id: u64, workstream: &str, state: &mut CoreState) -> Result<SeamEnvelope, AnyError> { let approved = read_approved_plan(workstream)?; let readiness = lane_readiness_from_events(&lanes, &approved, state); let resources = host_resource_facts()?; append_runner_invocation(state, &binding)?; spawn(id, action) }
 fn route_agent_result(frame: SeamEnvelope, state: &mut CoreState) -> Result<SeamEnvelope, AnyError> { accept_planning_carrier(frame.id, &assignment_id, carrier, state, None) }

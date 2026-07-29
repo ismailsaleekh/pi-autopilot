@@ -85,9 +85,11 @@ function appendBeforeEverySpawn(name, body) {
     if (/\breturn\b/u.test(body.slice(precedingAppend, spawnIndex))) failures.push(`${name} records invocation only before an unreachable spawn path`);
   }
 }
-for (const name of [...productionRoutes, 'accept_planning_carrier']) {
-  if (!new RegExp(`\\bfn\\s+${name}\\s*\\(`, 'u').test(seam)) continue;
-  appendBeforeEverySpawn(name, functionBody(name));
+// Wave batching moves the per-member spawn issuance into planning_wave_actions, so it must be
+// scanned for the same record-before-spawn invariant as the routes themselves.
+for (const name of [...productionRoutes, 'accept_planning_carrier', 'planning_wave_actions']) {
+  if (!new RegExp(`\\bfn\\s+${name}\\s*\\(`, 'u').test(productionSource)) continue;
+  appendBeforeEverySpawn(name, functionBody(name, productionSource));
 }
 
 const plan = functionBody('route_plan');
