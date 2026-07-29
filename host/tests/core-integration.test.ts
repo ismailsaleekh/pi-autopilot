@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { AUTOPILOT_COMMANDS, registerAutopilotCommands } from "../src/commands.ts";
+import { AUTOPILOT_COMMANDS, fixedServiceResolver, registerAutopilotCommands } from "../src/commands.ts";
 import { CoreTransport } from "../src/transport.ts";
 
 const PACKAGE_ROOT = fileURLToPath(new URL("../..", import.meta.url));
@@ -43,7 +43,7 @@ test("registered Pi slash handlers reach the real compiled autopilot-core over s
   const transport = new CoreTransport({ binaryPath: CORE_BINARY });
   const pi = registrationHarness();
   const backgroundTasks = fakeBackgroundTasks();
-  registerAutopilotCommands(pi, { transport, backgroundTasks, operatorMessage: recordingOperatorMessage });
+  registerAutopilotCommands(pi, fixedServiceResolver({ transport, backgroundTasks, operatorMessage: recordingOperatorMessage }));
 
   try {
     for (const command of AUTOPILOT_COMMANDS) {
@@ -100,7 +100,7 @@ test("planning rejects a bare directory with typed CONTEXT_GAP instead of fabric
   const transport = new CoreTransport({ binaryPath: CORE_BINARY });
   const pi = registrationHarness();
   const backgroundTasks = fakeBackgroundTasks();
-  registerAutopilotCommands(pi, { transport, backgroundTasks, operatorMessage: recordingOperatorMessage });
+  registerAutopilotCommands(pi, fixedServiceResolver({ transport, backgroundTasks, operatorMessage: recordingOperatorMessage }));
 
   try {
     const effects = await dispatchRegistered(pi, "autopilot-plan", PLAN_ARGS);
@@ -127,7 +127,7 @@ test("successful run route uses recorded model transcripts and records agent spa
   const transport = new CoreTransport({ binaryPath: CORE_BINARY });
   const pi = registrationHarness();
   const backgroundTasks = fakeBackgroundTasks();
-  registerAutopilotCommands(pi, { transport, backgroundTasks, operatorMessage: recordingOperatorMessage });
+  registerAutopilotCommands(pi, fixedServiceResolver({ transport, backgroundTasks, operatorMessage: recordingOperatorMessage }));
 
   try {
     const planEffects = await dispatchRegistered(pi, "autopilot-plan", PLAN_ARGS);

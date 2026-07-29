@@ -1,6 +1,6 @@
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-import autopilotExtension from "../src/extension.ts";
+import autopilotExtension, { type AutopilotExtensionOptions } from "../src/extension.ts";
 import {
   PLAN_REVIEW_TOOL_PARAMETERS,
   PLAN_REVIEW_TOOL_SCHEMA_DIGEST,
@@ -20,9 +20,27 @@ interface PlanningCarrierDetails {
   readonly payload: Record<string, unknown>;
 }
 
-export default function autopilot(pi: ExtensionAPI): void {
-  autopilotExtension(pi);
-  registerPlanningSubmitTools(pi);
+export default function autopilot(pi: ExtensionAPI, options: AutopilotExtensionOptions = {}): void {
+  // The planning-submit tools carry promptSnippet/promptGuidelines, so eager
+  // registration would inject Autopilot text into the SYSTEM PROMPT of every
+  // unrelated Pi session. They are registered on first activation instead.
+  //
+  // Child agents cannot be the consumer here: `drivers/src/runner/rpc.rs`
+  // spawns them with `--no-extensions`, so an extension-registered tool never
+  // reaches a child. These 7 tools exist for the PARENT session only, which is
+  // exactly the session that activation arms.
+  let registered = false;
+  autopilotExtension(pi, {
+    ...options,
+    onActivated: async () => {
+      await options.onActivated?.();
+      // Activation is memoized, but registration is also made idempotent here so
+      // a reload restatement can never double-register a tool name.
+      if (registered) return;
+      registered = true;
+      registerPlanningSubmitTools(pi);
+    },
+  });
 }
 
 function registerPlanningSubmitTools(pi: ExtensionAPI): void {

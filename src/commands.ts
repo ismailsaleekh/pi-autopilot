@@ -4,6 +4,7 @@ import type { BackgroundAction, CoreToHostFrame, HostToCoreCommandPayload, HostT
 import { applyCoreEffect, type CoreEffectResult, type HostEffectContext, type HostEffectServices, type OperatorMessageSink } from "./effects.ts";
 import type { BgTaskSnapshot, PiBackgroundTaskClient } from "./background-tasks.ts";
 import { boundedDiagnostic, unavailableCapabilities } from "./background-tasks.ts";
+import { ACTIVATING_COMMANDS } from "./activation.ts";
 import type { CoreTransport } from "./transport.ts";
 
 export const AUTOPILOT_COMMANDS = Object.freeze([
@@ -42,17 +43,53 @@ export interface RegisterCommandOptions {
   readonly onSpawn?: (binding: { readonly action: BackgroundAction; readonly task: BgTaskSnapshot }) => void | Promise<void>;
 }
 
-export function registerAutopilotCommands(pi: CommandHostLike, options: RegisterCommandOptions): void {
+/**
+ * Resolves per-command services at CALL time.
+ *
+ * Commands are the only load-time surface Autopilot keeps, because a command
+ * that is not registered cannot be typed and is therefore the irreducible
+ * activation entrypoint. The services behind them must not exist yet at load,
+ * so handlers receive a resolver instead of captured instances:
+ *
+ *   - `activate(command)` runs the one activation seam (activating commands).
+ *   - `requireActive(command)` refuses loudly in an unarmed session
+ *     (operating commands) and never activates implicitly.
+ */
+export interface CommandServiceResolver {
+  activate(command: string): Promise<RegisterCommandOptions>;
+  requireActive(command: string): RegisterCommandOptions;
+}
+
+export function registerAutopilotCommands(pi: CommandHostLike, resolver: CommandServiceResolver): void {
   for (const name of AUTOPILOT_COMMANDS) {
+    // The activating/operating split is resolved HERE, at registration, so each
+    // registered handler body stays a single unconditional forward.
+    const acquire = serviceAcquirer(resolver, name);
     pi.registerCommand(name, {
       description: `Forward /${name} to autopilot-core.`,
-      handler: async (args, ctx) => forwardCommand(name, args, ctx, options),
+      handler: async (args, ctx) => forwardCommand(name, args, ctx, await acquire()),
     });
   }
+  const acquireForAnswer = serviceAcquirer(resolver, AUTOPILOT_OPERATOR_ANSWER_COMMAND);
   pi.registerCommand(AUTOPILOT_OPERATOR_ANSWER_COMMAND, {
     description: "Send a D72 operator-answer frame to autopilot-core: /autopilot-answer <question-id> <json-object>.",
-    handler: async (args, ctx) => forwardOperatorAnswer(args, ctx, options),
+    handler: async (args, ctx) => forwardOperatorAnswer(args, ctx, await acquireForAnswer()),
   });
+}
+
+function serviceAcquirer(resolver: CommandServiceResolver, name: string): () => Promise<RegisterCommandOptions> {
+  if ((ACTIVATING_COMMANDS as readonly string[]).includes(name)) {
+    return async () => resolver.activate(name);
+  }
+  return async () => resolver.requireActive(name);
+}
+
+/** Resolver that hands every command the same eagerly-supplied services. */
+export function fixedServiceResolver(options: RegisterCommandOptions): CommandServiceResolver {
+  return {
+    async activate() { return options; },
+    requireActive() { return options; },
+  };
 }
 
 async function forwardOperatorAnswer(args: string, ctx: ExtensionCommandContext, options: RegisterCommandOptions): Promise<void> {

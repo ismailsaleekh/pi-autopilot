@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -50,20 +50,41 @@ test("H9 unsupported platform reports typed error naming platform", () => {
   }
 });
 
-test("H10 binary missing at extension load notifies exactly once", () => {
+/**
+ * BUG-184 REPLACEMENT. H10 previously asserted that a missing Core binary
+ * produced an operator message AT EXTENSION LOAD, deduplicated through a
+ * module-level Set. That pinned two defects: Autopilot spoke in sessions that
+ * never used it, and the dedup key was process-global across unrelated
+ * sessions. The binary is now probed at the point of use, where its absence is
+ * a BLOCKING failure of the activating command rather than a passive notice.
+ */
+test("H10 BUG-184: a missing binary stays silent at load and blocks the activating command", async () => {
   const root = fixturePackage("darwin", "arm64", false);
+  const stateRoot = mkdtempSync(join(tmpdir(), "autopilot-h10-state-"));
   const messages: string[] = [];
+  const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
+  const hooks = new Map<string, (event: unknown, ctx: unknown) => Promise<void>>();
   const pi = {
     events: { on() { return () => {}; }, emit() {} },
-    on() {},
-    registerCommand() {},
+    on(name: string, handler: (event: unknown, ctx: unknown) => Promise<void>) { hooks.set(name, handler); },
+    registerCommand(name: string, definition: { handler: (args: string, ctx: unknown) => Promise<void> }) { commands.set(name, definition); },
+    registerTool() {},
+    appendEntry() {},
     sendMessage(message: { content?: string } | string) { messages.push(typeof message === "string" ? message : String(message.content)); },
   };
+  const ctx = { hasUI: false, mode: "json", ui: { notify() {} }, sessionManager: { getSessionId: () => "019faf00-0000-7000-8000-0000000000d1" } };
   try {
-    autopilotExtension(pi, { packageJsonPath: root + "/package.json", platform: "darwin", arch: "arm64" });
-    autopilotExtension(pi, { packageJsonPath: root + "/package.json", platform: "darwin", arch: "arm64" });
-    assert.deepEqual(messages, ["Autopilot unavailable: core binary missing for darwin-arm64. Reinstall pi-autopilot."]);
+    autopilotExtension(pi, { packageJsonPath: root + "/package.json", platform: "darwin", arch: "arm64", stateRoot, processIdentity: "pid:test:started:1" });
+    await hooks.get("session_start")?.({ reason: "startup" }, ctx);
+
+    assert.deepEqual(messages, [], "a missing binary must not speak at load time");
+
+    await assert.rejects(
+      () => commands.get("autopilot-plan")!.handler("main A.md B.md C.md CTX.md", ctx),
+      /autopilot-core binary missing for darwin-arm64/u,
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
+    rmSync(stateRoot, { recursive: true, force: true });
   }
 });

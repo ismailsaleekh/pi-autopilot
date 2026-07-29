@@ -146,6 +146,79 @@ for (const candidate of packageSets) {
   });
 }
 
+/**
+ * BUG-184 T2. Autopilot is installed globally, so its extension factory runs in
+ * every Pi session. Through Pi's REAL loader and a REAL AgentSession, an
+ * unactivated session must expose the background tools and ZERO `autopilot_*`
+ * tools, and none of the 7 planning-tool prompt literals may reach the model's
+ * tool metadata. After /autopilot-plan they must all appear.
+ */
+test("BUG-184: autopilot tools and prompt text are absent until an activating command runs", { timeout: 90000 }, async () => {
+  const candidate = packageSets[0];
+  assertBackgroundCandidate(candidate.backgroundRoot);
+  assertCoreBinaryPresent(candidate.packageRoot);
+
+  const harness = createRuntimeHarness("pi-autopilot-bug184-scoping-");
+  const { eventBus, restore } = installOfflineCanaries(harness.fakeBin, harness.fakePiCanary, harness.project);
+  const loader = createLoader(harness.project, harness.agentDir, eventBus, candidate);
+  await loader.reload();
+
+  try {
+    const { session } = await createAgentSession({
+      cwd: harness.project,
+      agentDir: harness.agentDir,
+      resourceLoader: loader,
+      sessionManager: SessionManager.inMemory(harness.project),
+      settingsManager: SettingsManager.inMemory({}),
+      noTools: "builtin",
+    });
+    await bindSession(session);
+    try {
+      const backgroundTools = ["bg_run", "bg_status", "bg_logs", "bg_kill"];
+      const beforeNames = session.getAllTools().map((tool) => tool.name);
+      for (const name of backgroundTools) {
+        assert.ok(beforeNames.includes(name), `background tool ${name} must be present: ${JSON.stringify(beforeNames)}`);
+      }
+      assert.deepEqual(
+        beforeNames.filter((name) => name.startsWith("autopilot_")).sort(),
+        [],
+        "an unactivated session must expose zero autopilot_* tools",
+      );
+
+      // Prompt assembly is not directly observable from this harness, so the
+      // assertion is made on the tool metadata Pi uses to BUILD the prompt
+      // (promptSnippet/promptGuidelines are only emitted for active tools).
+      // GAP STATED: this proves the prompt inputs are absent, not the rendered
+      // system-prompt string.
+      const promptTextBefore = session.getAllTools()
+        .flatMap((tool) => [...(tool.promptGuidelines ?? []), tool.promptSnippet ?? ""])
+        .join("\n");
+      assert.equal(promptTextBefore.includes("autopilot_submit_"), false, promptTextBefore);
+      assert.equal(promptTextBefore.includes("typed Autopilot carrier"), false, promptTextBefore);
+
+      await session.prompt(`/autopilot-plan ${FOUR_PATH_ARGS}`);
+
+      const afterNames = session.getAllTools().map((tool) => tool.name);
+      assert.deepEqual(afterNames.filter((name) => name.startsWith("autopilot_")).sort(), [
+        "autopilot_submit_atoms",
+        "autopilot_submit_plan_cluster",
+        "autopilot_submit_questions",
+        "autopilot_submit_resolution",
+        "autopilot_submit_review",
+        "autopilot_submit_scout_report",
+        "autopilot_submit_synthesis",
+      ]);
+      for (const name of backgroundTools) {
+        assert.ok(afterNames.includes(name), `activation must not disturb ${name}`);
+      }
+    } finally {
+      await shutdownSession(session);
+    }
+  } finally {
+    restore();
+  }
+});
+
 test("missing background service returns SupplyCapability with zero Autopilot mutation", { timeout: 30000 }, async () => {
   const candidate = packageSets[0];
   assertCoreBinaryPresent(candidate.packageRoot);

@@ -1,11 +1,12 @@
 import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import autopilotExtension from "../src/extension.ts";
-import { AUTOPILOT_COMMANDS, AUTOPILOT_OPERATOR_ANSWER_COMMAND, registerAutopilotCommands } from "../src/commands.ts";
+import { AUTOPILOT_COMMANDS, AUTOPILOT_OPERATOR_ANSWER_COMMAND, fixedServiceResolver, registerAutopilotCommands } from "../src/commands.ts";
 
 const D76_PUBLIC_COMMANDS = Object.freeze([
   "autopilot-plan",
@@ -24,7 +25,7 @@ const PROMPTED_EXTRA_COMMANDS = Object.freeze(["autopilot-resume", "autopilot-he
 
 test("registers the retained D76 public commands", () => {
   const pi = fakePi();
-  registerAutopilotCommands(pi, { transport: fakeTransport(), backgroundTasks: fakeBackgroundTasks(), operatorMessage: fakeOperatorMessage() });
+  registerAutopilotCommands(pi, fixedServiceResolver({ transport: fakeTransport(), backgroundTasks: fakeBackgroundTasks(), operatorMessage: fakeOperatorMessage() }));
 
   assert.deepEqual([...AUTOPILOT_COMMANDS], D76_PUBLIC_COMMANDS);
   assert.equal(AUTOPILOT_OPERATOR_ANSWER_COMMAND, "autopilot-answer");
@@ -38,7 +39,7 @@ test("each command forwards one command frame with command name and raw argument
   for (const command of AUTOPILOT_COMMANDS) {
     const pi = fakePi();
     const transport = fakeTransport();
-    registerAutopilotCommands(pi, { transport, backgroundTasks: fakeBackgroundTasks(), operatorMessage: fakeOperatorMessage() });
+    registerAutopilotCommands(pi, fixedServiceResolver({ transport, backgroundTasks: fakeBackgroundTasks(), operatorMessage: fakeOperatorMessage() }));
 
     const rawArgs = "  keep  spacing --and-bytes=✓  ";
     await pi.registrations.get(command).handler(rawArgs, fakeCtx());
@@ -50,7 +51,7 @@ test("each command forwards one command frame with command name and raw argument
 test("command framing inserts only the missing delimiter before raw arguments", async () => {
   const pi = fakePi();
   const transport = fakeTransport();
-  registerAutopilotCommands(pi, { transport, backgroundTasks: fakeBackgroundTasks(), operatorMessage: fakeOperatorMessage() });
+  registerAutopilotCommands(pi, fixedServiceResolver({ transport, backgroundTasks: fakeBackgroundTasks(), operatorMessage: fakeOperatorMessage() }));
 
   const rawArgs = "keep  spacing --and-bytes=✓";
   await pi.registrations.get("autopilot-onboard").handler(rawArgs, fakeCtx());
@@ -60,7 +61,7 @@ test("command framing inserts only the missing delimiter before raw arguments", 
 
 test("registered command handlers contain no local control branch", () => {
   const pi = fakePi();
-  registerAutopilotCommands(pi, { transport: fakeTransport(), backgroundTasks: fakeBackgroundTasks(), operatorMessage: fakeOperatorMessage() });
+  registerAutopilotCommands(pi, fixedServiceResolver({ transport: fakeTransport(), backgroundTasks: fakeBackgroundTasks(), operatorMessage: fakeOperatorMessage() }));
 
   for (const [name, definition] of pi.registrations) {
     if (name === AUTOPILOT_OPERATOR_ANSWER_COMMAND) continue;
@@ -78,29 +79,41 @@ test("registered command handlers contain no local control branch", () => {
 test("extension registers no tool_call interceptor over foreign tool calls", async () => {
   const pi = fakePi();
   const transport = fakeTransport();
-  autopilotExtension(pi, { transport, backgroundTasks: fakeBackgroundTasks() });
+  autopilotExtension(pi, extensionOptions({ transport, backgroundTasks: fakeBackgroundTasks() }));
 
   assert.equal(pi.events.has("tool_call"), false);
   assert.deepEqual([...pi.events.keys()].sort(), ["session_shutdown", "session_start"]);
   assert.deepEqual(transport.calls.filter((call) => call.kind === "guard-query"), []);
 });
 
-test("extension never emits a guard-query frame for any tool call", async () => {
+// BUG-184 REPLACEMENT. This previously asserted the exact frame sequence
+// ["shutdown"] for an unactivated session, pinning the defect: an ordinary
+// session that never used Autopilot still sent a `shutdown` frame, spawning the
+// Rust Core child at exit and rendering "Autopilot done: ok:shutdown". The
+// correct contract is that an inert session emits NO frame at all.
+test("BUG-184: an inert session emits no Core frame across its whole lifecycle", async () => {
   const pi = fakePi();
   const transport = fakeTransport();
-  autopilotExtension(pi, { transport, backgroundTasks: fakeBackgroundTasks() });
+  autopilotExtension(pi, extensionOptions({ transport, backgroundTasks: fakeBackgroundTasks() }));
 
   await pi.events.get("session_start")({ reason: "startup" }, fakeCtx());
   await pi.events.get("session_shutdown")({ reason: "quit" }, fakeCtx());
 
-  assert.deepEqual(transport.calls.map((call) => call.kind), ["shutdown"]);
+  assert.deepEqual(transport.calls.map((call) => call.kind), []);
+  assert.deepEqual(pi.messages, []);
 });
 
-test("extension shutdown sends core shutdown and closes transport", async () => {
+// BUG-184 REPLACEMENT. Previously "extension shutdown sends core shutdown and
+// closes transport" fired the shutdown hook with no activation at all. The
+// shutdown frame is still sent and the transport still closed — but only for a
+// session that an operator actually armed.
+test("BUG-184: an ACTIVATED session still sends core shutdown and closes transport", async () => {
   const pi = fakePi();
   const transport = fakeTransport();
-  autopilotExtension(pi, { transport, backgroundTasks: fakeBackgroundTasks() });
+  autopilotExtension(pi, extensionOptions({ transport, backgroundTasks: fakeBackgroundTasks() }));
 
+  await pi.events.get("session_start")({ reason: "startup" }, fakeCtx());
+  await pi.registrations.get("autopilot-plan").handler("main TASK-A.md TASK-B.md TASK-C.md CONTEXT.md", fakeCtx());
   await pi.events.get("session_shutdown")({ reason: "quit" }, fakeCtx());
 
   assert.deepEqual(transport.calls.at(-1), {
@@ -114,7 +127,7 @@ test("extension shutdown sends core shutdown and closes transport", async () => 
 test("operator-answer command sends a typed operator-answer frame", async () => {
   const pi = fakePi();
   const transport = fakeTransport();
-  registerAutopilotCommands(pi, { transport, backgroundTasks: fakeBackgroundTasks(), operatorMessage: fakeOperatorMessage() });
+  registerAutopilotCommands(pi, fixedServiceResolver({ transport, backgroundTasks: fakeBackgroundTasks(), operatorMessage: fakeOperatorMessage() }));
 
   await pi.registrations.get("autopilot-answer").handler('q-1 {"decision":"answered","notes":["real sender"]}', fakeCtx());
 
@@ -159,8 +172,8 @@ test("completed planning terminal sends task-completed then agent-result with re
     async close() {},
   };
 
-  autopilotExtension(pi, { transport, backgroundTasks });
-  await pi.events.get("session_start")({}, fakeCtx());
+  autopilotExtension(pi, extensionOptions({ transport, backgroundTasks }));
+  await pi.events.get("session_start")({ reason: "startup" }, fakeCtx());
   await pi.registrations.get("autopilot-plan").handler("main TASK-A.md TASK-B.md TASK-C.md CONTEXT.md", fakeCtx());
   await terminalHandler(taskFromDescriptor(action.bg_run, "task-plan", "completed"));
 
@@ -206,7 +219,7 @@ test("extension buffers an immediate terminal task until its exact action bindin
     async close() {},
   };
 
-  autopilotExtension(pi, { transport, backgroundTasks });
+  autopilotExtension(pi, extensionOptions({ transport, backgroundTasks }));
   await pi.events.get("session_start")({ reason: "startup" }, fakeCtx());
   await pi.registrations.get("autopilot-plan").handler("main TASK-A.md TASK-B.md TASK-C.md CONTEXT.md", fakeCtx());
 
@@ -277,7 +290,20 @@ function fakeCtx() {
     hasUI: false,
     mode: "json",
     ui: { notify() { throw new Error("fakeCtx is non-UI"); } },
+    // Pi supplies session identity; activation binds to it rather than to any
+    // ambient environment variable.
+    sessionManager: { getSessionId: () => "019faf00-0000-7000-8000-0000000000fc" },
   };
+}
+
+// Each extension-driven test gets an isolated activation-record root so no test
+// can observe or inherit another's grant.
+function freshStateRoot() {
+  return mkdtempSync(join(tmpdir(), "autopilot-commands-state-"));
+}
+
+function extensionOptions(overrides) {
+  return { stateRoot: freshStateRoot(), processIdentity: "pid:test:started:1", ...overrides };
 }
 
 function terminalAction(actionId, assignmentId, name, command) {

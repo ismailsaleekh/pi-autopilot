@@ -34,6 +34,58 @@ current account full control on state/capability paths, uses a per-user
 generation-specific pipe name, and still requires the timing-safe capability proof on
 every frame.
 
+## Host activation records — `~/.pi/agent/autopilot/v2/sessions/<session-id>.json`
+
+Autopilot is **inert** in a Pi session until an operator runs one of the four
+activating commands: `/autopilot-plan`, `/autopilot`, `/autopilot-onboard`,
+`/autopilot-inject`. Until then the extension registers its 10 slash commands
+and nothing else — no LLM tools, no background-EventBus subscription, no Core
+process, and no `shutdown` frame at session exit.
+
+### Governing invariant
+
+> A filesystem read may only ever **withhold** or **revoke** Autopilot
+> authority. It may **never grant** it. Authority is granted only inside an
+> operator-initiated command handler in the current process. Any persisted
+> record is a **restatement** of that grant, keyed to the identity that made it.
+
+One file exists per armed session, addressed by exact key. Autopilot never
+enumerates this directory; it reads only `sessions/<session-id>.json` for the
+session id Pi supplies via `ctx.sessionManager.getSessionId()`.
+
+| Field | Meaning |
+|---|---|
+| `schema_version` | Always `autopilot.host_activation.v1`. |
+| `session_id` | The Pi session that was armed. Must equal the address. |
+| `process_identity` | `pid:<pid>:started:<ms>` of the process that granted authority. |
+| `granted_by_command` | Which activating command granted it. |
+| `activated_at_unix_ms` | When the grant was made. |
+
+`process_identity` is what keeps the record a restatement rather than a grant.
+`/reload` re-evaluates the extension module inside the **same** process, so the
+identity matches and activation is restated. A `/resume` of a crashed session
+reuses the same Pi session id (`SessionManager` restores it from the file
+header) but runs in a **new** process, so the identity cannot match and the
+session stays inert.
+
+### Read rules
+
+Each outcome is stated and terminal; none is a silent fallback.
+
+| Condition | Outcome |
+|---|---|
+| No record at this address | **Inert** |
+| Present, session + process identity match, schema valid | **Re-activate** |
+| Present, written by a different process | **Inert** (authority withheld) |
+| Present, `session_id` does not match the address | **Loud failure** |
+| Malformed, unknown schema, or non-activating command | **Loud failure**, record preserved |
+
+A malformed record is never treated as "assume inert": silently disarming a
+live run is the mirror image of the BUG-183 probe that silently armed one.
+
+The record is pruned on `session_shutdown` whenever the reason is not
+`reload`, so `new`/`resume`/`fork`/`quit` cannot inherit activation.
+
 ## Per-workstream runtime — `.pi/autopilot/<workstream>/`
 
 Lives inside the main worktree. Autopilot validates and writes package-owned artifact
