@@ -890,7 +890,7 @@ fn planning_binding_digests(
     })
 }
 
-pub(crate) fn planning_context_digest(
+pub fn planning_context_digest(
     authority_set_id: &str,
     authority_documents: &impl Serialize,
     context_documents: &impl Serialize,
