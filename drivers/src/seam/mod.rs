@@ -9,9 +9,8 @@ use std::time::Duration;
 use kernel::boundary::Rejection;
 use kernel::generated::{
     AllocationLaneProposal, BackgroundAction, CONTRACT_VERSION, CoreToHostDonePayload,
-    CoreToHostGuardDecisionPayload, CoreToHostSpawnPayload, CoreToHostSpawnWavePayload,
-    CoreToHostUiPayload, DeliveryBoundary, DeliveryResult, EventKind, EventRow, GuardDecision,
-    HostToCoreAgentResultPayload, HostToCoreCommandPayload, HostToCoreGuardQueryPayload,
+    CoreToHostSpawnPayload, CoreToHostSpawnWavePayload, CoreToHostUiPayload, DeliveryBoundary,
+    DeliveryResult, EventKind, EventRow, HostToCoreAgentResultPayload, HostToCoreCommandPayload,
     HostToCoreOperatorAnswerPayload, HostToCoreShutdownPayload, HostToCoreSpawnResultPayload,
     HostToCoreTaskCompletedPayload, Id, ModeId, Ref, SeamEnvelope, Sha, TestId, UiKind,
 };
@@ -134,7 +133,6 @@ pub fn admit_host_frame(frame: SeamEnvelope) -> Result<SeamEnvelope, Rejection> 
     match frame.kind.as_str() {
         "agent-result" => payload::<HostToCoreAgentResultPayload>(&frame)?,
         "command" => payload::<HostToCoreCommandPayload>(&frame)?,
-        "guard-query" => payload::<HostToCoreGuardQueryPayload>(&frame)?,
         "operator-answer" => payload::<HostToCoreOperatorAnswerPayload>(&frame)?,
         "shutdown" => payload::<HostToCoreShutdownPayload>(&frame)?,
         "spawn-result" => payload::<HostToCoreSpawnResultPayload>(&frame)?,
@@ -175,7 +173,6 @@ fn dispatch(frame: SeamEnvelope, state: &mut CoreState) -> Result<SeamEnvelope, 
     match frame.kind.as_str() {
         "command" => command(frame, state),
         "agent-result" => route_agent_result(frame, state),
-        "guard-query" => route_guard_query(frame, state),
         "shutdown" => done(frame.id, "ok:shutdown".to_owned()),
         "spawn-result" => route_spawn_result(frame, state),
         "task-completed" => route_task_completed(frame, state),
@@ -1210,17 +1207,6 @@ fn ui(id: u64, ui_kind: &str, content: serde_json::Value) -> Result<SeamEnvelope
         })?,
     })
 }
-fn guard_decision(id: u64, value: &str, reason: &str) -> Result<SeamEnvelope, AnyError> {
-    Ok(SeamEnvelope {
-        v: CONTRACT_VERSION as u32,
-        id,
-        kind: "guard-decision".to_owned(),
-        payload: serde_json::to_value(CoreToHostGuardDecisionPayload {
-            decision: GuardDecision(value.to_owned()),
-            reason: reason.to_owned(),
-        })?,
-    })
-}
 fn write_frame<W: Write>(writer: &mut W, frame: &SeamEnvelope) -> Result<(), AnyError> {
     serde_json::to_writer(&mut *writer, frame)?;
     writer.write_all(b"\n")?;
@@ -2188,117 +2174,6 @@ fn git_status(repo: &Path, args: &[&str]) -> Result<(), String> {
     } else {
         Err(String::from_utf8_lossy(&output.stderr).to_string())
     }
-}
-
-fn route_guard_query(frame: SeamEnvelope, state: &mut CoreState) -> Result<SeamEnvelope, AnyError> {
-    let payload: HostToCoreGuardQueryPayload = serde_json::from_value(frame.payload)?;
-    if payload.tool_name != "bg_run" {
-        return guard_decision(
-            frame.id,
-            "deny",
-            &format!("unsupported-tool:{}", payload.tool_name),
-        );
-    }
-    let call = match bg_run_from_guard_args(&payload.arguments) {
-        Ok(value) => value,
-        Err(error) => {
-            return guard_decision(frame.id, "deny", &format!("control:bg-run-shape:{error}"));
-        }
-    };
-    let actions = issued_actions(state);
-    let mut mismatch = None;
-    for candidate in actions {
-        let mut guard = crate::control::BgRunGuard::new(vec![candidate]);
-        match guard.admit(&call) {
-            Ok(crate::control::GuardOutcome::Accepted { action, .. })
-            | Ok(crate::control::GuardOutcome::Duplicate { action }) => {
-                state.append(
-                    EventKind("control:bg-run-admitted".to_owned()),
-                    vec![
-                        Ref("module-wired:control".to_owned()),
-                        Ref(action.action_id.0.clone()),
-                        Ref(action.assignment_id.0.clone()),
-                    ],
-                )?;
-                return guard_decision(
-                    frame.id,
-                    "allow",
-                    "control.bg-run-exact.v1:matched-live-action",
-                );
-            }
-            Err(crate::control::GuardRejection::Mismatch { valid }) => {
-                mismatch = Some(valid.action_id.0.clone());
-            }
-            Err(crate::control::GuardRejection::Unsafe { failure }) => {
-                return guard_decision(
-                    frame.id,
-                    "deny",
-                    &format!("control.bg-run-exact.v1:unsafe:{failure:?}"),
-                );
-            }
-        }
-    }
-    guard_decision(
-        frame.id,
-        "deny",
-        &format!(
-            "control.bg-run-exact.v1:mismatch:valid_action={}",
-            mismatch.unwrap_or_else(|| "<none>".to_owned())
-        ),
-    )
-}
-
-fn bg_run_from_guard_args(
-    value: &serde_json::Value,
-) -> Result<kernel::generated::BackgroundActionBgRun, String> {
-    let obj = value
-        .as_object()
-        .ok_or_else(|| "arguments-not-object".to_owned())?;
-    let name = string_field(obj, "name").or_else(|_| string_field(obj, "display_name"))?;
-    let command = string_field(obj, "command").or_else(|_| string_field(obj, "command_bytes"))?;
-    let is_agent = bool_field(obj, "isAgent").or_else(|_| bool_field(obj, "is_agent"))?;
-    let timeout_seconds = match obj
-        .get("timeoutSeconds")
-        .or_else(|| obj.get("timeout_seconds"))
-    {
-        Some(serde_json::Value::Number(number)) => Some(
-            number
-                .as_u64()
-                .ok_or_else(|| "timeoutSeconds-not-u64".to_owned())
-                .and_then(|n| u32::try_from(n).map_err(|_| "timeoutSeconds-overflow".to_owned()))?,
-        ),
-        Some(serde_json::Value::Null) => return Err("timeoutSeconds-null".to_owned()),
-        Some(_) => return Err("timeoutSeconds-not-number".to_owned()),
-        None => None,
-    };
-    let notify_on_completion = bool_field(obj, "notifyOnCompletion")
-        .or_else(|_| bool_field(obj, "notify_on_completion"))?;
-    let trigger_on_completion = bool_field(obj, "triggerOnCompletion")
-        .or_else(|_| bool_field(obj, "trigger_on_completion"))?;
-    Ok(kernel::generated::BackgroundActionBgRun {
-        name,
-        command: kernel::generated::Bytes(command),
-        is_agent,
-        timeout_seconds,
-        notify_on_completion,
-        trigger_on_completion,
-    })
-}
-
-fn string_field(
-    obj: &serde_json::Map<String, serde_json::Value>,
-    key: &str,
-) -> Result<String, String> {
-    obj.get(key)
-        .and_then(|value| value.as_str())
-        .map(str::to_owned)
-        .ok_or_else(|| format!("missing-string:{key}"))
-}
-
-fn bool_field(obj: &serde_json::Map<String, serde_json::Value>, key: &str) -> Result<bool, String> {
-    obj.get(key)
-        .and_then(|value| value.as_bool())
-        .ok_or_else(|| format!("missing-bool:{key}"))
 }
 
 fn action_ref(action: &BackgroundAction) -> Result<Ref, AnyError> {

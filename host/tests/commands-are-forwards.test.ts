@@ -70,20 +70,30 @@ test("registered command handlers contain no local control branch", () => {
   }
 });
 
-test("extension registers tool_call guard as a core frame forward", async () => {
+// Autopilot owns no public Pi tool call. Core-issued launches travel
+// Core -> Host -> the pi-background-tasks EventBus service, and child agents run
+// with `--no-extensions`. Registering a `tool_call` interceptor would therefore
+// place every operator/model/other-extension tool call (notably `bg_run`) under
+// Autopilot authority it cannot legitimately claim, so no such hook may exist.
+test("extension registers no tool_call interceptor over foreign tool calls", async () => {
   const pi = fakePi();
-  const transport = fakeTransport({ guard: "deny" });
+  const transport = fakeTransport();
   autopilotExtension(pi, { transport, backgroundTasks: fakeBackgroundTasks() });
 
-  const input = { command: "do-not-rewrite" };
-  const result = await pi.events.get("tool_call")({ toolName: "autopilot_emit_status", input }, fakeCtx());
+  assert.equal(pi.events.has("tool_call"), false);
+  assert.deepEqual([...pi.events.keys()].sort(), ["session_shutdown", "session_start"]);
+  assert.deepEqual(transport.calls.filter((call) => call.kind === "guard-query"), []);
+});
 
-  assert.deepEqual(transport.calls.at(-1), {
-    kind: "guard-query",
-    payload: { tool_name: "autopilot_emit_status", arguments: input },
-    timeoutMs: 5000,
-  });
-  assert.deepEqual(result, { block: true, reason: "guarded" });
+test("extension never emits a guard-query frame for any tool call", async () => {
+  const pi = fakePi();
+  const transport = fakeTransport();
+  autopilotExtension(pi, { transport, backgroundTasks: fakeBackgroundTasks() });
+
+  await pi.events.get("session_start")({ reason: "startup" }, fakeCtx());
+  await pi.events.get("session_shutdown")({ reason: "quit" }, fakeCtx());
+
+  assert.deepEqual(transport.calls.map((call) => call.kind), ["shutdown"]);
 });
 
 test("extension shutdown sends core shutdown and closes transport", async () => {
@@ -254,9 +264,6 @@ function fakeTransport(options = {}) {
     async request(kind, payload, timeoutMs) {
       const call = timeoutMs === undefined ? { kind, payload } : { kind, payload, timeoutMs };
       calls.push(call);
-      if (kind === "guard-query") {
-        return { v: 1, id: calls.length, kind: "guard-decision", payload: { decision: options.guard ?? "allow", reason: "guarded" } };
-      }
       return { v: 1, id: calls.length, kind: "done", payload: { status: "ok" } };
     },
     close() {

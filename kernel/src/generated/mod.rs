@@ -48,10 +48,6 @@ pub struct GitOid(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct GuardDecision(pub String);
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
 pub struct Id(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -2767,16 +2763,6 @@ pub struct CoreToHostDonePayload {
     pub status: String,
 }
 
-/// D78 §3.2 — allow / deny + reason, answers guard-query.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CoreToHostGuardDecisionPayload {
-    #[serde(rename = "decision")]
-    pub decision: GuardDecision,
-    #[serde(rename = "reason")]
-    pub reason: String,
-}
-
 /// D78 §3.2 — diagnostic line for the TUI.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2882,16 +2868,6 @@ pub struct HostToCoreCommandPayload {
     #[serde(rename = "background_capability_diagnostic")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub background_capability_diagnostic: Option<String>,
-}
-
-/// D78 §3.2 — a Pi tool_call needing an allow/deny decision.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HostToCoreGuardQueryPayload {
-    #[serde(rename = "tool_name")]
-    pub tool_name: String,
-    #[serde(rename = "arguments")]
-    pub arguments: serde_json::Value,
 }
 
 /// D78 §3.2 — a response to a Question Gate or approval prompt.

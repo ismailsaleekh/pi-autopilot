@@ -199,11 +199,11 @@ function main() {
   const files = new Set(packFiles.map((entry) => entry.path));
   const errors = [];
   const requireFile = (path, reason) => { if (!files.has(path)) errors.push(`missing required payload path ${path} (${reason})`); };
-  const hostRuntimeSources = ['src/extension.ts', 'src/commands.ts', 'src/effects.ts', 'src/background-tasks.ts', 'src/guard.ts', 'src/resolve-core.ts', 'src/resolve-runner.ts', 'src/transport.ts'];
+  const hostRuntimeSources = ['src/extension.ts', 'src/commands.ts', 'src/effects.ts', 'src/background-tasks.ts', 'src/resolve-core.ts', 'src/resolve-runner.ts', 'src/transport.ts'];
   const runtimeInputs = [
     { path: coreBinEntry, reason: 'package.json bin.autopilot-core' },
     { path: runnerBinEntry, reason: 'package.json bin.autopilot-agent-run' },
-    { path: 'src/generated/index.ts', reason: 'generated seam types and guard timeout' },
+    { path: 'src/generated/index.ts', reason: 'generated seam types' },
     ...hostRuntimeSources.map((path) => ({ path, reason: 'Host runtime source' })),
     ...hostRuntimeSources.flatMap(runtimeInputsFromSource),
   ];

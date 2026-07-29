@@ -3,7 +3,6 @@ import type {
   BackgroundAction,
   BackgroundActionBgRun,
   CoreToHostFrame,
-  CoreToHostGuardDecisionPayload,
   CoreToHostSessionPayload,
   CoreToHostSpawnWavePayload,
   CoreToHostUiPayload,
@@ -34,8 +33,6 @@ export function validateCoreToHostFrame(value: unknown): CoreToHostFrame {
   switch (kind) {
     case "done":
       return { v: 1, id, kind, payload: validateDonePayload(frame.payload) };
-    case "guard-decision":
-      return { v: 1, id, kind, payload: validateGuardDecisionPayload(frame.payload) };
     case "log":
       return { v: 1, id, kind, payload: validateLogPayload(frame.payload) };
     case "session":
@@ -97,14 +94,6 @@ export function validateBgRunDescriptorIdentity<T extends BackgroundActionBgRun>
 function validateDonePayload(value: unknown): { status: string } {
   const payload = requireClosedRecord(value, ["status"], "done payload");
   return { status: requireString(payload.status, "done.status") };
-}
-
-function validateGuardDecisionPayload(value: unknown): CoreToHostGuardDecisionPayload {
-  const payload = requireClosedRecord(value, ["decision", "reason"], "guard-decision payload");
-  return {
-    decision: requireString(payload.decision, "guard-decision.decision"),
-    reason: requireString(payload.reason, "guard-decision.reason"),
-  };
 }
 
 function validateLogPayload(value: unknown): { line: string } {

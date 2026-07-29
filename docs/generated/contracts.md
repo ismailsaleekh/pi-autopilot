@@ -12,17 +12,55 @@ Sources: `data/contracts.kdl`.
 | context_manifest | autopilot.context_manifest.v1 | Package | false | Canonical package-written context manifest (D76 §4.1). |
 | context_anchor | autopilot.context_anchor.v1 | Package | false | Validated context anchor pattern set from D76 §4.1. The discriminating field is anchor_form so generated kernel source can avoid embedding domain substrings; literal forms remain data. |
 | control_frame | autopilot.control_frame.v1 | Package | false | Bounded package-generated Control Frame (D76 §6.1). |
-| background_capabilities | autopilot.background_capabilities.v1 | Host | false | Exact pi-background-tasks extension API capability fact object observed by Host and consumed by Core before any planning/run mutation. |
+| background_capabilities | autopilot.background_capabilities.v1 | Host | false | Exact pi-background-tasks extension API capability fact object observed by Host and consumed by Core before any planning/run mutation. v1 generic bg_run fields remain for compatibility; v2 attested fields are required for evidence-backed planning review. |
 | background_action | autopilot.background_action.v1 | Package | false | Exact background launch/reconcile/stop action descriptor (D76 §6.2 and D74 §4.5). Core-owned authority metadata wraps the public pi-background-tasks bg_run object without Host renaming or synthesis. |
-| agent_run_spec | autopilot.agent_run_spec.v1 | Package | false | Strict parent-Core written child runner specification for the package-contained autopilot-agent-run wrapper and Rust agent-run mode. |
+| autopilot_content_ref | autopilot.content_ref.v1 | Package | false | Create-once package content reference for evidence artifacts. Paths are package-run-root-relative POSIX paths and hashes cover exact bytes. |
+| autopilot_event_ref | autopilot.event_ref.v1 | Package | false | Digest-bound reference to an authoritative EventRow v1 row. |
+| autopilot_evidence_conflict_policy | autopilot.evidence_conflict_policy.v1 | Package | false | Package-authored conflict policy for an attested evidence assignment. |
+| phase2_pi_consumer_binding | phase2.pi_consumer_binding.v1 | Package | false | Closed consumer binding echoed by the paired background producer request, report, and sidecar. |
+| phase2_pi_attested_run_request | phase2.pi_attested_run_request.v2 | Package | false | Closed EventBus v2 request for paired pi-background-tasks run-attested-pi. |
+| autopilot_attested_assignment | autopilot.attested_assignment.v1 | Package | false | Core-issued attested evidence assignment. Only Core creates this object and its action. |
+| autopilot_attested_action | autopilot.attested_action.v1 | Package | false | Core-issued exact attested action. Host may only relay this object through EventBus v2. |
+| autopilot_producer_binding | autopilot.producer_binding.v1 | Package | false | Core binding between an issued attested action and the producer task/report/sidecar locators returned by EventBus v2. |
+| autopilot_evidence_conflict_check | autopilot.evidence_conflict_check.v1 | Package | false | Folded package conflict check over authoritative accepted receipts. All conflict tuples must be empty for acceptance. |
+| autopilot_evidence_acceptance_receipt | autopilot.evidence_acceptance_receipt.v1 | Package | false | Versioned immutable acceptance receipt for an imported attested report and sidecar. |
+| autopilot_evidence_failure_receipt | autopilot.evidence_failure_receipt.v1 | Package | false | Immutable failure/rejection/conflict receipt. Rejected bytes are not imported. |
+| autopilot_evidence_supersession_receipt | autopilot.evidence_supersession_receipt.v1 | Package | false | Immutable supersession receipt. Acceptance receipts are never rewritten. |
+| autopilot_transcript_v2 | autopilot.transcript.v2 | Package | false | Receipt-backed non-authoritative replay transcript fixture. V1 transcripts remain compatibility-only. |
+| autopilot_evidence_envelope_manifest | autopilot.evidence_envelope_manifest.v1 | Package | false | Closed evidence envelope manifest. Members are exactly refs reachable from authoritative evidence events; scans/globs/prefixes are forbidden. |
+| task_document | autopilot.task_document.v1 | Package | false | Core-classified task-pack document copied into child runner specs. The digest is over the exact admitted file bytes; body_digest is over the model-visible body only. |
+| agent_run_spec | autopilot.agent_run_spec.v2 | Package | false | Strict parent-Core written child runner specification for the package-contained autopilot-agent-run wrapper and Rust agent-run mode. |
 | run_identity | autopilot.run_identity.v1 | Package | false | Clean v2 runtime identity namespace (D76 §5.1). |
 | event_row | autopilot.event_row.v1 | Package | false | Append-only event row; events.jsonl is the sole state authority (D76 §5.4 + D77 Closure B). |
 | state_cache | autopilot.state_cache.v1 | Package | false | Disposable cache only, never an authority. State is fold(events); this cache may be deleted at any instant with zero semantic loss and any mismatch forces full replay (D77 Closure B). |
+| agent_handoff | autopilot.agent-handoff.v1 | Model | true | Model-facing checkpoint handoff. The package preserves unknown top-level properties and validates role-required critical_state slots from data/checkpoint-policy.kdl before compaction/resume. |
+| task_atoms | planning.task-atoms.v1 | Model | true | Model-facing task atom submission. Shape is deliberately small: structure is enforced by the submit tool; source values are checked against task authority anchors by the planning driver. |
+| planning_atom_registry | autopilot.planning_atom_registry.v1 | Package | false | Create-once accepted task atom registry materialized by the seam after task extractors are accepted. |
+| scout_dossier | planning.scout-dossier.v1 | Model | true | Model-facing repository scout dossier. Shape is small; path values are checked against the pinned repository commit by the planning driver. |
+| questions | planning.questions.v1 | Model | true | Model-facing contradiction/question nominations. Empty questions are valid when no material unresolved issue remains. |
+| work_map | planning.work-map.v1 | Model | true | Model-facing work map. Link values are checked against the accepted atom registry by the planning driver. |
+| plan_review | planning.plan-review.v1 | Model | true | Model-facing plan review verdicts. Verdict is closed; finding text is optional and advisory unless the verdict requires explanation. |
 | allocation_lane_proposal | autopilot.allocation_lane_proposal.v1 | Model | true | Allocator model proposal; package validates totality, dependencies, cap, and no invented ownership (D76 §7). |
 | delivery_result | autopilot.delivery_result.v1 | Model | true | Implementer/Fixer terminal delivery carrier pending package acceptance (D76 §8.2). |
 | validation_verdict | autopilot.validation_verdict.v1 | Model | true | Independent validation verdict bundle for forward, closure, conflict, delta, or final review (D76 §9.2). |
 | finding | autopilot.finding.v1 | Model | true | Validator/Bughunter/Fixer finding with semantic scheduling effect (D76 §5.3 and D74 §11.2). |
+| validation_assignment_v2 | autopilot.validation_assignment.v1 | Package | false | Package-produced independent Validator assignment. Production validation uses v2 submissions/results; v1 verdicts remain historical. |
+| finding_v2 | autopilot.finding.v2 | Model | true | Embedded v2 validation finding with deterministic validation-id ordinal identifier. |
+| validation_context_v2 | autopilot.validation_context.v1 | Package | false | Canonical fact-only Validator context. Forbidden producer reasoning/session classes are listed explicitly. |
+| validation_submission_v2 | autopilot.validation_submission.v2 | Model | true | Only payload accepted by the Validator terminal tool. Assistant-text JSON without the terminal tool is not a carrier. |
+| validation_result_v2 | autopilot.validation_result.v2 | Package | false | Package-bound Validator carrier written create-once after validating model submission and immutable runner binding. |
 | seam_envelope | autopilot.seam_envelope.v1 | Host | false | D78 §3.1 newline-delimited JSON frame envelope over stdio. |
+| artifact_link | autopilot.artifact_link.v1 | Package | false | Digest-bound run-root artifact link used by finalization assemblies and archive manifests. |
+| accepted_evidence_envelope | autopilot.accepted_evidence_envelope.v1 | Package | false | Authoritative accepted evidence envelope. External-attested advisory origin is archived but cannot satisfy final conditions. |
+| command_receipt | autopilot.command_receipt.v1 | Package | false | Exact-tip command receipt for final commands, full suite, or focused checks. |
+| final_gate_assembly | autopilot.final_gate_assembly.v1 | Package | false | Authoritative derived final gate input; never accepted from Host, operator, or model. |
+| final_verification_pass | autopilot.final_verification_pass.v1 | Package | false | Digest-bound final gate pass written only after verify_final_gate succeeds. |
+| close_request | autopilot.close_request.v1 | Operator | false | Exact close command request. No force, nonce, dry-run, missing, duplicate, or reordered positional spellings are accepted. |
+| close_archive_manifest | autopilot.close_archive_manifest.v1 | Package | false | Create-once close archive manifest excluding close receipt/publication to avoid digest cycles. |
+| close_receipt | autopilot.close_receipt.v1 | Package | false | Close receipt binding result ref, manifest, watchdog receipt, cleanup receipts, and target observation. |
+| archive_publication | autopilot.close_archive_publication.v1 | Package | false | Create-once publication marker that makes a close archive visible. |
+| external_attested_evidence_import | autopilot.external_attested_evidence_import.v1 | BackgroundTask | false | Strict import request for existing phase2.pi_task_attestation.v1 bytes. The result is external-attested-advisory only and cannot satisfy final conditions. |
+| lifecycle_report | autopilot.lifecycle_report.v1 | Package | false | Close lifecycle report returned only after the terminal result-ref-archived event is durable. |
 
 ## Fields and lists
 
@@ -102,7 +140,7 @@ Sources: `data/contracts.kdl`.
 | control_frame | list | actions | background_action | true |  | Exact currently valid actions. |
 | control_frame | field | next_watchdog_at | timestamp | true | true |  |
 | control_frame | field | return_to_idle | bool | true |  |  |
-| background_capabilities | field | api_version | u32 | true |  | The paired pi-background-tasks extension API version; v1 for the event-bus protocol. |
+| background_capabilities | field | api_version | u32 | true |  | The paired pi-background-tasks extension API version; 2 is required for attested evidence launch. |
 | background_capabilities | field | run | bool | true |  |  |
 | background_capabilities | field | run_is_agent | bool | true |  |  |
 | background_capabilities | field | run_completion_trigger | bool | true |  |  |
@@ -110,6 +148,12 @@ Sources: `data/contracts.kdl`.
 | background_capabilities | field | logs | bool | true |  |  |
 | background_capabilities | field | logs_bounded | bool | true |  |  |
 | background_capabilities | field | kill | bool | true |  |  |
+| background_capabilities | field | run_attested_pi | bool | false |  | v2: exact run-attested-pi operation is available. |
+| background_capabilities | field | attested_idempotency | bool | false |  | v2: same idempotency key replays and conflicts loudly. |
+| background_capabilities | field | attested_status_by_idempotency_key | bool | false |  | v2: status/reconcile uses the full idempotency key. |
+| background_capabilities | field | attested_terminal_artifacts | bool | false |  | v2: terminal observations carry report and sidecar source paths. |
+| background_capabilities | field | report_schema | string | false |  | v2 literal phase2.pi_task_report.v1. |
+| background_capabilities | field | attestation_schema | string | false |  | v2 literal phase2.pi_task_attestation.v2. |
 | background_action | field | action_id | id | true |  |  |
 | background_action | field | assignment_id | id | true |  |  |
 | background_action | field | kind | action_kind | true |  |  |
@@ -122,9 +166,205 @@ Sources: `data/contracts.kdl`.
 | background_action | field | run_revision | u64 | true |  | Expected run revision. |
 | background_action | field | expires_at | timestamp | false | true | Expiry for one-time issued action. |
 | background_action | field | supersession_state | supersession-state | true |  | Live, superseded, expired, or consumed posture. |
+| autopilot_content_ref | field | schema_version | schema-id | true |  |  |
+| autopilot_content_ref | field | kind | evidence_content_kind | true |  |  |
+| autopilot_content_ref | field | path | path | true |  |  |
+| autopilot_content_ref | field | byte_length | unix-ms | true |  |  |
+| autopilot_content_ref | field | sha256 | digest | true |  |  |
+| autopilot_event_ref | field | schema_version | schema-id | true |  |  |
+| autopilot_event_ref | field | sequence | u64 | true |  |  |
+| autopilot_event_ref | field | kind | event-kind | true |  |  |
+| autopilot_event_ref | field | row_sha256 | digest | true |  |  |
+| autopilot_evidence_conflict_policy | field | schema_version | schema-id | true |  |  |
+| autopilot_evidence_conflict_policy | list | distinct_from_receipt_refs | autopilot_content_ref | true |  |  |
+| autopilot_evidence_conflict_policy | field | forbid_same_assignment | bool | true |  |  |
+| autopilot_evidence_conflict_policy | field | forbid_same_action | bool | true |  |  |
+| autopilot_evidence_conflict_policy | field | forbid_same_session | bool | true |  |  |
+| autopilot_evidence_conflict_policy | field | require_subject_current | bool | true |  |  |
+| autopilot_evidence_conflict_policy | field | policy_sha256 | digest | true |  |  |
+| phase2_pi_consumer_binding | field | schema_version | schema-id | true |  |  |
+| phase2_pi_consumer_binding | field | consumer | string | true |  |  |
+| phase2_pi_consumer_binding | field | run_id | uuidv7 | true |  |  |
+| phase2_pi_consumer_binding | field | repo_key | base32 | true |  |  |
+| phase2_pi_consumer_binding | field | workstream | id | true |  |  |
+| phase2_pi_consumer_binding | field | purpose_id | id | true |  |  |
+| phase2_pi_consumer_binding | field | action_id | id | true |  |  |
+| phase2_pi_consumer_binding | field | assignment_id | id | true |  |  |
+| phase2_pi_consumer_binding | field | assignment_revision | u32 | true |  |  |
+| phase2_pi_consumer_binding | field | run_revision | u64 | true |  |  |
+| phase2_pi_consumer_binding | field | boundary_id | contract-id | true |  |  |
+| phase2_pi_consumer_binding | field | subject_digest | digest | true |  |  |
+| phase2_pi_consumer_binding | field | binding_sha256 | digest | true |  |  |
+| phase2_pi_attested_run_request | field | schema_version | schema-id | true |  |  |
+| phase2_pi_attested_run_request | field | name | string | true |  |  |
+| phase2_pi_attested_run_request | field | provider | string | true |  |  |
+| phase2_pi_attested_run_request | field | model | string | true |  |  |
+| phase2_pi_attested_run_request | field | thinking | thinking-level | true |  |  |
+| phase2_pi_attested_run_request | field | system_prompt_utf8 | string | true |  |  |
+| phase2_pi_attested_run_request | field | prompt_utf8 | string | true |  |  |
+| phase2_pi_attested_run_request | field | report_path | path | true |  |  |
+| phase2_pi_attested_run_request | field | timeout_seconds | u32 | true |  |  |
+| phase2_pi_attested_run_request | field | idempotency_key | id | true |  |  |
+| phase2_pi_attested_run_request | field | consumer_binding | phase2_pi_consumer_binding | true |  |  |
+| phase2_pi_attested_run_request | field | request_sha256 | digest | true |  |  |
+| autopilot_attested_assignment | field | schema_version | schema-id | true |  |  |
+| autopilot_attested_assignment | field | run_id | uuidv7 | true |  |  |
+| autopilot_attested_assignment | field | repo_key | base32 | true |  |  |
+| autopilot_attested_assignment | field | workstream | id | true |  |  |
+| autopilot_attested_assignment | field | purpose_id | id | true |  |  |
+| autopilot_attested_assignment | field | assignment_id | id | true |  |  |
+| autopilot_attested_assignment | field | assignment_revision | u32 | true |  |  |
+| autopilot_attested_assignment | field | run_revision | u64 | true |  |  |
+| autopilot_attested_assignment | field | action_id | id | true |  |  |
+| autopilot_attested_assignment | field | issue_idempotency_key | id | true |  |  |
+| autopilot_attested_assignment | field | import_idempotency_key | id | true |  |  |
+| autopilot_attested_assignment | field | subject_digest | digest | true |  |  |
+| autopilot_attested_assignment | field | boundary_id | contract-id | true |  |  |
+| autopilot_attested_assignment | field | provider | string | true |  |  |
+| autopilot_attested_assignment | field | model | string | true |  |  |
+| autopilot_attested_assignment | field | thinking | thinking-level | true |  |  |
+| autopilot_attested_assignment | field | required_channel | string | true |  |  |
+| autopilot_attested_assignment | field | prompt_ref | autopilot_content_ref | true |  |  |
+| autopilot_attested_assignment | field | system_prompt_sha256 | digest | true |  |  |
+| autopilot_attested_assignment | field | report_staging_path | path | true |  |  |
+| autopilot_attested_assignment | field | producer_request_sha256 | digest | true |  |  |
+| autopilot_attested_assignment | field | conflict_policy | autopilot_evidence_conflict_policy | true |  |  |
+| autopilot_attested_assignment | field | issued_at_unix_ms | unix-ms | true |  |  |
+| autopilot_attested_assignment | field | supersedes_assignment_id | id | false |  |  |
+| autopilot_attested_assignment | field | assignment_sha256 | digest | true |  |  |
+| autopilot_attested_action | field | schema_version | schema-id | true |  |  |
+| autopilot_attested_action | field | action_id | id | true |  |  |
+| autopilot_attested_action | field | assignment_id | id | true |  |  |
+| autopilot_attested_action | field | assignment_revision | u32 | true |  |  |
+| autopilot_attested_action | field | run_revision | u64 | true |  |  |
+| autopilot_attested_action | field | assignment_ref | autopilot_content_ref | true |  |  |
+| autopilot_attested_action | field | producer_request | phase2_pi_attested_run_request | true |  |  |
+| autopilot_attested_action | field | expires_at_unix_ms | unix-ms | true |  |  |
+| autopilot_attested_action | field | supersession_state | string | true |  |  |
+| autopilot_attested_action | field | action_sha256 | digest | true |  |  |
+| autopilot_producer_binding | field | schema_version | schema-id | true |  |  |
+| autopilot_producer_binding | field | run_id | uuidv7 | true |  |  |
+| autopilot_producer_binding | field | workstream | id | true |  |  |
+| autopilot_producer_binding | field | action_id | id | true |  |  |
+| autopilot_producer_binding | field | assignment_id | id | true |  |  |
+| autopilot_producer_binding | field | assignment_revision | u32 | true |  |  |
+| autopilot_producer_binding | field | run_revision | u64 | true |  |  |
+| autopilot_producer_binding | field | assignment_ref | autopilot_content_ref | true |  |  |
+| autopilot_producer_binding | field | action_ref | autopilot_content_ref | true |  |  |
+| autopilot_producer_binding | field | producer_task_id | id | true |  |  |
+| autopilot_producer_binding | field | producer_request_sha256 | digest | true |  |  |
+| autopilot_producer_binding | field | report_source_path | path | true |  |  |
+| autopilot_producer_binding | field | sidecar_source_path | path | true |  |  |
+| autopilot_producer_binding | field | bound_at_unix_ms | unix-ms | true |  |  |
+| autopilot_producer_binding | field | binding_sha256 | digest | true |  |  |
+| autopilot_evidence_conflict_check | field | schema_version | schema-id | true |  |  |
+| autopilot_evidence_conflict_check | list | compared_receipt_refs | autopilot_content_ref | true |  |  |
+| autopilot_evidence_conflict_check | list | assignment_conflicts | id | true |  |  |
+| autopilot_evidence_conflict_check | list | action_conflicts | id | true |  |  |
+| autopilot_evidence_conflict_check | list | session_conflicts | id | true |  |  |
+| autopilot_evidence_conflict_check | list | subject_conflicts | digest | true |  |  |
+| autopilot_evidence_conflict_check | list | provider_channel_conflicts | string | true |  |  |
+| autopilot_evidence_conflict_check | field | status | string | true |  |  |
+| autopilot_evidence_conflict_check | field | check_sha256 | digest | true |  |  |
+| autopilot_evidence_acceptance_receipt | field | schema_version | schema-id | true |  |  |
+| autopilot_evidence_acceptance_receipt | field | receipt_id | id | true |  |  |
+| autopilot_evidence_acceptance_receipt | field | run_id | uuidv7 | true |  |  |
+| autopilot_evidence_acceptance_receipt | field | repo_key | base32 | true |  |  |
+| autopilot_evidence_acceptance_receipt | field | workstream | id | true |  |  |
+| autopilot_evidence_acceptance_receipt | field | purpose_id | id | true |  |  |
+| autopilot_evidence_acceptance_receipt | field | assignment_id | id | true |  |  |
+| autopilot_evidence_acceptance_receipt | field | action_id | id | true |  |  |
+| autopilot_evidence_acceptance_receipt | field | assignment_revision | u32 | true |  |  |
+| autopilot_evidence_acceptance_receipt | field | run_revision | u64 | true |  |  |
+| autopilot_evidence_acceptance_receipt | field | subject_digest | digest | true |  |  |
+| autopilot_evidence_acceptance_receipt | field | boundary_id | contract-id | true |  |  |
+| autopilot_evidence_acceptance_receipt | field | assignment_ref | autopilot_content_ref | true |  |  |
+| autopilot_evidence_acceptance_receipt | field | action_ref | autopilot_content_ref | true |  |  |
+| autopilot_evidence_acceptance_receipt | field | producer_binding_ref | autopilot_content_ref | true |  |  |
+| autopilot_evidence_acceptance_receipt | field | report_ref | autopilot_content_ref | true |  |  |
+| autopilot_evidence_acceptance_receipt | field | producer_sidecar_ref | autopilot_content_ref | true |  |  |
+| autopilot_evidence_acceptance_receipt | field | producer_task_id | id | true |  |  |
+| autopilot_evidence_acceptance_receipt | field | producer_request_sha256 | digest | true |  |  |
+| autopilot_evidence_acceptance_receipt | field | prompt_sha256 | digest | true |  |  |
+| autopilot_evidence_acceptance_receipt | field | system_prompt_sha256 | digest | true |  |  |
+| autopilot_evidence_acceptance_receipt | field | payload_sha256 | digest | true |  |  |
+| autopilot_evidence_acceptance_receipt | field | provider | string | true |  |  |
+| autopilot_evidence_acceptance_receipt | field | model | string | true |  |  |
+| autopilot_evidence_acceptance_receipt | field | channel | string | true |  |  |
+| autopilot_evidence_acceptance_receipt | field | auth_class | string | true |  |  |
+| autopilot_evidence_acceptance_receipt | field | credential_kind | string | true |  |  |
+| autopilot_evidence_acceptance_receipt | field | direct_api_key | bool | true |  |  |
+| autopilot_evidence_acceptance_receipt | field | pi_session_id | id | true |  |  |
+| autopilot_evidence_acceptance_receipt | field | conflict_check | autopilot_evidence_conflict_check | true |  |  |
+| autopilot_evidence_acceptance_receipt | field | issue_idempotency_key | id | true |  |  |
+| autopilot_evidence_acceptance_receipt | field | import_idempotency_key | id | true |  |  |
+| autopilot_evidence_acceptance_receipt | field | issue_event_ref | autopilot_event_ref | true |  |  |
+| autopilot_evidence_acceptance_receipt | field | binding_event_ref | autopilot_event_ref | true |  |  |
+| autopilot_evidence_acceptance_receipt | field | supersession_state_at_acceptance | string | true |  |  |
+| autopilot_evidence_acceptance_receipt | field | accepted_at_unix_ms | unix-ms | true |  |  |
+| autopilot_evidence_acceptance_receipt | field | receipt_sha256 | digest | true |  |  |
+| autopilot_evidence_failure_receipt | field | schema_version | schema-id | true |  |  |
+| autopilot_evidence_failure_receipt | field | run_id | uuidv7 | true |  |  |
+| autopilot_evidence_failure_receipt | field | workstream | id | true |  |  |
+| autopilot_evidence_failure_receipt | field | purpose_id | id | true |  |  |
+| autopilot_evidence_failure_receipt | field | assignment_id | id | true |  |  |
+| autopilot_evidence_failure_receipt | field | action_id | id | true |  |  |
+| autopilot_evidence_failure_receipt | field | assignment_revision | u32 | true |  |  |
+| autopilot_evidence_failure_receipt | field | run_revision | u64 | true |  |  |
+| autopilot_evidence_failure_receipt | field | state | string | true |  |  |
+| autopilot_evidence_failure_receipt | field | code | evidence_error_code | true |  |  |
+| autopilot_evidence_failure_receipt | list | expected_refs | autopilot_content_ref | true |  |  |
+| autopilot_evidence_failure_receipt | list | observed_hashes | digest | true |  |  |
+| autopilot_evidence_failure_receipt | field | occurred_at_unix_ms | unix-ms | true |  |  |
+| autopilot_evidence_failure_receipt | field | failure_sha256 | digest | true |  |  |
+| autopilot_evidence_supersession_receipt | field | schema_version | schema-id | true |  |  |
+| autopilot_evidence_supersession_receipt | field | run_id | uuidv7 | true |  |  |
+| autopilot_evidence_supersession_receipt | field | workstream | id | true |  |  |
+| autopilot_evidence_supersession_receipt | field | purpose_id | id | true |  |  |
+| autopilot_evidence_supersession_receipt | field | old_assignment_ref | autopilot_content_ref | true |  |  |
+| autopilot_evidence_supersession_receipt | field | new_assignment_ref | autopilot_content_ref | true |  |  |
+| autopilot_evidence_supersession_receipt | field | old_acceptance_receipt_ref | autopilot_content_ref | false |  |  |
+| autopilot_evidence_supersession_receipt | field | old_assignment_revision | u32 | true |  |  |
+| autopilot_evidence_supersession_receipt | field | new_assignment_revision | u32 | true |  |  |
+| autopilot_evidence_supersession_receipt | field | reason | string | true |  |  |
+| autopilot_evidence_supersession_receipt | field | superseded_at_event_revision | u64 | true |  |  |
+| autopilot_evidence_supersession_receipt | field | supersession_idempotency_key | id | true |  |  |
+| autopilot_evidence_supersession_receipt | field | supersession_sha256 | digest | true |  |  |
+| autopilot_transcript_v2 | field | schema_version | schema-id | true |  |  |
+| autopilot_transcript_v2 | field | boundary_id | contract-id | true |  |  |
+| autopilot_transcript_v2 | field | payload_utf8 | string | true |  |  |
+| autopilot_transcript_v2 | field | payload_sha256 | digest | true |  |  |
+| autopilot_transcript_v2 | field | acceptance_receipt_ref | autopilot_content_ref | true |  |  |
+| autopilot_transcript_v2 | field | producer_sidecar_ref | autopilot_content_ref | true |  |  |
+| autopilot_transcript_v2 | field | transcript_sha256 | digest | true |  |  |
+| autopilot_evidence_envelope_manifest | field | schema_version | schema-id | true |  |  |
+| autopilot_evidence_envelope_manifest | field | manifest_id | id | true |  |  |
+| autopilot_evidence_envelope_manifest | field | run_id | uuidv7 | true |  |  |
+| autopilot_evidence_envelope_manifest | field | repo_key | base32 | true |  |  |
+| autopilot_evidence_envelope_manifest | field | workstream | id | true |  |  |
+| autopilot_evidence_envelope_manifest | field | scope | string | true |  |  |
+| autopilot_evidence_envelope_manifest | field | manifest_revision | u32 | true |  |  |
+| autopilot_evidence_envelope_manifest | field | subject_digest | digest | true |  |  |
+| autopilot_evidence_envelope_manifest | field | previous_manifest_ref | autopilot_content_ref | false |  |  |
+| autopilot_evidence_envelope_manifest | field | closed_through_event_sequence | u64 | true |  |  |
+| autopilot_evidence_envelope_manifest | field | event_prefix_sha256 | digest | true |  |  |
+| autopilot_evidence_envelope_manifest | list | members | autopilot_content_ref | true |  |  |
+| autopilot_evidence_envelope_manifest | list | active_acceptance_receipt_refs | autopilot_content_ref | true |  |  |
+| autopilot_evidence_envelope_manifest | list | supersession_receipt_refs | autopilot_content_ref | true |  |  |
+| autopilot_evidence_envelope_manifest | list | failure_receipt_refs | autopilot_content_ref | true |  |  |
+| autopilot_evidence_envelope_manifest | field | excluded_self | bool | true |  |  |
+| autopilot_evidence_envelope_manifest | field | closed_at_unix_ms | unix-ms | true |  |  |
+| autopilot_evidence_envelope_manifest | field | manifest_sha256 | digest | true |  |  |
+| task_document | field | path | path | true |  |  |
+| task_document | field | class | task-document-class | true |  |  |
+| task_document | field | digest | digest | true |  |  |
+| task_document | field | body_digest | digest | true |  |  |
+| task_document | field | body | string | true |  |  |
 | agent_run_spec | field | schema | schema-id | true |  |  |
+| agent_run_spec | field | assignment_kind | validation_assignment_kind | true |  | Explicit assignment class; no runner infers planning/delivery/validation from result_contract. |
 | agent_run_spec | field | action_id | id | true |  |  |
 | agent_run_spec | field | assignment_id | id | true |  |  |
+| agent_run_spec | field | run_id | id | true |  | Durable top-level UUIDv7 run identity from .pi/autopilot/<workstream>/run-identity.json; scopes physical child-session identity so a new top-level run can never adopt a prior run's Pi session. |
 | agent_run_spec | field | run_revision | u64 | true |  |  |
 | agent_run_spec | field | workstream | id | true |  |  |
 | agent_run_spec | field | role_id | id | true |  |  |
@@ -135,11 +375,46 @@ Sources: `data/contracts.kdl`.
 | agent_run_spec | field | route | string | true |  |  |
 | agent_run_spec | field | cwd | path | true |  |  |
 | agent_run_spec | list | allowed_tools | tool-name | true |  |  |
+| agent_run_spec | field | spec_path | path | true |  |  |
 | agent_run_spec | field | prompt_path | path | true |  |  |
 | agent_run_spec | field | prompt_digest | digest | true |  |  |
 | agent_run_spec | field | boundary_id | contract-id | true |  |  |
+| agent_run_spec | field | boundary_digest | digest | true |  |  |
 | agent_run_spec | field | result_contract | contract-id | true |  |  |
+| agent_run_spec | field | result_contract_digest | digest | true |  |  |
 | agent_run_spec | field | carrier_path | path | true |  |  |
+| agent_run_spec | field | session_id | id | true |  | pi --session-id derived from run_id plus typed assignment identity; stable within one run for value-repair turns and resume, and necessarily distinct across top-level runs. |
+| agent_run_spec | field | session_dir | path | true |  | Run-owned pi --session-dir under the run root; never Pi's default global session directory. |
+| agent_run_spec | field | session_continuity | session_continuity | true |  | Parent-declared continuity class for this child invocation: fresh requires an empty Pi session, resume requires retained history. Declared by the issuing parent, never inferred by the child from disk. |
+| agent_run_spec | field | settings_digest | digest | true |  |  |
+| agent_run_spec | field | context_digest | digest | true |  |  |
+| agent_run_spec | field | skills_digest | digest | true |  |  |
+| agent_run_spec | field | subscription_digest | digest | true |  |  |
+| agent_run_spec | field | lane_id | id | false | true |  |
+| agent_run_spec | field | attempt | u32 | false | true |  |
+| agent_run_spec | field | base_commit | sha | false | true |  |
+| agent_run_spec | field | worktree | path | false | true |  |
+| agent_run_spec | field | required_focused_evidence | u32 | false | true |  |
+| agent_run_spec | field | authority_set_id | string | false | true |  |
+| agent_run_spec | list | authority_documents | task_document | false | true |  |
+| agent_run_spec | field | context_document | task_document | false | true |  |
+| agent_run_spec | list | context_documents | task_document | false | true |  |
+| agent_run_spec | field | assignment_path | path | false | true |  |
+| agent_run_spec | field | assignment_digest | digest | false | true |  |
+| agent_run_spec | field | context_manifest_path | path | false | true |  |
+| agent_run_spec | field | context_manifest_digest | digest | false | true |  |
+| agent_run_spec | field | runtime_extension_path | path | false | true |  |
+| agent_run_spec | field | runtime_extension_digest | digest | false | true |  |
+| agent_run_spec | list | producer_assignment_ids | id | false | true |  |
+| agent_run_spec | field | validation_id | id | false | true |  |
+| agent_run_spec | field | validation_attempt | u32 | false | true |  |
+| agent_run_spec | field | semantic_round | u32 | false | true |  |
+| agent_run_spec | field | model_submission_path | path | false | true |  |
+| agent_run_spec | field | atom_id_prefix | string | false | true |  |
+| agent_run_spec | field | atom_registry_path | path | false | true |  |
+| agent_run_spec | field | atom_registry_digest | digest | false | true |  |
+| agent_run_spec | field | planning_inputs_path | path | false | true |  |
+| agent_run_spec | field | planning_inputs_digest | digest | false | true |  |
 | run_identity | field | repo_key | base32 | true |  | lowercase-base32(sha256("autopilot-repo-v1\0" + realpath(git-common-dir))) |
 | run_identity | field | run_id | uuidv7 | true |  | UUIDv7 run-id. |
 | run_identity | field | workstream | id | true |  |  |
@@ -150,6 +425,43 @@ Sources: `data/contracts.kdl`.
 | event_row | list | artifact_refs | ref | true |  | Bounded artifact refs. |
 | state_cache | field | sequence | u64 | true |  |  |
 | state_cache | field | state_hash | digest | true |  |  |
+| agent_handoff | field | schema | schema-id | true |  |  |
+| agent_handoff | list | completed | string | true |  | Bounded finished obligations/results that must survive compaction. |
+| agent_handoff | list | remaining | string | true |  | Bounded unfinished obligations/results that must survive compaction. |
+| agent_handoff | field | critical_state | object | true |  | Role-specific slots; values must be scalar or arrays of scalar as declared in checkpoint-policy.kdl. |
+| agent_handoff | field | next_action | string | true |  | Immediate next action after resume. |
+| task_atoms | list | atoms | task_atom | true |  | Task atoms; may be empty only when no task authority text exists. |
+| task_atoms | field | task_atom.id | id | true |  |  |
+| task_atoms | field | task_atom.kind | planning_atom_kind | true |  |  |
+| task_atoms | field | task_atom.text | string | true |  |  |
+| task_atoms | list | task_atom.sources | ref | true |  | Task-document anchors supplied by the package. |
+| planning_atom_registry | field | schema | schema-id | true |  |  |
+| planning_atom_registry | field | workstream | id | true |  |  |
+| planning_atom_registry | field | authority_set_id | string | true |  |  |
+| planning_atom_registry | list | producer_assignment_ids | id | true |  |  |
+| planning_atom_registry | list | atoms | planning_atom_registry_atom | true |  |  |
+| planning_atom_registry | field | planning_atom_registry_atom.id | id | true |  |  |
+| planning_atom_registry | field | planning_atom_registry_atom.producer_assignment_id | id | true |  |  |
+| planning_atom_registry | field | planning_atom_registry_atom.kind | planning_atom_kind | true |  |  |
+| planning_atom_registry | field | planning_atom_registry_atom.text | string | true |  |  |
+| planning_atom_registry | list | planning_atom_registry_atom.sources | ref | true |  |  |
+| scout_dossier | list | findings | scout_finding | true |  | Repository findings grounded in current evidence. |
+| scout_dossier | field | scout_finding.path | path | true |  |  |
+| scout_dossier | field | scout_finding.observation | string | true |  |  |
+| scout_dossier | field | scout_finding.evidence_ref | ref | true |  |  |
+| questions | list | questions | planning_question | true |  | Material operator questions; [] is an accepted empty set. |
+| questions | field | planning_question.class | planning_question_class | true |  |  |
+| questions | field | planning_question.evidence | string | true |  |  |
+| questions | field | planning_question.consequence | string | true |  |  |
+| work_map | list | units | plan_unit | true |  | Executable plan units. |
+| work_map | field | plan_unit.id | id | true |  |  |
+| work_map | field | plan_unit.objective | string | true |  |  |
+| work_map | list | plan_unit.criteria | string | true |  |  |
+| work_map | list | plan_unit.links | id | true |  | Atom ids accepted from task_atoms. |
+| plan_review | list | verdicts | plan_review_verdict | true |  | Criterion verdicts. |
+| plan_review | field | plan_review_verdict.criterion_id | id | true |  |  |
+| plan_review | field | plan_review_verdict.verdict | planning_review_verdict | true |  |  |
+| plan_review | field | plan_review_verdict.finding | string | false |  |  |
 | allocation_lane_proposal | field | lane_id | id | true |  |  |
 | allocation_lane_proposal | field | objective | string | true |  |  |
 | allocation_lane_proposal | list | ordered_unit_ids | id | true |  |  |
@@ -170,6 +482,18 @@ Sources: `data/contracts.kdl`.
 | delivery_result | field | attempt | u32 | true |  |  |
 | delivery_result | field | base_commit | sha | true |  |  |
 | delivery_result | field | worktree | path | true |  |  |
+| delivery_result | field | action_id | id | false | true |  |
+| delivery_result | field | prompt_path | path | false | true |  |
+| delivery_result | field | prompt_digest | digest | false | true |  |
+| delivery_result | field | spec_path | path | false | true |  |
+| delivery_result | field | spec_digest | digest | false | true |  |
+| delivery_result | field | carrier_path | path | false | true |  |
+| delivery_result | field | boundary_digest | digest | false | true |  |
+| delivery_result | field | result_contract_digest | digest | false | true |  |
+| delivery_result | field | settings_digest | digest | false | true |  |
+| delivery_result | field | context_digest | digest | false | true |  |
+| delivery_result | field | skills_digest | digest | false | true |  |
+| delivery_result | field | subscription_digest | digest | false | true |  |
 | delivery_result | field | package_commit | sha | false | true |  |
 | delivery_result | field | package_tree | sha | false | true |  |
 | delivery_result | list | actual_changed_paths | path | true |  |  |
@@ -201,15 +525,306 @@ Sources: `data/contracts.kdl`.
 | finding | list | evidence_refs | ref | true |  |  |
 | finding | list | covered_paths | path | true |  |  |
 | finding | list | semantic_surface_ids | id | true |  |  |
+| validation_assignment_v2 | field | schema | schema-id | true |  |  |
+| validation_assignment_v2 | field | validation_id | id | true |  |  |
+| validation_assignment_v2 | field | validation_key | digest | true |  |  |
+| validation_assignment_v2 | field | workstream | id | true |  |  |
+| validation_assignment_v2 | field | run_revision | u64 | true |  |  |
+| validation_assignment_v2 | field | role_id | id | true |  |  |
+| validation_assignment_v2 | field | mode | mode-id | true |  |  |
+| validation_assignment_v2 | field | assignment_id | id | true |  |  |
+| validation_assignment_v2 | field | action_id | id | true |  |  |
+| validation_assignment_v2 | field | validation_attempt | u32 | true |  |  |
+| validation_assignment_v2 | field | semantic_round | u32 | true |  |  |
+| validation_assignment_v2 | field | scope | validation_scope_v2 | true |  |  |
+| validation_assignment_v2 | field | subject_kind | validation_subject_kind | true |  |  |
+| validation_assignment_v2 | list | producer_assignment_ids | id | true |  |  |
+| validation_assignment_v2 | list | producer_result_refs | ref | true |  |  |
+| validation_assignment_v2 | field | lane_id | id | false |  |  |
+| validation_assignment_v2 | field | candidate_id | id | false |  |  |
+| validation_assignment_v2 | field | exact_commit | git-oid | true |  |  |
+| validation_assignment_v2 | field | exact_tree | git-oid | true |  |  |
+| validation_assignment_v2 | field | candidate_root | path | true |  |  |
+| validation_assignment_v2 | field | forward_round | u32 | false |  |  |
+| validation_assignment_v2 | field | criteria_manifest_ref | ref | true |  |  |
+| validation_assignment_v2 | field | criteria_manifest_digest | digest | true |  |  |
+| validation_assignment_v2 | field | evidence_manifest_ref | ref | true |  |  |
+| validation_assignment_v2 | field | evidence_manifest_digest | digest | true |  |  |
+| validation_assignment_v2 | field | diff_ref | ref | true |  |  |
+| validation_assignment_v2 | field | diff_digest | digest | true |  |  |
+| validation_assignment_v2 | field | prior_result_ref | ref | false |  |  |
+| validation_assignment_v2 | list | prior_finding_refs | ref | true |  |  |
+| validation_assignment_v2 | list | allowed_read_roots | path | true |  |  |
+| validation_assignment_v2 | list | allowed_command_ids | id | true |  |  |
+| validation_assignment_v2 | field | max_transport_attempts | u32 | true |  |  |
+| finding_v2 | field | finding_id | id | true |  |  |
+| finding_v2 | field | kind | finding_kind_v2 | true |  |  |
+| finding_v2 | field | effect | finding_effect | true |  |  |
+| finding_v2 | field | summary | string | true |  |  |
+| finding_v2 | field | detail | string | true |  |  |
+| finding_v2 | list | criterion_ids | id | true |  |  |
+| finding_v2 | list | edge_ids | id | true |  |  |
+| finding_v2 | list | evidence_refs | ref | true |  |  |
+| finding_v2 | list | covered_paths | path | true |  |  |
+| finding_v2 | list | semantic_surface_ids | id | true |  |  |
+| validation_context_v2 | field | schema | schema-id | true |  |  |
+| validation_context_v2 | field | context_id | id | true |  |  |
+| validation_context_v2 | field | revision | u32 | true |  |  |
+| validation_context_v2 | field | validation_id | id | true |  |  |
+| validation_context_v2 | field | assignment_id | id | true |  |  |
+| validation_context_v2 | field | exact_commit | git-oid | true |  |  |
+| validation_context_v2 | field | exact_tree | git-oid | true |  |  |
+| validation_context_v2 | field | candidate.source_root | path | true |  |  |
+| validation_context_v2 | field | candidate.diff_ref | ref | true |  |  |
+| validation_context_v2 | field | candidate.diff_digest | digest | true |  |  |
+| validation_context_v2 | list | candidate.actual_changed_paths | path | true |  |  |
+| validation_context_v2 | field | candidate.execution_audit_ref | ref | true |  |  |
+| validation_context_v2 | list | criteria | validation_context_criterion | true |  |  |
+| validation_context_v2 | list | evidence | validation_context_evidence | true |  |  |
+| validation_context_v2 | list | prior_findings | finding_v2 | true |  |  |
+| validation_context_v2 | list | applicable_decision_refs | ref | true |  |  |
+| validation_context_v2 | list | applicable_constraint_refs | ref | true |  |  |
+| validation_context_v2 | list | included_context_classes | string | true |  |  |
+| validation_context_v2 | list | forbidden_context_classes | string | true |  |  |
+| validation_context_v2 | list | allowed_read_roots | path | true |  |  |
+| validation_context_v2 | list | excluded_refs | validation_excluded_ref | true |  |  |
+| validation_context_v2 | field | validation_context_criterion.criterion_id | id | true |  |  |
+| validation_context_v2 | field | validation_context_criterion.mandatory | bool | true |  |  |
+| validation_context_v2 | list | validation_context_criterion.covered_paths | path | true |  |  |
+| validation_context_v2 | list | validation_context_criterion.semantic_surface_ids | id | true |  |  |
+| validation_context_v2 | list | validation_context_criterion.forward_edge_ids | id | true |  |  |
+| validation_context_v2 | list | validation_context_criterion.witness_ids | id | true |  |  |
+| validation_context_v2 | field | validation_context_evidence.evidence_ref | ref | true |  |  |
+| validation_context_v2 | field | validation_context_evidence.digest | digest | true |  |  |
+| validation_context_v2 | field | validation_context_evidence.kind | string | true |  |  |
+| validation_context_v2 | field | validation_context_evidence.exact_commit | git-oid | true |  |  |
+| validation_context_v2 | field | validation_context_evidence.exact_tree | git-oid | true |  |  |
+| validation_context_v2 | field | validation_context_evidence.command_id | id | false |  |  |
+| validation_context_v2 | field | validation_excluded_ref.ref | ref | true |  |  |
+| validation_context_v2 | field | validation_excluded_ref.reason | string | true |  |  |
+| validation_submission_v2 | field | schema | schema-id | true |  |  |
+| validation_submission_v2 | field | validation_id | id | true |  |  |
+| validation_submission_v2 | field | assignment_id | id | true |  |  |
+| validation_submission_v2 | field | scope | validation_scope_v2 | true |  |  |
+| validation_submission_v2 | field | exact_commit | git-oid | true |  |  |
+| validation_submission_v2 | field | exact_tree | git-oid | true |  |  |
+| validation_submission_v2 | field | outcome | validation_outcome_v2 | true |  |  |
+| validation_submission_v2 | list | criterion_results | criterion_result_v2 | true |  |  |
+| validation_submission_v2 | list | findings | finding_v2 | true |  |  |
+| validation_submission_v2 | field | criterion_result_v2.criterion_id | id | true |  |  |
+| validation_submission_v2 | field | criterion_result_v2.verdict | criterion_verdict | true |  |  |
+| validation_submission_v2 | field | criterion_result_v2.blocker_kind | validation_blocker_kind | false |  |  |
+| validation_submission_v2 | list | criterion_result_v2.evidence_refs | ref | true |  |  |
+| validation_submission_v2 | list | criterion_result_v2.finding_ids | id | true |  |  |
+| validation_submission_v2 | list | criterion_result_v2.covered_paths | path | true |  |  |
+| validation_submission_v2 | list | criterion_result_v2.semantic_surface_ids | id | true |  |  |
+| validation_submission_v2 | list | criterion_result_v2.forward_edge_ids | id | true |  |  |
+| validation_result_v2 | field | schema | schema-id | true |  |  |
+| validation_result_v2 | field | action_id | id | true |  |  |
+| validation_result_v2 | field | assignment_id | id | true |  |  |
+| validation_result_v2 | field | validation_id | id | true |  |  |
+| validation_result_v2 | field | validation_key | digest | true |  |  |
+| validation_result_v2 | field | validation_attempt | u32 | true |  |  |
+| validation_result_v2 | field | semantic_round | u32 | true |  |  |
+| validation_result_v2 | field | run_revision | u64 | true |  |  |
+| validation_result_v2 | field | workstream | id | true |  |  |
+| validation_result_v2 | field | role_id | id | true |  |  |
+| validation_result_v2 | field | mode | mode-id | true |  |  |
+| validation_result_v2 | list | producer_assignment_ids | id | true |  |  |
+| validation_result_v2 | field | exact_commit | git-oid | true |  |  |
+| validation_result_v2 | field | exact_tree | git-oid | true |  |  |
+| validation_result_v2 | field | assignment_path | path | true |  |  |
+| validation_result_v2 | field | assignment_digest | digest | true |  |  |
+| validation_result_v2 | field | context_manifest_path | path | true |  |  |
+| validation_result_v2 | field | context_manifest_digest | digest | true |  |  |
+| validation_result_v2 | field | prompt_path | path | true |  |  |
+| validation_result_v2 | field | prompt_digest | digest | true |  |  |
+| validation_result_v2 | field | spec_path | path | true |  |  |
+| validation_result_v2 | field | spec_digest | digest | true |  |  |
+| validation_result_v2 | field | carrier_path | path | true |  |  |
+| validation_result_v2 | field | boundary_id | contract-id | true |  |  |
+| validation_result_v2 | field | boundary_digest | digest | true |  |  |
+| validation_result_v2 | field | result_contract | contract-id | true |  |  |
+| validation_result_v2 | field | result_contract_digest | digest | true |  |  |
+| validation_result_v2 | field | settings_digest | digest | true |  |  |
+| validation_result_v2 | field | skills_digest | digest | true |  |  |
+| validation_result_v2 | field | subscription_digest | digest | true |  |  |
+| validation_result_v2 | field | runtime_extension_digest | digest | true |  |  |
+| validation_result_v2 | field | tool_audit_ref | ref | true |  |  |
+| validation_result_v2 | field | tool_audit_digest | digest | true |  |  |
+| validation_result_v2 | field | submission_digest | digest | true |  |  |
+| validation_result_v2 | field | submission | validation_submission_v2 | true |  |  |
 | seam_envelope | field | v | u32 | true |  |  |
 | seam_envelope | field | id | u64 | true |  |  |
 | seam_envelope | field | kind | string | true |  |  |
 | seam_envelope | field | payload | object | true |  |  |
+| artifact_link | field | schema_version | schema-id | true |  |  |
+| artifact_link | field | path | path | true |  |  |
+| artifact_link | field | artifact_schema | string | true |  |  |
+| artifact_link | field | byte_length | u64 | true |  |  |
+| artifact_link | field | sha256 | digest | true |  |  |
+| accepted_evidence_envelope | field | schema_version | schema-id | true |  |  |
+| accepted_evidence_envelope | field | repo_key | base32 | true |  |  |
+| accepted_evidence_envelope | field | run_id | uuidv7 | true |  |  |
+| accepted_evidence_envelope | field | workstream | id | true |  |  |
+| accepted_evidence_envelope | field | evidence_id | id | true |  |  |
+| accepted_evidence_envelope | field | evidence_kind | final_evidence_kind | true |  |  |
+| accepted_evidence_envelope | field | subject_id | id | true |  |  |
+| accepted_evidence_envelope | field | origin | evidence_origin | true |  |  |
+| accepted_evidence_envelope | field | artifact | artifact_link | true |  |  |
+| accepted_evidence_envelope | field | acceptance_receipt | artifact_link | true |  |  |
+| accepted_evidence_envelope | field | boundary_id | contract-id | true |  |  |
+| accepted_evidence_envelope | field | assignment_id | id | false |  |  |
+| accepted_evidence_envelope | field | action_id | id | false |  |  |
+| accepted_evidence_envelope | field | role_id | id | false |  |  |
+| accepted_evidence_envelope | field | mode | mode-id | false |  |  |
+| accepted_evidence_envelope | field | accepted_run_revision | u64 | true |  |  |
+| accepted_evidence_envelope | field | exact_commit | git-oid | false |  |  |
+| accepted_evidence_envelope | field | exact_tree | git-oid | false |  |  |
+| accepted_evidence_envelope | field | provider | string | false |  |  |
+| accepted_evidence_envelope | field | model | string | false |  |  |
+| accepted_evidence_envelope | field | thinking | thinking-level | false |  |  |
+| accepted_evidence_envelope | field | route | string | false |  |  |
+| accepted_evidence_envelope | field | pi_session_id | id | false |  |  |
+| accepted_evidence_envelope | field | envelope_sha256 | digest | true |  |  |
+| command_receipt | field | schema_version | schema-id | true |  |  |
+| command_receipt | field | receipt_id | id | true |  |  |
+| command_receipt | field | command_kind | command_receipt_kind | true |  |  |
+| command_receipt | field | command_bytes | bytes | true |  |  |
+| command_receipt | field | cwd_realpath | path | true |  |  |
+| command_receipt | field | env_profile_id | id | true |  |  |
+| command_receipt | field | started_at_ms | u64 | true |  |  |
+| command_receipt | field | ended_at_ms | u64 | true |  |  |
+| command_receipt | field | timeout_ms | u64 | true |  |  |
+| command_receipt | field | timed_out | bool | true |  |  |
+| command_receipt | field | exit_code | u32 | true |  |  |
+| command_receipt | field | commit | git-oid | true |  |  |
+| command_receipt | field | tree | git-oid | true |  |  |
+| command_receipt | field | bounded_output | artifact_link | true |  |  |
+| command_receipt | field | full_output | artifact_link | true |  |  |
+| command_receipt | field | receipt_sha256 | digest | true |  |  |
+| final_gate_assembly | field | schema_version | schema-id | true |  |  |
+| final_gate_assembly | field | repo_key | base32 | true |  |  |
+| final_gate_assembly | field | run_id | uuidv7 | true |  |  |
+| final_gate_assembly | field | workstream | id | true |  |  |
+| final_gate_assembly | field | basis_event_sequence | u64 | true |  |  |
+| final_gate_assembly | field | basis_run_revision | u64 | true |  |  |
+| final_gate_assembly | field | basis_event_log_sha256 | digest | true |  |  |
+| final_gate_assembly | field | basis_state_hash | digest | true |  |  |
+| final_gate_assembly | field | plan_envelope | artifact_link | true |  |  |
+| final_gate_assembly | field | final_commit | git-oid | true |  |  |
+| final_gate_assembly | field | final_tree | git-oid | true |  |  |
+| final_gate_assembly | field | target_ref | ref | true |  |  |
+| final_gate_assembly | field | recorded_target_base | git-oid | true |  |  |
+| final_gate_assembly | field | observed_target_tip | git-oid | true |  |  |
+| final_gate_assembly | list | conditions | final_condition_evidence | true |  |  |
+| final_gate_assembly | field | triggers | bughunter_triggers_v1 | true |  |  |
+| final_gate_assembly | list | accepted_envelopes | artifact_link | true |  |  |
+| final_gate_assembly | field | assembly_sha256 | digest | true |  |  |
+| final_gate_assembly | field | final_condition_evidence.condition_id | id | true |  |  |
+| final_gate_assembly | field | final_condition_evidence.satisfied | bool | true |  |  |
+| final_gate_assembly | list | final_condition_evidence.evidence_envelopes | artifact_link | true |  |  |
+| final_gate_assembly | field | bughunter_triggers_v1.implementation_lanes | u32 | true |  |  |
+| final_gate_assembly | field | bughunter_triggers_v1.risk | string | true |  |  |
+| final_gate_assembly | field | bughunter_triggers_v1.protected_security_data_or_migration | bool | true |  |  |
+| final_gate_assembly | field | bughunter_triggers_v1.semantic_conflict_resolution | bool | true |  |  |
+| final_gate_assembly | field | bughunter_triggers_v1.operator_required | bool | true |  |  |
+| final_verification_pass | field | schema_version | schema-id | true |  |  |
+| final_verification_pass | field | repo_key | base32 | true |  |  |
+| final_verification_pass | field | run_id | uuidv7 | true |  |  |
+| final_verification_pass | field | workstream | id | true |  |  |
+| final_verification_pass | field | basis_event_sequence | u64 | true |  |  |
+| final_verification_pass | field | basis_run_revision | u64 | true |  |  |
+| final_verification_pass | field | final_commit | git-oid | true |  |  |
+| final_verification_pass | field | final_tree | git-oid | true |  |  |
+| final_verification_pass | field | assembly | artifact_link | true |  |  |
+| final_verification_pass | field | assembly_sha256 | digest | true |  |  |
+| final_verification_pass | field | bughunter_required | bool | true |  |  |
+| final_verification_pass | field | pass_sha256 | digest | true |  |  |
+| close_request | field | schema_version | schema-id | true |  |  |
+| close_request | field | repo_key | base32 | true |  |  |
+| close_request | field | run_id | uuidv7 | true |  |  |
+| close_request | field | workstream | id | true |  |  |
+| close_request | field | expected_run_revision | u64 | true |  |  |
+| close_request | field | expected_event_log_sha256 | digest | true |  |  |
+| close_request | field | expected_final_commit | git-oid | true |  |  |
+| close_request | field | expected_final_tree | git-oid | true |  |  |
+| close_request | field | expected_final_digest | digest | true |  |  |
+| close_request | field | request_sha256 | digest | true |  |  |
+| close_archive_manifest | field | schema_version | schema-id | true |  |  |
+| close_archive_manifest | field | repo_key | base32 | true |  |  |
+| close_archive_manifest | field | run_id | uuidv7 | true |  |  |
+| close_archive_manifest | field | workstream | id | true |  |  |
+| close_archive_manifest | field | request | artifact_link | true |  |  |
+| close_archive_manifest | field | final_pass | artifact_link | true |  |  |
+| close_archive_manifest | field | close_intent_event_sequence | u64 | true |  |  |
+| close_archive_manifest | field | result_ref | ref | true |  |  |
+| close_archive_manifest | field | final_commit | git-oid | true |  |  |
+| close_archive_manifest | field | final_tree | git-oid | true |  |  |
+| close_archive_manifest | field | event_prefix | artifact_link | true |  |  |
+| close_archive_manifest | list | entries | archive_entry | true |  |  |
+| close_archive_manifest | field | manifest_sha256 | digest | true |  |  |
+| close_archive_manifest | field | archive_entry.archive_path | path | true |  |  |
+| close_archive_manifest | field | archive_entry.source | artifact_link | true |  |  |
+| close_archive_manifest | field | archive_entry.class | archive_entry_class | true |  |  |
+| close_archive_manifest | field | archive_entry.archived_byte_length | u64 | true |  |  |
+| close_archive_manifest | field | archive_entry.archived_sha256 | digest | true |  |  |
+| close_receipt | field | schema_version | schema-id | true |  |  |
+| close_receipt | field | repo_key | base32 | true |  |  |
+| close_receipt | field | run_id | uuidv7 | true |  |  |
+| close_receipt | field | workstream | id | true |  |  |
+| close_receipt | field | request_sha256 | digest | true |  |  |
+| close_receipt | field | final_pass_sha256 | digest | true |  |  |
+| close_receipt | field | result_ref | ref | true |  |  |
+| close_receipt | field | final_commit | git-oid | true |  |  |
+| close_receipt | field | final_tree | git-oid | true |  |  |
+| close_receipt | field | archive_manifest_sha256 | digest | true |  |  |
+| close_receipt | field | watchdog_receipt | artifact_link | true |  |  |
+| close_receipt | list | cleanup_receipts | artifact_link | true |  |  |
+| close_receipt | field | target_ref | ref | true |  |  |
+| close_receipt | field | target_tip_observed_before_cas | git-oid | true |  |  |
+| close_receipt | field | ready_event_sequence | u64 | true |  |  |
+| close_receipt | field | close_receipt_sha256 | digest | true |  |  |
+| archive_publication | field | schema_version | schema-id | true |  |  |
+| archive_publication | field | request_sha256 | digest | true |  |  |
+| archive_publication | field | archive_manifest_sha256 | digest | true |  |  |
+| archive_publication | field | close_receipt_sha256 | digest | true |  |  |
+| archive_publication | field | publication_sha256 | digest | true |  |  |
+| external_attested_evidence_import | field | schema_version | schema-id | true |  |  |
+| external_attested_evidence_import | field | repo_key | base32 | true |  |  |
+| external_attested_evidence_import | field | run_id | uuidv7 | true |  |  |
+| external_attested_evidence_import | field | workstream | id | true |  |  |
+| external_attested_evidence_import | field | evidence_kind | string | true |  |  |
+| external_attested_evidence_import | field | assignment_id | id | true |  |  |
+| external_attested_evidence_import | field | role_id | id | true |  |  |
+| external_attested_evidence_import | field | mode | mode-id | true |  |  |
+| external_attested_evidence_import | field | expected_final_commit | git-oid | true |  |  |
+| external_attested_evidence_import | field | expected_final_tree | git-oid | true |  |  |
+| external_attested_evidence_import | field | expected_provider | string | true |  |  |
+| external_attested_evidence_import | field | expected_model | string | true |  |  |
+| external_attested_evidence_import | field | expected_thinking | thinking-level | true |  |  |
+| external_attested_evidence_import | field | expected_prompt | artifact_link | true |  |  |
+| external_attested_evidence_import | list | expected_argv | string | true |  |  |
+| external_attested_evidence_import | field | report | artifact_link | true |  |  |
+| external_attested_evidence_import | field | attestation | artifact_link | true |  |  |
+| external_attested_evidence_import | field | import_sha256 | digest | true |  |  |
+| lifecycle_report | field | schema_version | schema-id | true |  |  |
+| lifecycle_report | field | request_sha256 | digest | true |  |  |
+| lifecycle_report | field | result_ref | ref | true |  |  |
+| lifecycle_report | field | final_commit | git-oid | true |  |  |
+| lifecycle_report | field | final_tree | git-oid | true |  |  |
+| lifecycle_report | field | archive_manifest | artifact_link | true |  |  |
+| lifecycle_report | field | close_receipt | artifact_link | true |  |  |
+| lifecycle_report | list | cleanup_receipts | artifact_link | true |  |  |
+| lifecycle_report | field | disposition | string | true |  |  |
 
 ## Enums
 
 | Enum | Values |
 | --- | --- |
+| planning_atom_kind | work, decision, constraint, acceptance, premise, question, reference |
+| planning_question_class | invalidated-decision, missing-material-decision, material-underdetermination, dod-hole, unsafe-irreversible |
+| planning_review_verdict | pass, blocker, advisory, fail, blocked, needs-fix |
 | run_phase | planning, ready-to-execute, allocating, executing, final-verification, ready-to-close, terminal |
 | run_health | healthy, degraded, paused, unsafe-halt |
 | run_outcome | null, closed, aborted |
@@ -220,6 +835,20 @@ Sources: `data/contracts.kdl`.
 | closure_verdict | PASS, NEEDS_FIX, BLOCKED |
 | criterion_verdict | PASS, FAIL, BLOCKED |
 | finding_effect | forward-blocking, closure-blocking-forward-safe, advisory |
+| evidence_content_kind | prompt, assignment, action, producer-binding, report, producer-sidecar, acceptance-receipt, failure-receipt, supersession-receipt, transcript, envelope-manifest |
+| evidence_error_code | EVIDENCE_PRODUCER_UNAVAILABLE, EVIDENCE_ASSIGNMENT_CONFLICT, EVIDENCE_ACTION_NOT_ISSUED, EVIDENCE_ACTION_EXPIRED, EVIDENCE_ACTION_SUPERSEDED, EVIDENCE_TASK_BINDING_CONFLICT, EVIDENCE_TERMINAL_NOT_COMPLETED, EVIDENCE_SOURCE_PATH_INVALID, EVIDENCE_SOURCE_MISSING, EVIDENCE_SOURCE_NOT_REGULAR, EVIDENCE_SOURCE_SYMLINK, EVIDENCE_SCHEMA_UNSUPPORTED, EVIDENCE_PROSE_NOT_CONTRACT, EVIDENCE_HASH_MISMATCH, EVIDENCE_PRODUCER_REQUEST_MISMATCH, EVIDENCE_PROVIDER_MISMATCH, EVIDENCE_MODEL_MISMATCH, EVIDENCE_CHANNEL_FORBIDDEN, EVIDENCE_METERED_USAGE_OBSERVED, EVIDENCE_SESSION_CONFLICT, EVIDENCE_IDEMPOTENCY_CONFLICT, EVIDENCE_SUBJECT_STALE, EVIDENCE_BOUNDARY_REJECTED, EVIDENCE_SUPERSESSION_INVALID, EVIDENCE_EVENT_LOG_CORRUPT, EVIDENCE_STORE_IO, EVIDENCE_ENVELOPE_OPEN, EVIDENCE_ENVELOPE_MEMBER_MISMATCH, EVIDENCE_UNDECLARED_INPUT |
+| validation_scope_v2 | forward, closure, delta, conflict, final |
+| validation_outcome_v2 | FORWARD_READY, FORWARD_BLOCKED, PASS, NEEDS_FIX, BLOCKED |
+| validation_subject_kind | lane-delivery, repair, conflict-candidate, run-final-tip |
+| validation_blocker_kind | missing-evidence, stale-evidence, context-gap, external-prerequisite, unsafe-boundary |
+| finding_kind_v2 | source-defect, test-defect, contract-defect, evidence-gap, context-gap, unsafe-boundary, advisory |
+| session_continuity | fresh, resume |
+| validation_assignment_kind | planning-review, delivery, validation |
+| attested_action_kind | launch-attested-pi, reconcile-attested-pi |
+| final_evidence_kind | plan-approved, allocation-accepted, unit-closed, finding-disposition, candidate-accepted, integrated-diff-attribution, staleness-snapshot, background-terminal, command-batch, validation-verdict, bughunter-verdict, conflict-resolution, conflict-review, target-sync, watchdog-stopped, cleanup-proof |
+| evidence_origin | package, ordinary-bg-run, external-attested-advisory |
+| command_receipt_kind | final-command, full-suite, focused |
+| archive_entry_class | receipt, protected-evidence, background-reference, cleanup-receipt, watchdog-receipt, plan, finalization |
 | action_kind | launch-background, reconcile-background, read-failure-log, stop-background, request-operator, return-idle |
 | producer | Model, Git, Operator, Filesystem, Provider, BackgroundTask, Package, Host |
 | roster_slot | control, reasoning, extraction, coding, review |
@@ -229,15 +858,18 @@ Sources: `data/contracts.kdl`.
 
 | Kind | Direction | Fields |
 | --- | --- | --- |
+| spawn-attested | core-to-host |  |
+| reconcile-attested | core-to-host |  |
+| attested-task-observation | host-to-core |  |
 | command | host-to-core |  |
-| guard-query | host-to-core |  |
 | task-completed | host-to-core |  |
+| spawn-result | host-to-core |  |
 | agent-result | host-to-core |  |
 | operator-answer | host-to-core |  |
 | shutdown | host-to-core |  |
-| guard-decision | core-to-host |  |
 | ui | core-to-host |  |
 | spawn | core-to-host |  |
+| spawn-wave | core-to-host |  |
 | session | core-to-host |  |
 | log | core-to-host |  |
 | done | core-to-host |  |

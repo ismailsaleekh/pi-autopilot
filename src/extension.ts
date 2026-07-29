@@ -5,17 +5,9 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { PiBackgroundTaskClient, type BgTaskSnapshot } from "./background-tasks.ts";
 import { registerAutopilotCommands, applyAndRecord } from "./commands.ts";
 import type { OperatorMessageLevel, OperatorMessageSink } from "./effects.ts";
-import { guardToolCall, type GuardResult } from "./guard.ts";
 import { corePlatformKey, CoreInstallError, resolveCoreBinary, type ResolveCoreOptions } from "./resolve-core.ts";
 import { CoreTransport } from "./transport.ts";
 import type { BackgroundAction } from "./generated/index.ts";
-
-export interface ToolCallEventLike {
-  readonly toolName?: string;
-  readonly input?: Record<string, unknown>;
-}
-
-export type ToolCallGuardReturn = { readonly block: true; readonly reason: string } | undefined;
 
 export interface AutopilotExtensionOptions extends ResolveCoreOptions {
   readonly transport?: CoreTransport;
@@ -96,11 +88,6 @@ export default function autopilotExtension(pi: ExtensionAPI, options: AutopilotE
   pi.on("session_start", async (_event, ctx) => {
     currentCtx = ctx;
   });
-
-  pi.on("tool_call", async (event) => guardReturn(await guardToolCall({
-    tool_name: String((event as ToolCallEventLike).toolName ?? ""),
-    arguments: ((event as ToolCallEventLike).input ?? {}) as Record<string, unknown>,
-  }, { transport, packageJsonPath: options.packageJsonPath })));
 
   const unsubscribeTerminal = backgroundTasks.onTerminal(handleTerminal);
 
@@ -240,10 +227,6 @@ function requireString(value: unknown, label: string): string {
 
 function correlationLabel(binding: TaskBinding): string {
   return `task=${binding.task_id} action=${binding.action.action_id} assignment=${binding.action.assignment_id}`;
-}
-
-function guardReturn(result: GuardResult): ToolCallGuardReturn {
-  return result.decision === "allow" ? undefined : { block: true, reason: result.reason };
 }
 
 function notifyCoreUnavailabilityOnce(pi: ExtensionAPI, options: ResolveCoreOptions): void {

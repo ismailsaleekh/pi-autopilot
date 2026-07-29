@@ -10,7 +10,6 @@ test("routes generated Core effects through supported Pi Host APIs", async () =>
   const services = effectServices(calls);
 
   const frames = [
-    { v: 1, id: 1, kind: "guard-decision", payload: { decision: "allow", reason: "ok" } },
     { v: 1, id: 2, kind: "ui", payload: { ui_kind: "text", content: { message: "hello" } } },
     { v: 1, id: 3, kind: "spawn", payload: { action: backgroundAction() } },
     { v: 1, id: 4, kind: "log", payload: { line: "diagnostic" } },
@@ -22,7 +21,6 @@ test("routes generated Core effects through supported Pi Host APIs", async () =>
   }
 
   assert.deepEqual(calls, [
-    ["operator", "info", "Autopilot guard decision: allow (ok)"],
     ["operator", "info", "Autopilot: hello"],
     ["bg_run", backgroundAction().bg_run],
     ["operator", "info", "Autopilot log: diagnostic"],

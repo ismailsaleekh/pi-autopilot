@@ -36,14 +36,6 @@ export type CoreEffectResult = { readonly kind: "spawn"; readonly acknowledge: b
 export async function applyCoreEffect(frame: CoreToHostFrame, ctx: HostEffectContext, services: HostEffectServices): Promise<CoreEffectResult> {
   const validFrame = validateCoreToHostFrame(frame);
   switch (validFrame.kind) {
-    case "guard-decision":
-      await emitOperatorMessage(
-        ctx,
-        services,
-        `Autopilot guard decision: ${validFrame.payload.decision} (${validFrame.payload.reason})`,
-        validFrame.payload.decision === "allow" ? "info" : "warning",
-      );
-      return undefined;
     case "ui":
       await applyUiEffect(validFrame.payload, ctx, services);
       return undefined;

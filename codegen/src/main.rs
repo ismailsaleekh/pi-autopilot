@@ -78,7 +78,6 @@ struct Contracts {
     schema: String,
     version: u64,
     types: BTreeSet<String>,
-    constants: BTreeMap<String, String>,
     artifacts: Vec<Artifact>,
     enums: Vec<EnumDef>,
     frames: Vec<Frame>,
@@ -156,7 +155,6 @@ impl Contracts {
         let mut schema = None;
         let mut version = None;
         let mut types = BTreeSet::new();
-        let mut constants = BTreeMap::new();
         let mut artifacts = Vec::new();
         let mut enums = Vec::new();
         let mut frames = Vec::new();
@@ -186,19 +184,6 @@ impl Contracts {
                 "artifact" => artifacts.push(parse_artifact(node, source)?),
                 "enum" => enums.push(parse_enum(node, source)?),
                 "frame" => frames.push(parse_frame(node, source)?),
-                "constant" => {
-                    ensure_entries(node, 1, &["value", "doc"], source)?;
-                    let key = arg_string(node, 0, source)?.to_owned();
-                    let value = prop_string(node, "value", source)?.to_owned();
-                    prop_string_optional(node, "doc", source)?;
-                    ensure_no_children(node, source)?;
-                    if constants.insert(key.clone(), value).is_some() {
-                        return Err(CodegenError::Input(format!(
-                            "duplicate constant `{key}` at line {}",
-                            line_of(node, source)
-                        )));
-                    }
-                }
                 "artifact_category" => {
                     ensure_entries(node, 1, &["path", "doc"], source)?;
                     arg_string(node, 0, source)?;
@@ -245,7 +230,6 @@ impl Contracts {
             schema,
             version,
             types,
-            constants,
             artifacts,
             enums,
             frames,
@@ -288,7 +272,6 @@ fn builtin_scalar_types() -> BTreeSet<String> {
         "delivery-terminal-status",
         "duration",
         "event-kind",
-        "guard-decision",
         "mode-id",
         "object",
         "path",
@@ -892,11 +875,7 @@ fn emit_rust_typescript(contracts: &Contracts) -> Result<(String, String), Codeg
     typescript.push_str("// ");
     typescript.push_str(GENERATED_MARKER);
     typescript.push_str("\n\n");
-    typescript.push_str("export type JsonObject = Record<string, unknown>;\n");
-    typescript.push_str(&format!(
-        "export const GUARD_TIMEOUT_DEFAULT_MS = {};\n\n",
-        duration_ms(required_constant(contracts, "guard_timeout_default")?)?
-    ));
+    typescript.push_str("export type JsonObject = Record<string, unknown>;\n\n");
 
     let mut scalar_types: Vec<String> = contracts
         .types
@@ -1193,24 +1172,6 @@ fn sha256_hex(data: &[u8]) -> String {
         out.push_str(&format!("{byte:02x}"));
     }
     out
-}
-
-fn required_constant<'a>(contracts: &'a Contracts, key: &str) -> Result<&'a str, CodegenError> {
-    contracts
-        .constants
-        .get(key)
-        .map(String::as_str)
-        .ok_or_else(|| CodegenError::Input(format!("missing required constant `{key}`")))
-}
-
-fn duration_ms(value: &str) -> Result<u64, CodegenError> {
-    let seconds = value
-        .strip_suffix('s')
-        .ok_or_else(|| CodegenError::Input(format!("unsupported duration constant `{value}`")))?;
-    let seconds = seconds.parse::<u64>().map_err(|error| {
-        CodegenError::Input(format!("invalid duration constant `{value}`: {error}"))
-    })?;
-    Ok(seconds * 1000)
 }
 
 fn emit_shape_tree(

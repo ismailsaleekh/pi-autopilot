@@ -849,8 +849,6 @@ artifact "seam_envelope" schema="autopilot.seam_envelope.v1" producer="Host" mod
     field "payload" type="object" required=#true
 }
 
-constant "guard_timeout_default" value="5s" doc="D78 §3.3 default guard-query timeout. On timeout or Core unavailability the Host denies fail-closed."
-
 artifact "artifact_link" schema="autopilot.artifact_link.v1" producer="Package" model_produced=#false {
     doc "Digest-bound run-root artifact link used by finalization assemblies and archive manifests."
     field "schema_version" type="schema-id" required=#true
@@ -1424,12 +1422,6 @@ frame direction="host-to-core" kind="command" {
     field "background_capability_diagnostic" type="string" required=#false nullable=#true
 }
 
-frame direction="host-to-core" kind="guard-query" {
-    doc "D78 §3.2 — a Pi tool_call needing an allow/deny decision."
-    field "tool_name" type="string" required=#true
-    field "arguments" type="object" required=#true
-}
-
 frame direction="host-to-core" kind="task-completed" {
     doc "D78 §3.2 — a pi-background-tasks terminal notification correlated by Host to a Core-issued action/task binding. Core validates the binding and decides the next effect."
     field "task_id" type="id" required=#true
@@ -1462,12 +1454,6 @@ frame direction="host-to-core" kind="operator-answer" {
 frame direction="host-to-core" kind="shutdown" {
     doc "D78 §3.2 — Pi is exiting; checkpoint and settle."
     field "reason" type="string" required=#false nullable=#true
-}
-
-frame direction="core-to-host" kind="guard-decision" {
-    doc "D78 §3.2 — allow / deny + reason, answers guard-query."
-    field "decision" type="guard-decision" required=#true
-    field "reason" type="string" required=#true
 }
 
 frame direction="core-to-host" kind="ui" {
