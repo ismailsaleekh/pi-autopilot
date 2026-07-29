@@ -43,28 +43,11 @@ pub fn main(args: &[String]) -> Result<(), String> {
     super::require_regular_file(&spec_path).map_err(|error| error.to_string())?;
     let raw = fs::read_to_string(&spec_path)
         .map_err(|error| format!("agent-run spec read failed {:?}: {error}", spec_path))?;
-    let mut spec_value: Value = serde_json::from_str(&raw).map_err(|error| {
-        format!("agent-run spec is malformed, incomplete, or has unknown fields: {error}")
-    })?;
-    let planning_context_documents = spec_value
-        .get("context_documents")
-        .cloned()
-        .map(|value| {
-            serde_json::from_value::<Vec<TaskDocument>>(value)
-                .map_err(|error| format!("agent-run context_documents is malformed: {error}"))
-        })
-        .transpose()?;
-    if planning_context_documents.is_some() {
-        spec_value
-            .as_object_mut()
-            .ok_or_else(|| "agent-run spec top-level must be an object".to_owned())?
-            .remove("context_documents");
-    }
-    let spec: AgentRunSpec = serde_json::from_value(spec_value).map_err(|error| {
+    let spec: AgentRunSpec = serde_json::from_str(&raw).map_err(|error| {
         format!("agent-run spec is malformed, incomplete, or has unknown fields: {error}")
     })?;
     let spec_digest = sha256_hex(raw.as_bytes());
-    validate_spec(&spec, planning_context_documents.as_deref(), &spec_path)?;
+    validate_spec(&spec, &spec_path)?;
     let prompt_path = PathBuf::from(&spec.prompt_path.0);
     super::require_regular_file(&prompt_path).map_err(|error| error.to_string())?;
     let prompt = fs::read_to_string(&prompt_path).map_err(|error| {
@@ -922,11 +905,7 @@ fn parse_args(args: &[String]) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-fn validate_spec(
-    strict: &AgentRunSpec,
-    planning_context_documents: Option<&[TaskDocument]>,
-    spec_path: &Path,
-) -> Result<(), String> {
+fn validate_spec(strict: &AgentRunSpec, spec_path: &Path) -> Result<(), String> {
     if strict.schema.0 != "autopilot.agent_run_spec.v1" {
         return Err(format!(
             "unsupported agent-run spec schema: {}",
@@ -945,10 +924,10 @@ fn validate_spec(
     }
     validate_route_and_role(strict)?;
     validate_paths(strict, spec_path)?;
-    validate_digests(strict, planning_context_documents)?;
+    validate_digests(strict)?;
     validate_session_identity(strict)?;
     validate_delivery_identity(strict)?;
-    validate_planning_documents(strict, planning_context_documents)?;
+    validate_planning_documents(strict)?;
     Ok(())
 }
 
@@ -1056,10 +1035,7 @@ fn validate_paths(strict: &AgentRunSpec, spec_path: &Path) -> Result<(), String>
     Ok(())
 }
 
-fn validate_digests(
-    strict: &AgentRunSpec,
-    planning_context_documents: Option<&[TaskDocument]>,
-) -> Result<(), String> {
+fn validate_digests(strict: &AgentRunSpec) -> Result<(), String> {
     let route = super::route_for_role(&strict.role_id.0).map_err(|error| error.to_string())?;
     let expected_boundary =
         super::contract_digest(&strict.boundary_id.0).map_err(|error| error.to_string())?;
@@ -1084,18 +1060,20 @@ fn validate_digests(
             "required_focused_evidence": strict.required_focused_evidence,
         }))?
     } else {
-        match planning_context_documents {
-            Some(context_documents) => sha_json(&serde_json::json!({
-                "authority_set_id": strict.authority_set_id.as_deref(),
-                "authority_documents": strict.authority_documents.as_ref(),
-                "context_documents": context_documents,
-            }))?,
-            None => sha_json(&serde_json::json!({
-                "authority_set_id": strict.authority_set_id.as_deref(),
-                "authority_documents": strict.authority_documents.as_ref(),
-                "context_document": strict.context_document.as_ref(),
-            }))?,
-        }
+        let authority_set_id = strict
+            .authority_set_id
+            .as_deref()
+            .ok_or_else(|| "agent-run missing authority_set_id".to_owned())?;
+        let authority_documents = strict
+            .authority_documents
+            .as_ref()
+            .ok_or_else(|| "agent-run missing authority documents".to_owned())?;
+        let context_documents = strict
+            .context_documents
+            .as_ref()
+            .ok_or_else(|| "agent-run missing context_documents".to_owned())?;
+        super::planning_context_digest(authority_set_id, authority_documents, context_documents)
+            .map_err(|error| error.to_string())?
     };
     if strict.context_digest.0 != context_digest {
         return Err("agent-run context digest drift".to_owned());
@@ -1167,15 +1145,12 @@ fn validate_delivery_identity(strict: &AgentRunSpec) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_planning_documents(
-    strict: &AgentRunSpec,
-    planning_context_documents: Option<&[TaskDocument]>,
-) -> Result<(), String> {
+fn validate_planning_documents(strict: &AgentRunSpec) -> Result<(), String> {
     if strict.result_contract.0 == "autopilot.delivery_result.v1" {
         if strict.authority_set_id.is_some()
             || strict.authority_documents.is_some()
             || strict.context_document.is_some()
-            || planning_context_documents.is_some()
+            || strict.context_documents.is_some()
         {
             return Err("agent-run delivery spec contains planning documents".to_owned());
         }
@@ -1203,16 +1178,18 @@ fn validate_planning_documents(
         .as_ref()
         .ok_or_else(|| "agent-run missing context document".to_owned())?;
     validate_doc(context, "context/non-authority", authority_set_id)?;
-    if let Some(context_documents) = planning_context_documents {
-        if context_documents.is_empty() {
-            return Err("agent-run missing context documents".to_owned());
-        }
-        if context_documents.first() != Some(context) {
-            return Err("agent-run context_document alias drift".to_owned());
-        }
-        for document in context_documents {
-            validate_doc(document, "context/non-authority", authority_set_id)?;
-        }
+    let context_documents = strict
+        .context_documents
+        .as_ref()
+        .ok_or_else(|| "agent-run missing context documents".to_owned())?;
+    if context_documents.is_empty() {
+        return Err("agent-run missing context documents".to_owned());
+    }
+    if context_documents.first() != Some(context) {
+        return Err("agent-run context_document alias drift".to_owned());
+    }
+    for document in context_documents {
+        validate_doc(document, "context/non-authority", authority_set_id)?;
     }
     Ok(())
 }

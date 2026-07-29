@@ -368,6 +368,13 @@ pub fn planning_issue(request: &PlanningRunnerRequest) -> Result<IssuedRunnerAct
                 .collect(),
         ),
         context_document: Some(request.context_document.as_contract()),
+        context_documents: Some(
+            request
+                .context_documents
+                .iter()
+                .map(RunnerTaskDocument::as_contract)
+                .collect(),
+        ),
         assignment_path: None,
         assignment_digest: None,
         context_manifest_path: None,
@@ -504,6 +511,7 @@ pub fn delivery_issue_with_facts(
         authority_set_id: None,
         authority_documents: None,
         context_document: None,
+        context_documents: None,
         assignment_path: None,
         assignment_digest: None,
         context_manifest_path: None,
@@ -867,11 +875,11 @@ fn planning_binding_digests(
     request: &PlanningRunnerRequest,
     route: &roster::Route,
 ) -> Result<BindingDigests, RunnerError> {
-    let context_digest = sha_json(&serde_json::json!({
-        "authority_set_id": request.authority_set_id,
-        "authority_documents": request.authority_documents,
-        "context_documents": request.context_documents,
-    }))?;
+    let context_digest = planning_context_digest(
+        &request.authority_set_id,
+        &request.authority_documents,
+        &request.context_documents,
+    )?;
     Ok(BindingDigests {
         boundary_digest: contract_digest(&request.boundary_id.0)?,
         result_contract_digest: contract_digest(&request.boundary_id.0)?,
@@ -880,6 +888,18 @@ fn planning_binding_digests(
         skills_digest: sha256_hex(SKILLS_IDENTITY.as_bytes()),
         subscription_digest: subscription_digest(route),
     })
+}
+
+pub(crate) fn planning_context_digest(
+    authority_set_id: &str,
+    authority_documents: &impl Serialize,
+    context_documents: &impl Serialize,
+) -> Result<String, RunnerError> {
+    sha_json(&serde_json::json!({
+        "authority_set_id": authority_set_id,
+        "authority_documents": authority_documents,
+        "context_documents": context_documents,
+    }))
 }
 
 fn delivery_binding_digests(
@@ -2024,15 +2044,28 @@ pub(crate) fn task_anchor_registry_from_spec(
         runtime.reject("boundary_id=planning.task-atoms.v1; field=context_document; expected=runner-issued context document; got=missing; hint=refuse unbound task atom assignment".to_owned())?;
         unreachable!("runtime.reject returns Err in enforce mode")
     };
+    let Some(context_documents) = spec.context_documents.as_ref() else {
+        runtime.reject("boundary_id=planning.task-atoms.v1; field=context_documents; expected=runner-issued context documents; got=missing; hint=refuse unbound task atom assignment".to_owned())?;
+        unreachable!("runtime.reject returns Err in enforce mode")
+    };
+    if context_documents.is_empty() || context_documents.first() != Some(context_document) {
+        runtime.reject("boundary_id=planning.task-atoms.v1; field=context_documents; expected=context_document alias first; got=drift; hint=refuse unbound task atom assignment".to_owned())?;
+        unreachable!("runtime.reject returns Err in enforce mode")
+    }
     let authority_documents = authority_documents
         .iter()
         .map(|document| planning_task_document_from_contract(document, crate::planning::TaskDocumentClass::Authority, authority_set_id))
         .collect::<Vec<_>>();
-    let context_documents = vec![planning_task_document_from_contract(
-        context_document,
-        crate::planning::TaskDocumentClass::ContextNonAuthority,
-        authority_set_id,
-    )];
+    let context_documents = context_documents
+        .iter()
+        .map(|document| {
+            planning_task_document_from_contract(
+                document,
+                crate::planning::TaskDocumentClass::ContextNonAuthority,
+                authority_set_id,
+            )
+        })
+        .collect::<Vec<_>>();
     Ok(crate::planning::TaskAnchorRegistry::from_input_set(
         &crate::planning::TaskInputSet {
             authority_set_id: authority_set_id.clone(),

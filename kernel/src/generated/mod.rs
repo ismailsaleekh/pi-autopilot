@@ -828,6 +828,9 @@ pub struct AgentRunSpec {
     #[serde(rename = "context_document")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_document: Option<TaskDocument>,
+    #[serde(rename = "context_documents")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_documents: Option<Vec<TaskDocument>>,
     #[serde(rename = "assignment_path")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assignment_path: Option<Path>,

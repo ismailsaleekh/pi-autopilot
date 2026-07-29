@@ -139,6 +139,7 @@ export interface AgentRunSpec {
   authority_set_id?: string | null;
   authority_documents?: TaskDocument[] | null;
   context_document?: TaskDocument | null;
+  context_documents?: TaskDocument[] | null;
   assignment_path?: Path | null;
   assignment_digest?: Digest | null;
   context_manifest_path?: Path | null;

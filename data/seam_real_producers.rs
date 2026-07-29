@@ -77,7 +77,7 @@ fn planning_bg_action(workstream: &str, assignment: &AgentAssignment, run_revisi
     let context = input_set.context_documents.first().ok_or_else(|| runner::RunnerError::InvalidSpec("missing planning context".to_owned()))?;
     let assignments = planning_assignments(workstream).map_err(|error| runner::RunnerError::InvalidSpec(format!("planning assignments: {error:?}")))?;
     let mode_parameter = assignment_mode_parameter(&assignments, assignment)?;
-    let mut issued = runner::planning_issue(&runner::PlanningRunnerRequest {
+    runner::planning_issue(&runner::PlanningRunnerRequest {
         workstream: workstream.to_owned(),
         action_id: idv(&format!("action-{}", assignment.assignment_id)),
         assignment_id: idv(&assignment.assignment_id),
@@ -93,9 +93,7 @@ fn planning_bg_action(workstream: &str, assignment: &AgentAssignment, run_revisi
         atom_id_prefix: assignment.atom_id_prefix.clone(),
         atom_registry_path: atom_registry.as_ref().map(|(path, _)| path.clone()),
         atom_registry_digest: atom_registry.as_ref().map(|(_, digest)| digest.clone()),
-    })?;
-    augment_planning_issue_with_context_documents(&mut issued, input_set)?;
-    Ok(issued)
+    })
 }
 fn append_runner_invocation(state: &mut CoreState, binding: &runner::IssuedRunnerBinding) -> Result<(), AnyError> {
     let mut refs = vec![
@@ -120,27 +118,6 @@ fn runner_doc_from_task(document: &planning::TaskDocument) -> runner::RunnerTask
         planning::TaskDocumentClass::InlineTask => "inline-task",
     };
     runner::RunnerTaskDocument::new(document.path.clone(), class.to_owned(), document.digest.clone(), document.body.clone())
-}
-fn augment_planning_issue_with_context_documents(issued: &mut runner::IssuedRunnerAction, input_set: &planning::TaskInputSet) -> Result<(), runner::RunnerError> {
-    let context = input_set.context_documents.first().ok_or_else(|| runner::RunnerError::InvalidSpec("missing planning context".to_owned()))?;
-    let authority_docs = input_set.authority_documents.iter().map(runner_doc_from_task).collect::<Vec<_>>();
-    let context_docs = input_set.context_documents.iter().map(runner_doc_from_task).collect::<Vec<_>>();
-    let context_digest = serde_json::to_vec(&serde_json::json!({"authority_set_id":input_set.authority_set_id,"authority_documents":authority_docs,"context_documents":context_docs})).map(|data| sha256_hex_local(&data)).map_err(|error| runner::RunnerError::InvalidSpec(format!("planning context digest json: {error}")))?;
-    let prompt_digest = issued.binding.prompt_digest.clone();
-    let spec_path = PathBuf::from(&issued.binding.spec_path);
-    let spec_text = fs::read_to_string(&spec_path).map_err(|error| runner::RunnerError::Io(format!("planning spec read {}: {error}", spec_path.display())))?;
-    let mut spec: serde_json::Value = serde_json::from_str(&spec_text).map_err(|error| runner::RunnerError::InvalidSpec(format!("planning spec json: {error}")))?;
-    spec["context_document"] = serde_json::to_value(runner_doc_from_task(context)).map_err(|error| runner::RunnerError::InvalidSpec(format!("context alias json: {error}")))?;
-    spec["context_documents"] = serde_json::to_value(&context_docs).map_err(|error| runner::RunnerError::InvalidSpec(format!("context documents json: {error}")))?;
-    spec["context_digest"] = serde_json::Value::String(context_digest.clone());
-    spec["prompt_digest"] = serde_json::Value::String(prompt_digest.clone());
-    let spec_bytes = serde_json::to_vec_pretty(&spec).map_err(|error| runner::RunnerError::InvalidSpec(format!("planning spec encode: {error}")))?;
-    let spec_digest = sha256_hex_local(&spec_bytes);
-    fs::write(&spec_path, spec_bytes).map_err(|error| runner::RunnerError::Io(format!("planning spec write {}: {error}", spec_path.display())))?;
-    issued.binding.prompt_digest = prompt_digest;
-    issued.binding.context_digest = context_digest;
-    issued.binding.spec_digest = spec_digest;
-    Ok(())
 }
 fn next_planning_assignment(workstream: &str, state: &CoreState) -> Result<Option<AgentAssignment>, planning::PlanningError> {
     let manifest = read_planning_schedule_manifest(workstream).map_err(planning::PlanningError::ContextGap)?;
@@ -248,11 +225,7 @@ fn planning_refs_from_state(workstream: &str, state: &CoreState) -> planning::Pl
 
 fn read_runner_spec_for_binding(binding: &runner::IssuedRunnerBinding) -> Result<kernel::generated::AgentRunSpec, String> {
     let text = fs::read_to_string(&binding.spec_path).map_err(|error| format!("{}:{error}", binding.spec_path))?;
-    let mut value: serde_json::Value = serde_json::from_str(&text).map_err(|error| error.to_string())?;
-    if value.get("context_documents").is_some() {
-        value.as_object_mut().ok_or_else(|| "spec top-level not object".to_owned())?.remove("context_documents");
-    }
-    serde_json::from_value(value).map_err(|error| error.to_string())
+    serde_json::from_str(&text).map_err(|error| error.to_string())
 }
 
 fn task_doc_from_manifest(value: &serde_json::Value, class: planning::TaskDocumentClass, authority_set_id: &str, index: usize) -> Result<planning::TaskDocument, String> {

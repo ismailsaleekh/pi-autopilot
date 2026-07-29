@@ -464,6 +464,7 @@ artifact "agent_run_spec" schema="autopilot.agent_run_spec.v1" producer="Package
     field "authority_set_id" type="string" required=#false nullable=#true
     list "authority_documents" item="task_document" required=#false nullable=#true
     field "context_document" type="task_document" required=#false nullable=#true
+    list "context_documents" item="task_document" required=#false nullable=#true
     field "assignment_path" type="path" required=#false nullable=#true
     field "assignment_digest" type="digest" required=#false nullable=#true
     field "context_manifest_path" type="path" required=#false nullable=#true
