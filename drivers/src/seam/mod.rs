@@ -1504,6 +1504,7 @@ fn validation_issue_for_delivery(
         ),
         skills_digest: runner::skills_digest(),
         subscription_digest: sha256_hex_local(b"validator-subscription-pi"),
+        mode_parameter: None,
         lane_id: binding.lane_id.clone(),
         attempt: binding.attempt,
         base_commit: binding.base_commit.clone(),
@@ -2021,61 +2022,33 @@ fn record_context_prompt_for_action(state: &CoreState, action: &BackgroundAction
             "module-unreachable:context-prompt:no-runner-binding".to_owned()
         )];
     };
-    let assignment_text = fs::read_to_string(&binding.spec_path)
-        .unwrap_or_else(|error| format!("spec-read-error:{}:{error}", binding.spec_path));
-    let estimate = crate::context::estimate_tokens(assignment_text.as_bytes(), 512);
-    let budget = crate::context::route_budget(estimate, 200_000, estimate / 2);
-    let manifest = crate::context::manifest_shell(
-        kernel::generated::Uuidv7(format!("manifest-{}", binding.assignment_id.0)),
-        kernel::generated::Uuidv7(format!("run-{}", binding.run_revision)),
-        binding.assignment_id.clone(),
-        binding.role_id.clone(),
-        budget,
-    );
-    let manifest_text = match serde_json::to_string_pretty(&manifest) {
+    let prompt_text = match fs::read_to_string(&binding.prompt_path) {
         Ok(value) => value,
-        Err(error) => return vec![Ref(format!("module-unreachable:context:serialize:{error}"))],
-    };
-    let prompt_input = crate::prompt::PromptInput {
-        role_id: binding.role_id.0.clone(),
-        mode_id: binding.mode.0.clone(),
-        mode_parameter: None,
-        assignment_revision: binding.run_revision.to_string(),
-        plan_revision: binding.spec_digest.clone(),
-        runtime_revision: state.state.revision,
-        context_manifest_id: manifest.manifest_id.0.clone(),
-        git_identity: binding
-            .base_commit
-            .as_ref()
-            .map(|sha| sha.0.clone())
-            .unwrap_or_else(|| "planning-no-base-commit".to_owned()),
-        assignment: assignment_text,
-        context_manifest: manifest_text.clone(),
-        contract: binding.result_contract.0.clone(),
-        runtime_overlay: None,
-    };
-    match crate::prompt::render(&prompt_input) {
-        Ok(rendered) => {
-            let sidecar = PathBuf::from(&binding.prompt_path).with_extension("package-rendered.md");
-            match write_parent_file_local(&sidecar, rendered.text.as_bytes()) {
-                Ok(()) => vec![
-                    Ref("module-wired:context".to_owned()),
-                    Ref("module-wired:prompt".to_owned()),
-                    Ref(format!(
-                        "context-route:{:?}:{}",
-                        budget.route, budget.estimated_percent
-                    )),
-                    Ref(format!("prompt-rendered:{}", rendered.digest)),
-                    Ref(sidecar.display().to_string()),
-                ],
-                Err(error) => vec![Ref(format!("module-unreachable:prompt-write:{error}"))],
-            }
+        Err(error) => {
+            return vec![Ref(format!(
+                "module-unreachable:prompt-read:{}:{error}",
+                binding.prompt_path
+            ))]
         }
-        Err(error) => vec![
-            Ref("module-wired:context".to_owned()),
-            Ref(format!("module-unreachable:prompt-render:{error:?}")),
-        ],
+    };
+    let prompt_digest = sha256_hex_local(prompt_text.as_bytes());
+    if prompt_digest != binding.prompt_digest {
+        return vec![Ref(format!(
+            "module-unreachable:prompt-digest:{}",
+            binding.assignment_id.0
+        ))];
     }
+    let estimate = crate::context::estimate_tokens(prompt_text.as_bytes(), 512);
+    let budget = crate::context::route_budget(estimate, 200_000, estimate / 2);
+    vec![
+        Ref("module-wired:context".to_owned()),
+        Ref("module-wired:prompt".to_owned()),
+        Ref(format!(
+            "context-route:{:?}:{}",
+            budget.route, budget.estimated_percent
+        )),
+        Ref(format!("prompt-bound:{}", binding.prompt_digest)),
+    ]
 }
 
 fn record_delivery_transcript(

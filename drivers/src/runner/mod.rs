@@ -5,9 +5,10 @@ use std::process::Command;
 
 use kernel::failure::{Failure, HardBoundary};
 use kernel::generated::{
-    ActionKind, AgentRunSpec, BackgroundAction, BackgroundActionBgRun, Bytes, ContractId,
-    DeliveryResult, Digest, Id, ModeId, Path as ContractPath, Ref, Sha, SupersessionState,
-    TaskDocument as ContractTaskDocument, TaskDocumentClass, ToolName, ValidationAssignmentKind,
+    ActionKind, AgentRunSpec, AuthorityClass, BackgroundAction, BackgroundActionBgRun, Bytes,
+    ContextAnchor, ContextAnchorForm, ContextGap, ContextItem, ContractId, DeliveryResult, Digest,
+    Id, ModeId, Path as ContractPath, RedactionState, Ref, Sha, SupersessionState,
+    TaskDocument as ContractTaskDocument, TaskDocumentClass, ToolName, Uri, ValidationAssignmentKind,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as ShaDigest, Sha256};
@@ -112,6 +113,7 @@ pub struct PlanningRunnerRequest {
     pub authority_set_id: String,
     pub authority_documents: Vec<RunnerTaskDocument>,
     pub context_document: RunnerTaskDocument,
+    pub mode_parameter: Option<String>,
     pub atom_id_prefix: Option<String>,
     pub atom_registry_path: Option<String>,
     pub atom_registry_digest: Option<String>,
@@ -213,6 +215,8 @@ pub struct IssuedRunnerBinding {
     pub context_digest: String,
     pub skills_digest: String,
     pub subscription_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode_parameter: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lane_id: Option<Id>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -314,9 +318,9 @@ pub fn planning_issue(request: &PlanningRunnerRequest) -> Result<IssuedRunnerAct
         &request.mode,
         &request.boundary_id,
     );
-    let prompt = planning_prompt(request, &route);
-    write_parent_file(&paths.prompt_path, prompt.as_bytes())?;
-    let prompt_digest = sha256_hex(prompt.as_bytes());
+    let rendered = render_planning_prompt(request, &route, &cwd)?;
+    write_parent_file(&paths.prompt_path, rendered.text.as_bytes())?;
+    let prompt_digest = sha256_hex(rendered.text.as_bytes());
     let binding_digests = planning_binding_digests(request, &route)?;
     let spec = AgentRunSpec {
         schema: kernel::generated::SchemaId("autopilot.agent_run_spec.v1".to_owned()),
@@ -408,6 +412,7 @@ pub fn planning_issue(request: &PlanningRunnerRequest) -> Result<IssuedRunnerAct
         context_digest: binding_digests.context_digest,
         skills_digest: binding_digests.skills_digest,
         subscription_digest: binding_digests.subscription_digest,
+        mode_parameter: request.mode_parameter.clone(),
         lane_id: None,
         attempt: None,
         base_commit: None,
@@ -537,6 +542,7 @@ pub fn delivery_issue_with_facts(
         context_digest: binding_digests.context_digest,
         skills_digest: binding_digests.skills_digest,
         subscription_digest: binding_digests.subscription_digest,
+        mode_parameter: None,
         lane_id: Some(assignment.lane_id.clone()),
         attempt: Some(assignment.attempt),
         base_commit: Some(assignment.base_commit.clone()),
@@ -943,48 +949,360 @@ fn sha_json(value: &impl Serialize) -> Result<String, RunnerError> {
     Ok(sha256_hex(&data))
 }
 
-fn planning_prompt(request: &PlanningRunnerRequest, route: &roster::Route) -> String {
-    let mut out = format!(
-        "Autopilot planning child assignment.\nassignment_id: {}\naction_id: {}\nworkstream: {}\nrole: {}\nmode: {}\nboundary: {}\nprovider: {}\nmodel: {}\nthinking: {}\nroute: subscription\nauthority_set_id: {}\n\nReturn exactly one final assistant result satisfying the boundary.\nContext may ground work but must not create or override an atom.\n\n## Core authority documents\n",
-        request.assignment_id.0,
-        request.action_id.0,
-        request.workstream,
-        request.role_id.0,
-        request.mode.0,
-        request.boundary_id.0,
-        route.provider,
-        route.model,
-        route.thinking,
-        request.authority_set_id,
+fn render_planning_prompt(
+    request: &PlanningRunnerRequest,
+    route: &roster::Route,
+    cwd: &Path,
+) -> Result<crate::prompt::RenderedPrompt, RunnerError> {
+    let roles = crate::roles::RoleRegistry::package()
+        .map_err(|error| RunnerError::InvalidSpec(format!("role registry: {error:?}")))?;
+    let role = roles
+        .get(&request.role_id.0)
+        .map_err(|error| RunnerError::InvalidSpec(format!("role lookup: {error:?}")))?;
+    if !role.modes.iter().any(|mode| mode == &request.mode.0) {
+        return Err(RunnerError::InvalidSpec(format!(
+            "role {} does not declare mode {}",
+            request.role_id.0, request.mode.0
+        )));
+    }
+    let context_manifest = planning_context_manifest_text(request, role, cwd)?;
+    let assignment = planning_assignment_text(request, role, route)?;
+    let input = crate::prompt::PromptInput {
+        role_id: request.role_id.0.clone(),
+        mode_id: request.mode.0.clone(),
+        mode_parameter: request.mode_parameter.clone(),
+        assignment_revision: request.run_revision.to_string(),
+        plan_revision: planning_assignment_digest(request)?,
+        runtime_revision: request.run_revision,
+        context_manifest_id: context_manifest.id,
+        git_identity: format!("cwd={}", cwd.display()),
+        assignment,
+        context_manifest: context_manifest.text,
+        contract: request.boundary_id.0.clone(),
+        runtime_overlay: None,
+    };
+    crate::prompt::render(&input)
+        .map_err(|error| RunnerError::InvalidSpec(format!("prompt render: {error:?}")))
+}
+
+struct PlanningContextManifestText {
+    id: String,
+    text: String,
+}
+
+fn planning_assignment_digest(request: &PlanningRunnerRequest) -> Result<String, RunnerError> {
+    sha_json(&serde_json::json!({
+        "workstream": request.workstream,
+        "assignment_id": request.assignment_id,
+        "role_id": request.role_id,
+        "mode": request.mode,
+        "mode_parameter": request.mode_parameter,
+        "boundary_id": request.boundary_id,
+        "run_revision": request.run_revision,
+        "authority_set_id": request.authority_set_id,
+        "authority_documents": request.authority_documents.iter().map(document_binding_summary).collect::<Vec<_>>(),
+        "context_document": document_binding_summary(&request.context_document),
+        "atom_id_prefix": request.atom_id_prefix,
+        "atom_registry_path": request.atom_registry_path,
+        "atom_registry_digest": request.atom_registry_digest,
+    }))
+}
+
+fn planning_assignment_text(
+    request: &PlanningRunnerRequest,
+    role: &crate::roles::Role,
+    route: &roster::Route,
+) -> Result<String, RunnerError> {
+    serde_json::to_string_pretty(&serde_json::json!({
+        "assignment_id": request.assignment_id.0,
+        "action_id": request.action_id.0,
+        "workstream": request.workstream,
+        "role": request.role_id.0,
+        "mode": request.mode.0,
+        "mode_parameter": request.mode_parameter,
+        "boundary": request.boundary_id.0,
+        "provider": route.provider,
+        "model": route.model,
+        "thinking": route.thinking,
+        "route": "subscription",
+        "authority_set_id": request.authority_set_id,
+        "terminal_path": role.terminal_path,
+        "atom_id_prefix": request.atom_id_prefix,
+        "atom_registry": request.atom_registry_path.as_ref().zip(request.atom_registry_digest.as_ref()).map(|(path, digest)| serde_json::json!({"path": path, "digest": digest})),
+        "bound_authority_documents": request.authority_documents.iter().map(document_binding_summary).collect::<Vec<_>>(),
+        "bound_context_documents": [document_binding_summary(&request.context_document)],
+    }))
+    .map_err(|error| RunnerError::InvalidSpec(format!("planning assignment json: {error}")))
+}
+
+fn document_binding_summary(document: &RunnerTaskDocument) -> serde_json::Value {
+    serde_json::json!({
+        "path": document.path,
+        "class": document.class,
+        "digest": document.digest,
+        "body_digest": document.body_digest,
+    })
+}
+
+fn planning_context_manifest_text(
+    request: &PlanningRunnerRequest,
+    role: &crate::roles::Role,
+    cwd: &Path,
+) -> Result<PlanningContextManifestText, RunnerError> {
+    let policies = crate::context::policy::ContextPolicyRegistry::package()
+        .map_err(|error| RunnerError::InvalidSpec(format!("context policy registry: {error:?}")))?;
+    let policy = policies
+        .policy(&role.context_policy)
+        .map_err(|error| RunnerError::InvalidSpec(format!("context policy lookup: {error:?}")))?;
+    let mode = policy.modes.get(&request.mode.0).ok_or_else(|| {
+        RunnerError::InvalidSpec(format!(
+            "context policy {} missing mode {}",
+            role.context_policy, request.mode.0
+        ))
+    })?;
+    let manifest_id = format!(
+        "context-manifest-{}-{}-{}",
+        request.workstream, request.assignment_id.0, request.run_revision
     );
-    if let Some(prefix) = &request.atom_id_prefix {
-        out.push_str(&format!(
-            "\n## Runner-issued atom namespace\nEvery atoms[].id you submit must begin with this exact prefix and must add a non-empty local suffix: `{prefix}`\nDo not rewrite the prefix, do not omit it, and do not use another extractor's prefix.\n"
-        ));
+    let manifest_seed = serde_json::json!({
+        "assignment": request.assignment_id.0,
+        "policy": policy.id,
+        "mode": mode.id,
+        "authority": request.authority_documents.iter().map(document_binding_summary).collect::<Vec<_>>(),
+        "context": document_binding_summary(&request.context_document),
+        "atom_registry_path": request.atom_registry_path,
+        "atom_registry_digest": request.atom_registry_digest,
+    });
+    let estimate_bytes = serde_json::to_vec(&manifest_seed)
+        .map_err(|error| RunnerError::InvalidSpec(format!("context manifest seed json: {error}")))?;
+    let budget = crate::context::route_budget(
+        crate::context::estimate_tokens(&estimate_bytes, 512),
+        200_000,
+        crate::context::estimate_tokens(&estimate_bytes, 128),
+    );
+    if budget.route == crate::context::BudgetRoute::SplitAssignment {
+        return Err(RunnerError::InvalidSpec(format!(
+            "context manifest over budget for {}",
+            request.assignment_id.0
+        )));
     }
-    if let (Some(path), Some(digest)) = (&request.atom_registry_path, &request.atom_registry_digest) {
-        out.push_str(&format!(
-            "\n## Bound atom registry\nUse only atom ids from this package-created registry for units[].links.\npath: {path}\ndigest: {digest}\nPlaceholder links such as A1/A2/A3 are invalid unless they are exact registry ids.\n"
-        ));
+    let mut manifest = crate::context::manifest_shell(
+        kernel::generated::Uuidv7(manifest_id.clone()),
+        kernel::generated::Uuidv7(format!("run-{}", request.run_revision)),
+        request.assignment_id.clone(),
+        request.role_id.clone(),
+        budget,
+    );
+    manifest.role.mode = request.mode.clone();
+    manifest.freshness.task_revision = Digest(planning_assignment_digest(request)?);
+    manifest.freshness.plan_revision = Digest(request.run_revision.to_string());
+    manifest.freshness.dossier_revision = Digest("planning-dossier:not-bound".to_owned());
+    manifest.freshness.runtime_revision = request.run_revision;
+    manifest.freshness.git_commit = Sha(sha256_hex(cwd.display().to_string().as_bytes()));
+
+    fill_context_tier(
+        &policies,
+        request,
+        &mode.mandatory_inline,
+        "mandatory_inline",
+        &mut manifest.mandatory_inline,
+        &mut manifest.gaps,
+    )?;
+    fill_context_tier(
+        &policies,
+        request,
+        &mode.required_reads,
+        "required_reads",
+        &mut manifest.required_reads,
+        &mut manifest.gaps,
+    )?;
+    fill_context_tier(
+        &policies,
+        request,
+        &mode.on_demand,
+        "on_demand",
+        &mut manifest.on_demand,
+        &mut manifest.gaps,
+    )?;
+    fill_context_tier(
+        &policies,
+        request,
+        &mode.excluded,
+        "excluded",
+        &mut manifest.excluded,
+        &mut manifest.gaps,
+    )?;
+
+    let text = serde_json::to_string_pretty(&manifest)
+        .map_err(|error| RunnerError::InvalidSpec(format!("context manifest json: {error}")))?;
+    Ok(PlanningContextManifestText {
+        id: manifest_id,
+        text,
+    })
+}
+
+fn fill_context_tier(
+    policies: &crate::context::policy::ContextPolicyRegistry,
+    request: &PlanningRunnerRequest,
+    categories: &[String],
+    tier: &str,
+    target: &mut Vec<ContextItem>,
+    gaps: &mut Vec<ContextGap>,
+) -> Result<(), RunnerError> {
+    for category_id in categories {
+        let category = policies
+            .category(category_id)
+            .map_err(|error| RunnerError::InvalidSpec(format!("context category: {error:?}")))?;
+        let before = target.len();
+        match category.id.as_str() {
+            "task-authority" => {
+                for (index, document) in request.authority_documents.iter().enumerate() {
+                    target.push(context_item_for_document(
+                        request,
+                        tier,
+                        &category.id,
+                        index,
+                        document,
+                    ));
+                }
+            }
+            "repository-context" => target.push(context_item_for_document(
+                request,
+                tier,
+                &category.id,
+                0,
+                &request.context_document,
+            )),
+            "task-atoms" => {
+                if let (Some(path), Some(digest)) = (
+                    request.atom_registry_path.as_deref(),
+                    request.atom_registry_digest.as_deref(),
+                ) {
+                    target.push(context_item_for_artifact(
+                        request,
+                        tier,
+                        &category.id,
+                        path,
+                        digest,
+                    ));
+                }
+            }
+            _ if category.source == "package-generated" => target.push(context_item_for_synthetic(
+                request,
+                tier,
+                &category.id,
+                &format!("package-generated:{}:{}", category.source, category.class),
+            )),
+            _ => {}
+        }
+        if target.len() == before && tier != "excluded" {
+            gaps.push(ContextGap {
+                id: Id(format!(
+                    "{}:{}:{}:gap",
+                    request.assignment_id.0, tier, category.id
+                )),
+                missing_fact_or_ref: format!("context category {}", category.id),
+                reason: format!(
+                    "policy {} requires category {} but no package binding was supplied at issue time",
+                    tier, category.id
+                ),
+                affected_criterion: None,
+                affected_decision: None,
+                known_source: None,
+            });
+        }
     }
-    for (index, document) in request.authority_documents.iter().enumerate() {
-        out.push_str(&format!(
-            "\n### AUTHORITY {}\npath: {}\ndigest: {}\nbody_digest: {}\n```text\n{}\n```\n",
-            index + 1,
-            document.path,
-            document.digest,
-            document.body_digest,
-            document.body
-        ));
+    Ok(())
+}
+
+fn context_item_for_document(
+    request: &PlanningRunnerRequest,
+    tier: &str,
+    category_id: &str,
+    index: usize,
+    document: &RunnerTaskDocument,
+) -> ContextItem {
+    ContextItem {
+        id: Id(format!(
+            "{}:{}:{}:{}",
+            request.assignment_id.0, tier, category_id, index
+        )),
+        authority_class: AuthorityClass(document.class.clone()),
+        source_uri: Uri(document.path.clone()),
+        anchor: ContextAnchor {
+            anchor_form: ContextAnchorForm::Json,
+            uri: Uri(format!(
+                "json://planning/{}/{}/{}#/body",
+                request.assignment_id.0, category_id, index
+            )),
+        },
+        source_digest: Digest(document.digest.clone()),
+        content_digest: Digest(document.body_digest.clone()),
+        purpose: format!("{tier}:{category_id}:{}", document.path),
+        linked_criterion: None,
+        linked_decision: None,
+        linked_unit: None,
+        token_estimate: crate::context::estimate_tokens(document.body.as_bytes(), 0),
+        redaction_state: RedactionState("none".to_owned()),
     }
-    out.push_str(&format!(
-        "\n## Grounding context document (non-authority)\npath: {}\ndigest: {}\nbody_digest: {}\nThis document is context only; do not emit it as a Work atom.\n```text\n{}\n```\n",
-        request.context_document.path,
-        request.context_document.digest,
-        request.context_document.body_digest,
-        request.context_document.body
-    ));
-    out
+}
+
+fn context_item_for_artifact(
+    request: &PlanningRunnerRequest,
+    tier: &str,
+    category_id: &str,
+    path: &str,
+    digest: &str,
+) -> ContextItem {
+    ContextItem {
+        id: Id(format!("{}:{}:{}", request.assignment_id.0, tier, category_id)),
+        authority_class: AuthorityClass("planning-artifact".to_owned()),
+        source_uri: Uri(path.to_owned()),
+        anchor: ContextAnchor {
+            anchor_form: ContextAnchorForm::Json,
+            uri: Uri(format!(
+                "json://planning/{}/{category_id}#/artifact",
+                request.assignment_id.0
+            )),
+        },
+        source_digest: Digest(digest.to_owned()),
+        content_digest: Digest(digest.to_owned()),
+        purpose: format!("{tier}:{category_id}:{path}"),
+        linked_criterion: None,
+        linked_decision: None,
+        linked_unit: None,
+        token_estimate: 0,
+        redaction_state: RedactionState("none".to_owned()),
+    }
+}
+
+fn context_item_for_synthetic(
+    request: &PlanningRunnerRequest,
+    tier: &str,
+    category_id: &str,
+    descriptor: &str,
+) -> ContextItem {
+    let digest = sha256_hex(descriptor.as_bytes());
+    ContextItem {
+        id: Id(format!("{}:{}:{}", request.assignment_id.0, tier, category_id)),
+        authority_class: AuthorityClass("index".to_owned()),
+        source_uri: Uri(format!("package://{category_id}")),
+        anchor: ContextAnchor {
+            anchor_form: ContextAnchorForm::Json,
+            uri: Uri(format!(
+                "json://planning/{}/{category_id}#/index",
+                request.assignment_id.0
+            )),
+        },
+        source_digest: Digest(digest.clone()),
+        content_digest: Digest(digest),
+        purpose: format!("{tier}:{category_id}"),
+        linked_criterion: None,
+        linked_decision: None,
+        linked_unit: None,
+        token_estimate: crate::context::estimate_tokens(descriptor.as_bytes(), 0),
+        redaction_state: RedactionState("none".to_owned()),
+    }
 }
 
 fn delivery_prompt(assignment: &RunnerAssignment, route: &roster::Route, worktree: &str) -> String {

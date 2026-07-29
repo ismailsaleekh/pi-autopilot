@@ -547,6 +547,7 @@ else:
                 "auth",
                 "Repo context",
             ),
+            mode_parameter: None,
             atom_id_prefix: prefix.map(str::to_owned),
             atom_registry_path: registry_path,
             atom_registry_digest: registry_digest,

@@ -224,6 +224,17 @@ impl ContextPolicyRegistry {
             .get(id)
             .ok_or_else(|| ContextPolicyError::MissingPolicy(id.to_owned()))
     }
+
+    pub fn category(&self, id: &str) -> Result<&ContextPolicyCategory, ContextPolicyError> {
+        self.categories
+            .get(id)
+            .ok_or_else(|| ContextPolicyError::UnknownCategory {
+                policy_id: "<lookup>".to_owned(),
+                mode_id: "<lookup>".to_owned(),
+                tier: "<lookup>".to_owned(),
+                category_id: id.to_owned(),
+            })
+    }
 }
 
 fn parse_policy(

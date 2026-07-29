@@ -49,10 +49,34 @@ struct AgentCarrier {
 struct ApprovedPlanArtifact { units: Vec<ApprovedUnit> }
 
 fn planning_assignments(workstream: &str) -> Result<Vec<AgentAssignment>, planning::PlanningError> {
-    planning::planning_assignments_for_workstream(workstream)
+    let assignments = planning::planning_assignments_for_workstream(workstream)?;
+    validate_assignment_mode_parameters(&assignments)?;
+    Ok(assignments)
+}
+fn validate_assignment_mode_parameters(assignments: &[AgentAssignment]) -> Result<(), planning::PlanningError> {
+    let roles = crate::roles::RoleRegistry::package().map_err(|error| planning::PlanningError::BadDeclaration(format!("role registry: {error:?}")))?;
+    let mut role_ids = assignments.iter().map(|assignment| assignment.role.as_str()).collect::<Vec<_>>();
+    role_ids.sort_unstable();
+    role_ids.dedup();
+    for role_id in role_ids {
+        let role = roles.get(role_id).map_err(|error| planning::PlanningError::BadDeclaration(format!("role lookup: {error:?}")))?;
+        let count = assignments.iter().filter(|assignment| assignment.role == role_id).count();
+        crate::roles::allocate_mode_parameters(role, count).map_err(|error| planning::PlanningError::BadDeclaration(format!("mode parameter allocation: {error:?}")))?;
+    }
+    Ok(())
+}
+fn assignment_mode_parameter(assignments: &[AgentAssignment], assignment: &AgentAssignment) -> Result<Option<String>, runner::RunnerError> {
+    let roles = crate::roles::RoleRegistry::package().map_err(|error| runner::RunnerError::InvalidSpec(format!("role registry: {error:?}")))?;
+    let role = roles.get(&assignment.role).map_err(|error| runner::RunnerError::InvalidSpec(format!("role lookup: {error:?}")))?;
+    let role_assignments = assignments.iter().filter(|item| item.role == assignment.role).collect::<Vec<_>>();
+    let allocations = crate::roles::allocate_mode_parameters(role, role_assignments.len()).map_err(|error| runner::RunnerError::InvalidSpec(format!("mode parameter allocation: {error:?}")))?;
+    let index = role_assignments.iter().position(|item| item.assignment_id == assignment.assignment_id).ok_or_else(|| runner::RunnerError::InvalidSpec(format!("assignment {} not found in role allocation", assignment.assignment_id)))?;
+    Ok(allocations[index].clone())
 }
 fn planning_bg_action(workstream: &str, assignment: &AgentAssignment, run_revision: u64, input_set: &planning::TaskInputSet, atom_registry: Option<(String, String)>) -> Result<runner::IssuedRunnerAction, runner::RunnerError> {
     let context = input_set.context_documents.first().ok_or_else(|| runner::RunnerError::InvalidSpec("missing planning context".to_owned()))?;
+    let assignments = planning_assignments(workstream).map_err(|error| runner::RunnerError::InvalidSpec(format!("planning assignments: {error:?}")))?;
+    let mode_parameter = assignment_mode_parameter(&assignments, assignment)?;
     let mut issued = runner::planning_issue(&runner::PlanningRunnerRequest {
         workstream: workstream.to_owned(),
         action_id: idv(&format!("action-{}", assignment.assignment_id)),
@@ -64,6 +88,7 @@ fn planning_bg_action(workstream: &str, assignment: &AgentAssignment, run_revisi
         authority_set_id: input_set.authority_set_id.clone(),
         authority_documents: input_set.authority_documents.iter().map(runner_doc_from_task).collect(),
         context_document: runner_doc_from_task(context),
+        mode_parameter,
         atom_id_prefix: assignment.atom_id_prefix.clone(),
         atom_registry_path: atom_registry.as_ref().map(|(path, _)| path.clone()),
         atom_registry_digest: atom_registry.as_ref().map(|(_, digest)| digest.clone()),
@@ -100,17 +125,7 @@ fn augment_planning_issue_with_context_documents(issued: &mut runner::IssuedRunn
     let authority_docs = input_set.authority_documents.iter().map(runner_doc_from_task).collect::<Vec<_>>();
     let context_docs = input_set.context_documents.iter().map(runner_doc_from_task).collect::<Vec<_>>();
     let context_digest = serde_json::to_vec(&serde_json::json!({"authority_set_id":input_set.authority_set_id,"authority_documents":authority_docs,"context_documents":context_docs})).map(|data| sha256_hex_local(&data)).map_err(|error| runner::RunnerError::InvalidSpec(format!("planning context digest json: {error}")))?;
-    let prompt_path = PathBuf::from(&issued.binding.prompt_path);
-    let mut prompt = fs::read_to_string(&prompt_path).map_err(|error| runner::RunnerError::Io(format!("planning prompt read {}: {error}", prompt_path.display())))?;
-    if input_set.context_documents.len() > 1 {
-        prompt.push_str("\n## Additional grounding context documents (non-authority)\n");
-        for (index, document) in input_set.context_documents.iter().enumerate().skip(1) {
-            let doc = runner_doc_from_task(document);
-            prompt.push_str(&format!("\n### CONTEXT {}\npath: {}\ndigest: {}\nbody_digest: {}\nThis document is context only; do not emit it as a Work atom.\n```text\n{}\n```\n", index + 1, doc.path, doc.digest, doc.body_digest, doc.body));
-        }
-    }
-    let prompt_digest = sha256_hex_local(prompt.as_bytes());
-    fs::write(&prompt_path, prompt).map_err(|error| runner::RunnerError::Io(format!("planning prompt write {}: {error}", prompt_path.display())))?;
+    let prompt_digest = issued.binding.prompt_digest.clone();
     let spec_path = PathBuf::from(&issued.binding.spec_path);
     let spec_text = fs::read_to_string(&spec_path).map_err(|error| runner::RunnerError::Io(format!("planning spec read {}: {error}", spec_path.display())))?;
     let mut spec: serde_json::Value = serde_json::from_str(&spec_text).map_err(|error| runner::RunnerError::InvalidSpec(format!("planning spec json: {error}")))?;
@@ -153,7 +168,11 @@ fn write_planning_manifest(workstream: &str, input_set: &planning::TaskInputSet,
     let authority_docs = input_set.authority_documents.iter().map(runner_doc_from_task).map(|doc| serde_json::to_value(doc).expect("runner doc json")).collect::<Vec<_>>();
     let context_docs = input_set.context_documents.iter().map(runner_doc_from_task).map(|doc| serde_json::to_value(doc).expect("runner doc json")).collect::<Vec<_>>();
     let context_doc = runner_doc_from_task(context);
-    let body = serde_json::json!({"workstream":workstream,"authority_set_id":input_set.authority_set_id,"authority_paths":input_set.authority_documents.iter().map(|item| &item.path).collect::<Vec<_>>(),"authority_documents":authority_docs,"context_documents":context_docs,"context":{"path":context.path,"class":"context/non-authority","digest":context.digest},"context_document":context_doc,"file_digests":input_set.authority_documents.iter().chain(input_set.context_documents.iter()).map(|item| serde_json::json!({"path":item.path,"class":format!("{:?}", item.class),"digest":item.digest})).collect::<Vec<_>>(),"atoms":inventory.atoms.len(),"verified_facts":dossier.verified_facts,"planning_wave_cap":schedule.planning_wave_cap,"planning_max_attempts":schedule.planning_max_attempts,"planning_waves":schedule.waves,"assignments":assignments.iter().map(|item| serde_json::json!({"assignment_id":item.assignment_id,"role":item.role,"mode":item.mode,"boundary_id":item.boundary_id,"ordinal":item.ordinal,"atom_id_prefix":item.atom_id_prefix})).collect::<Vec<_>>()});
+    let assignment_rows = assignments.iter().map(|item| {
+        assignment_mode_parameter(assignments, item)
+            .map(|mode_parameter| serde_json::json!({"assignment_id":item.assignment_id,"role":item.role,"mode":item.mode,"mode_parameter":mode_parameter,"boundary_id":item.boundary_id,"ordinal":item.ordinal,"atom_id_prefix":item.atom_id_prefix}))
+    }).collect::<Result<Vec<_>, _>>()?;
+    let body = serde_json::json!({"workstream":workstream,"authority_set_id":input_set.authority_set_id,"authority_paths":input_set.authority_documents.iter().map(|item| &item.path).collect::<Vec<_>>(),"authority_documents":authority_docs,"context_documents":context_docs,"context":{"path":context.path,"class":"context/non-authority","digest":context.digest},"context_document":context_doc,"file_digests":input_set.authority_documents.iter().chain(input_set.context_documents.iter()).map(|item| serde_json::json!({"path":item.path,"class":format!("{:?}", item.class),"digest":item.digest})).collect::<Vec<_>>(),"atoms":inventory.atoms.len(),"verified_facts":dossier.verified_facts,"planning_wave_cap":schedule.planning_wave_cap,"planning_max_attempts":schedule.planning_max_attempts,"planning_waves":schedule.waves,"assignments":assignment_rows});
     let bytes = serde_json::to_vec_pretty(&body)?;
     let path = dir.join("planning-manifest.json");
     match fs::read(&path) {
