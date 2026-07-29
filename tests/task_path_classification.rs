@@ -489,13 +489,23 @@ fn task_path_classification_terminal_events_require_core_issued_action_assignmen
         &mut state,
         serde_json::json!({"v":1,"id":10,"kind":"task-completed","payload":{"task_id":"task-real-1","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}),
     );
-    // The rest of the P1 wave is already in flight, so accepting one member is a plain
-    // acceptance; the next wave only launches once every member of this one is consumed.
-    assert_eq!(completed.kind, "done", "{}", completed.payload);
+    // This harness never sends `spawn-result`, so the sibling P1 members remain
+    // unacknowledged and Core re-emits exactly those already-issued actions rather than
+    // issuing new bindings. Re-emission must never include the accepted member.
+    assert_eq!(completed.kind, "spawn-wave", "{}", completed.payload);
+    let reemitted = completed.payload["actions"]
+        .as_array()
+        .expect("spawn-wave actions")
+        .iter()
+        .map(|action| action["assignment_id"].as_str().unwrap_or_default().to_owned())
+        .collect::<Vec<_>>();
     assert!(
-        done_status(&completed).contains("agent-result:accepted:planning.task-atoms.v1"),
-        "{}",
-        completed.payload
+        !reemitted.contains(&"planning-main-task-extractor-01".to_owned()),
+        "accepted member must not be re-emitted: {reemitted:?}"
+    );
+    assert!(
+        reemitted.contains(&"planning-main-task-extractor-02".to_owned()),
+        "unacknowledged siblings must be re-emitted: {reemitted:?}"
     );
 
     let accepted = send_frame(

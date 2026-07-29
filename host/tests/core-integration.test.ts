@@ -363,7 +363,13 @@ async function completePlanningFromSpawn(transport, firstActions) {
     // Only the wave's last acceptance advances planning, so keep draining until the
     // queue is empty and then require the terminal status.
     if (pending.length > 0) {
-      assert.match(frame.payload.status, /agent-result:accepted/u);
+      // A non-final wave member is either a plain acceptance, or a typed waiting-on-in-flight
+      // status naming the siblings Core is still waiting for. Both are non-terminal progress;
+      // neither may be a silent stop.
+      assert.match(
+        frame.payload.status,
+        /agent-result:accepted|planning:waiting-on-in-flight:wave=/u,
+      );
       continue;
     }
     assert.match(frame.payload.status, /ready-to-execute:workstream=main/u);
