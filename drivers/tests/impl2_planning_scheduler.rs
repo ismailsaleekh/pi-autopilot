@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use drivers::planning::{
     PlanningAcceptedRef, PlanningError, PlanningIssuedRef, PlanningLaunchAckRef, PlanningManifest,
-    PlanningPolicy, PlanningRefs, PlanningTerminalFailureRef, PlanningWaveFailure,
+    PlanningPolicy, PlanningRefs, PlanningTerminalFailureRef, PlanningWaveOutcome,
     next_planning_wave, planning_policy,
 };
 
@@ -65,6 +65,13 @@ fn accept_roles(manifest: &PlanningManifest, roles: &[&str]) -> PlanningRefs {
     }
 }
 
+fn launch_assignments(outcome: PlanningWaveOutcome) -> Vec<drivers::planning::PlanningAgentAssignment> {
+    match outcome {
+        PlanningWaveOutcome::Launch { assignments, .. } => assignments,
+        other => panic!("expected launch outcome, got {other:?}"),
+    }
+}
+
 fn move_line_before(text: &str, moving: &str, before: &str) -> String {
     assert_eq!(
         text.match_indices(moving).count(),
@@ -120,7 +127,7 @@ fn planning_scheduler_respects_role_barrier_and_partial_topup() {
         activation_refs: BTreeSet::new(),
     };
 
-    let next = next_planning_wave(&manifest, &refs, 64).expect("P1 top-up remains schedulable");
+    let next = launch_assignments(next_planning_wave(&manifest, &refs, 64));
     assert_eq!(
         next.len(),
         3,
@@ -160,13 +167,16 @@ fn issued_unacknowledged_assignment_occupies_wave_slot() {
         activation_refs: BTreeSet::new(),
     };
 
-    let next = next_planning_wave(&manifest, &refs, 64)
-        .expect("issued unacknowledged wave remains schedulable");
+    let next = next_planning_wave(&manifest, &refs, 64);
+    let PlanningWaveOutcome::WaitingOnInFlight { active, .. } = next else {
+        panic!("issued unacknowledged wave must be an explicit waiting outcome");
+    };
     assert_eq!(
-        next,
-        Vec::new(),
-        "already-issued unconsumed assignments must not be re-issued"
+        active.iter().map(|item| item.assignment_id.clone()).collect::<Vec<_>>(),
+        p1.iter().map(|item| item.assignment_id.clone()).collect::<Vec<_>>(),
+        "already-issued unconsumed assignments must not be duplicated"
     );
+    assert!(active.iter().all(|item| !item.launch_acknowledged));
 }
 
 #[test]
@@ -213,10 +223,9 @@ fn planning_failed_member_pauses_without_erasing_siblings() {
         activation_refs: BTreeSet::new(),
     };
 
-    let err = next_planning_wave(&manifest, &refs, manifest.planning_wave_cap)
-        .expect_err("failed P1 member blocks the wave loudly");
-    match err {
-        PlanningWaveFailure::Blocked(blocked) => {
+    let outcome = next_planning_wave(&manifest, &refs, manifest.planning_wave_cap);
+    match outcome {
+        PlanningWaveOutcome::Blocked(blocked) => {
             assert_eq!(blocked.wave_id, "P1.extract");
             assert_eq!(
                 blocked.failed_assignments,
@@ -232,6 +241,7 @@ fn planning_failed_member_pauses_without_erasing_siblings() {
                 );
             }
         }
+        other => panic!("failed P1 member must block loudly, got {other:?}"),
     }
 }
 
@@ -287,8 +297,7 @@ fn scout_wave_blocked_until_every_p1_member_accepted() {
         extract_line,
     );
     let manifest = manifest_from_kdl("scheduler-scout-deps", &reordered_kdl);
-    let next = next_planning_wave(&manifest, &PlanningRefs::default(), 64)
-        .expect("dependency-blocked scout leaves P1 schedulable");
+    let next = launch_assignments(next_planning_wave(&manifest, &PlanningRefs::default(), 64));
 
     assert_eq!(next.len(), 7);
     assert!(
@@ -315,8 +324,11 @@ fn compile_wave_requires_all_three_declared_dependencies() {
     two_dependency_refs
         .activation_refs
         .insert("planning-resolution-required".to_owned());
-    let blocked_by_active_resolution = next_planning_wave(&manifest, &two_dependency_refs, 64)
-        .expect("active P3 dependency blocks compile and schedules resolution");
+    let blocked_by_active_resolution = launch_assignments(next_planning_wave(
+        &manifest,
+        &two_dependency_refs,
+        64,
+    ));
     assert_eq!(blocked_by_active_resolution.len(), 3);
     assert!(
         blocked_by_active_resolution
@@ -328,9 +340,11 @@ fn compile_wave_requires_all_three_declared_dependencies() {
         &manifest,
         &["task-extractor", "repository-scout", "context-curator"],
     );
-    let compile_after_inactive_resolution =
-        next_planning_wave(&manifest, &inactive_resolution_refs, 64)
-            .expect("inactive P3 dependency is complete for compile");
+    let compile_after_inactive_resolution = launch_assignments(next_planning_wave(
+        &manifest,
+        &inactive_resolution_refs,
+        64,
+    ));
     assert_eq!(compile_after_inactive_resolution.len(), 5);
     assert!(
         compile_after_inactive_resolution
@@ -350,8 +364,11 @@ fn compile_wave_requires_all_three_declared_dependencies() {
     all_dependency_refs
         .activation_refs
         .insert("planning-resolution-required".to_owned());
-    let compile_after_all_dependencies = next_planning_wave(&manifest, &all_dependency_refs, 64)
-        .expect("all compile dependencies satisfied");
+    let compile_after_all_dependencies = launch_assignments(next_planning_wave(
+        &manifest,
+        &all_dependency_refs,
+        64,
+    ));
     assert_eq!(compile_after_all_dependencies.len(), 5);
     assert!(
         compile_after_all_dependencies
@@ -417,11 +434,11 @@ fn planning_resume_recomputes_identical_wave_from_event_refs() {
         activation_refs: BTreeSet::new(),
     };
 
-    let before_restart = next_planning_wave(&manifest, &refs, 4).expect("wave before restart");
+    let before_restart = next_planning_wave(&manifest, &refs, 4);
     let after_restart_refs = refs.clone();
-    let after_restart =
-        next_planning_wave(&manifest, &after_restart_refs, 4).expect("wave after restart");
+    let after_restart = next_planning_wave(&manifest, &after_restart_refs, 4);
     assert_eq!(before_restart, after_restart);
+    let before_restart = launch_assignments(before_restart);
     assert_eq!(
         before_restart
             .iter()

@@ -141,11 +141,32 @@ fn runner_doc_from_task(document: &planning::TaskDocument) -> runner::RunnerTask
     };
     runner::RunnerTaskDocument::new(document.path.clone(), class.to_owned(), document.digest.clone(), document.body.clone())
 }
-fn next_planning_assignments(workstream: &str, state: &CoreState) -> Result<Vec<AgentAssignment>, planning::PlanningError> {
+fn next_planning_outcome(workstream: &str, state: &CoreState) -> Result<planning::PlanningWaveOutcome, planning::PlanningError> {
     let manifest = read_planning_schedule_manifest(workstream).map_err(planning::PlanningError::ContextGap)?;
     let refs = planning_refs_from_state(workstream, state);
-    planning::next_planning_wave(&manifest, &refs, manifest.planning_wave_cap)
-        .map_err(|failure| planning::PlanningError::ContextGap(format!("planning-wave:{failure:?}")))
+    Ok(planning::next_planning_wave(&manifest, &refs, manifest.planning_wave_cap))
+}
+fn unacknowledged_planning_actions(state: &CoreState, active: &[planning::PlanningActiveRef]) -> Result<Vec<BackgroundAction>, AnyError> {
+    let issued = issued_actions(state);
+    let mut actions = Vec::new();
+    for active_ref in active.iter().filter(|active_ref| !active_ref.launch_acknowledged) {
+        let action = issued.iter().find(|action| {
+            action.assignment_id.0 == active_ref.assignment_id
+                && action.action_id.0 == active_ref.action_id
+                && action.run_revision == active_ref.run_revision
+        }).ok_or_else(|| format!("CONTEXT_GAP:planning-reemit:missing-control-action:{}:{}:{}", active_ref.assignment_id, active_ref.action_id, active_ref.run_revision))?;
+        actions.push(action.clone());
+    }
+    Ok(actions)
+}
+fn planning_waiting_status(wave_id: &str, active: &[planning::PlanningActiveRef], state: &CoreState) -> String {
+    let active_ids = active.iter().map(|item| item.assignment_id.clone()).collect::<Vec<_>>().join(",");
+    let acknowledged = active.iter().filter(|item| item.launch_acknowledged).count();
+    let unacknowledged = active.len().saturating_sub(acknowledged);
+    format!("planning:waiting-on-in-flight:wave={wave_id};active={active_ids};launch_acked={acknowledged};unacknowledged={unacknowledged};{}", state.summary())
+}
+fn planning_blocked_status(blocked: &planning::PlanningWaveBlocked, state: &CoreState) -> String {
+    format!("planning:blocked:wave={};failed={};completed={};{}", blocked.wave_id, blocked.failed_assignments.join(","), blocked.completed_assignments.join(","), state.summary())
 }
 fn validate_agent_output(binding: &runner::IssuedRunnerBinding, raw: &str) -> Result<String, Rejection> {
     let spec = read_runner_spec_for_binding(binding).map_err(|detail| {

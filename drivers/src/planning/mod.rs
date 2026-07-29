@@ -186,6 +186,14 @@ pub struct PlanningLaunchAckRef {
     pub task_id: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlanningActiveRef {
+    pub assignment_id: String,
+    pub action_id: String,
+    pub run_revision: u64,
+    pub launch_acknowledged: bool,
+}
+
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct PlanningTerminalFailureRef {
     pub assignment_id: String,
@@ -207,7 +215,7 @@ pub struct PlanningRefs {
 pub enum PlanningBarrierStatus {
     Complete,
     Running {
-        active: Vec<String>,
+        active: Vec<PlanningActiveRef>,
         unissued: Vec<String>,
     },
     Blocked {
@@ -225,6 +233,20 @@ pub struct PlanningWaveBlocked {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PlanningWaveFailure {
+    Blocked(PlanningWaveBlocked),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PlanningWaveOutcome {
+    Launch {
+        wave_id: String,
+        assignments: Vec<PlanningAgentAssignment>,
+    },
+    WaitingOnInFlight {
+        wave_id: String,
+        active: Vec<PlanningActiveRef>,
+    },
+    Complete,
     Blocked(PlanningWaveBlocked),
 }
 
@@ -569,8 +591,7 @@ pub fn barrier_status(
     }
     let active = assignments
         .iter()
-        .filter(|assignment| assignment_is_active(&assignment.assignment_id, refs))
-        .map(|assignment| assignment.assignment_id.clone())
+        .flat_map(|assignment| active_refs_for_assignment(&assignment.assignment_id, refs))
         .collect::<Vec<_>>();
     let unissued = assignments
         .iter()
@@ -588,7 +609,7 @@ pub fn next_planning_wave(
     manifest: &PlanningManifest,
     refs: &PlanningRefs,
     cap: usize,
-) -> Result<Vec<PlanningAgentAssignment>, PlanningWaveFailure> {
+) -> PlanningWaveOutcome {
     let effective_cap = cap.min(manifest.planning_wave_cap);
     for wave in &manifest.waves {
         if !planning_wave_dependencies_complete(manifest, wave, refs) {
@@ -598,9 +619,7 @@ pub fn next_planning_wave(
         match status {
             PlanningBarrierStatus::Complete => continue,
             PlanningBarrierStatus::Blocked { failures } => {
-                return Err(PlanningWaveFailure::Blocked(blocked_wave(
-                    manifest, wave, refs, failures,
-                )));
+                return PlanningWaveOutcome::Blocked(blocked_wave(manifest, wave, refs, failures));
             }
             PlanningBarrierStatus::Running { active, unissued } => {
                 let open_slots = effective_cap.saturating_sub(active.len());
@@ -614,11 +633,20 @@ pub fn next_planning_wave(
                     .filter(|assignment| selected_ids.contains(&assignment.assignment_id))
                     .cloned()
                     .collect::<Vec<_>>();
-                return Ok(selected);
+                if selected.is_empty() {
+                    return PlanningWaveOutcome::WaitingOnInFlight {
+                        wave_id: wave.id.clone(),
+                        active,
+                    };
+                }
+                return PlanningWaveOutcome::Launch {
+                    wave_id: wave.id.clone(),
+                    assignments: selected,
+                };
             }
         }
     }
-    Ok(Vec::new())
+    PlanningWaveOutcome::Complete
 }
 
 fn planning_wave_dependencies_complete(
@@ -690,11 +718,35 @@ fn assignment_is_accepted(assignment_id: &str, refs: &PlanningRefs) -> bool {
 }
 
 fn assignment_is_active(assignment_id: &str, refs: &PlanningRefs) -> bool {
-    refs.issued.iter().any(|issued| {
-        issued.assignment_id == assignment_id
-            && !accepted_exact(issued, refs)
-            && !terminal_failure_exact(issued, refs)
-    })
+    !active_refs_for_assignment(assignment_id, refs).is_empty()
+}
+
+fn active_refs_for_assignment(assignment_id: &str, refs: &PlanningRefs) -> Vec<PlanningActiveRef> {
+    refs.issued
+        .iter()
+        .filter(|issued| {
+            issued.assignment_id == assignment_id
+                && !accepted_exact(issued, refs)
+                && !terminal_failure_exact(issued, refs)
+        })
+        .map(|issued| PlanningActiveRef {
+            assignment_id: issued.assignment_id.clone(),
+            action_id: issued.action_id.clone(),
+            run_revision: issued.run_revision,
+            launch_acknowledged: launch_ack_task_id(issued, refs).is_some(),
+        })
+        .collect()
+}
+
+fn launch_ack_task_id(issued: &PlanningIssuedRef, refs: &PlanningRefs) -> Option<String> {
+    refs.launch_acks
+        .iter()
+        .find(|ack| {
+            ack.assignment_id == issued.assignment_id
+                && ack.action_id == issued.action_id
+                && ack.run_revision == issued.run_revision
+        })
+        .map(|ack| ack.task_id.clone())
 }
 
 fn assignment_failures(

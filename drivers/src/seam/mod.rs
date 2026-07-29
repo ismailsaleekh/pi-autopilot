@@ -284,13 +284,29 @@ fn route_plan(id: u64, args: &[String], state: &mut CoreState) -> Result<SeamEnv
     let assignments =
         planning_assignments(workstream).map_err(|error| context_status("planning", error))?;
     write_planning_manifest(workstream, &input_set, &inventory, &dossier, &assignments)?;
-    let wave = next_planning_assignments(workstream, state)
-        .map_err(|error| context_status("planning", error))?;
-    if wave.is_empty() {
-        return done(id, rejection("planning-wave", "empty-initial-wave"));
+    match next_planning_outcome(workstream, state).map_err(|error| context_status("planning", error))? {
+        planning::PlanningWaveOutcome::Launch { assignments: wave, .. } => {
+            let actions = planning_wave_actions(workstream, &wave, state, &input_set, None)?;
+            controlled_spawn_wave(id, actions, state, "planning")
+        }
+        planning::PlanningWaveOutcome::WaitingOnInFlight { wave_id, active } => {
+            let actions = unacknowledged_planning_actions(state, &active)?;
+            if actions.is_empty() {
+                return done(id, planning_waiting_status(&wave_id, &active, state));
+            }
+            validate_spawn_wave_actions(&actions)?;
+            spawn_wave(id, actions)
+        }
+        planning::PlanningWaveOutcome::Complete => {
+            if assignments.is_empty() {
+                return done(id, rejection("planning-wave", "empty-initial-wave"));
+            }
+            done(id, format!("planning:complete:workstream={workstream};{}", state.summary()))
+        }
+        planning::PlanningWaveOutcome::Blocked(blocked) => {
+            done(id, planning_blocked_status(&blocked, state))
+        }
     }
-    let actions = planning_wave_actions(workstream, &wave, state, &input_set, None)?;
-    controlled_spawn_wave(id, actions, state, "planning")
 }
 
 fn route_run(id: u64, workstream: &str, state: &mut CoreState) -> Result<SeamEnvelope, AnyError> {
@@ -424,27 +440,41 @@ fn accept_planning_carrier(
     if let Err(error) = ensure_atom_registry_after_task_atoms(&carrier.workstream, state) {
         return done(id, rejection("planning-postprocess", &error.to_string()));
     }
-    let next = next_planning_assignments(&carrier.workstream, state)
-        .map_err(|error| context_status("planning", error))?;
-    if !next.is_empty() {
-        let input_set = read_planning_input_set(&carrier.workstream)
-            .map_err(|error| format!("CONTEXT_GAP:planning-manifest:{error}"))?;
-        let needs_atom_registry = next
-            .iter()
-            .any(|assignment| assignment.boundary_id.as_deref() == Some("planning.work-map.v1"));
-        let atom_registry = if needs_atom_registry {
-            match ensure_atom_registry(&carrier.workstream, state) {
-                Ok(registry) => Some(registry),
-                Err(error) => {
-                    return done(id, rejection("planning-postprocess", &error.to_string()));
+    match next_planning_outcome(&carrier.workstream, state)
+        .map_err(|error| context_status("planning", error))?
+    {
+        planning::PlanningWaveOutcome::Launch { assignments: next, .. } => {
+            let input_set = read_planning_input_set(&carrier.workstream)
+                .map_err(|error| format!("CONTEXT_GAP:planning-manifest:{error}"))?;
+            let needs_atom_registry = next.iter().any(|assignment| {
+                assignment.boundary_id.as_deref() == Some("planning.work-map.v1")
+            });
+            let atom_registry = if needs_atom_registry {
+                match ensure_atom_registry(&carrier.workstream, state) {
+                    Ok(registry) => Some(registry),
+                    Err(error) => {
+                        return done(id, rejection("planning-postprocess", &error.to_string()));
+                    }
                 }
+            } else {
+                None
+            };
+            let actions =
+                planning_wave_actions(&carrier.workstream, &next, state, &input_set, atom_registry)?;
+            return controlled_spawn_wave(id, actions, state, "planning");
+        }
+        planning::PlanningWaveOutcome::WaitingOnInFlight { wave_id, active } => {
+            let actions = unacknowledged_planning_actions(state, &active)?;
+            if actions.is_empty() {
+                return done(id, planning_waiting_status(&wave_id, &active, state));
             }
-        } else {
-            None
-        };
-        let actions =
-            planning_wave_actions(&carrier.workstream, &next, state, &input_set, atom_registry)?;
-        return controlled_spawn_wave(id, actions, state, "planning");
+            validate_spawn_wave_actions(&actions)?;
+            return spawn_wave(id, actions);
+        }
+        planning::PlanningWaveOutcome::Complete => {}
+        planning::PlanningWaveOutcome::Blocked(blocked) => {
+            return done(id, planning_blocked_status(&blocked, state));
+        }
     }
     done(
         id,
@@ -510,13 +540,14 @@ fn planning_blocked_or_summary(
     workstream: &str,
     state: &CoreState,
 ) -> Result<SeamEnvelope, AnyError> {
-    match next_planning_assignments(workstream, state) {
-        Ok(_) => done(id, state.summary()),
-        Err(planning::PlanningError::ContextGap(detail))
-            if detail.starts_with("planning-wave:") =>
-        {
-            done(id, format!("planning:blocked:{detail};{}", state.summary()))
+    match next_planning_outcome(workstream, state) {
+        Ok(planning::PlanningWaveOutcome::Blocked(blocked)) => {
+            done(id, planning_blocked_status(&blocked, state))
         }
+        Ok(planning::PlanningWaveOutcome::WaitingOnInFlight { wave_id, active }) => {
+            done(id, planning_waiting_status(&wave_id, &active, state))
+        }
+        Ok(_) => done(id, state.summary()),
         Err(error) => done(id, rejection("planning-postprocess", &format!("{error:?}"))),
     }
 }

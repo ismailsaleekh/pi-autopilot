@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 
 use drivers::planning::{
     PlanningAcceptedRef, PlanningIssuedRef, PlanningLaunchAckRef, PlanningManifest, PlanningRefs,
-    next_planning_wave, planning_policy,
+    PlanningWaveOutcome, next_planning_wave, planning_policy,
 };
 use drivers::seam::{CoreState, handle_line};
 use kernel::generated::SeamEnvelope;
@@ -135,7 +135,11 @@ fn planning_wave_respects_lower_cap_and_tops_up() {
         .filter(|assignment| assignment.role == "task-extractor")
         .collect::<Vec<_>>();
 
-    let first = next_planning_wave(&manifest, &PlanningRefs::default(), 3).expect("first wave");
+    let PlanningWaveOutcome::Launch { assignments: first, .. } =
+        next_planning_wave(&manifest, &PlanningRefs::default(), 3)
+    else {
+        panic!("first wave must launch assignments");
+    };
     assert_eq!(first.len(), 3);
     assert!(
         first
@@ -173,7 +177,11 @@ fn planning_wave_respects_lower_cap_and_tops_up() {
         activation_refs: BTreeSet::new(),
     };
 
-    let topup = next_planning_wave(&manifest, &refs, 3).expect("top-up");
+    let PlanningWaveOutcome::Launch { assignments: topup, .. } =
+        next_planning_wave(&manifest, &refs, 3)
+    else {
+        panic!("top-up must launch one assignment");
+    };
     assert_eq!(topup.len(), 1);
     assert_eq!(topup[0].assignment_id, p1[3].assignment_id);
     assert_ne!(topup[0].role, "repository-scout");
@@ -221,9 +229,16 @@ fn core_restart_midwave_recomputes_identical_wave() {
         activation_refs: BTreeSet::new(),
     };
 
-    let before = next_planning_wave(&manifest, &refs, 7).expect("before restart");
-    let after = next_planning_wave(&manifest, &refs.clone(), 7).expect("after restart");
+    let before = next_planning_wave(&manifest, &refs, 7);
+    let after = next_planning_wave(&manifest, &refs.clone(), 7);
     assert_eq!(before, after);
+    let PlanningWaveOutcome::Launch {
+        assignments: before,
+        ..
+    } = before
+    else {
+        panic!("restart must remain launchable");
+    };
     assert_eq!(before.len(), 2);
     assert!(
         before
