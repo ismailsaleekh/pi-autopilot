@@ -442,7 +442,8 @@ fn accept_planning_carrier(
         } else {
             None
         };
-        let actions = planning_wave_actions(&carrier.workstream, &next, state, &input_set, atom_registry)?;
+        let actions =
+            planning_wave_actions(&carrier.workstream, &next, state, &input_set, atom_registry)?;
         return controlled_spawn_wave(id, actions, state, "planning");
     }
     done(
@@ -455,7 +456,10 @@ fn accept_planning_carrier(
     )
 }
 
-fn route_spawn_result(frame: SeamEnvelope, state: &mut CoreState) -> Result<SeamEnvelope, AnyError> {
+fn route_spawn_result(
+    frame: SeamEnvelope,
+    state: &mut CoreState,
+) -> Result<SeamEnvelope, AnyError> {
     let payload: HostToCoreSpawnResultPayload = serde_json::from_value(frame.payload)?;
     let binding = match binding_for(state, &payload.action_id.0, &payload.assignment_id.0) {
         Ok(value) => value,
@@ -464,10 +468,16 @@ fn route_spawn_result(frame: SeamEnvelope, state: &mut CoreState) -> Result<Seam
     match payload.status.as_str() {
         "launched" => {
             let Some(task_id) = payload.task_id.as_ref() else {
-                return done(frame.id, rejection("spawn-result", "launched-missing-task-id"));
+                return done(
+                    frame.id,
+                    rejection("spawn-result", "launched-missing-task-id"),
+                );
             };
             if payload.diagnostic.is_some() {
-                return done(frame.id, rejection("spawn-result", "launched-with-diagnostic"));
+                return done(
+                    frame.id,
+                    rejection("spawn-result", "launched-with-diagnostic"),
+                );
             }
             if launch_ack_consumed(state, &binding) {
                 return done(frame.id, rejection("spawn-result", "already-acknowledged"));
@@ -477,7 +487,10 @@ fn route_spawn_result(frame: SeamEnvelope, state: &mut CoreState) -> Result<Seam
         }
         "launch-failed" => {
             let Some(diagnostic) = payload.diagnostic.as_ref() else {
-                return done(frame.id, rejection("spawn-result", "failed-missing-diagnostic"));
+                return done(
+                    frame.id,
+                    rejection("spawn-result", "failed-missing-diagnostic"),
+                );
             };
             if payload.task_id.is_some() {
                 return done(frame.id, rejection("spawn-result", "failed-with-task-id"));
@@ -499,7 +512,9 @@ fn planning_blocked_or_summary(
 ) -> Result<SeamEnvelope, AnyError> {
     match next_planning_assignments(workstream, state) {
         Ok(_) => done(id, state.summary()),
-        Err(planning::PlanningError::ContextGap(detail)) if detail.starts_with("planning-wave:") => {
+        Err(planning::PlanningError::ContextGap(detail))
+            if detail.starts_with("planning-wave:") =>
+        {
             done(id, format!("planning:blocked:{detail};{}", state.summary()))
         }
         Err(error) => done(id, rejection("planning-postprocess", &format!("{error:?}"))),
@@ -1224,7 +1239,13 @@ fn controlled_spawn(
         actions: vec![action.clone()],
         next_watchdog_at: kernel::generated::Nullable(None),
     });
-    let mut refs = control_refs(state, trigger, &policy, &frame, std::slice::from_ref(&action))?;
+    let mut refs = control_refs(
+        state,
+        trigger,
+        &policy,
+        &frame,
+        std::slice::from_ref(&action),
+    )?;
     refs.extend(record_context_prompt_for_action(state, &action));
     if let Some(watchdog) = arm_watchdog_if_needed(state, action.run_revision)? {
         refs.push(Ref(format!("watchdog:armed:{}", watchdog.action_id.0)));
@@ -1296,10 +1317,16 @@ fn validate_spawn_wave_actions(actions: &[BackgroundAction]) -> Result<(), AnyEr
     let run_revision = actions[0].run_revision;
     for action in actions {
         if !action_ids.insert(action.action_id.0.clone()) {
-            return Err(format!("control:spawn-wave:duplicate-action:{}", action.action_id.0).into());
+            return Err(
+                format!("control:spawn-wave:duplicate-action:{}", action.action_id.0).into(),
+            );
         }
         if !assignment_ids.insert(action.assignment_id.0.clone()) {
-            return Err(format!("control:spawn-wave:duplicate-assignment:{}", action.assignment_id.0).into());
+            return Err(format!(
+                "control:spawn-wave:duplicate-assignment:{}",
+                action.assignment_id.0
+            )
+            .into());
         }
         if action.run_revision != run_revision {
             return Err("control:spawn-wave:mixed-run-revisions".into());
@@ -1331,7 +1358,10 @@ fn control_refs(
         refs.push(Ref(action.action_id.0.clone()));
         refs.push(action_ref(action)?);
     }
-    refs.push(Ref(format!("control:revision:{}", state.state.revision + 1)));
+    refs.push(Ref(format!(
+        "control:revision:{}",
+        state.state.revision + 1
+    )));
     Ok(refs)
 }
 
@@ -2247,7 +2277,7 @@ fn record_context_prompt_for_action(state: &CoreState, action: &BackgroundAction
             return vec![Ref(format!(
                 "module-unreachable:prompt-read:{}:{error}",
                 binding.prompt_path
-            ))]
+            ))];
         }
     };
     let prompt_digest = sha256_hex_local(prompt_text.as_bytes());

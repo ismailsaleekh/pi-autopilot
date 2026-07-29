@@ -973,7 +973,7 @@ pub trait Compactor {
 
 pub trait CheckpointSource {
     fn render_checkpoint(&self, percent: ContextPercent)
-        -> Result<CheckpointRecord, IdentityError>;
+    -> Result<CheckpointRecord, IdentityError>;
 }
 
 pub fn observe_context<B, S>(budget: B, state: &S) -> Result<ContextDecision, CheckpointError>

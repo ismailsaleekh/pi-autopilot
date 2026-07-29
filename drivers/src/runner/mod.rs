@@ -8,7 +8,8 @@ use kernel::generated::{
     ActionKind, AgentRunSpec, AuthorityClass, BackgroundAction, BackgroundActionBgRun, Bytes,
     ContextAnchor, ContextAnchorForm, ContextGap, ContextItem, ContractId, DeliveryResult, Digest,
     Id, ModeId, Path as ContractPath, RedactionState, Ref, Sha, SupersessionState,
-    TaskDocument as ContractTaskDocument, TaskDocumentClass, ToolName, Uri, ValidationAssignmentKind,
+    TaskDocument as ContractTaskDocument, TaskDocumentClass, ToolName, Uri,
+    ValidationAssignmentKind,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as ShaDigest, Sha256};
@@ -1105,8 +1106,9 @@ fn planning_context_manifest_text(
         "atom_registry_path": request.atom_registry_path,
         "atom_registry_digest": request.atom_registry_digest,
     });
-    let estimate_bytes = serde_json::to_vec(&manifest_seed)
-        .map_err(|error| RunnerError::InvalidSpec(format!("context manifest seed json: {error}")))?;
+    let estimate_bytes = serde_json::to_vec(&manifest_seed).map_err(|error| {
+        RunnerError::InvalidSpec(format!("context manifest seed json: {error}"))
+    })?;
     let budget = crate::context::route_budget(
         crate::context::estimate_tokens(&estimate_bytes, 512),
         200_000,
@@ -1291,7 +1293,10 @@ fn context_item_for_artifact(
     digest: &str,
 ) -> ContextItem {
     ContextItem {
-        id: Id(format!("{}:{}:{}", request.assignment_id.0, tier, category_id)),
+        id: Id(format!(
+            "{}:{}:{}",
+            request.assignment_id.0, tier, category_id
+        )),
         authority_class: AuthorityClass("planning-artifact".to_owned()),
         source_uri: Uri(path.to_owned()),
         anchor: ContextAnchor {
@@ -1320,7 +1325,10 @@ fn context_item_for_synthetic(
 ) -> ContextItem {
     let digest = sha256_hex(descriptor.as_bytes());
     ContextItem {
-        id: Id(format!("{}:{}:{}", request.assignment_id.0, tier, category_id)),
+        id: Id(format!(
+            "{}:{}:{}",
+            request.assignment_id.0, tier, category_id
+        )),
         authority_class: AuthorityClass("index".to_owned()),
         source_uri: Uri(format!("package://{category_id}")),
         anchor: ContextAnchor {
