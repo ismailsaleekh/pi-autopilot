@@ -40,19 +40,19 @@ const forbidden = [
 ];
 for (const [needle, label] of forbidden) if (productionSource.includes(needle)) failures.push(label);
 
-function functionBody(name) {
+function functionBody(name, source = seam) {
   const re = new RegExp(`(?:pub(?:\\([^)]*\\))?\\s+)?fn\\s+${name}\\s*\\(`, 'u');
-  const match = re.exec(seam);
+  const match = re.exec(source);
   if (match === null) { failures.push(`missing production function ${name}`); return ''; }
-  const open = seam.indexOf('{', match.index);
+  const open = source.indexOf('{', match.index);
   if (open < 0) { failures.push(`production function ${name} has no body`); return ''; }
   let depth = 0;
-  for (let index = open; index < seam.length; index += 1) {
-    const ch = seam[index];
+  for (let index = open; index < source.length; index += 1) {
+    const ch = source[index];
     if (ch === '{') depth += 1;
     if (ch === '}') {
       depth -= 1;
-      if (depth === 0) return seam.slice(open + 1, index);
+      if (depth === 0) return source.slice(open + 1, index);
     }
   }
   failures.push(`unclosed production function ${name}`);
@@ -92,7 +92,9 @@ for (const name of [...productionRoutes, 'accept_planning_carrier']) {
 
 const plan = functionBody('route_plan');
 if (!plan.includes('RepoGrounding') || !plan.includes('p2_ground')) failures.push('route_plan does not ground through repository evidence');
-if (!plan.includes('planning_assignments') || !plan.includes('planning_bg_action')) failures.push('route_plan does not dispatch the D72 assignment plan');
+if (!plan.includes('planning_assignments') || !plan.includes('planning_wave_actions')) failures.push('route_plan does not dispatch the D72 assignment plan');
+const waveActions = functionBody('planning_wave_actions', productionSource);
+if (!waveActions.includes('planning_bg_action') || !waveActions.includes('append_runner_invocation')) failures.push('planning_wave_actions does not issue real runner actions per wave member');
 const run = functionBody('route_run');
 if (!run.includes('read_approved_plan') || !run.includes('host_resource_facts') || !run.includes('lane_readiness_from_events')) failures.push('route_run does not use persisted plan, event readiness, and host resources');
 const agentResult = functionBody('route_agent_result');

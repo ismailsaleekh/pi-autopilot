@@ -127,8 +127,12 @@ fn accepted_registry_rejects_cross_extractor_duplicate_and_is_resume_stable() {
         "first extractor should be accepted: {ok}"
     );
     let rejected = duplicate.agent_result(&mut state, &second, task_atoms("TE02-OK"));
+    // A duplicate atom id across extractors must never be silently absorbed. Under wave
+    // scheduling the ambiguous re-issued binding is caught first; either way the result is a
+    // loud typed rejection and no registry is written.
     assert!(
-        rejected.contains("planning-postprocess") && rejected.contains("atom-registry"),
+        rejected.starts_with("rejection:")
+            && (rejected.contains("atom-registry") || rejected.contains("ambiguous")),
         "duplicate registry must fail loudly: {rejected}"
     );
 
@@ -649,29 +653,48 @@ else:
     }
 }
 
+/// Terminal status text, or a synthetic `accepted:` marker when the seam responded by
+/// launching the next planning wave (which only happens after the prior result was accepted).
 fn response_status(response: &SeamEnvelope) -> String {
-    response
-        .payload
-        .get("status")
-        .and_then(|value| value.as_str())
-        .unwrap_or_else(|| panic!("non-status response: {response:?}"))
-        .to_owned()
+    if let Some(status) = response.payload.get("status").and_then(|value| value.as_str()) {
+        return status.to_owned();
+    }
+    let launched = spawned_assignment_ids(response);
+    assert!(
+        !launched.is_empty(),
+        "non-status response launched nothing: {response:?}"
+    );
+    format!("accepted:next-wave={}", launched.join(","))
 }
 
 fn assert_spawn_assignment(response: &SeamEnvelope, assignment_id: &str) {
-    assert_eq!(
-        response.kind, "spawn",
+    assert!(
+        matches!(response.kind.as_str(), "spawn" | "spawn-wave"),
         "expected spawn response: {response:?}"
     );
-    assert_eq!(
-        response
-            .payload
-            .get("action")
-            .and_then(|action| action.get("assignment_id"))
-            .and_then(serde_json::Value::as_str),
-        Some(assignment_id),
-        "spawn should launch the next planning assignment: {response:?}"
+    assert!(
+        spawned_assignment_ids(response).iter().any(|id| id == assignment_id),
+        "spawn should launch {assignment_id}: {response:?}"
     );
+}
+
+/// Assignment ids launched by either a singular `spawn` or a batched `spawn-wave`.
+fn spawned_assignment_ids(response: &SeamEnvelope) -> Vec<String> {
+    let read = |action: &serde_json::Value| {
+        action
+            .get("assignment_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
+    if let Some(actions) = response.payload.get("actions").and_then(|v| v.as_array()) {
+        return actions.iter().filter_map(read).collect();
+    }
+    response
+        .payload
+        .get("action")
+        .and_then(read)
+        .into_iter()
+        .collect()
 }
 
 fn has_attempt_event(events: &[serde_json::Value], event: &str) -> bool {

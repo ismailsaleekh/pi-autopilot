@@ -133,7 +133,7 @@ test("successful run route uses recorded model transcripts and records agent spa
     const planEffects = await dispatchRegistered(pi, "autopilot-plan", PLAN_ARGS);
     assertPlanningSpawn(planEffects, "autopilot-plan");
     assertAgentSpawnRecorded(eventLog, "planning-main-task-extractor-01");
-    await completePlanningFromSpawn(transport, spawnAction(planEffects, "autopilot-plan"));
+    await completePlanningFromSpawn(transport, spawnActions(planEffects, "autopilot-plan"));
 
     const runEffects = await dispatchRegistered(pi, "autopilot", "main");
     const runSpawn = spawnAction(runEffects, "autopilot run");
@@ -219,7 +219,12 @@ function fakeBackgroundTasks() {
   return {
     async capabilities() { return completeCapabilities(); },
     async run(descriptor) {
-      activeEffects?.push({ kind: "spawn", action: { bg_run: descriptor, assignment_id: descriptor.name.includes("planning-main-task-extractor-01") ? "planning-main-task-extractor-01" : "assignment-main-L1" } });
+      // Derive the real assignment id from the launch name so batched waves keep
+      // each member distinct instead of collapsing onto a hardcoded id.
+      const launched = descriptor.name.startsWith("autopilot-agent-run ")
+        ? descriptor.name.slice("autopilot-agent-run ".length).trim()
+        : "assignment-main-L1";
+      activeEffects?.push({ kind: "spawn", action: { bg_run: descriptor, assignment_id: launched } });
       return { id: `task-${Date.now()}`, command: descriptor.command, status: "running", outputPath: join(tmpdir(), "autopilot-bg.out") };
     },
   };
@@ -250,12 +255,19 @@ function doneStatus(effects, label) {
   return effect.message.slice("Autopilot done: ".length);
 }
 
+function spawnActions(effects, label) {
+  // The fake background client records one effect per launched task, so a batched
+  // planning wave appears as several spawn effects. Collect every one of them.
+  const actions = effects
+    .filter((item) => item.kind === "spawn")
+    .flatMap((item) => (item.launched ?? (item.action === undefined ? [] : [{ action: item.action }])))
+    .map((item) => item.action);
+  assert.ok(actions.length > 0, `${label} launched nothing: ${JSON.stringify(effects)}`);
+  return actions;
+}
+
 function spawnAction(effects, label) {
-  const effect = effects.find((item) => item.kind === "spawn");
-  assert.ok(effect, `${label} did not produce a spawn effect: ${JSON.stringify(effects)}`);
-  assert.equal(typeof effect.action, "object");
-  assert.notEqual(effect.action, null);
-  return effect.action;
+  return spawnActions(effects, label)[0];
 }
 
 function assertPlanningSpawn(effects, label) {
@@ -316,22 +328,48 @@ function assertAgentSpawnRecorded(eventLog, assignmentId) {
   );
 }
 
-async function completePlanningFromSpawn(transport, firstAction) {
-  let action = firstAction;
-  for (let index = 0; index < 40; index += 1) {
+function spawnedActions(frame) {
+  if (frame.kind === "spawn-wave") return [...frame.payload.actions];
+  if (frame.kind === "spawn") return [frame.payload.action];
+  return [];
+}
+
+async function completePlanningFromSpawn(transport, firstActions) {
+  // Planning launches whole waves, so drain every launched assignment before expecting terminal.
+  const pending = Array.isArray(firstActions) ? [...firstActions] : [firstActions];
+  // Key on assignment id: a re-issued binding for an already-consumed assignment would be
+  // ambiguous at the seam, so each assignment must be completed exactly once.
+  const seen = new Set(pending.map((action) => action.assignment_id));
+  const consumed = new Set();
+  for (let index = 0; index < 200; index += 1) {
+    const action = pending.shift();
+    assert.ok(action !== undefined, "planning ran out of assignments before ready-to-execute");
+    if (consumed.has(action.assignment_id)) continue;
+    consumed.add(action.assignment_id);
     const frame = await transport.request("agent-result", {
       assignment_id: action.assignment_id,
       carrier: planningCarrierForAction(action),
     }, 5000);
-    if (frame.kind === "spawn") {
-      action = frame.payload.action;
+    for (const next of spawnedActions(frame)) {
+      // A later wave may re-announce an assignment that is already queued or consumed;
+      // completing it twice would be an ambiguous binding at the seam.
+      if (seen.has(next.assignment_id) || consumed.has(next.assignment_id)) continue;
+      seen.add(next.assignment_id);
+      pending.push(next);
+    }
+    if (frame.kind === "spawn" || frame.kind === "spawn-wave") continue;
+    assert.equal(frame.kind, "done");
+    // Accepting a non-final member of a wave returns `done: agent-result:accepted...`.
+    // Only the wave's last acceptance advances planning, so keep draining until the
+    // queue is empty and then require the terminal status.
+    if (pending.length > 0) {
+      assert.match(frame.payload.status, /agent-result:accepted/u);
       continue;
     }
-    assert.equal(frame.kind, "done");
     assert.match(frame.payload.status, /ready-to-execute:workstream=main/u);
     return;
   }
-  assert.fail("planning did not reach ready-to-execute within 40 carrier acceptances");
+  assert.fail("planning did not reach ready-to-execute within 200 carrier acceptances");
 }
 
 function planningCarrierForAction(action) {

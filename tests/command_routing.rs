@@ -3,6 +3,7 @@
 mod common;
 
 use std::{
+    collections::VecDeque,
     fs,
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
@@ -12,7 +13,8 @@ use std::{
 
 use drivers::vcs::GitVcs;
 use kernel::generated::{
-    CoreToHostDonePayload, CoreToHostSpawnPayload, CoreToHostUiPayload, EventRow, SeamEnvelope,
+    BackgroundAction, CoreToHostDonePayload, CoreToHostSpawnPayload, CoreToHostSpawnWavePayload,
+    CoreToHostUiPayload, EventRow, SeamEnvelope,
 };
 use sha2::{Digest as ShaDigest, Sha256};
 
@@ -29,18 +31,20 @@ fn command_routing_all_public_commands_reach_driver_surfaces() {
 
     let plan_raw = format!("autopilot-plan main {}", task_paths.join(" "));
     let plan = send_with_log(&plan_raw, &event_log, Some(&repo));
-    assert_eq!(plan.kind, "spawn");
-    let plan_spawn: CoreToHostSpawnPayload =
-        serde_json::from_value(plan.payload).expect("plan spawn payload");
-    assert!(plan_spawn.action.bg_run.command.0.contains(" --spec "));
-    assert!(!plan_spawn
-        .action
-        .bg_run
-        .command
-        .0
-        .contains("autopilot-agent-run --assignment"));
+    let plan_wave = planning_wave_payload(plan);
+    assert_p1_wave_is_parallel(&plan_wave);
+    for action in &plan_wave.actions {
+        assert!(action.bg_run.command.0.contains(" --spec "));
+        assert!(
+            !action
+                .bg_run
+                .command
+                .0
+                .contains("autopilot-agent-run --assignment")
+        );
+    }
 
-    let ready = complete_planning_until_ready(plan_spawn, &event_log, &repo);
+    let ready = complete_planning_until_ready(plan_wave, &event_log, &repo);
     assert!(done_status(&ready).contains("ready-to-execute:workstream=main"));
     assert!(
         fs::read_to_string(repo.join(".pi/autopilot/main/approved-plan.json"))
@@ -133,13 +137,15 @@ fn command_routing_all_public_commands_reach_driver_surfaces() {
         close_status.contains("rejection:lifecycle-close:FinalGateFailed:final-commands-exact-tip"),
         "unexpected close status: {close_status}"
     );
-    assert!(!Command::new("git")
-        .current_dir(&repo)
-        .args(["rev-parse", "--verify", "refs/autopilot/results/main/run-1"])
-        .stdout(Stdio::null())
-        .status()
-        .expect("git rev-parse")
-        .success());
+    assert!(
+        !Command::new("git")
+            .current_dir(&repo)
+            .args(["rev-parse", "--verify", "refs/autopilot/results/main/run-1"])
+            .stdout(Stdio::null())
+            .status()
+            .expect("git rev-parse")
+            .success()
+    );
 
     let inject = send_once("autopilot-inject main", None);
     assert!(done_status(&inject).contains("attach:workstream=main;state:sequence=1;revision=1"));
@@ -164,10 +170,10 @@ fn one_unit_work_map_reaches_ready_and_dispatches_one_lane() {
 
     let plan_raw = format!("autopilot-plan main {}", task_paths.join(" "));
     let plan = send_with_log(&plan_raw, &event_log, Some(&repo));
-    let plan_spawn: CoreToHostSpawnPayload =
-        serde_json::from_value(plan.payload).expect("plan spawn payload");
+    let plan_wave = planning_wave_payload(plan);
+    assert_p1_wave_is_parallel(&plan_wave);
     let ready = complete_planning_until_ready_with_work_map(
-        plan_spawn,
+        plan_wave,
         &event_log,
         &repo,
         Some(one_unit_work_map()),
@@ -203,29 +209,21 @@ fn failed_plan_review_projection_is_loud_unconsumed_and_retryable() {
 
     let plan_raw = format!("autopilot-plan main {}", task_paths.join(" "));
     let plan = send_with_log(&plan_raw, &event_log, Some(&repo));
-    let mut spawn_payload: CoreToHostSpawnPayload =
-        serde_json::from_value(plan.payload).expect("plan spawn payload");
-    while spawn_payload.action.assignment_id.0 != "planning-main-plan-reviewer-01" {
-        let response = send_agent_carrier(
-            &spawn_payload,
-            &event_log,
-            &repo,
-            20 + spawn_payload.action.run_revision,
-        );
-        assert_eq!(
-            response.kind, "spawn",
-            "pre-review planning response: {:?}",
-            response
-        );
-        spawn_payload = serde_json::from_value(response.payload).expect("next planning spawn");
-    }
+    let plan_wave = planning_wave_payload(plan);
+    assert_p1_wave_is_parallel(&plan_wave);
+    let spawn_payload = complete_planning_until_assignment(
+        plan_wave,
+        &event_log,
+        &repo,
+        "planning-main-plan-reviewer-01",
+    );
 
     fs::write(
         repo.join(".pi/autopilot/main/work-map.md"),
         "{\"units\":[]}",
     )
     .expect("poison work map");
-    let failed = send_agent_carrier(&spawn_payload, &event_log, &repo, 900);
+    let failed = send_planning_completion(&spawn_payload, &event_log, &repo, 900);
     let failed_status = done_status(&failed);
     assert!(
         failed_status.contains("rejection:planning-postprocess:CONTEXT_GAP:approved-plan:expected at least 1 approved unit, got 0"),
@@ -241,7 +239,7 @@ fn failed_plan_review_projection_is_loud_unconsumed_and_retryable() {
         one_unit_work_map(),
     )
     .expect("repair work map");
-    let retried = send_agent_carrier(&spawn_payload, &event_log, &repo, 901);
+    let retried = send_planning_completion(&spawn_payload, &event_log, &repo, 901);
     assert!(done_status(&retried).contains("ready-to-execute:workstream=main"));
     assert!(repo.join(".pi/autopilot/main/approved-plan.json").exists());
 }
@@ -325,59 +323,181 @@ fn send_with_log(raw: &str, event_log: &Path, cwd: Option<&Path>) -> SeamEnvelop
     send_frame(frame_json(1, raw), event_log, cwd)
 }
 
+fn planning_wave_payload(envelope: SeamEnvelope) -> CoreToHostSpawnWavePayload {
+    assert_eq!(
+        envelope.kind, "spawn-wave",
+        "planning response: {:?}",
+        envelope
+    );
+    serde_json::from_value(envelope.payload).expect("planning spawn-wave payload")
+}
+
+fn assert_p1_wave_is_parallel(wave: &CoreToHostSpawnWavePayload) {
+    assert!(
+        wave.actions.len() > 1,
+        "P1 planning wave must carry more than one action, got {}",
+        wave.actions.len()
+    );
+}
+
 fn complete_planning_until_ready(
-    spawn_payload: CoreToHostSpawnPayload,
+    spawn_wave: CoreToHostSpawnWavePayload,
     event_log: &Path,
     cwd: &Path,
 ) -> SeamEnvelope {
-    complete_planning_until_ready_with_work_map(spawn_payload, event_log, cwd, None)
+    complete_planning_until_ready_with_work_map(spawn_wave, event_log, cwd, None)
 }
 
 fn complete_planning_until_ready_with_work_map(
-    mut spawn_payload: CoreToHostSpawnPayload,
+    spawn_wave: CoreToHostSpawnWavePayload,
     event_log: &Path,
     cwd: &Path,
     work_map_override: Option<String>,
 ) -> SeamEnvelope {
-    for step in 0..40 {
-        let response = send_agent_carrier_with_work_map(
-            &spawn_payload,
+    let mut next_id = 2;
+    let mut pending = VecDeque::new();
+    acknowledge_spawn_wave(&spawn_wave, event_log, cwd, &mut next_id);
+    pending.extend(spawn_wave.actions);
+    for _step in 0..100 {
+        let Some(action) = pending.pop_front() else {
+            panic!("planning queue drained before ready-to-execute");
+        };
+        let response = send_planning_completion_with_work_map(
+            &action,
             event_log,
             cwd,
-            step + 2,
+            next_id,
             work_map_override.as_deref(),
         );
-        if response.kind == "done" {
-            return response;
+        next_id += 2;
+        match response.kind.as_str() {
+            "done" => {
+                let status = done_status(&response);
+                if status.contains("ready-to-execute:workstream=main") {
+                    assert!(
+                        pending.is_empty(),
+                        "planning reached ready with {} issued actions still pending",
+                        pending.len()
+                    );
+                    return response;
+                }
+                if status.starts_with("rejection:") || status.starts_with("planning:blocked:") {
+                    return response;
+                }
+            }
+            "spawn-wave" => {
+                let wave = planning_wave_payload(response);
+                acknowledge_spawn_wave(&wave, event_log, cwd, &mut next_id);
+                pending.extend(wave.actions);
+            }
+            other => panic!("planning step returned unexpected frame kind {other}"),
         }
-        assert_eq!(
-            response.kind, "spawn",
-            "planning step response: {:?}",
-            response
-        );
-        spawn_payload = serde_json::from_value(response.payload).expect("next planning spawn");
     }
     panic!("planning did not become ready");
 }
 
-fn send_agent_carrier(
-    spawn_payload: &CoreToHostSpawnPayload,
+fn complete_planning_until_assignment(
+    spawn_wave: CoreToHostSpawnWavePayload,
+    event_log: &Path,
+    cwd: &Path,
+    target_assignment_id: &str,
+) -> BackgroundAction {
+    let mut next_id = 2;
+    let mut pending = VecDeque::new();
+    acknowledge_spawn_wave(&spawn_wave, event_log, cwd, &mut next_id);
+    pending.extend(spawn_wave.actions);
+    for _step in 0..100 {
+        let Some(action) = pending.pop_front() else {
+            panic!("planning queue drained before issuing {target_assignment_id}");
+        };
+        if action.assignment_id.0 == target_assignment_id {
+            return action;
+        }
+        let response = send_planning_completion(&action, event_log, cwd, next_id);
+        next_id += 2;
+        match response.kind.as_str() {
+            "done" => {
+                let status = done_status(&response);
+                assert!(
+                    !status.contains("ready-to-execute:workstream=main"),
+                    "planning became ready before issuing {target_assignment_id}: {status}"
+                );
+                assert!(
+                    !status.starts_with("rejection:") && !status.starts_with("planning:blocked:"),
+                    "planning stopped before issuing {target_assignment_id}: {status}"
+                );
+            }
+            "spawn-wave" => {
+                let wave = planning_wave_payload(response);
+                acknowledge_spawn_wave(&wave, event_log, cwd, &mut next_id);
+                pending.extend(wave.actions);
+            }
+            other => panic!("planning step returned unexpected frame kind {other}"),
+        }
+    }
+    panic!("planning did not issue {target_assignment_id}");
+}
+
+fn acknowledge_spawn_wave(
+    wave: &CoreToHostSpawnWavePayload,
+    event_log: &Path,
+    cwd: &Path,
+    next_id: &mut u64,
+) {
+    for action in &wave.actions {
+        let ack = send_spawn_result(action, event_log, cwd, *next_id);
+        *next_id += 1;
+        let status = done_status(&ack);
+        assert!(
+            !status.starts_with("rejection:"),
+            "spawn-result ack rejected for {}: {status}",
+            action.assignment_id.0
+        );
+    }
+}
+
+fn send_spawn_result(
+    action: &BackgroundAction,
     event_log: &Path,
     cwd: &Path,
     id: u64,
 ) -> SeamEnvelope {
-    send_agent_carrier_with_work_map(spawn_payload, event_log, cwd, id, None)
+    let cwd = fs::canonicalize(cwd).expect("canonical cwd");
+    send_frame(
+        serde_json::json!({
+            "v":1,
+            "id":id,
+            "kind":"spawn-result",
+            "payload":{
+                "action_id":action.action_id.0,
+                "assignment_id":action.assignment_id.0,
+                "status":"launched",
+                "task_id":format!("task-{}", action.action_id.0)
+            }
+        }),
+        event_log,
+        Some(&cwd),
+    )
 }
 
-fn send_agent_carrier_with_work_map(
-    spawn_payload: &CoreToHostSpawnPayload,
+fn send_planning_completion(
+    action: &BackgroundAction,
+    event_log: &Path,
+    cwd: &Path,
+    id: u64,
+) -> SeamEnvelope {
+    send_planning_completion_with_work_map(action, event_log, cwd, id, None)
+}
+
+fn send_planning_completion_with_work_map(
+    action: &BackgroundAction,
     event_log: &Path,
     cwd: &Path,
     id: u64,
     work_map_override: Option<&str>,
 ) -> SeamEnvelope {
     let cwd = fs::canonicalize(cwd).expect("canonical cwd");
-    let assignment_id = &spawn_payload.action.assignment_id.0;
+    let assignment_id = &action.assignment_id.0;
     let spec_path = cwd
         .join(".pi/autopilot/main/planning/specs")
         .join(format!("{assignment_id}.json"));
@@ -391,9 +511,9 @@ fn send_agent_carrier_with_work_map(
         .join(format!("{assignment_id}.json"));
     let carrier = serde_json::json!({
         "schema":"autopilot.planning_carrier.v1",
-        "action_id":spawn_payload.action.action_id.0,
+        "action_id":action.action_id.0,
         "assignment_id":assignment_id,
-        "run_revision":spawn_payload.action.run_revision,
+        "run_revision":action.run_revision,
         "workstream":"main",
         "role_id":spec["role_id"],
         "mode":spec["mode"],
@@ -419,11 +539,32 @@ fn send_agent_carrier_with_work_map(
         serde_json::to_vec(&carrier).expect("planning carrier serialize"),
     )
     .expect("planning carrier fixture file");
-    send_frame(
-        serde_json::json!({"v":1,"id":id,"kind":"agent-result","payload":{"assignment_id":assignment_id,"carrier":carrier}}),
+    let completed = send_frame(
+        serde_json::json!({
+            "v":1,
+            "id":id,
+            "kind":"task-completed",
+            "payload":{
+                "task_id":format!("task-{}", action.action_id.0),
+                "action_id":action.action_id.0,
+                "assignment_id":assignment_id,
+                "status":"completed"
+            }
+        }),
         event_log,
         Some(&cwd),
-    )
+    );
+    let agent_result = send_frame(
+        serde_json::json!({"v":1,"id":id + 1,"kind":"agent-result","payload":{"assignment_id":assignment_id,"carrier":carrier}}),
+        event_log,
+        Some(&cwd),
+    );
+    assert_eq!(
+        agent_result.kind, "done",
+        "agent-result follow-up response: {:?}",
+        agent_result
+    );
+    completed
 }
 
 fn one_unit_work_map() -> String {

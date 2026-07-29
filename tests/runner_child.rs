@@ -181,12 +181,19 @@ fn autopilot_plan_preserves_multiple_context_documents_in_manifest_spec_and_prom
     );
     std::env::set_current_dir(previous).expect("restore cwd");
 
-    assert_eq!(envelope.kind, "spawn", "payload={}", envelope.payload);
-    let spawn: CoreToHostSpawnPayload =
-        serde_json::from_value(envelope.payload).expect("spawn payload");
+    // Planning now launches the whole P1 wave in one frame.
+    assert_eq!(envelope.kind, "spawn-wave", "payload={}", envelope.payload);
+    let actions = envelope.payload["actions"]
+        .as_array()
+        .expect("spawn-wave actions");
+    assert!(
+        actions.len() > 1,
+        "P1 must launch in parallel: {}",
+        envelope.payload
+    );
     assert_eq!(
-        spawn.action.assignment_id.0,
-        "planning-main-task-extractor-01"
+        actions[0]["assignment_id"].as_str(),
+        Some("planning-main-task-extractor-01")
     );
 
     let manifest: Value = serde_json::from_slice(
@@ -936,11 +943,8 @@ fn write_planning_spec_with_prompt(
         "CONTEXT-SENTINEL-UNIQUE",
     );
     let context_documents = vec![context_document.clone()];
-    let context_digest = planning_context_digest_for_spec(
-        "set-a",
-        &authority_documents,
-        &context_documents,
-    );
+    let context_digest =
+        planning_context_digest_for_spec("set-a", &authority_documents, &context_documents);
     let session_id = session_id_for(
         &Id("main".to_owned()),
         &assignment_id,
@@ -1189,14 +1193,12 @@ fn planning_context_digest_for_spec(
     authority_documents: &[Value],
     context_documents: &[Value],
 ) -> String {
-    let authority_documents = serde_json::from_value::<Vec<TaskDocument>>(Value::Array(
-        authority_documents.to_vec(),
-    ))
-    .expect("authority documents match agent-run spec schema");
-    let context_documents = serde_json::from_value::<Vec<TaskDocument>>(Value::Array(
-        context_documents.to_vec(),
-    ))
-    .expect("context documents match agent-run spec schema");
+    let authority_documents =
+        serde_json::from_value::<Vec<TaskDocument>>(Value::Array(authority_documents.to_vec()))
+            .expect("authority documents match agent-run spec schema");
+    let context_documents =
+        serde_json::from_value::<Vec<TaskDocument>>(Value::Array(context_documents.to_vec()))
+            .expect("context documents match agent-run spec schema");
     planning_context_digest(authority_set_id, &authority_documents, &context_documents)
         .expect("planning context digest")
 }

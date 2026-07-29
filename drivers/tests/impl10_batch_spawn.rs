@@ -16,10 +16,8 @@ use serde_json::json;
 static CWD_LOCK: Mutex<()> = Mutex::new(());
 
 fn temp_repo(name: &str) -> PathBuf {
-    let root = std::env::temp_dir().join(format!(
-        "pi-autopilot-impl10-{name}-{}",
-        std::process::id()
-    ));
+    let root =
+        std::env::temp_dir().join(format!("pi-autopilot-impl10-{name}-{}", std::process::id()));
     if root.exists() {
         fs::remove_dir_all(&root).expect("old temp cleanup");
     }
@@ -37,10 +35,26 @@ fn run_git(root: &Path, args: &[&str]) {
 }
 
 fn write_planning_inputs(root: &Path) {
-    fs::write(root.join("TASK-A.md"), doc("[authority]", "set-a", "Implement batch planning.")).expect("task a");
-    fs::write(root.join("TASK-B.md"), doc("[authority]", "set-a", "Respect every barrier.")).expect("task b");
-    fs::write(root.join("TASK-C.md"), doc("[authority]", "set-a", "Acknowledge launches.")).expect("task c");
-    fs::write(root.join("CONTEXT.md"), doc("[context/non-authority]", "set-a", "Repository context.")).expect("context");
+    fs::write(
+        root.join("TASK-A.md"),
+        doc("[authority]", "set-a", "Implement batch planning."),
+    )
+    .expect("task a");
+    fs::write(
+        root.join("TASK-B.md"),
+        doc("[authority]", "set-a", "Respect every barrier."),
+    )
+    .expect("task b");
+    fs::write(
+        root.join("TASK-C.md"),
+        doc("[authority]", "set-a", "Acknowledge launches."),
+    )
+    .expect("task c");
+    fs::write(
+        root.join("CONTEXT.md"),
+        doc("[context/non-authority]", "set-a", "Repository context."),
+    )
+    .expect("context");
 }
 
 fn doc(marker: &str, id: &str, body: &str) -> String {
@@ -70,8 +84,14 @@ fn with_repo<T>(name: &str, f: impl FnOnce(&Path, &mut CoreState) -> T) -> T {
     init_repo(&root);
     let previous = std::env::current_dir().expect("cwd");
     unsafe {
-        std::env::set_var("AUTOPILOT_NODE_EXECUTABLE", std::env::current_exe().expect("exe"));
-        std::env::set_var("AUTOPILOT_AGENT_RUNNER_WRAPPER", std::env::current_exe().expect("exe"));
+        std::env::set_var(
+            "AUTOPILOT_NODE_EXECUTABLE",
+            std::env::current_exe().expect("exe"),
+        );
+        std::env::set_var(
+            "AUTOPILOT_AGENT_RUNNER_WRAPPER",
+            std::env::current_exe().expect("exe"),
+        );
     }
     std::env::set_current_dir(&root).expect("chdir");
     let mut state = CoreState::open(None).expect("state");
@@ -83,11 +103,22 @@ fn with_repo<T>(name: &str, f: impl FnOnce(&Path, &mut CoreState) -> T) -> T {
 #[test]
 fn planning_wave_launches_full_wave_up_to_cap() {
     with_repo("full-wave", |_root, state| {
-        let frame = send(state, command_frame(1, "autopilot-plan main TASK-A.md TASK-B.md TASK-C.md CONTEXT.md"));
+        let frame = send(
+            state,
+            command_frame(
+                1,
+                "autopilot-plan main TASK-A.md TASK-B.md TASK-C.md CONTEXT.md",
+            ),
+        );
         assert_eq!(frame.kind, "spawn-wave", "payload={}", frame.payload);
         let actions = frame.payload["actions"].as_array().expect("wave actions");
         assert_eq!(actions.len(), 7);
-        assert!(actions.iter().all(|action| action["assignment_id"].as_str().expect("assignment id").contains("task-extractor")));
+        assert!(actions.iter().all(|action| {
+            action["assignment_id"]
+                .as_str()
+                .expect("assignment id")
+                .contains("task-extractor")
+        }));
     });
 }
 
@@ -106,7 +137,11 @@ fn planning_wave_respects_lower_cap_and_tops_up() {
 
     let first = next_planning_wave(&manifest, &PlanningRefs::default(), 3).expect("first wave");
     assert_eq!(first.len(), 3);
-    assert!(first.iter().all(|assignment| assignment.role == "task-extractor"));
+    assert!(
+        first
+            .iter()
+            .all(|assignment| assignment.role == "task-extractor")
+    );
 
     let issued = p1
         .iter()
@@ -190,6 +225,10 @@ fn core_restart_midwave_recomputes_identical_wave() {
     let after = next_planning_wave(&manifest, &refs.clone(), 7).expect("after restart");
     assert_eq!(before, after);
     assert_eq!(before.len(), 2);
-    assert!(before.iter().all(|assignment| assignment.assignment_id != p1[0].assignment_id));
+    assert!(
+        before
+            .iter()
+            .all(|assignment| assignment.assignment_id != p1[0].assignment_id)
+    );
     assert_eq!(before[0].assignment_id, p1[5].assignment_id);
 }
