@@ -14,7 +14,7 @@ use crate::runner::rpc::{
 };
 
 use kernel::failure::{Failure, OperatorDecision, RetryPolicy};
-use kernel::generated::{AgentRunSpec, DeliveryResult, TaskDocument};
+use kernel::generated::{AgentRunSpec, DeliveryResult, SessionContinuity, TaskDocument};
 use serde_json::Value;
 use sha2::{Digest as ShaDigest, Sha256};
 
@@ -182,6 +182,7 @@ impl RpcAssignment {
             spec.model.clone(),
             spec.thinking.0.clone(),
             spec.session_id.0.clone(),
+            PathBuf::from(&spec.session_dir.0),
             tools,
         );
         config.stderr_tail_bytes = stderr_limit;
@@ -573,6 +574,7 @@ impl RpcAssignment {
             .ok_or_else(|| "agent-run get_state missing data".to_owned())?;
         let value: Value = serde_json::from_str(data)
             .map_err(|error| format!("agent-run get_state malformed data: {error}"))?;
+        Self::validate_session_history(spec, &value)?;
         let session = value.get("sessionId").and_then(Value::as_str);
         let thinking = value.get("thinkingLevel").and_then(Value::as_str);
         let auto = value.get("autoCompactionEnabled").and_then(Value::as_bool);
@@ -593,6 +595,32 @@ impl RpcAssignment {
             ));
         }
         Ok(())
+    }
+
+    /// Fence the child's inherited conversation length against the assignment's
+    /// durable continuity class.
+    ///
+    /// A genuinely fresh assignment must open an empty Pi session. Any prior
+    /// message on the active branch means the child inherited another run's
+    /// context, which is unobservable in the produced carrier and therefore
+    /// must fail loudly here rather than silently bias the model.
+    fn validate_session_history(spec: &AgentRunSpec, state: &Value) -> Result<(), String> {
+        let message_count = state
+            .get("messageCount")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "agent-run get_state missing messageCount".to_owned())?;
+        match spec.session_continuity {
+            SessionContinuity::Fresh if message_count != 0 => Err(format!(
+                "agent-run stale child session: assignment {} is fresh (attempt 1, no checkpoint) but session {} already holds {message_count} message(s); expected 0",
+                spec.assignment_id.0, spec.session_id.0
+            )),
+            SessionContinuity::Fresh => Ok(()),
+            SessionContinuity::Resume if message_count == 0 => Err(format!(
+                "agent-run resume without history: assignment {} authorizes resume but session {} is empty",
+                spec.assignment_id.0, spec.session_id.0
+            )),
+            SessionContinuity::Resume => Ok(()),
+        }
     }
 
     fn checkpoint_record(
@@ -906,7 +934,7 @@ fn parse_args(args: &[String]) -> Result<PathBuf, String> {
 }
 
 fn validate_spec(strict: &AgentRunSpec, spec_path: &Path) -> Result<(), String> {
-    if strict.schema.0 != "autopilot.agent_run_spec.v1" {
+    if strict.schema.0 != "autopilot.agent_run_spec.v2" {
         return Err(format!(
             "unsupported agent-run spec schema: {}",
             strict.schema.0
@@ -932,7 +960,11 @@ fn validate_spec(strict: &AgentRunSpec, spec_path: &Path) -> Result<(), String> 
 }
 
 fn validate_session_identity(strict: &AgentRunSpec) -> Result<(), String> {
+    // run_id is read from the spec rather than re-derived here. Recomputing it
+    // in the child would recreate the very conflation this fix removes: the
+    // parent owns run identity, the child only verifies the value it was given.
     let expected = super::session_id_for(
+        &strict.run_id,
         &strict.workstream,
         &strict.assignment_id,
         &strict.role_id,

@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use drivers::runner::{
@@ -65,8 +66,17 @@ fn fake_pi_journey_writes_identity_carrier_and_isolated_exact_args() {
         .collect::<Vec<_>>();
     assert_eq!(argv[0..3], ["--mode", "rpc", "--session-id"]);
     assert!(argv[3].starts_with("autopilot-planning-main-task-extractor-01-"));
+    // The child must be pinned to a run-owned session directory. Without this
+    // Pi falls back to its cwd-keyed global store, where a later top-level run
+    // reopens an earlier run's session for the same assignment.
+    assert_eq!(argv[4], "--session-dir");
+    assert!(
+        Path::new(&argv[5]).is_absolute(),
+        "session dir must be absolute: {}",
+        argv[5]
+    );
     assert_eq!(
-        argv[4..15],
+        argv[6..17],
         [
             "--no-extensions",
             "--no-skills",
@@ -523,10 +533,11 @@ fn fake_pi_nonzero_malformed_wrong_model_boundary_and_jsonl_protocol_fail_loudly
         &root,
         &rpc_fake_pi("", "emitAssistant('no boundary token here');"),
     );
+    let boundary_spec = next_scenario_spec(&root);
     assert!(
         with_fake_path(&root, || child::main(&[
             "--spec".to_owned(),
-            spec.display().to_string()
+            boundary_spec.display().to_string()
         ]))
         .expect_err("boundary")
         .contains("value repair exhausted")
@@ -542,10 +553,11 @@ fn fake_pi_nonzero_malformed_wrong_model_boundary_and_jsonl_protocol_fail_loudly
             ),
         ),
     );
+    let settled_spec = next_scenario_spec(&root);
     assert!(
         with_fake_path(&root, || child::main(&[
             "--spec".to_owned(),
-            spec.display().to_string()
+            settled_spec.display().to_string()
         ]))
         .expect_err("agent_settled")
         .contains("missing rpc responses")
@@ -562,10 +574,11 @@ fn fake_pi_nonzero_malformed_wrong_model_boundary_and_jsonl_protocol_fail_loudly
             ),
         ),
     );
+    let dedupe_spec = next_scenario_spec(&root);
     assert!(
         with_fake_path(&root, || child::main(&[
             "--spec".to_owned(),
-            spec.display().to_string()
+            dedupe_spec.display().to_string()
         ]))
         .is_ok(),
         "duplicate identical terminal event is de-duplicated"
@@ -582,10 +595,11 @@ fn fake_pi_nonzero_malformed_wrong_model_boundary_and_jsonl_protocol_fail_loudly
             ),
         ),
     );
+    let tool_after_spec = next_scenario_spec(&root);
     assert!(
         with_fake_path(&root, || child::main(&[
             "--spec".to_owned(),
-            spec.display().to_string()
+            tool_after_spec.display().to_string()
         ]))
         .expect_err("tool after assistant")
         .contains("tool activity")
@@ -602,10 +616,11 @@ fn fake_pi_nonzero_malformed_wrong_model_boundary_and_jsonl_protocol_fail_loudly
         ),
     );
     fs::remove_file(carrier_path(&root)).ok();
+    let tool_cycle_spec = next_scenario_spec(&root);
     assert!(
         with_fake_path(&root, || child::main(&[
             "--spec".to_owned(),
-            spec.display().to_string()
+            tool_cycle_spec.display().to_string()
         ]))
         .is_ok(),
         "real Pi 0.82 agent_end messages shape should parse"
@@ -622,10 +637,11 @@ fn fake_pi_nonzero_malformed_wrong_model_boundary_and_jsonl_protocol_fail_loudly
         ),
     );
     fs::remove_file(carrier_path(&root)).ok();
+    let stop_reason_spec = next_scenario_spec(&root);
     assert!(
         with_fake_path(&root, || child::main(&[
             "--spec".to_owned(),
-            spec.display().to_string()
+            stop_reason_spec.display().to_string()
         ]))
         .expect_err("bad stopReason")
         .contains("stopReason")
@@ -927,7 +943,39 @@ fn write_planning_spec_with_prompt(
     model: &str,
     prompt: &str,
 ) -> PathBuf {
+    write_planning_spec_inner(
+        root,
+        "019fa883-1eaf-75f9-99af-6aa246736f72",
+        mutate,
+        boundary,
+        model,
+        prompt,
+    )
+}
+
+fn write_planning_spec_with_prompt_for_run(
+    root: &Path,
+    run_id: &str,
+    boundary: &str,
+    model: &str,
+    prompt: &str,
+) -> PathBuf {
+    write_planning_spec_inner(root, run_id, |value| value, boundary, model, prompt)
+}
+
+fn write_planning_spec_inner(
+    root: &Path,
+    run_id: &str,
+    mutate: impl Fn(Value) -> Value,
+    boundary: &str,
+    model: &str,
+    prompt: &str,
+) -> PathBuf {
     let assignment_id = Id("planning-main-task-extractor-01".to_owned());
+    // Session directories are run-owned in production; mirror that here so the
+    // test cannot pass by accident when two runs share one directory.
+    let session_dir = root.join("run-sessions").join(run_id);
+    fs::create_dir_all(&session_dir).expect("session dir");
     let paths = planning_paths(root, "main", &assignment_id);
     fs::create_dir_all(paths.prompt_path.parent().expect("prompt parent")).expect("prompt dir");
     fs::write(&paths.prompt_path, prompt).expect("prompt");
@@ -946,6 +994,7 @@ fn write_planning_spec_with_prompt(
     let context_digest =
         planning_context_digest_for_spec("set-a", &authority_documents, &context_documents);
     let session_id = session_id_for(
+        &Id(run_id.to_owned()),
         &Id("main".to_owned()),
         &assignment_id,
         &Id("task-extractor".to_owned()),
@@ -953,10 +1002,11 @@ fn write_planning_spec_with_prompt(
         &ContractId(boundary.to_owned()),
     );
     let spec = json!({
-        "schema":"autopilot.agent_run_spec.v1",
+        "schema":"autopilot.agent_run_spec.v2",
         "assignment_kind":"planning-review",
         "action_id":"action-planning-main-task-extractor-01",
         "assignment_id":"planning-main-task-extractor-01",
+        "run_id":run_id,
         "run_revision":1,
         "workstream":"main",
         "role_id":"task-extractor",
@@ -970,6 +1020,8 @@ fn write_planning_spec_with_prompt(
         "spec_path":paths.spec_path,
         "prompt_path":paths.prompt_path,
         "prompt_digest":sha256_hex(prompt.as_bytes()),
+        "session_dir":session_dir.display().to_string(),
+        "session_continuity":"fresh",
         "boundary_id":boundary,
         "boundary_digest":contract_digest(boundary),
         "result_contract":boundary,
@@ -1036,6 +1088,15 @@ import {{ appendFileSync, readFileSync, writeFileSync }} from 'node:fs';
 let promptCount = 0;
 let contextPercent = 10;
 const sessionId = process.argv[process.argv.indexOf('--session-id') + 1];
+const sessionDirIndex = process.argv.indexOf('--session-dir');
+if (sessionDirIndex === -1) {{ process.stderr.write('fake pi: --session-dir is required\n'); process.exit(64); }}
+const sessionDir = process.argv[sessionDirIndex + 1];
+// Model real Pi's session store: a session file keyed by (sessionDir, sessionId)
+// is reopened when it already exists, and its retained messages become context.
+const sessionPath = `${{sessionDir}}/${{sessionId}}.jsonl`;
+let storedMessages = [];
+try {{ storedMessages = readFileSync(sessionPath, 'utf8').split('\n').filter(line => line.trim()); }} catch {{ storedMessages = []; }}
+function persist(entry) {{ storedMessages.push(JSON.stringify(entry)); appendFileSync(sessionPath, JSON.stringify(entry) + '\n'); }}
 function send(value) {{ process.stdout.write(JSON.stringify(value) + '\n'); }}
 function message(text, model='gpt-5.5', stopReason='stop') {{ return {{ role:'assistant', provider:'openai-codex', model, content:[{{type:'text', text}}], stopReason }}; }}
 function emitAssistant(text, model='gpt-5.5', stopReason='stop') {{ const msg = message(text, model, stopReason); send({{type:'agent_start'}}); send({{type:'message_start'}}); send({{type:'message_end', message: msg}}); send({{type:'agent_end', willRetry:false}}); send({{type:'agent_settled'}}); }}
@@ -1046,12 +1107,12 @@ process.stdin.on('data', chunk => {{ buffer += chunk; let lines = buffer.split('
 process.stdin.on('end', () => process.exit(0));
 function handle(cmd) {{
   if (cmd.type === 'set_auto_compaction') return send({{id:cmd.id,type:'response',command:'set_auto_compaction',success:true}});
-  if (cmd.type === 'get_state') return send({{id:cmd.id,type:'response',command:'get_state',success:true,data:{{model:{{id:'gpt-5.5',provider:'openai-codex'}},thinkingLevel:'high',sessionId,autoCompactionEnabled:false,pendingMessageCount:0}}}});
+  if (cmd.type === 'get_state') return send({{id:cmd.id,type:'response',command:'get_state',success:true,data:{{model:{{id:'gpt-5.5',provider:'openai-codex'}},thinkingLevel:'high',sessionId,autoCompactionEnabled:false,messageCount:storedMessages.length,pendingMessageCount:0}}}});
   if (cmd.type === 'get_session_stats') return send({{id:cmd.id,type:'response',command:'get_session_stats',success:true,data:statsData()}});
   if (cmd.type === 'abort') return send({{id:cmd.id,type:'response',command:'abort',success:true}});
   if (cmd.type === 'compact') {{ send({{type:'compaction_start',reason:'manual'}}); send({{type:'compaction_end',reason:'manual',aborted:false,willRetry:false}}); send({{id:cmd.id,type:'response',command:'compact',success:true,data:{{summary:'ok'}}}}); if (typeof afterCompact === 'function') afterCompact(cmd); return; }}
   if (cmd.type === 'steer') {{ send({{id:cmd.id,type:'response',command:'steer',success:true}}); send({{type:'queue_update',steering:[cmd.message],followUp:[]}}); if (typeof afterSteer === 'function') afterSteer(cmd); return; }}
-  if (cmd.type === 'prompt') {{ promptCount++; send({{id:cmd.id,type:'response',command:'prompt',success:true}}); {on_prompt}; return; }}
+  if (cmd.type === 'prompt') {{ promptCount++; persist({{role:'user', content:cmd.message}}); send({{id:cmd.id,type:'response',command:'prompt',success:true}}); {on_prompt}; return; }}
   send({{id:cmd.id,type:'response',command:cmd.type,success:false,error:'unexpected command'}});
 }}
 "#
@@ -1243,4 +1304,136 @@ fn sha256_hex(data: &[u8]) -> String {
         out.push_str(&format!("{byte:02x}"));
     }
     out
+}
+
+/// Two distinct top-level runs must never share a child Pi session.
+///
+/// The original defect was invisible to every existing gate because the session
+/// id was derived only from assignment identity, and probes used a unique
+/// temporary cwd per run. This test therefore holds the cwd *fixed* across both
+/// runs and clears the repo-local `.pi/autopilot` state between them, which is
+/// exactly what an operator does when starting a fresh run. Pi's session store
+/// is global, so only a run-scoped identity can keep the second run clean.
+#[test]
+fn distinct_top_level_runs_do_not_share_child_pi_sessions() {
+    let root = temp_root("runner-cross-run-freshness");
+    let accepted = transcript("planning.task-atoms.v1");
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi("", &format!("emitAssistant({accepted:?});")),
+    );
+
+    let first = write_planning_spec_for_run(
+        &root,
+        "019fa883-1eaf-75f9-99af-6aa246736f72",
+        "planning.task-atoms.v1",
+    );
+    with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), first.display().to_string()])
+    })
+    .expect("first top-level run succeeds");
+    // Both runs address the same assignment and therefore the same spec path,
+    // so record run 1's identity before run 2 overwrites the file.
+    let first_session = spec_session_id(&first);
+    let first_dir = spec_session_dir(&first);
+
+    // The operator-visible reset: repo-local autopilot state is removed. Pi's
+    // global session store is deliberately left untouched, because Autopilot
+    // cannot and must not delete it.
+    fs::remove_dir_all(root.join(".pi/autopilot")).expect("clear repo-local state");
+
+    let second = write_planning_spec_for_run(
+        &root,
+        "019fb111-2c3d-7a4b-8e5f-9a0b1c2d3e4f",
+        "planning.task-atoms.v1",
+    );
+    with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), second.display().to_string()])
+    })
+    .expect("second top-level run must start from a fresh child session");
+
+    let second_session = spec_session_id(&second);
+    assert_ne!(
+        first_session, second_session,
+        "two top-level runs derived the same child session id; the second run would inherit the first run's context"
+    );
+    let second_dir = spec_session_dir(&second);
+    assert_ne!(
+        first_dir, second_dir,
+        "each top-level run must own a private Pi session directory"
+    );
+}
+
+/// A child declared `fresh` that finds retained conversation must fail loudly
+/// rather than silently inheriting it.
+#[test]
+fn fresh_assignment_rejects_inherited_child_session_history() {
+    let root = temp_root("runner-stale-session-rejected");
+    let accepted = transcript("planning.task-atoms.v1");
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi("", &format!("emitAssistant({accepted:?});")),
+    );
+    let spec = write_planning_spec_for_run(
+        &root,
+        "019fa883-1eaf-75f9-99af-6aa246736f72",
+        "planning.task-atoms.v1",
+    );
+
+    // Pre-seed the run-owned store with a session file for this exact id, as a
+    // prior run would have left behind had identity collided.
+    let session_dir = spec_session_dir(&spec);
+    fs::create_dir_all(&session_dir).expect("session dir");
+    fs::write(
+        session_dir.join(format!("{}.jsonl", spec_session_id(&spec))),
+        "{\"role\":\"user\",\"content\":\"stale context from an earlier run\"}\n",
+    )
+    .expect("seed stale session");
+
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("fresh assignment must refuse inherited history");
+    assert!(
+        error.contains("stale child session"),
+        "expected a loud stale-session rejection, got: {error}"
+    );
+}
+
+/// Issue a spec for the next scenario in a multi-scenario test.
+///
+/// Each scenario is an independent top-level invocation, so each gets its own
+/// run identity exactly as production would. Without this, one scenario's
+/// retained child session would leak into the next and trip the fresh-session
+/// fence instead of the behaviour under test.
+fn next_scenario_spec(root: &Path) -> PathBuf {
+    static SCENARIO: AtomicU32 = AtomicU32::new(0);
+    let n = SCENARIO.fetch_add(1, Ordering::SeqCst);
+    write_planning_spec_for_run(
+        root,
+        &format!("019fb000-0000-7000-8000-{n:012x}"),
+        "planning.task-atoms.v1",
+    )
+}
+
+fn write_planning_spec_for_run(root: &Path, run_id: &str, boundary: &str) -> PathBuf {
+    write_planning_spec_with_prompt_for_run(
+        root,
+        run_id,
+        boundary,
+        "gpt-5.5",
+        "runner prompt with AUTHORITY-A-SENTINEL AUTHORITY-B-SENTINEL AUTHORITY-C-SENTINEL CONTEXT-SENTINEL-UNIQUE",
+    )
+}
+
+fn spec_session_id(spec_path: &Path) -> String {
+    let value: Value =
+        serde_json::from_slice(&fs::read(spec_path).expect("spec")).expect("spec json");
+    value["session_id"].as_str().expect("session_id").to_owned()
+}
+
+fn spec_session_dir(spec_path: &Path) -> PathBuf {
+    let value: Value =
+        serde_json::from_slice(&fs::read(spec_path).expect("spec")).expect("spec json");
+    PathBuf::from(value["session_dir"].as_str().expect("session_dir"))
 }

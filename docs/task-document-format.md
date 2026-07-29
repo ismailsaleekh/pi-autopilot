@@ -1,7 +1,9 @@
 # Task document format
 
-`/autopilot-plan` accepts **exactly four** task files. Each is a UTF-8 Markdown file with a
-strict three-line header followed by a body.
+`/autopilot-plan` accepts a **variadic** task pack: any number of files, in any order,
+as long as the pack contains at least one `[authority]` document and at least one
+`[context/non-authority]` document sharing one `authority_set_id`. Each is a UTF-8
+Markdown file with a strict three-line header followed by a body.
 
 This format is enforced by `drivers/src/planning/mod.rs::classify_task_document` and
 `validate_task_input_set`. Every rule below is mechanically checked before any model is
@@ -12,19 +14,20 @@ invoked — a malformed pack is rejected with a typed error and costs nothing.
 ## The invocation
 
 ```
-/autopilot-plan <workstream> <authority-1> <authority-2> <authority-3> <context>
+/autopilot-plan <workstream> <path> [<path> ...]
 ```
 
-Exactly four paths, in this order:
+Order is **not** significant. The pack is validated as a set:
 
-| Position | Required class |
+| Rule | Requirement |
 |---|---|
-| 1 | `[authority]` |
-| 2 | `[authority]` |
-| 3 | `[authority]` |
-| 4 | `[context/non-authority]` |
+| Authority | at least one `[authority]` document |
+| Context | at least one `[context/non-authority]` document |
+| Binding | one `authority_set_id`, identical across every file |
+| Forbidden | no `[historical/non-authority]`, no `[index/non-authority]` |
 
-Three authority documents + one context document. Not three, not five — **four**.
+A pack of three files (2 authority + 1 context) and a pack of eight are both valid.
+What is refused is a pack missing either required class.
 
 ---
 
@@ -54,23 +57,26 @@ Line by line:
 
 | Marker | Meaning | Usable in a pack? |
 |---|---|---|
-| `[authority]` | Operator intent. Binding. | ✅ positions 1–3 |
-| `[context/non-authority]` | Supporting background. Not binding. | ✅ position 4 |
+| `[authority]` | Operator intent. Binding. | ✅ one or more required |
+| `[context/non-authority]` | Supporting background. Not binding. | ✅ one or more required |
 | `[historical/non-authority]` | Superseded/forensic material. | ❌ rejected |
 | `[index/non-authority]` | Navigation/index file. | ❌ rejected |
+
+Which documents are authority and which are context is an **operator decision**. The
+classifier never infers it from a filename or from prose.
 
 `historical` and `index` markers are recognised so they can be **explicitly refused** —
 they exist to stop stale or navigational documents being mistaken for authority.
 
 ### `authority_set_id`
 
-- Identical across **all four** files. A mismatch rejects the whole pack.
+- Identical across **every** file in the pack. A mismatch rejects the whole pack.
 - Non-empty, no leading or trailing whitespace.
 - Any stable slug works; a dated task slug is a good habit
   (`schema-migration-2026-07-28`).
 
-Its purpose is to bind four files into one deliberate set, so a stray file cannot be
-silently swept into a run.
+Its purpose is to bind the supplied files into one deliberate set, so a stray file
+cannot be silently swept into a run.
 
 ### Encoding
 
@@ -109,12 +115,12 @@ Every rejection names the exact file and reason.
 
 | Error | Meaning |
 |---|---|
-| `TaskInputCount` | Not exactly four paths |
-| `TaskInputOrder` | Wrong class at a position — reports the position and both classes |
-| `TaskAuthoritySetMismatch` | The four `authority_set_id`s are not identical |
+| `TaskInputInvariant` | No `[authority]` document, or no `[context/non-authority]` document |
+| `TaskInputOrder` | Pack shape rejected by the `planning.task-file-pack.v1` boundary |
+| `TaskAuthoritySetMismatch` | The `authority_set_id`s are not identical |
 | `HistoricalTaskInput` | A `[historical/non-authority]` file was supplied |
 | `IndexTaskInput` | An `[index/non-authority]` file was supplied |
-| `NoTaskAuthority` | No authority document, or an authority body is blank |
+| `NoTaskAuthority` | An authority body is blank |
 
 ### Path — `planning:TaskPath("<reason>")`
 

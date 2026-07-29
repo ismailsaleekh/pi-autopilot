@@ -21,6 +21,10 @@ pub struct RpcSpawnConfig {
     pub model: String,
     pub thinking: String,
     pub session_id: String,
+    /// Run-owned Pi session directory. Required: Pi's default store is keyed
+    /// only by cwd, so omitting this lets a later run reopen an earlier run's
+    /// session for the same assignment.
+    pub session_dir: PathBuf,
     pub tools: Vec<String>,
     pub pi_executable: OsString,
     pub stderr_tail_bytes: usize,
@@ -35,6 +39,7 @@ impl RpcSpawnConfig {
         model: String,
         thinking: String,
         session_id: String,
+        session_dir: PathBuf,
         tools: Vec<String>,
     ) -> Self {
         Self {
@@ -43,6 +48,7 @@ impl RpcSpawnConfig {
             model,
             thinking,
             session_id,
+            session_dir,
             tools,
             pi_executable: OsString::from("pi"),
             stderr_tail_bytes: DEFAULT_STDERR_TAIL_BYTES,
@@ -341,6 +347,15 @@ pub struct RpcClient {
 
 impl RpcClient {
     pub fn spawn(config: RpcSpawnConfig) -> Result<Self, RpcError> {
+        // Create the run-owned session directory up front and fail loudly if it
+        // is unusable. Falling back to Pi's default global store here would
+        // silently restore cross-run session collision.
+        std::fs::create_dir_all(&config.session_dir).map_err(|error| {
+            RpcError::Io(format!(
+                "run-owned pi session directory unavailable at {}: {error}",
+                config.session_dir.display()
+            ))
+        })?;
         let mut command = Command::new(&config.pi_executable);
         command
             .current_dir(&config.cwd)
@@ -348,6 +363,8 @@ impl RpcClient {
             .arg("rpc")
             .arg("--session-id")
             .arg(&config.session_id)
+            .arg("--session-dir")
+            .arg(&config.session_dir)
             .arg("--no-extensions")
             .arg("--no-skills")
             .arg("--no-prompt-templates")

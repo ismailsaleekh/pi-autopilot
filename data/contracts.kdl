@@ -427,12 +427,13 @@ artifact "task_document" schema="autopilot.task_document.v1" producer="Package" 
     field "body" type="string" required=#true
 }
 
-artifact "agent_run_spec" schema="autopilot.agent_run_spec.v1" producer="Package" model_produced=#false {
+artifact "agent_run_spec" schema="autopilot.agent_run_spec.v2" producer="Package" model_produced=#false {
     doc "Strict parent-Core written child runner specification for the package-contained autopilot-agent-run wrapper and Rust agent-run mode."
-    field "schema" type="schema-id" required=#true constant="autopilot.agent_run_spec.v1"
+    field "schema" type="schema-id" required=#true constant="autopilot.agent_run_spec.v2"
     field "assignment_kind" type="validation_assignment_kind" required=#true doc="Explicit assignment class; no runner infers planning/delivery/validation from result_contract."
     field "action_id" type="id" required=#true
     field "assignment_id" type="id" required=#true
+    field "run_id" type="id" required=#true doc="Durable top-level UUIDv7 run identity from .pi/autopilot/<workstream>/run-identity.json; scopes physical child-session identity so a new top-level run can never adopt a prior run's Pi session."
     field "run_revision" type="u64" required=#true
     field "workstream" type="id" required=#true
     field "role_id" type="id" required=#true
@@ -451,7 +452,9 @@ artifact "agent_run_spec" schema="autopilot.agent_run_spec.v1" producer="Package
     field "result_contract" type="contract-id" required=#true
     field "result_contract_digest" type="digest" required=#true
     field "carrier_path" type="path" required=#true
-    field "session_id" type="id" required=#true doc="Stable pi --session-id derived from typed assignment identity; reused for value-repair turns and resume."
+    field "session_id" type="id" required=#true doc="pi --session-id derived from run_id plus typed assignment identity; stable within one run for value-repair turns and resume, and necessarily distinct across top-level runs."
+    field "session_dir" type="path" required=#true doc="Run-owned pi --session-dir under the run root; never Pi's default global session directory."
+    field "session_continuity" type="session_continuity" required=#true doc="Parent-declared continuity class for this child invocation: fresh requires an empty Pi session, resume requires retained history. Declared by the issuing parent, never inferred by the child from disk."
     field "settings_digest" type="digest" required=#true
     field "context_digest" type="digest" required=#true
     field "skills_digest" type="digest" required=#true
@@ -1290,6 +1293,11 @@ enum "finding_kind_v2" {
     value "context-gap"
     value "unsafe-boundary"
     value "advisory"
+}
+
+enum "session_continuity" {
+    value "fresh"
+    value "resume"
 }
 
 enum "validation_assignment_kind" {

@@ -377,6 +377,18 @@ model = arg_value("--model")
 thinking = arg_value("--thinking")
 session_id = arg_value("--session-id")
 mode = arg_value("--mode")
+session_dir = arg_value("--session-dir")
+if not session_dir:
+    sys.stderr.write("fake pi: --session-dir is required\n")
+    sys.exit(64)
+# Model real Pi's store: a session file keyed by (session_dir, session_id) is
+# reopened when present, and its retained messages become model context.
+session_path = os.path.join(session_dir, session_id + ".jsonl")
+try:
+    with open(session_path, "r", encoding="utf-8") as handle:
+        stored_messages = [line for line in handle.read().split("\n") if line.strip()]
+except OSError:
+    stored_messages = []
 
 if mode == "rpc":
     for line in sys.stdin:
@@ -386,9 +398,14 @@ if mode == "rpc":
         if command_type == "set_auto_compaction":
             emit({{"type":"response","id":command_id,"command":command_type,"success":True}})
         elif command_type == "get_state":
-            emit({{"type":"response","id":command_id,"command":command_type,"success":True,"data":{{"sessionId":session_id,"model":{{"provider":provider,"id":model}},"thinkingLevel":thinking,"autoCompactionEnabled":False}}}})
+            emit({{"type":"response","id":command_id,"command":command_type,"success":True,"data":{{"sessionId":session_id,"model":{{"provider":provider,"id":model}},"thinkingLevel":thinking,"autoCompactionEnabled":False,"messageCount":len(stored_messages)}}}})
         elif command_type == "prompt":
             content = next_output()
+            entry = json.dumps({{"role":"user","content":command.get("message")}}, separators=(",", ":"))
+            stored_messages.append(entry)
+            os.makedirs(session_dir, exist_ok=True)
+            with open(session_path, "a", encoding="utf-8") as handle:
+                handle.write(entry + "\n")
             emit({{"type":"response","id":command_id,"command":command_type,"success":True}})
             emit({{"type":"agent_start"}})
             emit({{"type":"turn_start"}})
@@ -434,21 +451,54 @@ else:
     ) -> Vec<runner::AcceptedPlanningArtifactBinding> {
         let categories: &[(&str, &str, &str, &str)] = match role {
             "plan-compiler" => &[
-                ("task-atoms", "planning.task-atoms.v1", "task-extractor", "planning-ws-task-extractor-01"),
-                ("scout-findings", "planning.scout-dossier.v1", "repository-scout", "planning-ws-repository-scout-01"),
+                (
+                    "task-atoms",
+                    "planning.task-atoms.v1",
+                    "task-extractor",
+                    "planning-ws-task-extractor-01",
+                ),
+                (
+                    "scout-findings",
+                    "planning.scout-dossier.v1",
+                    "repository-scout",
+                    "planning-ws-repository-scout-01",
+                ),
             ],
             "plan-reviewer" => &[
-                ("task-atoms", "planning.task-atoms.v1", "task-extractor", "planning-ws-task-extractor-01"),
-                ("scout-findings", "planning.scout-dossier.v1", "repository-scout", "planning-ws-repository-scout-01"),
-                ("compiler-work-maps", "planning.work-map.v1", "plan-compiler", "planning-ws-plan-compiler-01"),
-                ("synthesized-work-map", "planning.work-map.v1", "plan-synthesizer", "planning-ws-plan-synthesizer-02"),
+                (
+                    "task-atoms",
+                    "planning.task-atoms.v1",
+                    "task-extractor",
+                    "planning-ws-task-extractor-01",
+                ),
+                (
+                    "scout-findings",
+                    "planning.scout-dossier.v1",
+                    "repository-scout",
+                    "planning-ws-repository-scout-01",
+                ),
+                (
+                    "compiler-work-maps",
+                    "planning.work-map.v1",
+                    "plan-compiler",
+                    "planning-ws-plan-compiler-01",
+                ),
+                (
+                    "synthesized-work-map",
+                    "planning.work-map.v1",
+                    "plan-synthesizer",
+                    "planning-ws-plan-synthesizer-02",
+                ),
             ],
             _ => &[],
         };
         categories
             .iter()
             .map(|(category_id, boundary_id, role_id, assignment_id)| {
-                let path = self.root.join("accepted").join(format!("{category_id}.json"));
+                let path = self
+                    .root
+                    .join("accepted")
+                    .join(format!("{category_id}.json"));
                 fs::create_dir_all(path.parent().unwrap()).unwrap();
                 let bytes = serde_json::to_vec_pretty(&json!({
                     "category_id": category_id,
@@ -698,7 +748,11 @@ else:
 /// Terminal status text, or a synthetic `accepted:` marker when the seam responded by
 /// launching the next planning wave (which only happens after the prior result was accepted).
 fn response_status(response: &SeamEnvelope) -> String {
-    if let Some(status) = response.payload.get("status").and_then(|value| value.as_str()) {
+    if let Some(status) = response
+        .payload
+        .get("status")
+        .and_then(|value| value.as_str())
+    {
         return status.to_owned();
     }
     let launched = spawned_assignment_ids(response);
@@ -715,7 +769,9 @@ fn assert_spawn_assignment(response: &SeamEnvelope, assignment_id: &str) {
         "expected spawn response: {response:?}"
     );
     assert!(
-        spawned_assignment_ids(response).iter().any(|id| id == assignment_id),
+        spawned_assignment_ids(response)
+            .iter()
+            .any(|id| id == assignment_id),
         "spawn should launch {assignment_id}: {response:?}"
     );
 }

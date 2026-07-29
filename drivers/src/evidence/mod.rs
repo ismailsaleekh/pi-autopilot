@@ -333,6 +333,14 @@ pub struct BoundProducer {
 }
 
 impl EvidenceIdentity {
+    /// The durable run identity as a contract `Id`, for use as typed session
+    /// identity material. One accessor keeps every consumer reading the same
+    /// durable value instead of re-deriving run identity independently.
+    #[must_use]
+    pub fn run_id_as_id(&self) -> Id {
+        Id(self.run_id.0.clone())
+    }
+
     pub fn for_workstream(workstream: &str) -> Result<Self, EvidenceError> {
         let cwd =
             std::env::current_dir().map_err(|error| EvidenceError::Store(error.to_string()))?;

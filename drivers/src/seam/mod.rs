@@ -284,8 +284,12 @@ fn route_plan(id: u64, args: &[String], state: &mut CoreState) -> Result<SeamEnv
     let assignments =
         planning_assignments(workstream).map_err(|error| context_status("planning", error))?;
     write_planning_manifest(workstream, &input_set, &inventory, &dossier, &assignments)?;
-    match next_planning_outcome(workstream, state).map_err(|error| context_status("planning", error))? {
-        planning::PlanningWaveOutcome::Launch { assignments: wave, .. } => {
+    match next_planning_outcome(workstream, state)
+        .map_err(|error| context_status("planning", error))?
+    {
+        planning::PlanningWaveOutcome::Launch {
+            assignments: wave, ..
+        } => {
             let actions = planning_wave_actions(workstream, &wave, state, &input_set, None)?;
             controlled_spawn_wave(id, actions, state, "planning")
         }
@@ -301,7 +305,13 @@ fn route_plan(id: u64, args: &[String], state: &mut CoreState) -> Result<SeamEnv
             if assignments.is_empty() {
                 return done(id, rejection("planning-wave", "empty-initial-wave"));
             }
-            done(id, format!("planning:complete:workstream={workstream};{}", state.summary()))
+            done(
+                id,
+                format!(
+                    "planning:complete:workstream={workstream};{}",
+                    state.summary()
+                ),
+            )
         }
         planning::PlanningWaveOutcome::Blocked(blocked) => {
             done(id, planning_blocked_status(&blocked, state))
@@ -443,7 +453,9 @@ fn accept_planning_carrier(
     match next_planning_outcome(&carrier.workstream, state)
         .map_err(|error| context_status("planning", error))?
     {
-        planning::PlanningWaveOutcome::Launch { assignments: next, .. } => {
+        planning::PlanningWaveOutcome::Launch {
+            assignments: next, ..
+        } => {
             let input_set = read_planning_input_set(&carrier.workstream)
                 .map_err(|error| format!("CONTEXT_GAP:planning-manifest:{error}"))?;
             let needs_atom_registry = next.iter().any(|assignment| {
@@ -459,8 +471,13 @@ fn accept_planning_carrier(
             } else {
                 None
             };
-            let actions =
-                planning_wave_actions(&carrier.workstream, &next, state, &input_set, atom_registry)?;
+            let actions = planning_wave_actions(
+                &carrier.workstream,
+                &next,
+                state,
+                &input_set,
+                atom_registry,
+            )?;
             return controlled_spawn_wave(id, actions, state, "planning");
         }
         planning::PlanningWaveOutcome::WaitingOnInFlight { wave_id, active } => {
@@ -1720,6 +1737,10 @@ fn validation_issue_for_delivery(
     }
     let cwd = fs::canonicalize(std::env::current_dir().map_err(|error| error.to_string())?)
         .map_err(|error| error.to_string())?;
+    // The validator is a child of the same top-level run, so it resolves the
+    // same durable run identity rather than deriving one of its own.
+    let run_identity = crate::evidence::EvidenceIdentity::for_workstream(&binding.workstream.0)
+        .map_err(|error| format!("run identity unavailable for validator issue: {error:?}"))?;
     let validation_id = format!("validation-{}", binding.assignment_id.0);
     let assignment_id = Id(format!("validator-{}", binding.assignment_id.0));
     let action_id = Id(format!("action-{}", assignment_id.0));
@@ -1768,6 +1789,7 @@ fn validation_issue_for_delivery(
         spec_digest,
         carrier_path: carrier_path.display().to_string(),
         session_id: runner::session_id_for(
+            &run_identity.run_id_as_id(),
             &binding.workstream,
             &assignment_id,
             &Id("validator".to_owned()),

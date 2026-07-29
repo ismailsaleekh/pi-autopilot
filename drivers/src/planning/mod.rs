@@ -1317,7 +1317,6 @@ pub enum PlanningError {
     ContextGap(String),
     TaskPath(String),
     TaskHeader(String),
-    TaskInputCount { expected: usize, actual: usize },
     TaskInputOrder(String),
     TaskInputInvariant(String),
     DuplicateTaskPath(PathBuf),

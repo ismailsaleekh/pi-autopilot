@@ -14,6 +14,7 @@ use kernel::generated::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as ShaDigest, Sha256};
 
+use crate::evidence::EvidenceIdentity;
 use crate::roles::kdl::{blocks, boundary_runtime, one, values};
 use crate::roster::{self, Roster};
 use crate::vcs::GitVcs;
@@ -339,7 +340,10 @@ pub fn planning_issue(request: &PlanningRunnerRequest) -> Result<IssuedRunnerAct
     let cwd = canonical_current_dir()?;
     let paths = planning_paths(&cwd, &request.workstream, &request.assignment_id);
     reject_link_components_for_path(&paths.carrier_path)?;
+    let run_identity = run_identity_for(&request.workstream)?;
+    let session_dir = session_dir_for(&run_identity.run_root);
     let session_id = session_id_for(
+        &run_identity.run_id_as_id(),
         &Id(request.workstream.clone()),
         &request.assignment_id,
         &request.role_id,
@@ -351,10 +355,11 @@ pub fn planning_issue(request: &PlanningRunnerRequest) -> Result<IssuedRunnerAct
     let prompt_digest = sha256_hex(rendered.text.as_bytes());
     let binding_digests = planning_binding_digests(request, &route)?;
     let spec = AgentRunSpec {
-        schema: kernel::generated::SchemaId("autopilot.agent_run_spec.v1".to_owned()),
+        schema: kernel::generated::SchemaId("autopilot.agent_run_spec.v2".to_owned()),
         assignment_kind: ValidationAssignmentKind::PlanningReview,
         action_id: request.action_id.clone(),
         assignment_id: request.assignment_id.clone(),
+        run_id: run_identity.run_id_as_id(),
         run_revision: request.run_revision,
         workstream: Id(request.workstream.clone()),
         role_id: request.role_id.clone(),
@@ -371,12 +376,16 @@ pub fn planning_issue(request: &PlanningRunnerRequest) -> Result<IssuedRunnerAct
         spec_path: to_contract_path(&paths.spec_path)?,
         prompt_path: to_contract_path(&paths.prompt_path)?,
         prompt_digest: Digest(prompt_digest.clone()),
+        session_dir: to_contract_path(&session_dir)?,
         boundary_id: request.boundary_id.clone(),
         boundary_digest: Digest(binding_digests.boundary_digest.clone()),
         result_contract: request.boundary_id.clone(),
         result_contract_digest: Digest(binding_digests.result_contract_digest.clone()),
         carrier_path: to_contract_path(&paths.carrier_path)?,
         session_id: session_id.clone(),
+        // A planning assignment is issued once per run and carries no attempt
+        // history, so its child must always open an empty Pi session.
+        session_continuity: kernel::generated::SessionContinuity::Fresh,
         settings_digest: Digest(binding_digests.settings_digest.clone()),
         context_digest: Digest(binding_digests.context_digest.clone()),
         skills_digest: Digest(binding_digests.skills_digest.clone()),
@@ -488,7 +497,10 @@ pub fn delivery_issue_with_facts(
     let paths = delivery_paths(&worktree, &assignment.assignment_id);
     reject_link_components_for_path(&paths.carrier_path)?;
     let worktree_text = path_to_string(&worktree)?;
+    let run_identity = run_identity_for(&assignment.workstream.0)?;
+    let session_dir = session_dir_for(&run_identity.run_root);
     let session_id = session_id_for(
+        &run_identity.run_id_as_id(),
         &assignment.workstream,
         &assignment.assignment_id,
         &assignment.role_id,
@@ -500,10 +512,11 @@ pub fn delivery_issue_with_facts(
     let prompt_digest = sha256_hex(prompt.as_bytes());
     let binding_digests = delivery_binding_digests(assignment, &route, &worktree_text)?;
     let spec = AgentRunSpec {
-        schema: kernel::generated::SchemaId("autopilot.agent_run_spec.v1".to_owned()),
+        schema: kernel::generated::SchemaId("autopilot.agent_run_spec.v2".to_owned()),
         assignment_kind: ValidationAssignmentKind::Delivery,
         action_id: assignment.action_id.clone(),
         assignment_id: assignment.assignment_id.clone(),
+        run_id: run_identity.run_id_as_id(),
         run_revision: assignment.run_revision,
         workstream: assignment.workstream.clone(),
         role_id: assignment.role_id.clone(),
@@ -520,12 +533,21 @@ pub fn delivery_issue_with_facts(
         spec_path: to_contract_path(&paths.spec_path)?,
         prompt_path: to_contract_path(&paths.prompt_path)?,
         prompt_digest: Digest(prompt_digest.clone()),
+        session_dir: to_contract_path(&session_dir)?,
         boundary_id: delivery_contract.clone(),
         boundary_digest: Digest(binding_digests.boundary_digest.clone()),
         result_contract: delivery_contract.clone(),
         result_contract_digest: Digest(binding_digests.result_contract_digest.clone()),
         carrier_path: to_contract_path(&paths.carrier_path)?,
         session_id: session_id.clone(),
+        // Attempt 1 is a fresh child. A later attempt reuses the same session id
+        // by design (`data/recovery.kdl` value repair and crash resume), so the
+        // child is then expected to find retained history.
+        session_continuity: if assignment.attempt <= 1 {
+            kernel::generated::SessionContinuity::Fresh
+        } else {
+            kernel::generated::SessionContinuity::Resume
+        },
         settings_digest: Digest(binding_digests.settings_digest.clone()),
         context_digest: Digest(binding_digests.context_digest.clone()),
         skills_digest: Digest(binding_digests.skills_digest.clone()),
@@ -693,7 +715,17 @@ pub fn expected_boundary_for_role(role_id: &str) -> Option<&'static str> {
     }
 }
 
+/// Derive the physical Pi child-session identity for one assignment.
+///
+/// `run_id` is the durable top-level run identity. It is part of the hashed
+/// material because logical assignment continuity *within* a run and physical
+/// child-session identity *across* runs are two different concepts: the former
+/// must stay stable (value repair and resume depend on it — see
+/// `data/recovery.kdl` `value_repair … session="same-session-id"`), while the
+/// latter must be fresh, or a new top-level run silently inherits the previous
+/// run's conversation from Pi's global session store.
 pub fn session_id_for(
+    run_id: &Id,
     workstream: &Id,
     assignment_id: &Id,
     role_id: &Id,
@@ -701,11 +733,36 @@ pub fn session_id_for(
     boundary_id: &ContractId,
 ) -> Id {
     let material = format!(
-        "autopilot.pi-session.v1\0{}\0{}\0{}\0{}\0{}",
-        workstream.0, assignment_id.0, role_id.0, mode.0, boundary_id.0
+        "autopilot.pi-session.v2\0{}\0{}\0{}\0{}\0{}\0{}",
+        run_id.0, workstream.0, assignment_id.0, role_id.0, mode.0, boundary_id.0
     );
     let digest = sha256_hex(material.as_bytes());
     Id(format!("autopilot-{}-{}", assignment_id.0, &digest[..16]))
+}
+
+/// Load-or-create the durable top-level run identity for a workstream.
+///
+/// This is a strict pass-through to the existing durable manifest at
+/// `.pi/autopilot/<workstream>/run-identity.json`, so a crash-resumed run
+/// recovers the same `run_id` and therefore the same child session identities.
+/// A failure here is fatal by design: silently inventing a run identity would
+/// reintroduce exactly the cross-run session collision this exists to prevent.
+fn run_identity_for(workstream: &str) -> Result<EvidenceIdentity, RunnerError> {
+    EvidenceIdentity::for_workstream(workstream).map_err(|error| {
+        RunnerError::Io(format!(
+            "run identity unavailable for workstream {workstream}: {error:?}"
+        ))
+    })
+}
+
+/// Absolute run-owned Pi session directory for one top-level run.
+///
+/// Sessions live beside the run's other forensic evidence under the existing
+/// run root, so they share one lifecycle. Pi's default global session store is
+/// never used for child agents: that store is keyed only by cwd, which is what
+/// allows a later run to reopen an earlier run's session.
+pub fn session_dir_for(run_root: &Path) -> PathBuf {
+    run_root.join("pi-sessions")
 }
 
 fn delivery_contract_id() -> ContractId {
@@ -850,7 +907,9 @@ fn validate_planning_request(request: &PlanningRunnerRequest) -> Result<(), Runn
     Ok(())
 }
 
-fn validate_accepted_planning_artifacts(request: &PlanningRunnerRequest) -> Result<(), RunnerError> {
+fn validate_accepted_planning_artifacts(
+    request: &PlanningRunnerRequest,
+) -> Result<(), RunnerError> {
     let policies = crate::context::policy::ContextPolicyRegistry::package()
         .map_err(|error| RunnerError::InvalidSpec(format!("context policy registry: {error:?}")))?;
     let mut seen = std::collections::BTreeSet::new();

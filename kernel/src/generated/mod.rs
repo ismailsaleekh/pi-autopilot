@@ -597,6 +597,14 @@ pub enum RunPhase {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SessionContinuity {
+    #[serde(rename = "fresh")]
+    Fresh,
+    #[serde(rename = "resume")]
+    Resume,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ValidationAssignmentKind {
     #[serde(rename = "delivery")]
     Delivery,
@@ -757,6 +765,9 @@ pub struct AgentRunSpec {
     pub action_id: Id,
     #[serde(rename = "assignment_id")]
     pub assignment_id: Id,
+    /// Durable top-level UUIDv7 run identity from .pi/autopilot/<workstream>/run-identity.json; scopes physical child-session identity so a new top-level run can never adopt a prior run's Pi session.
+    #[serde(rename = "run_id")]
+    pub run_id: Id,
     #[serde(rename = "run_revision")]
     pub run_revision: u64,
     #[serde(rename = "workstream")]
@@ -793,9 +804,15 @@ pub struct AgentRunSpec {
     pub result_contract_digest: Digest,
     #[serde(rename = "carrier_path")]
     pub carrier_path: Path,
-    /// Stable pi --session-id derived from typed assignment identity; reused for value-repair turns and resume.
+    /// pi --session-id derived from run_id plus typed assignment identity; stable within one run for value-repair turns and resume, and necessarily distinct across top-level runs.
     #[serde(rename = "session_id")]
     pub session_id: Id,
+    /// Run-owned pi --session-dir under the run root; never Pi's default global session directory.
+    #[serde(rename = "session_dir")]
+    pub session_dir: Path,
+    /// Parent-declared continuity class for this child invocation: fresh requires an empty Pi session, resume requires retained history. Declared by the issuing parent, never inferred by the child from disk.
+    #[serde(rename = "session_continuity")]
+    pub session_continuity: SessionContinuity,
     #[serde(rename = "settings_digest")]
     pub settings_digest: Digest,
     #[serde(rename = "context_digest")]

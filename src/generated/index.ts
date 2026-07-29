@@ -62,6 +62,7 @@ export type RosterSlot = "control" | "reasoning" | "extraction" | "coding" | "re
 export type RunHealth = "healthy" | "degraded" | "paused" | "unsafe-halt";
 export type RunOutcome = "null" | "closed" | "aborted";
 export type RunPhase = "planning" | "ready-to-execute" | "allocating" | "executing" | "final-verification" | "ready-to-close" | "terminal";
+export type SessionContinuity = "fresh" | "resume";
 export type ValidationAssignmentKind = "planning-review" | "delivery" | "validation";
 export type ValidationBlockerKind = "missing-evidence" | "stale-evidence" | "context-gap" | "external-prerequisite" | "unsafe-boundary";
 export type ValidationOutcomeV2 = "FORWARD_READY" | "FORWARD_BLOCKED" | "PASS" | "NEEDS_FIX" | "BLOCKED";
@@ -108,6 +109,7 @@ export interface AgentRunSpec {
   assignment_kind: ValidationAssignmentKind;
   action_id: Id;
   assignment_id: Id;
+  run_id: Id;
   run_revision: number;
   workstream: Id;
   role_id: Id;
@@ -127,6 +129,8 @@ export interface AgentRunSpec {
   result_contract_digest: Digest;
   carrier_path: Path;
   session_id: Id;
+  session_dir: Path;
+  session_continuity: SessionContinuity;
   settings_digest: Digest;
   context_digest: Digest;
   skills_digest: Digest;

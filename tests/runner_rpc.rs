@@ -365,6 +365,7 @@ fn spawn_fake_client(root: &Path, max_terminal_bytes: usize) -> RpcClient {
         "gpt-5.5".to_owned(),
         "high".to_owned(),
         "session-123".to_owned(),
+        root.join("run-sessions"),
         vec!["read".to_owned(), "ls".to_owned()],
     );
     config.pi_executable = root.join("pi").into_os_string();
