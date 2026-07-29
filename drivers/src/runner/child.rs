@@ -86,7 +86,7 @@ fn run_value_attempts(
     let mut attempt_prompt = prompt;
     for attempt in 1..=MAX_VALUE_ATTEMPTS {
         append_attempt_event(spec, attempt, "started", None)?;
-        let assistant = runner.run_normal_prompt(spec, &attempt_prompt)?;
+        let assistant = run_prompt_with_capacity_retry(runner, spec, &attempt_prompt, attempt)?;
         match write_carrier(spec_path, spec_digest, spec, &assistant) {
             Ok(()) => {
                 append_attempt_event(spec, attempt, "accepted", None)?;
@@ -105,10 +105,50 @@ fn run_value_attempts(
     unreachable!("bounded value attempt loop must return")
 }
 
+/// Send one prompt, retrying only launch-side upstream capacity refusals.
+///
+/// A capacity refusal happens before the model produces anything: no tokens are
+/// billed and no content exists to repair, so the value-repair path cannot help
+/// and the correct response is to wait and re-send the identical prompt. Retry
+/// happens on the same live child session, which keeps the session identity
+/// contract intact and never re-enters the fresh-session fence.
+///
+/// Content failures are deliberately not retried here: they fall through to the
+/// value-repair loop, which reformulates the prompt.
+fn run_prompt_with_capacity_retry(
+    runner: &mut RpcAssignment,
+    spec: &AgentRunSpec,
+    prompt: &str,
+    attempt: u32,
+) -> Result<String, String> {
+    let policy = CapacityRetryPolicy::parse()?;
+    let mut last = String::new();
+    for retry in 0..=policy.max_retries {
+        match runner.run_normal_prompt(spec, prompt) {
+            Ok(assistant) => return Ok(assistant),
+            Err(PromptFailure::UpstreamCapacity(detail)) => {
+                last = detail;
+                if retry == policy.max_retries {
+                    break;
+                }
+                append_attempt_event(spec, attempt, "upstream-capacity-retry", None)?;
+                std::thread::sleep(policy.backoff(retry, &spec.assignment_id.0));
+            }
+            Err(other) => return Err(other.into_message()),
+        }
+    }
+    Err(format!(
+        "agent-run upstream capacity refusal: {last}; exhausted {} upstream capacity retries",
+        policy.max_retries
+    ))
+}
+
 struct RpcAssignment {
     client: RpcClient,
     next_command: u64,
     policy: CheckpointPolicy,
+    /// Detail of the most recent launch-side refusal, set by `finish_cycle`.
+    last_capacity_refusal: Option<String>,
     last_known_percent: Option<f64>,
     checkpoint_armed: bool,
 }
@@ -139,6 +179,8 @@ struct CycleState {
     steer_message_started: bool,
     handoff: Option<AgentHandoff>,
     compacted: bool,
+    /// Set when the terminal was an upstream refusal rather than model output.
+    upstream_capacity_failure: Option<String>,
 }
 
 impl CycleState {
@@ -156,6 +198,7 @@ impl CycleState {
             steer_message_started: matches!(purpose, PromptPurpose::Handoff),
             handoff: None,
             compacted: false,
+            upstream_capacity_failure: None,
         }
     }
 }
@@ -192,6 +235,7 @@ impl RpcAssignment {
             client,
             next_command: 0,
             policy,
+            last_capacity_refusal: None,
             last_known_percent: None,
             checkpoint_armed: false,
         };
@@ -206,8 +250,21 @@ impl RpcAssignment {
         Ok(runner)
     }
 
-    fn run_normal_prompt(&mut self, spec: &AgentRunSpec, prompt: &str) -> Result<String, String> {
-        self.run_prompt(spec, prompt, PromptPurpose::Normal)
+    /// Run one normal prompt cycle, classifying the failure.
+    fn run_normal_prompt(
+        &mut self,
+        spec: &AgentRunSpec,
+        prompt: &str,
+    ) -> Result<String, PromptFailure> {
+        let capacity_before = self.last_capacity_refusal.take();
+        let result = self.run_prompt(spec, prompt, PromptPurpose::Normal);
+        match result {
+            Ok(value) => Ok(value),
+            Err(message) => match self.last_capacity_refusal.take().or(capacity_before) {
+                Some(detail) => Err(PromptFailure::UpstreamCapacity(detail)),
+                None => Err(PromptFailure::Other(message)),
+            },
+        }
     }
 
     fn run_prompt(
@@ -339,6 +396,14 @@ impl RpcAssignment {
     ) -> Result<(), String> {
         if message.role != "assistant" {
             return Ok(());
+        }
+        // An upstream capacity refusal arrives as a terminal with no text and a
+        // provider errorMessage. Record it and let the cycle drain normally:
+        // returning early here would abandon the stream before the prompt
+        // response is consumed and mask the real cause.
+        if let Some(detail) = upstream_capacity_failure(&message) {
+            state.upstream_capacity_failure = Some(detail);
+            return self.request_stats(state);
         }
         let record = assistant_from_terminal(message)?;
         if record.stop_reason == "tooluse" {
@@ -492,6 +557,12 @@ impl RpcAssignment {
     }
 
     fn finish_cycle(&mut self, spec: &AgentRunSpec, state: CycleState) -> Result<String, String> {
+        // Surface a launch-side refusal ahead of output-shape checks: there is
+        // no assistant output to judge, and the caller retries on this marker.
+        if let Some(detail) = state.upstream_capacity_failure {
+            self.last_capacity_refusal = Some(detail.clone());
+            return Err(format!("agent-run upstream capacity refusal: {detail}"));
+        }
         if state.tool_after_terminal {
             return Err(
                 "agent-run Pi JSONL had tool activity after terminal assistant result".to_owned(),
@@ -847,6 +918,126 @@ fn context_budget_from_stats(response: &RpcResponse) -> Result<ContextBudget, St
         .map_err(|error| format!("agent-run context percent invalid: {error:?}")),
         _ => Err("agent-run context percent has wrong type".to_owned()),
     }
+}
+
+/// Bounded retry policy for launch-side upstream capacity refusals.
+///
+/// Declared in `data/recovery.kdl` rather than hardcoded, so the retry budget
+/// is operator-visible data alongside the value-repair policy it complements.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) struct CapacityRetryPolicy {
+    pub max_retries: u32,
+    pub base_delay_ms: u64,
+    pub max_delay_ms: u64,
+}
+
+impl CapacityRetryPolicy {
+    pub(crate) fn parse() -> Result<Self, String> {
+        Self::parse_source(include_str!("../../../data/recovery.kdl"))
+    }
+
+    pub(crate) fn parse_source(source: &str) -> Result<Self, String> {
+        let line = source
+            .lines()
+            .map(str::trim)
+            .find_map(|line| line.strip_prefix("upstream_capacity_retry "))
+            .ok_or_else(|| "recovery policy missing upstream_capacity_retry".to_owned())?;
+        let field = |key: &str| -> Result<u64, String> {
+            let start = line
+                .find(key)
+                .ok_or_else(|| format!("upstream_capacity_retry missing {key}"))?
+                + key.len();
+            let rest = &line[start..];
+            let end = rest
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(rest.len());
+            rest[..end]
+                .parse::<u64>()
+                .map_err(|_| format!("upstream_capacity_retry {key} is not a number"))
+        };
+        let max_retries = u32::try_from(field("max_retries=")?)
+            .map_err(|_| "upstream_capacity_retry max_retries out of range".to_owned())?;
+        let base_delay_ms = field("base_delay_ms=")?;
+        let max_delay_ms = field("max_delay_ms=")?;
+        if max_retries == 0 || base_delay_ms == 0 || max_delay_ms < base_delay_ms {
+            return Err("upstream_capacity_retry bounds are incoherent".to_owned());
+        }
+        Ok(Self {
+            max_retries,
+            base_delay_ms,
+            max_delay_ms,
+        })
+    }
+
+    /// Exponential backoff with deterministic per-assignment jitter.
+    ///
+    /// Jitter is derived from the assignment id rather than a random source so
+    /// the schedule is reproducible in tests, while still de-synchronising the
+    /// children of one wave, which are launched within milliseconds of one
+    /// another and would otherwise retry in lockstep and re-create the burst.
+    pub(crate) fn backoff(self, retry: u32, assignment_id: &str) -> Duration {
+        let factor = 1_u64 << retry.min(16);
+        let base = self
+            .base_delay_ms
+            .saturating_mul(factor)
+            .min(self.max_delay_ms);
+        let spread = base / 2;
+        let jitter = if spread == 0 {
+            0
+        } else {
+            let digest = sha256_hex(format!("{assignment_id}:{retry}").as_bytes());
+            u64::from_str_radix(&digest[..8], 16).unwrap_or(0) % spread
+        };
+        Duration::from_millis(base.saturating_sub(spread / 2).saturating_add(jitter))
+    }
+}
+
+/// Outcome classes for one prompt cycle.
+///
+/// Typed rather than a string marker so the retry decision is made on a
+/// variant, never by inspecting message text.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) enum PromptFailure {
+    /// Launch-side refusal by the provider: no content was produced and no
+    /// tokens were billed, so the identical prompt may be re-sent.
+    UpstreamCapacity(String),
+    /// Any other failure, including content failures that value repair owns.
+    Other(String),
+}
+
+impl PromptFailure {
+    fn into_message(self) -> String {
+        match self {
+            Self::UpstreamCapacity(detail) => {
+                format!("agent-run upstream capacity refusal: {detail}")
+            }
+            Self::Other(message) => message,
+        }
+    }
+}
+
+impl From<String> for PromptFailure {
+    fn from(message: String) -> Self {
+        Self::Other(message)
+    }
+}
+
+/// Detect a terminal that failed upstream rather than in the model's output.
+///
+/// The signature is a non-`stop` terminal carrying a provider `errorMessage`
+/// and no assistant text: the request was refused before any content existed.
+/// This is deliberately evidence-based rather than string-matching the
+/// provider's prose, which is not a stable contract.
+fn upstream_capacity_failure(message: &TerminalMessage) -> Option<String> {
+    let stop = message.stop_reason.as_deref()?.to_ascii_lowercase();
+    if stop == "stop" || stop == "tooluse" {
+        return None;
+    }
+    let detail = message.error_message.as_deref()?;
+    if message.text.as_deref().is_some_and(|text| !text.is_empty()) {
+        return None;
+    }
+    Some(format!("stopReason={stop}; {detail}"))
 }
 
 fn assistant_from_terminal(message: TerminalMessage) -> Result<AssistantRecord, String> {

@@ -316,6 +316,10 @@ fn route_plan(id: u64, args: &[String], state: &mut CoreState) -> Result<SeamEnv
         planning::PlanningWaveOutcome::Blocked(blocked) => {
             done(id, planning_blocked_status(&blocked, state))
         }
+        planning::PlanningWaveOutcome::CapacityUnknown(detail) => done(
+            id,
+            rejection("planning-wave", &format!("capacity-unknown:{detail}")),
+        ),
     }
 }
 
@@ -491,6 +495,12 @@ fn accept_planning_carrier(
         planning::PlanningWaveOutcome::Complete => {}
         planning::PlanningWaveOutcome::Blocked(blocked) => {
             return done(id, planning_blocked_status(&blocked, state));
+        }
+        planning::PlanningWaveOutcome::CapacityUnknown(detail) => {
+            return done(
+                id,
+                rejection("planning-wave", &format!("capacity-unknown:{detail}")),
+            );
         }
     }
     done(

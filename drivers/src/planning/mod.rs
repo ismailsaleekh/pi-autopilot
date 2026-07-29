@@ -248,6 +248,19 @@ pub enum PlanningWaveOutcome {
     },
     Complete,
     Blocked(PlanningWaveBlocked),
+    /// The concurrency pool serving this wave's role could not be resolved.
+    /// Surfaced rather than defaulted: guessing a width is what lets a wave
+    /// overrun the provider.
+    CapacityUnknown(String),
+}
+
+/// Concurrency ceiling for the provider+model pool that serves `role`.
+fn wave_pool_capacity(role: &str) -> Result<usize, String> {
+    let roster = crate::roster::Roster::package()
+        .map_err(|error| format!("roster unavailable for wave capacity: {error:?}"))?;
+    roster
+        .concurrency_for_role(role)
+        .map_err(|error| format!("no concurrency declared for role {role}: {error:?}"))
 }
 
 impl PlanningPolicy {
@@ -622,6 +635,15 @@ pub fn next_planning_wave(
                 return PlanningWaveOutcome::Blocked(blocked_wave(manifest, wave, refs, failures));
             }
             PlanningBarrierStatus::Running { active, unissued } => {
+                // The wave cap bounds planning breadth; the model pool bounds
+                // what the provider will actually admit at once. A wave must
+                // respect both, or the surplus children are refused upstream
+                // with zero tokens billed and the whole wave blocks.
+                let pool_cap = match wave_pool_capacity(&wave.role) {
+                    Ok(value) => value,
+                    Err(error) => return PlanningWaveOutcome::CapacityUnknown(error),
+                };
+                let effective_cap = effective_cap.min(pool_cap);
                 let open_slots = effective_cap.saturating_sub(active.len());
                 let selected_ids = unissued
                     .into_iter()

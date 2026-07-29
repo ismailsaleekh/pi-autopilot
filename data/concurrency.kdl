@@ -1,0 +1,28 @@
+// Upstream capacity pools for child-agent launch.
+//
+// Concurrency is keyed by provider+model, not by roster slot: one model is
+// routinely shared by several slots (gpt-5.5 serves extraction, coding, and
+// review), so a per-slot limit would split a single upstream quota into
+// independent budgets that can still overrun it together.
+//
+// Exceeding a pool is a launch-side failure, not a content failure: the
+// provider refuses the request with "servers are currently overloaded",
+// bills zero tokens, and returns no assistant text. No prompt change can fix
+// it, so the width must be bounded before launch.
+//
+// max: maximum child agents in flight against this pool at one time.
+pool "openai-codex/gpt-5.6-sol" {
+  provider "openai-codex"
+  model "gpt-5.6-sol"
+  max "2"
+}
+pool "openai-codex/gpt-5.6-terra" {
+  provider "openai-codex"
+  model "gpt-5.6-terra"
+  max "2"
+}
+pool "openai-codex/gpt-5.5" {
+  provider "openai-codex"
+  model "gpt-5.5"
+  max "7"
+}

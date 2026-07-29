@@ -1100,6 +1100,10 @@ function persist(entry) {{ storedMessages.push(JSON.stringify(entry)); appendFil
 function send(value) {{ process.stdout.write(JSON.stringify(value) + '\n'); }}
 function message(text, model='gpt-5.5', stopReason='stop') {{ return {{ role:'assistant', provider:'openai-codex', model, content:[{{type:'text', text}}], stopReason }}; }}
 function emitAssistant(text, model='gpt-5.5', stopReason='stop') {{ const msg = message(text, model, stopReason); send({{type:'agent_start'}}); send({{type:'message_start'}}); send({{type:'message_end', message: msg}}); send({{type:'agent_end', willRetry:false}}); send({{type:'agent_settled'}}); }}
+// Reproduces an upstream capacity refusal exactly as observed in production:
+// a non-stop terminal with a provider errorMessage, no assistant text, and no
+// tokens billed.
+function emitCapacityRefusal() {{ send({{type:'agent_start'}}); send({{type:'message_start'}}); send({{type:'message_end', message:{{role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[], stopReason:'error', errorMessage:'Codex error: Our servers are currently overloaded. Please try again later.', usage:{{input:0,output:0}}}}}}); send({{type:'agent_end', willRetry:false}}); send({{type:'agent_settled'}}); }}
 function statsData() {{ return {{ sessionId, contextUsage: {{ tokens: Math.round(contextPercent * 1000), contextWindow: 100000, percent: contextPercent }} }}; }}
 {setup}
 let buffer = '';
@@ -1436,4 +1440,100 @@ fn spec_session_dir(spec_path: &Path) -> PathBuf {
     let value: Value =
         serde_json::from_slice(&fs::read(spec_path).expect("spec")).expect("spec json");
     PathBuf::from(value["session_dir"].as_str().expect("session_dir"))
+}
+
+/// A transient upstream capacity refusal must be retried on the same session
+/// and then succeed, rather than failing the whole assignment.
+///
+/// This is the launch-side failure observed in production: three of five
+/// same-wave children were refused with "servers are currently overloaded",
+/// zero tokens billed, and the run had no retry path for it.
+#[test]
+fn upstream_capacity_refusal_is_retried_and_then_succeeds() {
+    let root = temp_root("runner-capacity-retry");
+    let accepted = transcript("planning.task-atoms.v1");
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            "",
+            &format!(
+                "if (promptCount === 1) {{ emitCapacityRefusal(); }} else {{ emitAssistant({accepted:?}); }}"
+            ),
+        ),
+    );
+    let spec = next_scenario_spec(&root);
+    with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect("capacity refusal must be retried, not fatal");
+
+    let events = attempt_events(&root, "planning-main-task-extractor-01");
+    assert!(
+        events.iter().any(|e| e == "upstream-capacity-retry"),
+        "a capacity retry must be recorded: {events:?}"
+    );
+    assert!(
+        events.iter().any(|e| e == "accepted"),
+        "assignment must ultimately be accepted: {events:?}"
+    );
+}
+
+/// A persistent capacity refusal must still fail loudly once the bounded retry
+/// budget is exhausted, naming the upstream cause.
+#[test]
+fn persistent_upstream_capacity_refusal_fails_loudly_after_retries() {
+    let root = temp_root("runner-capacity-exhausted");
+    write_fake_pi(&root, &rpc_fake_pi("", "emitCapacityRefusal();"));
+    let spec = next_scenario_spec(&root);
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("persistent capacity refusal must fail");
+    assert!(
+        error.contains("upstream capacity refusal"),
+        "error must name the upstream cause: {error}"
+    );
+    assert!(
+        error.contains("exhausted"),
+        "error must report retry exhaustion: {error}"
+    );
+    assert!(
+        !carrier_path(&root).exists(),
+        "no carrier may be written for an upstream refusal"
+    );
+}
+
+/// A content failure must NOT be treated as a capacity refusal: it carries
+/// assistant text and must reach the value-repair path instead.
+#[test]
+fn content_failure_is_not_misclassified_as_capacity_refusal() {
+    let root = temp_root("runner-content-not-capacity");
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi("", "emitAssistant('no boundary token here');"),
+    );
+    let spec = next_scenario_spec(&root);
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("content failure must still fail");
+    assert!(
+        !error.contains("upstream capacity refusal"),
+        "content failure must not be classified as upstream capacity: {error}"
+    );
+    assert!(
+        error.contains("value repair exhausted"),
+        "content failure must use the value-repair path: {error}"
+    );
+}
+
+fn attempt_events(root: &Path, assignment_id: &str) -> Vec<String> {
+    let path = root
+        .join(".pi/autopilot/runner/attempt-events")
+        .join(format!("{assignment_id}.jsonl"));
+    let text = fs::read_to_string(path).unwrap_or_default();
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|row| row["event"].as_str().map(str::to_owned))
+        .collect()
 }

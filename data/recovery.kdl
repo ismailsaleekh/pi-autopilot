@@ -6,6 +6,13 @@ recovery version="v1" {
 
   value_repair scope="agent-run" max_attempts=3 retry_prompt="typed-diff" exhaustion="paused-operator-decision" session="same-session-id"
 
+  // Launch-side upstream refusals (provider capacity exhausted) produce no
+  // content and bill no tokens, so value repair cannot apply: the identical
+  // prompt must simply be re-sent later on the same session. Jitter is
+  // required because a wave launches its children within milliseconds, and an
+  // unjittered backoff would re-synchronise them into a second burst.
+  upstream_capacity_retry scope="agent-run" max_retries=4 base_delay_ms=2000 max_delay_ms=30000 jitter="deterministic-per-assignment" session="same-session-id"
+
   r13 number=1 name="planning" status="live"
   r13 number=2 name="normal execution" status="live"
   r13 number=3 name="forward release" status="live"

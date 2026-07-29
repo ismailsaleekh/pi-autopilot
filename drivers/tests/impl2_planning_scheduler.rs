@@ -65,7 +65,9 @@ fn accept_roles(manifest: &PlanningManifest, roles: &[&str]) -> PlanningRefs {
     }
 }
 
-fn launch_assignments(outcome: PlanningWaveOutcome) -> Vec<drivers::planning::PlanningAgentAssignment> {
+fn launch_assignments(
+    outcome: PlanningWaveOutcome,
+) -> Vec<drivers::planning::PlanningAgentAssignment> {
     match outcome {
         PlanningWaveOutcome::Launch { assignments, .. } => assignments,
         other => panic!("expected launch outcome, got {other:?}"),
@@ -172,8 +174,13 @@ fn issued_unacknowledged_assignment_occupies_wave_slot() {
         panic!("issued unacknowledged wave must be an explicit waiting outcome");
     };
     assert_eq!(
-        active.iter().map(|item| item.assignment_id.clone()).collect::<Vec<_>>(),
-        p1.iter().map(|item| item.assignment_id.clone()).collect::<Vec<_>>(),
+        active
+            .iter()
+            .map(|item| item.assignment_id.clone())
+            .collect::<Vec<_>>(),
+        p1.iter()
+            .map(|item| item.assignment_id.clone())
+            .collect::<Vec<_>>(),
         "already-issued unconsumed assignments must not be duplicated"
     );
     assert!(active.iter().all(|item| !item.launch_acknowledged));
@@ -324,12 +331,12 @@ fn compile_wave_requires_all_three_declared_dependencies() {
     two_dependency_refs
         .activation_refs
         .insert("planning-resolution-required".to_owned());
-    let blocked_by_active_resolution = launch_assignments(next_planning_wave(
-        &manifest,
-        &two_dependency_refs,
-        64,
-    ));
-    assert_eq!(blocked_by_active_resolution.len(), 3);
+    let blocked_by_active_resolution =
+        launch_assignments(next_planning_wave(&manifest, &two_dependency_refs, 64));
+    // Breadth is bounded by the reasoning model pool, so assert the wave
+    // identity (which is what dependency ordering decides) rather than a count
+    // that belongs to capacity policy.
+    assert!(!blocked_by_active_resolution.is_empty());
     assert!(
         blocked_by_active_resolution
             .iter()
@@ -340,12 +347,9 @@ fn compile_wave_requires_all_three_declared_dependencies() {
         &manifest,
         &["task-extractor", "repository-scout", "context-curator"],
     );
-    let compile_after_inactive_resolution = launch_assignments(next_planning_wave(
-        &manifest,
-        &inactive_resolution_refs,
-        64,
-    ));
-    assert_eq!(compile_after_inactive_resolution.len(), 5);
+    let compile_after_inactive_resolution =
+        launch_assignments(next_planning_wave(&manifest, &inactive_resolution_refs, 64));
+    assert!(!compile_after_inactive_resolution.is_empty());
     assert!(
         compile_after_inactive_resolution
             .iter()
@@ -364,12 +368,9 @@ fn compile_wave_requires_all_three_declared_dependencies() {
     all_dependency_refs
         .activation_refs
         .insert("planning-resolution-required".to_owned());
-    let compile_after_all_dependencies = launch_assignments(next_planning_wave(
-        &manifest,
-        &all_dependency_refs,
-        64,
-    ));
-    assert_eq!(compile_after_all_dependencies.len(), 5);
+    let compile_after_all_dependencies =
+        launch_assignments(next_planning_wave(&manifest, &all_dependency_refs, 64));
+    assert!(!compile_after_all_dependencies.is_empty());
     assert!(
         compile_after_all_dependencies
             .iter()
@@ -455,4 +456,77 @@ fn planning_resume_recomputes_identical_wave_from_event_refs() {
             .iter()
             .all(|assignment| assignment.assignment_id != p1[0].assignment_id)
     );
+}
+
+/// A wave must never launch more children than its upstream model pool admits.
+///
+/// Production evidence: five plan-compilers were launched within 45ms against
+/// the gpt-5.6-sol pool; two were admitted and three were refused with
+/// "servers are currently overloaded" and zero tokens billed. The wave cap
+/// alone (7) does not bound this, because capacity belongs to the model pool.
+#[test]
+fn wave_launch_is_clamped_by_model_pool_concurrency() {
+    let manifest = manifest("pool-clamp");
+    let roster = drivers::roster::Roster::package().expect("roster parses");
+
+    // plan-compiler is served by the reasoning pool; the wave declares 5.
+    let declared = by_role(&manifest, "plan-compiler").len();
+    let pool = roster
+        .concurrency_for_role("plan-compiler")
+        .expect("plan-compiler pool capacity declared");
+    assert_eq!(declared, 5, "wave breadth is data-defined");
+    assert!(
+        pool < declared,
+        "fixture requires a pool narrower than the wave: pool={pool} declared={declared}"
+    );
+
+    let refs = accept_roles(
+        &manifest,
+        &["task-extractor", "repository-scout", "context-curator"],
+    );
+    match next_planning_wave(&manifest, &refs, manifest.planning_wave_cap) {
+        PlanningWaveOutcome::Launch {
+            wave_id,
+            assignments,
+        } => {
+            assert_eq!(wave_id, "P4.compile");
+            assert_eq!(
+                assignments.len(),
+                pool,
+                "compile wave must be clamped to the reasoning pool, not the wave cap"
+            );
+        }
+        other => panic!("expected a clamped compile launch, got {other:?}"),
+    }
+}
+
+/// Roles on a wide pool must not be narrowed by another pool's limit.
+#[test]
+fn wide_model_pool_is_not_narrowed_by_another_pools_limit() {
+    let manifest = manifest("pool-wide");
+    let roster = drivers::roster::Roster::package().expect("roster parses");
+    let pool = roster
+        .concurrency_for_role("task-extractor")
+        .expect("task-extractor pool capacity declared");
+    let refs = PlanningRefs {
+        issued: Vec::new(),
+        launch_acks: BTreeSet::new(),
+        accepted: BTreeSet::new(),
+        terminal_failures: BTreeSet::new(),
+        activation_refs: BTreeSet::new(),
+    };
+    match next_planning_wave(&manifest, &refs, manifest.planning_wave_cap) {
+        PlanningWaveOutcome::Launch {
+            wave_id,
+            assignments,
+        } => {
+            assert_eq!(wave_id, "P1.extract");
+            assert_eq!(
+                assignments.len(),
+                by_role(&manifest, "task-extractor").len().min(pool),
+                "extraction pool is wide enough to run the declared wave"
+            );
+        }
+        other => panic!("expected the extract wave to launch, got {other:?}"),
+    }
 }

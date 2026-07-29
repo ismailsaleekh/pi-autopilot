@@ -232,6 +232,10 @@ pub struct TerminalMessage {
     pub model: Option<String>,
     pub stop_reason: Option<String>,
     pub text: Option<String>,
+    /// Provider-supplied failure detail accompanying a non-`stop` terminal.
+    /// Retained because it is the only evidence distinguishing an upstream
+    /// capacity refusal from a genuine content failure.
+    pub error_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -1003,6 +1007,8 @@ struct AgentMessage {
     #[serde(rename = "stopReason")]
     stop_reason: Option<String>,
     content: Option<Vec<MessageContent>>,
+    #[serde(rename = "errorMessage")]
+    error_message: Option<String>,
 }
 
 impl AgentMessage {
@@ -1013,6 +1019,7 @@ impl AgentMessage {
             model: self.model,
             stop_reason: self.stop_reason,
             text: self.content.map(extract_text),
+            error_message: self.error_message,
         }
     }
 }
