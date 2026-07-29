@@ -262,11 +262,14 @@ fn task_path_classification_exact_four_path_command_spawns_and_hlo_replacement_d
         root.join(".pi/autopilot/main/planning/prompts/planning-main-task-extractor-01.md"),
     )
     .expect("planning prompt");
-    assert!(prompt.contains("A"));
-    assert!(prompt.contains("B"));
-    assert!(prompt.contains("C"));
-    assert!(prompt.contains("CONTEXT-SENTINEL-UNIQUE"));
-    assert!(prompt.contains("Context may ground work but must not create or override an atom"));
+    // The renderer binds task documents as path+digest required-reads instead of inlining
+    // bodies, so assert the bindings rather than the body sentinels.
+    assert!(prompt.contains("TASK-A.md"), "{prompt}");
+    assert!(prompt.contains("TASK-B.md"), "{prompt}");
+    assert!(prompt.contains("TASK-C.md"), "{prompt}");
+    assert!(prompt.contains("CONTEXT.md"), "{prompt}");
+    assert!(prompt.contains("required_reads"), "{prompt}");
+    assert!(prompt.contains("## Layer 5 — canonical Context Manifest"), "{prompt}");
     let spec: serde_json::Value = serde_json::from_slice(
         &fs::read(
             root.join(".pi/autopilot/main/planning/specs/planning-main-task-extractor-01.json"),
