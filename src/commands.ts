@@ -1,6 +1,6 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
-import type { BackgroundAction, CoreToHostFrame, HostToCoreCommandPayload, HostToCoreOperatorAnswerPayload } from "./generated/index.ts";
+import type { BackgroundAction, CoreToHostFrame, HostToCoreCommandPayload, HostToCoreOperatorAnswerPayload, HostToCoreSpawnResultPayload } from "./generated/index.ts";
 import { applyCoreEffect, type CoreEffectResult, type HostEffectContext, type HostEffectServices, type OperatorMessageSink } from "./effects.ts";
 import type { BgTaskSnapshot, PiBackgroundTaskClient } from "./background-tasks.ts";
 import { boundedDiagnostic, unavailableCapabilities } from "./background-tasks.ts";
@@ -32,6 +32,7 @@ export interface CommandHostLike {
 export interface CommandTransportLike {
   request(kind: "command", payload: HostToCoreCommandPayload): Promise<CoreToHostFrame>;
   request(kind: "operator-answer", payload: HostToCoreOperatorAnswerPayload): Promise<CoreToHostFrame>;
+  request(kind: "spawn-result", payload: HostToCoreSpawnResultPayload): Promise<CoreToHostFrame>;
 }
 
 export interface RegisterCommandOptions {
@@ -65,9 +66,37 @@ async function forwardCommand(name: string, args: string, ctx: ExtensionCommandC
   await applyAndRecord(frame, ctx, options);
 }
 
-export async function applyAndRecord(frame: CoreToHostFrame, ctx: HostEffectContext, options: Pick<RegisterCommandOptions, "backgroundTasks" | "operatorMessage" | "onSpawn">): Promise<CoreEffectResult> {
+export async function applyAndRecord(frame: CoreToHostFrame, ctx: HostEffectContext, options: Pick<RegisterCommandOptions, "transport" | "backgroundTasks" | "operatorMessage" | "onSpawn">): Promise<CoreEffectResult> {
   const result = await applyCoreEffect(frame, ctx, { backgroundTasks: options.backgroundTasks, operatorMessage: options.operatorMessage } satisfies HostEffectServices);
-  if (result?.kind === "spawn") await options.onSpawn?.({ action: result.action, task: result.task });
+  if (result?.kind !== "spawn") return result;
+  if (!result.acknowledge) {
+    for (const launched of result.launched) {
+      await options.onSpawn?.({ action: launched.action, task: launched.task });
+    }
+    return result;
+  }
+  for (const launched of result.launched) {
+    const ack = await options.transport.request("spawn-result", {
+      action_id: launched.action.action_id,
+      assignment_id: launched.action.assignment_id,
+      status: "launched",
+      task_id: launched.task.id,
+    });
+    await applyCoreEffect(ack, ctx, { backgroundTasks: options.backgroundTasks, operatorMessage: options.operatorMessage } satisfies HostEffectServices);
+    await options.onSpawn?.({ action: launched.action, task: launched.task });
+  }
+  for (const failure of result.failures) {
+    const ack = await options.transport.request("spawn-result", {
+      action_id: failure.action.action_id,
+      assignment_id: failure.action.assignment_id,
+      status: "launch-failed",
+      diagnostic: failure.diagnostic,
+    });
+    await applyCoreEffect(ack, ctx, { backgroundTasks: options.backgroundTasks, operatorMessage: options.operatorMessage } satisfies HostEffectServices);
+  }
+  if (result.failures.length > 0) {
+    throw new Error(`spawn-wave launch failures: ${result.failures.map((failure) => `${failure.action.assignment_id}:${failure.diagnostic}`).join("; ")}`);
+  }
   return result;
 }
 

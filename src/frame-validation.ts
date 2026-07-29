@@ -5,6 +5,7 @@ import type {
   CoreToHostFrame,
   CoreToHostGuardDecisionPayload,
   CoreToHostSessionPayload,
+  CoreToHostSpawnWavePayload,
   CoreToHostUiPayload,
   JsonObject,
 } from "./generated/index.ts";
@@ -41,6 +42,8 @@ export function validateCoreToHostFrame(value: unknown): CoreToHostFrame {
       return { v: 1, id, kind, payload: validateSessionPayload(frame.payload) };
     case "spawn":
       return { v: 1, id, kind, payload: validateSpawnPayload(frame.payload) };
+    case "spawn-wave":
+      return { v: 1, id, kind, payload: validateSpawnWavePayload(frame.payload) };
     case "ui":
       return { v: 1, id, kind, payload: validateUiPayload(frame.payload) };
     default:
@@ -122,6 +125,16 @@ function validateSpawnPayload(value: unknown): { action: BackgroundAction } {
   return { action: validateBackgroundAction(payload.action) };
 }
 
+function validateSpawnWavePayload(value: unknown): CoreToHostSpawnWavePayload {
+  const payload = requireClosedRecord(value, ["actions"], "spawn-wave payload");
+  const actions = requireArray(payload.actions, "spawn-wave.actions").map((action) => validateBackgroundAction(action));
+  if (actions.length === 0) throw new CoreFrameValidationError("spawn-wave.actions must be non-empty");
+  if (actions.length > 64) throw new CoreFrameValidationError("spawn-wave.actions exceeds maximum 64");
+  requireUnique(actions.map((action) => action.action_id), "spawn-wave action_id");
+  requireUnique(actions.map((action) => action.assignment_id), "spawn-wave assignment_id");
+  return { actions };
+}
+
 function validateUiPayload(value: unknown): CoreToHostUiPayload {
   const payload = requireClosedRecord(value, ["ui_kind", "content"], "ui payload");
   return {
@@ -146,6 +159,19 @@ function requireJsonObject(value: unknown, label: string): JsonObject {
     throw new CoreFrameValidationError(`${label} must be a JSON object`);
   }
   return value as JsonObject;
+}
+
+function requireArray(value: unknown, label: string): unknown[] {
+  if (Array.isArray(value)) return value;
+  throw new CoreFrameValidationError(`${label} must be an array`);
+}
+
+function requireUnique(values: readonly string[], label: string): void {
+  const seen = new Set<string>();
+  for (const value of values) {
+    if (seen.has(value)) throw new CoreFrameValidationError(`${label} must be unique: ${value}`);
+    seen.add(value);
+  }
 }
 
 function requireString(value: unknown, label: string): string {

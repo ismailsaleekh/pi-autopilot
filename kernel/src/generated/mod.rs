@@ -2802,6 +2802,14 @@ pub struct CoreToHostSpawnAttestedPayload {
     pub action: AutopilotAttestedAction,
 }
 
+/// Launch a nonempty bounded wave of exact bg_run descriptors in parallel; singular spawn remains for delivery and validation compatibility.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoreToHostSpawnWavePayload {
+    #[serde(rename = "actions")]
+    pub actions: Vec<BackgroundAction>,
+}
+
 /// D78 §3.2 — render text/select/confirm/input through ctx.ui.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2886,6 +2894,24 @@ pub struct HostToCoreShutdownPayload {
     #[serde(rename = "reason")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+/// Host acknowledgement for one Core-issued background action launch settlement inside a spawn-wave. status is launched or launch-failed; task_id is required when launched, diagnostic when launch-failed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostToCoreSpawnResultPayload {
+    #[serde(rename = "action_id")]
+    pub action_id: Id,
+    #[serde(rename = "assignment_id")]
+    pub assignment_id: Id,
+    #[serde(rename = "status")]
+    pub status: String,
+    #[serde(rename = "task_id")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<Id>,
+    #[serde(rename = "diagnostic")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<String>,
 }
 
 /// D78 §3.2 — a pi-background-tasks terminal notification correlated by Host to a Core-issued action/task binding. Core validates the binding and decides the next effect.

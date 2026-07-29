@@ -179,6 +179,14 @@ pub struct PlanningAcceptedRef {
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct PlanningLaunchAckRef {
+    pub assignment_id: String,
+    pub action_id: String,
+    pub run_revision: u64,
+    pub task_id: String,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct PlanningTerminalFailureRef {
     pub assignment_id: String,
     pub action_id: String,
@@ -189,6 +197,7 @@ pub struct PlanningTerminalFailureRef {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PlanningRefs {
     pub issued: Vec<PlanningIssuedRef>,
+    pub launch_acks: BTreeSet<PlanningLaunchAckRef>,
     pub accepted: BTreeSet<PlanningAcceptedRef>,
     pub terminal_failures: BTreeSet<PlanningTerminalFailureRef>,
     pub activation_refs: BTreeSet<String>,
@@ -567,7 +576,8 @@ pub fn barrier_status(
         .iter()
         .filter(|assignment| {
             !assignment_is_accepted(&assignment.assignment_id, refs)
-                && !assignment_is_issued(&assignment.assignment_id, refs)
+                && !assignment_is_launched(&assignment.assignment_id, refs)
+                && assignment_failures(&assignment.assignment_id, refs).is_empty()
         })
         .map(|assignment| assignment.assignment_id.clone())
         .collect::<Vec<_>>();
@@ -668,10 +678,15 @@ fn blocked_wave(
     }
 }
 
-fn assignment_is_issued(assignment_id: &str, refs: &PlanningRefs) -> bool {
-    refs.issued
-        .iter()
-        .any(|issued| issued.assignment_id == assignment_id)
+fn assignment_is_launched(assignment_id: &str, refs: &PlanningRefs) -> bool {
+    refs.launch_acks.iter().any(|ack| {
+        ack.assignment_id == assignment_id
+            && refs.issued.iter().any(|issued| {
+                issued.assignment_id == ack.assignment_id
+                    && issued.action_id == ack.action_id
+                    && issued.run_revision == ack.run_revision
+            })
+    })
 }
 
 fn assignment_is_accepted(assignment_id: &str, refs: &PlanningRefs) -> bool {
@@ -688,6 +703,7 @@ fn assignment_is_accepted(assignment_id: &str, refs: &PlanningRefs) -> bool {
 fn assignment_is_active(assignment_id: &str, refs: &PlanningRefs) -> bool {
     refs.issued.iter().any(|issued| {
         issued.assignment_id == assignment_id
+            && launched_exact(issued, refs)
             && !accepted_exact(issued, refs)
             && !terminal_failure_exact(issued, refs)
     })
@@ -723,6 +739,14 @@ fn accepted_exact(issued: &PlanningIssuedRef, refs: &PlanningRefs) -> bool {
         assignment_id: issued.assignment_id.clone(),
         action_id: issued.action_id.clone(),
         run_revision: issued.run_revision,
+    })
+}
+
+fn launched_exact(issued: &PlanningIssuedRef, refs: &PlanningRefs) -> bool {
+    refs.launch_acks.iter().any(|ack| {
+        ack.assignment_id == issued.assignment_id
+            && ack.action_id == issued.action_id
+            && ack.run_revision == issued.run_revision
     })
 }
 

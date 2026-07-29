@@ -95,6 +95,28 @@ fn planning_bg_action(workstream: &str, assignment: &AgentAssignment, run_revisi
         atom_registry_digest: atom_registry.as_ref().map(|(_, digest)| digest.clone()),
     })
 }
+
+fn planning_wave_actions(
+    workstream: &str,
+    assignments: &[AgentAssignment],
+    state: &mut CoreState,
+    input_set: &planning::TaskInputSet,
+    atom_registry: Option<(String, String)>,
+) -> Result<Vec<BackgroundAction>, AnyError> {
+    let run_revision = state.state.revision;
+    let mut actions = Vec::new();
+    for assignment in assignments {
+        let registry = if assignment.boundary_id.as_deref() == Some("planning.work-map.v1") {
+            atom_registry.clone()
+        } else {
+            None
+        };
+        let issue = planning_bg_action(workstream, assignment, run_revision, input_set, registry)?;
+        append_runner_invocation(state, &issue.binding)?;
+        actions.push(issue.action);
+    }
+    Ok(actions)
+}
 fn append_runner_invocation(state: &mut CoreState, binding: &runner::IssuedRunnerBinding) -> Result<(), AnyError> {
     let mut refs = vec![
         Ref(binding.workstream.0.clone()),
@@ -119,12 +141,11 @@ fn runner_doc_from_task(document: &planning::TaskDocument) -> runner::RunnerTask
     };
     runner::RunnerTaskDocument::new(document.path.clone(), class.to_owned(), document.digest.clone(), document.body.clone())
 }
-fn next_planning_assignment(workstream: &str, state: &CoreState) -> Result<Option<AgentAssignment>, planning::PlanningError> {
+fn next_planning_assignments(workstream: &str, state: &CoreState) -> Result<Vec<AgentAssignment>, planning::PlanningError> {
     let manifest = read_planning_schedule_manifest(workstream).map_err(planning::PlanningError::ContextGap)?;
     let refs = planning_refs_from_state(workstream, state);
     planning::next_planning_wave(&manifest, &refs, manifest.planning_wave_cap)
         .map_err(|failure| planning::PlanningError::ContextGap(format!("planning-wave:{failure:?}")))
-        .map(|wave| wave.into_iter().next())
 }
 fn validate_agent_output(binding: &runner::IssuedRunnerBinding, raw: &str) -> Result<String, Rejection> {
     let spec = read_runner_spec_for_binding(binding).map_err(|detail| {
@@ -209,10 +230,15 @@ fn planning_refs_from_state(workstream: &str, state: &CoreState) -> planning::Pl
         if binding.workstream.0 != workstream || !binding.result_contract.0.starts_with("planning.") { continue; }
         let issued = planning::PlanningIssuedRef { assignment_id: binding.assignment_id.0.clone(), action_id: binding.action_id.0.clone(), run_revision: binding.run_revision };
         refs.issued.push(issued.clone());
+        if let Some(task_id) = launch_ack_task_id(state, &binding) {
+            refs.launch_acks.insert(planning::PlanningLaunchAckRef { assignment_id: issued.assignment_id.clone(), action_id: issued.action_id.clone(), run_revision: issued.run_revision, task_id });
+        }
         if planning_result_consumed(state, &binding) {
             refs.accepted.insert(planning::PlanningAcceptedRef { assignment_id: issued.assignment_id.clone(), action_id: issued.action_id.clone(), run_revision: issued.run_revision });
         } else if terminal_consumed(state, &binding) {
             refs.terminal_failures.insert(planning::PlanningTerminalFailureRef { assignment_id: issued.assignment_id.clone(), action_id: issued.action_id.clone(), run_revision: issued.run_revision, status: "terminal-without-planning-result".to_owned() });
+        } else if launch_failure_consumed(state, &binding) {
+            refs.terminal_failures.insert(planning::PlanningTerminalFailureRef { assignment_id: issued.assignment_id.clone(), action_id: issued.action_id.clone(), run_revision: issued.run_revision, status: "launch-failed".to_owned() });
         }
     }
     for reference in state.state.refs.keys() {
@@ -221,6 +247,21 @@ fn planning_refs_from_state(workstream: &str, state: &CoreState) -> planning::Pl
         }
     }
     refs
+}
+
+fn launch_ack_task_id(state: &CoreState, binding: &runner::IssuedRunnerBinding) -> Option<String> {
+    if !launch_ack_consumed(state, binding) {
+        return None;
+    }
+    state.state.refs.keys().find_map(|reference| {
+        let rest = reference.0.strip_prefix("task-binding:")?;
+        let value = serde_json::from_str::<serde_json::Value>(rest).ok()?;
+        let action_id = value.get("action_id").and_then(|item| item.as_str())?;
+        let assignment_id = value.get("assignment_id").and_then(|item| item.as_str())?;
+        let run_revision = value.get("run_revision").and_then(|item| item.as_u64())?;
+        let task_id = value.get("task_id").and_then(|item| item.as_str())?;
+        (action_id == binding.action_id.0 && assignment_id == binding.assignment_id.0 && run_revision == binding.run_revision).then(|| task_id.to_owned())
+    })
 }
 
 fn read_runner_spec_for_binding(binding: &runner::IssuedRunnerBinding) -> Result<kernel::generated::AgentRunSpec, String> {

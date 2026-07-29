@@ -21,7 +21,17 @@ export interface HostEffectServices {
   readonly operatorMessage: OperatorMessageSink;
 }
 
-export type CoreEffectResult = { readonly kind: "spawn"; readonly action: BackgroundAction; readonly task: BgTaskSnapshot } | undefined;
+export interface LaunchedBackgroundTask {
+  readonly action: BackgroundAction;
+  readonly task: BgTaskSnapshot;
+}
+
+export interface BackgroundLaunchFailure {
+  readonly action: BackgroundAction;
+  readonly diagnostic: string;
+}
+
+export type CoreEffectResult = { readonly kind: "spawn"; readonly acknowledge: boolean; readonly launched: readonly LaunchedBackgroundTask[]; readonly failures: readonly BackgroundLaunchFailure[] } | undefined;
 
 export async function applyCoreEffect(frame: CoreToHostFrame, ctx: HostEffectContext, services: HostEffectServices): Promise<CoreEffectResult> {
   const validFrame = validateCoreToHostFrame(frame);
@@ -39,8 +49,10 @@ export async function applyCoreEffect(frame: CoreToHostFrame, ctx: HostEffectCon
       return undefined;
     case "spawn": {
       const task = await services.backgroundTasks.run(validFrame.payload.action.bg_run);
-      return { kind: "spawn", action: validFrame.payload.action, task };
+      return { kind: "spawn", acknowledge: false, launched: [{ action: validFrame.payload.action, task }], failures: [] };
     }
+    case "spawn-wave":
+      return launchWave(validFrame.payload.actions, services);
     case "session":
       await failClosed(
         ctx,
@@ -57,6 +69,28 @@ export async function applyCoreEffect(frame: CoreToHostFrame, ctx: HostEffectCon
     default:
       throw new UnknownCoreEffectError(String((validFrame as { readonly kind: string }).kind));
   }
+}
+
+async function launchWave(actions: readonly BackgroundAction[], services: HostEffectServices): Promise<CoreEffectResult> {
+  const launches = actions.map((action) => {
+    try {
+      return Promise.resolve(services.backgroundTasks.run(action.bg_run));
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  });
+  const settled = await Promise.allSettled(launches);
+  const launched: LaunchedBackgroundTask[] = [];
+  const failures: BackgroundLaunchFailure[] = [];
+  for (let index = 0; index < settled.length; index += 1) {
+    const action = actions[index];
+    if (action === undefined) throw new Error(`spawn-wave internal action index drift at ${index}`);
+    const outcome = settled[index];
+    if (outcome === undefined) throw new Error(`spawn-wave internal outcome index drift at ${index}`);
+    if (outcome.status === "fulfilled") launched.push({ action, task: outcome.value });
+    else failures.push({ action, diagnostic: boundedError(outcome.reason) });
+  }
+  return { kind: "spawn", acknowledge: true, launched, failures };
 }
 
 async function applyUiEffect(payload: CoreToHostUiPayload, ctx: HostEffectContext, services: HostEffectServices): Promise<void> {
@@ -107,4 +141,9 @@ function severityForStatus(status: string): OperatorMessageLevel {
   }
   if (lower.includes("error") || lower.includes("failed") || lower.includes("unsafe")) return "error";
   return "info";
+}
+
+function boundedError(error: unknown): string {
+  const text = error instanceof Error ? error.message : String(error);
+  return text.length <= 240 ? text : `${text.slice(0, 239)}…`;
 }

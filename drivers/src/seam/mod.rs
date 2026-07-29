@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -8,11 +9,11 @@ use std::time::Duration;
 use kernel::boundary::Rejection;
 use kernel::generated::{
     AllocationLaneProposal, BackgroundAction, CONTRACT_VERSION, CoreToHostDonePayload,
-    CoreToHostGuardDecisionPayload, CoreToHostSpawnPayload, CoreToHostUiPayload, DeliveryBoundary,
-    DeliveryResult, EventKind, EventRow, GuardDecision, HostToCoreAgentResultPayload,
-    HostToCoreCommandPayload, HostToCoreGuardQueryPayload, HostToCoreOperatorAnswerPayload,
-    HostToCoreShutdownPayload, HostToCoreTaskCompletedPayload, Id, ModeId, Ref, SeamEnvelope, Sha,
-    TestId, UiKind,
+    CoreToHostGuardDecisionPayload, CoreToHostSpawnPayload, CoreToHostSpawnWavePayload,
+    CoreToHostUiPayload, DeliveryBoundary, DeliveryResult, EventKind, EventRow, GuardDecision,
+    HostToCoreAgentResultPayload, HostToCoreCommandPayload, HostToCoreGuardQueryPayload,
+    HostToCoreOperatorAnswerPayload, HostToCoreShutdownPayload, HostToCoreSpawnResultPayload,
+    HostToCoreTaskCompletedPayload, Id, ModeId, Ref, SeamEnvelope, Sha, TestId, UiKind,
 };
 use kernel::schedule::ResourceFacts;
 use kernel::state::{State, apply};
@@ -136,6 +137,7 @@ pub fn admit_host_frame(frame: SeamEnvelope) -> Result<SeamEnvelope, Rejection> 
         "guard-query" => payload::<HostToCoreGuardQueryPayload>(&frame)?,
         "operator-answer" => payload::<HostToCoreOperatorAnswerPayload>(&frame)?,
         "shutdown" => payload::<HostToCoreShutdownPayload>(&frame)?,
+        "spawn-result" => payload::<HostToCoreSpawnResultPayload>(&frame)?,
         "task-completed" => payload::<HostToCoreTaskCompletedPayload>(&frame)?,
         other => boundary_runtime(BOUNDARY_ID).reject(format!("unknown-kind:{other}"))?,
     }
@@ -175,6 +177,7 @@ fn dispatch(frame: SeamEnvelope, state: &mut CoreState) -> Result<SeamEnvelope, 
         "agent-result" => route_agent_result(frame, state),
         "guard-query" => route_guard_query(frame, state),
         "shutdown" => done(frame.id, "ok:shutdown".to_owned()),
+        "spawn-result" => route_spawn_result(frame, state),
         "task-completed" => route_task_completed(frame, state),
         "operator-answer" => done(frame.id, "ok:recorded".to_owned()),
         other => done(frame.id, rejection("unknown-kind", other)),
@@ -280,13 +283,14 @@ fn route_plan(id: u64, args: &[String], state: &mut CoreState) -> Result<SeamEnv
         .map_err(|error| context_status("planning", error))?;
     let assignments =
         planning_assignments(workstream).map_err(|error| context_status("planning", error))?;
-    let first = assignments
-        .first()
-        .ok_or("planning assignment plan is empty")?;
     write_planning_manifest(workstream, &input_set, &inventory, &dossier, &assignments)?;
-    let issue = planning_bg_action(workstream, first, state.state.revision, &input_set, None)?;
-    append_runner_invocation(state, &issue.binding)?;
-    controlled_spawn(id, issue.action, state, "planning")
+    let wave = next_planning_assignments(workstream, state)
+        .map_err(|error| context_status("planning", error))?;
+    if wave.is_empty() {
+        return done(id, rejection("planning-wave", "empty-initial-wave"));
+    }
+    let actions = planning_wave_actions(workstream, &wave, state, &input_set, None)?;
+    controlled_spawn_wave(id, actions, state, "planning")
 }
 
 fn route_run(id: u64, workstream: &str, state: &mut CoreState) -> Result<SeamEnvelope, AnyError> {
@@ -420,12 +424,15 @@ fn accept_planning_carrier(
     if let Err(error) = ensure_atom_registry_after_task_atoms(&carrier.workstream, state) {
         return done(id, rejection("planning-postprocess", &error.to_string()));
     }
-    if let Some(next) = next_planning_assignment(&carrier.workstream, state)
-        .map_err(|error| context_status("planning", error))?
-    {
+    let next = next_planning_assignments(&carrier.workstream, state)
+        .map_err(|error| context_status("planning", error))?;
+    if !next.is_empty() {
         let input_set = read_planning_input_set(&carrier.workstream)
             .map_err(|error| format!("CONTEXT_GAP:planning-manifest:{error}"))?;
-        let atom_registry = if next.boundary_id.as_deref() == Some("planning.work-map.v1") {
+        let needs_atom_registry = next
+            .iter()
+            .any(|assignment| assignment.boundary_id.as_deref() == Some("planning.work-map.v1"));
+        let atom_registry = if needs_atom_registry {
             match ensure_atom_registry(&carrier.workstream, state) {
                 Ok(registry) => Some(registry),
                 Err(error) => {
@@ -435,15 +442,8 @@ fn accept_planning_carrier(
         } else {
             None
         };
-        let issue = planning_bg_action(
-            &carrier.workstream,
-            &next,
-            state.state.revision,
-            &input_set,
-            atom_registry,
-        )?;
-        append_runner_invocation(state, &issue.binding)?;
-        return controlled_spawn(id, issue.action, state, "planning");
+        let actions = planning_wave_actions(&carrier.workstream, &next, state, &input_set, atom_registry)?;
+        return controlled_spawn_wave(id, actions, state, "planning");
     }
     done(
         id,
@@ -453,6 +453,57 @@ fn accept_planning_carrier(
             state.summary()
         ),
     )
+}
+
+fn route_spawn_result(frame: SeamEnvelope, state: &mut CoreState) -> Result<SeamEnvelope, AnyError> {
+    let payload: HostToCoreSpawnResultPayload = serde_json::from_value(frame.payload)?;
+    let binding = match binding_for(state, &payload.action_id.0, &payload.assignment_id.0) {
+        Ok(value) => value,
+        Err(error) => return done(frame.id, rejection("spawn-result-binding", &error)),
+    };
+    match payload.status.as_str() {
+        "launched" => {
+            let Some(task_id) = payload.task_id.as_ref() else {
+                return done(frame.id, rejection("spawn-result", "launched-missing-task-id"));
+            };
+            if payload.diagnostic.is_some() {
+                return done(frame.id, rejection("spawn-result", "launched-with-diagnostic"));
+            }
+            if launch_ack_consumed(state, &binding) {
+                return done(frame.id, rejection("spawn-result", "already-acknowledged"));
+            }
+            append_launch_ack_event(state, task_id, &binding)?;
+            done(frame.id, state.summary())
+        }
+        "launch-failed" => {
+            let Some(diagnostic) = payload.diagnostic.as_ref() else {
+                return done(frame.id, rejection("spawn-result", "failed-missing-diagnostic"));
+            };
+            if payload.task_id.is_some() {
+                return done(frame.id, rejection("spawn-result", "failed-with-task-id"));
+            }
+            if launch_failure_consumed(state, &binding) {
+                return done(frame.id, rejection("spawn-result", "already-failed"));
+            }
+            append_launch_failure_event(state, diagnostic, &binding)?;
+            planning_blocked_or_summary(frame.id, &binding.workstream.0, state)
+        }
+        other => done(frame.id, rejection("spawn-result-status", other)),
+    }
+}
+
+fn planning_blocked_or_summary(
+    id: u64,
+    workstream: &str,
+    state: &CoreState,
+) -> Result<SeamEnvelope, AnyError> {
+    match next_planning_assignments(workstream, state) {
+        Ok(_) => done(id, state.summary()),
+        Err(planning::PlanningError::ContextGap(detail)) if detail.starts_with("planning-wave:") => {
+            done(id, format!("planning:blocked:{detail};{}", state.summary()))
+        }
+        Err(error) => done(id, rejection("planning-postprocess", &format!("{error:?}"))),
+    }
 }
 
 fn route_task_completed(
@@ -472,6 +523,9 @@ fn route_task_completed(
     }
     if payload.status != "completed" {
         append_terminal_event(state, &payload, &binding)?;
+        if binding.result_contract.0.starts_with("planning.") {
+            return planning_blocked_or_summary(frame.id, &binding.workstream.0, state);
+        }
         return done(frame.id, state.summary());
     }
     if binding.result_contract.0 == "autopilot.delivery_result.v1" {
@@ -673,6 +727,64 @@ fn append_terminal_event(
             terminal_consumed_ref(binding),
         ],
     )
+}
+
+fn launch_ack_consumed(state: &CoreState, binding: &runner::IssuedRunnerBinding) -> bool {
+    state.state.refs.contains_key(&launch_ack_ref(binding))
+}
+
+fn launch_failure_consumed(state: &CoreState, binding: &runner::IssuedRunnerBinding) -> bool {
+    state.state.refs.contains_key(&launch_failure_ref(binding))
+}
+
+fn append_launch_ack_event(
+    state: &mut CoreState,
+    task_id: &Id,
+    binding: &runner::IssuedRunnerBinding,
+) -> Result<(), AnyError> {
+    let task_binding = serde_json::json!({"task_id":task_id,"action_id":binding.action_id,"assignment_id":binding.assignment_id,"run_revision":binding.run_revision});
+    state.append(
+        EventKind("background:launch-ack".to_owned()),
+        vec![
+            Ref(task_id.0.clone()),
+            Ref(binding.action_id.0.clone()),
+            Ref(binding.assignment_id.0.clone()),
+            Ref(binding.run_revision.to_string()),
+            Ref(format!("task-binding:{task_binding}")),
+            launch_ack_ref(binding),
+        ],
+    )
+}
+
+fn append_launch_failure_event(
+    state: &mut CoreState,
+    diagnostic: &str,
+    binding: &runner::IssuedRunnerBinding,
+) -> Result<(), AnyError> {
+    state.append(
+        EventKind("background:launch-failed".to_owned()),
+        vec![
+            Ref(binding.action_id.0.clone()),
+            Ref(binding.assignment_id.0.clone()),
+            Ref(binding.run_revision.to_string()),
+            Ref(format!("diagnostic:{}", bounded_ref_detail(diagnostic))),
+            launch_failure_ref(binding),
+        ],
+    )
+}
+
+fn launch_ack_ref(binding: &runner::IssuedRunnerBinding) -> Ref {
+    Ref(format!(
+        "launch-ack:{}:{}:{}",
+        binding.action_id.0, binding.assignment_id.0, binding.run_revision
+    ))
+}
+
+fn launch_failure_ref(binding: &runner::IssuedRunnerBinding) -> Ref {
+    Ref(format!(
+        "launch-failed:{}:{}:{}",
+        binding.action_id.0, binding.assignment_id.0, binding.run_revision
+    ))
 }
 
 fn terminal_consumed_ref(binding: &runner::IssuedRunnerBinding) -> Ref {
@@ -1006,6 +1118,14 @@ fn spawn(id: u64, action: BackgroundAction) -> Result<SeamEnvelope, AnyError> {
         payload: serde_json::to_value(CoreToHostSpawnPayload { action })?,
     })
 }
+fn spawn_wave(id: u64, actions: Vec<BackgroundAction>) -> Result<SeamEnvelope, AnyError> {
+    Ok(SeamEnvelope {
+        v: CONTRACT_VERSION as u32,
+        id,
+        kind: "spawn-wave".to_owned(),
+        payload: serde_json::to_value(CoreToHostSpawnWavePayload { actions })?,
+    })
+}
 fn ui(id: u64, ui_kind: &str, content: serde_json::Value) -> Result<SeamEnvelope, AnyError> {
     Ok(SeamEnvelope {
         v: CONTRACT_VERSION as u32,
@@ -1060,6 +1180,17 @@ fn rejection(code: &str, detail: &str) -> String {
     format!("rejection:{code}:{detail}")
 }
 
+fn bounded_ref_detail(detail: &str) -> String {
+    let single_line = detail.replace(['\n', '\r'], " ");
+    let mut chars = single_line.chars();
+    let bounded = chars.by_ref().take(159).collect::<String>();
+    if chars.next().is_some() {
+        format!("{bounded}…")
+    } else {
+        bounded
+    }
+}
+
 fn controlled_spawn(
     id: u64,
     action: BackgroundAction,
@@ -1093,6 +1224,97 @@ fn controlled_spawn(
         actions: vec![action.clone()],
         next_watchdog_at: kernel::generated::Nullable(None),
     });
+    let mut refs = control_refs(state, trigger, &policy, &frame, std::slice::from_ref(&action))?;
+    refs.extend(record_context_prompt_for_action(state, &action));
+    if let Some(watchdog) = arm_watchdog_if_needed(state, action.run_revision)? {
+        refs.push(Ref(format!("watchdog:armed:{}", watchdog.action_id.0)));
+        refs.push(action_ref(&watchdog)?);
+    }
+    state.append(EventKind("control:frame".to_owned()), refs)?;
+    spawn(id, action)
+}
+
+fn controlled_spawn_wave(
+    id: u64,
+    actions: Vec<BackgroundAction>,
+    state: &mut CoreState,
+    trigger: &str,
+) -> Result<SeamEnvelope, AnyError> {
+    validate_spawn_wave_actions(&actions)?;
+    for action in &actions {
+        crate::control::admit_exact_bg_run((action, &action.bg_run))
+            .map_err(|error| format!("control:bg-run:{}", error.actual()))?;
+    }
+    let policy = crate::control::ControlPolicy::package()
+        .map_err(|error| format!("control:policy:{error:?}"))?;
+    let ordered_ids = actions
+        .iter()
+        .map(|action| action.action_id.0.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let frame = crate::control::ControlFrameDocument::build(crate::control::FrameInput {
+        frame_id: kernel::generated::Uuidv7(format!(
+            "control-frame-{}-planning-wave-{}",
+            state.state.revision + 1,
+            sha256_hex_local(ordered_ids.as_bytes())
+        )),
+        run_id: kernel::generated::Uuidv7(format!("run-{}", actions[0].run_revision)),
+        run_revision: actions[0].run_revision,
+        trigger_kind: kernel::generated::TriggerKind(trigger.to_owned()),
+        trigger_refs: actions
+            .iter()
+            .map(|action| Ref(action.action_id.0.clone()))
+            .collect(),
+        counts: kernel::generated::ControlFrameCounts {
+            implementers: active_implementers(state) as u32,
+            validators: active_validators(state) as u32,
+            fixers: 0,
+            deterministic_jobs: 0,
+            queued_candidates: queued_candidates(state) as u32,
+        },
+        observations: Vec::new(),
+        actions: actions.clone(),
+        next_watchdog_at: kernel::generated::Nullable(None),
+    });
+    let mut refs = control_refs(state, trigger, &policy, &frame, &actions)?;
+    for action in &actions {
+        refs.extend(record_context_prompt_for_action(state, action));
+    }
+    state.append(EventKind("control:frame".to_owned()), refs)?;
+    spawn_wave(id, actions)
+}
+
+fn validate_spawn_wave_actions(actions: &[BackgroundAction]) -> Result<(), AnyError> {
+    if actions.is_empty() {
+        return Err("control:spawn-wave:empty-actions".into());
+    }
+    if actions.len() > 64 {
+        return Err(format!("control:spawn-wave:too-many-actions:{}", actions.len()).into());
+    }
+    let mut action_ids = BTreeSet::new();
+    let mut assignment_ids = BTreeSet::new();
+    let run_revision = actions[0].run_revision;
+    for action in actions {
+        if !action_ids.insert(action.action_id.0.clone()) {
+            return Err(format!("control:spawn-wave:duplicate-action:{}", action.action_id.0).into());
+        }
+        if !assignment_ids.insert(action.assignment_id.0.clone()) {
+            return Err(format!("control:spawn-wave:duplicate-assignment:{}", action.assignment_id.0).into());
+        }
+        if action.run_revision != run_revision {
+            return Err("control:spawn-wave:mixed-run-revisions".into());
+        }
+    }
+    Ok(())
+}
+
+fn control_refs(
+    state: &CoreState,
+    trigger: &str,
+    policy: &crate::control::ControlPolicy,
+    frame: &crate::control::ControlFrameDocument,
+    actions: &[BackgroundAction],
+) -> Result<Vec<Ref>, AnyError> {
     let mut refs = vec![
         Ref("module-wired:control".to_owned()),
         Ref(format!("control:trigger:{trigger}")),
@@ -1104,16 +1326,13 @@ fn controlled_spawn(
             "control:return_to_idle:{}",
             frame.as_generated().return_to_idle
         )),
-        Ref(action.action_id.0.clone()),
-        action_ref(&action)?,
     ];
-    refs.extend(record_context_prompt_for_action(state, &action));
-    if let Some(watchdog) = arm_watchdog_if_needed(state, action.run_revision)? {
-        refs.push(Ref(format!("watchdog:armed:{}", watchdog.action_id.0)));
-        refs.push(action_ref(&watchdog)?);
+    for action in actions {
+        refs.push(Ref(action.action_id.0.clone()));
+        refs.push(action_ref(action)?);
     }
-    state.append(EventKind("control:frame".to_owned()), refs)?;
-    spawn(id, action)
+    refs.push(Ref(format!("control:revision:{}", state.state.revision + 1)));
+    Ok(refs)
 }
 
 fn record_task_completion_control(

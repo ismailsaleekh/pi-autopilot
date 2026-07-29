@@ -1430,6 +1430,15 @@ frame direction="host-to-core" kind="task-completed" {
     field "status" type="string" required=#true
 }
 
+frame direction="host-to-core" kind="spawn-result" {
+    doc "Host acknowledgement for one Core-issued background action launch settlement inside a spawn-wave. status is launched or launch-failed; task_id is required when launched, diagnostic when launch-failed."
+    field "action_id" type="id" required=#true
+    field "assignment_id" type="id" required=#true
+    field "status" type="string" required=#true
+    field "task_id" type="id" required=#false nullable=#true
+    field "diagnostic" type="string" required=#false nullable=#true
+}
+
 frame direction="host-to-core" kind="agent-result" {
     doc "D78 §3.2 — a child agent terminal/checkpoint carrier."
     field "assignment_id" type="id" required=#true
@@ -1462,6 +1471,11 @@ frame direction="core-to-host" kind="ui" {
 frame direction="core-to-host" kind="spawn" {
     doc "D78 §3.2 — launch an exact bg_run descriptor, byte-fixed by D76 §6.2."
     field "action" type="background_action" required=#true
+}
+
+frame direction="core-to-host" kind="spawn-wave" {
+    doc "Launch a nonempty bounded wave of exact bg_run descriptors in parallel; singular spawn remains for delivery and validation compatibility."
+    list "actions" item="background_action" required=#true
 }
 
 frame direction="core-to-host" kind="session" {

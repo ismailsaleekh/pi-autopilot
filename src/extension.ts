@@ -70,10 +70,10 @@ export default function autopilotExtension(pi: ExtensionAPI, options: AutopilotE
         assignment_id: binding.action.assignment_id,
         status: task.status,
       });
-      await applyAndRecord(frame, ctx, { backgroundTasks, operatorMessage, onSpawn: rememberSpawn });
+      await applyAndRecord(frame, ctx, { transport, backgroundTasks, operatorMessage, onSpawn: rememberSpawn });
       if (agentResult !== undefined) {
         const resultFrame = await transport.request("agent-result", agentResult);
-        await applyAndRecord(resultFrame, ctx, { backgroundTasks, operatorMessage, onSpawn: rememberSpawn });
+        await applyAndRecord(resultFrame, ctx, { transport, backgroundTasks, operatorMessage, onSpawn: rememberSpawn });
       }
     } catch (error) {
       await operatorMessage(`Autopilot terminal handling failed for ${correlationLabel(binding)}: ${boundedError(error)}`, "error");
@@ -109,7 +109,7 @@ export default function autopilotExtension(pi: ExtensionAPI, options: AutopilotE
       const reason = shutdownReason(event);
       const payload = reason === undefined ? {} : { reason };
       const frame = await transport.request("shutdown", payload, 2000);
-      await applyAndRecord(frame, ctx, { backgroundTasks, operatorMessage, onSpawn: rememberSpawn });
+      await applyAndRecord(frame, ctx, { transport, backgroundTasks, operatorMessage, onSpawn: rememberSpawn });
     } finally {
       try {
         await reportUnmatchedTerminals();

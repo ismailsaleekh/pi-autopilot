@@ -1085,6 +1085,10 @@ export interface CoreToHostSpawnAttestedPayload {
   action: AutopilotAttestedAction;
 }
 
+export interface CoreToHostSpawnWavePayload {
+  actions: BackgroundAction[];
+}
+
 export interface CoreToHostUiPayload {
   ui_kind: UiKind;
   content: JsonObject;
@@ -1127,6 +1131,14 @@ export interface HostToCoreShutdownPayload {
   reason?: string | null;
 }
 
+export interface HostToCoreSpawnResultPayload {
+  action_id: Id;
+  assignment_id: Id;
+  status: string;
+  task_id?: Id | null;
+  diagnostic?: string | null;
+}
+
 export interface HostToCoreTaskCompletedPayload {
   task_id: Id;
   action_id: Id;
@@ -1134,5 +1146,5 @@ export interface HostToCoreTaskCompletedPayload {
   status: string;
 }
 
-export type HostToCoreFrame = { v: 1; id: number; kind: "agent-result"; payload: HostToCoreAgentResultPayload } | { v: 1; id: number; kind: "attested-task-observation"; payload: HostToCoreAttestedTaskObservationPayload } | { v: 1; id: number; kind: "command"; payload: HostToCoreCommandPayload } | { v: 1; id: number; kind: "guard-query"; payload: HostToCoreGuardQueryPayload } | { v: 1; id: number; kind: "operator-answer"; payload: HostToCoreOperatorAnswerPayload } | { v: 1; id: number; kind: "shutdown"; payload: HostToCoreShutdownPayload } | { v: 1; id: number; kind: "task-completed"; payload: HostToCoreTaskCompletedPayload };
-export type CoreToHostFrame = { v: 1; id: number; kind: "done"; payload: CoreToHostDonePayload } | { v: 1; id: number; kind: "guard-decision"; payload: CoreToHostGuardDecisionPayload } | { v: 1; id: number; kind: "log"; payload: CoreToHostLogPayload } | { v: 1; id: number; kind: "reconcile-attested"; payload: CoreToHostReconcileAttestedPayload } | { v: 1; id: number; kind: "session"; payload: CoreToHostSessionPayload } | { v: 1; id: number; kind: "spawn"; payload: CoreToHostSpawnPayload } | { v: 1; id: number; kind: "spawn-attested"; payload: CoreToHostSpawnAttestedPayload } | { v: 1; id: number; kind: "ui"; payload: CoreToHostUiPayload };
+export type HostToCoreFrame = { v: 1; id: number; kind: "agent-result"; payload: HostToCoreAgentResultPayload } | { v: 1; id: number; kind: "attested-task-observation"; payload: HostToCoreAttestedTaskObservationPayload } | { v: 1; id: number; kind: "command"; payload: HostToCoreCommandPayload } | { v: 1; id: number; kind: "guard-query"; payload: HostToCoreGuardQueryPayload } | { v: 1; id: number; kind: "operator-answer"; payload: HostToCoreOperatorAnswerPayload } | { v: 1; id: number; kind: "shutdown"; payload: HostToCoreShutdownPayload } | { v: 1; id: number; kind: "spawn-result"; payload: HostToCoreSpawnResultPayload } | { v: 1; id: number; kind: "task-completed"; payload: HostToCoreTaskCompletedPayload };
+export type CoreToHostFrame = { v: 1; id: number; kind: "done"; payload: CoreToHostDonePayload } | { v: 1; id: number; kind: "guard-decision"; payload: CoreToHostGuardDecisionPayload } | { v: 1; id: number; kind: "log"; payload: CoreToHostLogPayload } | { v: 1; id: number; kind: "reconcile-attested"; payload: CoreToHostReconcileAttestedPayload } | { v: 1; id: number; kind: "session"; payload: CoreToHostSessionPayload } | { v: 1; id: number; kind: "spawn"; payload: CoreToHostSpawnPayload } | { v: 1; id: number; kind: "spawn-attested"; payload: CoreToHostSpawnAttestedPayload } | { v: 1; id: number; kind: "spawn-wave"; payload: CoreToHostSpawnWavePayload } | { v: 1; id: number; kind: "ui"; payload: CoreToHostUiPayload };

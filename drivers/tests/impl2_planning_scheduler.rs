@@ -1,9 +1,9 @@
 use std::collections::BTreeSet;
 
 use drivers::planning::{
-    PlanningAcceptedRef, PlanningError, PlanningIssuedRef, PlanningManifest, PlanningPolicy,
-    PlanningRefs, PlanningTerminalFailureRef, PlanningWaveFailure, next_planning_wave,
-    planning_policy,
+    PlanningAcceptedRef, PlanningError, PlanningIssuedRef, PlanningLaunchAckRef, PlanningManifest,
+    PlanningPolicy, PlanningRefs, PlanningTerminalFailureRef, PlanningWaveFailure,
+    next_planning_wave, planning_policy,
 };
 
 fn manifest(workstream: &str) -> PlanningManifest {
@@ -30,6 +30,7 @@ fn manifest_from_kdl(workstream: &str, text: &str) -> PlanningManifest {
 fn accept_roles(manifest: &PlanningManifest, roles: &[&str]) -> PlanningRefs {
     let selected_roles = roles.iter().copied().collect::<BTreeSet<_>>();
     let mut issued = Vec::new();
+    let mut launch_acks = BTreeSet::new();
     let mut accepted = BTreeSet::new();
     for (index, assignment) in manifest
         .assignments
@@ -43,6 +44,12 @@ fn accept_roles(manifest: &PlanningManifest, roles: &[&str]) -> PlanningRefs {
             action_id: action_id.clone(),
             run_revision: 1,
         });
+        launch_acks.insert(PlanningLaunchAckRef {
+            assignment_id: assignment.assignment_id.clone(),
+            action_id: action_id.clone(),
+            run_revision: 1,
+            task_id: format!("task-{index}"),
+        });
         accepted.insert(PlanningAcceptedRef {
             assignment_id: assignment.assignment_id.clone(),
             action_id,
@@ -51,6 +58,7 @@ fn accept_roles(manifest: &PlanningManifest, roles: &[&str]) -> PlanningRefs {
     }
     PlanningRefs {
         issued,
+        launch_acks,
         accepted,
         terminal_failures: BTreeSet::new(),
         activation_refs: BTreeSet::new(),
@@ -82,15 +90,25 @@ fn planning_scheduler_respects_role_barrier_and_partial_topup() {
         "fixture must exercise the seven-member P1 wave"
     );
 
+    let issued = p1
+        .iter()
+        .take(4)
+        .enumerate()
+        .map(|(index, assignment)| PlanningIssuedRef {
+            assignment_id: assignment.assignment_id.clone(),
+            action_id: format!("action-{index}"),
+            run_revision: 1,
+        })
+        .collect::<Vec<_>>();
     let refs = PlanningRefs {
-        issued: p1
+        issued: issued.clone(),
+        launch_acks: issued
             .iter()
-            .take(4)
-            .enumerate()
-            .map(|(index, assignment)| PlanningIssuedRef {
-                assignment_id: assignment.assignment_id.clone(),
-                action_id: format!("action-{index}"),
-                run_revision: 1,
+            .map(|issued| PlanningLaunchAckRef {
+                assignment_id: issued.assignment_id.clone(),
+                action_id: issued.action_id.clone(),
+                run_revision: issued.run_revision,
+                task_id: format!("task-{}", issued.action_id),
             })
             .collect(),
         accepted: BTreeSet::from([PlanningAcceptedRef {
@@ -150,7 +168,16 @@ fn planning_failed_member_pauses_without_erasing_siblings() {
         status: "failed".to_owned(),
     }]);
     let refs = PlanningRefs {
-        issued,
+        issued: issued.clone(),
+        launch_acks: issued
+            .iter()
+            .map(|issued| PlanningLaunchAckRef {
+                assignment_id: issued.assignment_id.clone(),
+                action_id: issued.action_id.clone(),
+                run_revision: issued.run_revision,
+                task_id: format!("task-{}", issued.action_id),
+            })
+            .collect(),
         accepted,
         terminal_failures,
         activation_refs: BTreeSet::new(),
@@ -350,6 +377,7 @@ fn planning_resume_recomputes_identical_wave_from_event_refs() {
             action_id: "action-accepted".to_owned(),
             run_revision: 1,
         }],
+        launch_acks: BTreeSet::new(),
         accepted: BTreeSet::from([PlanningAcceptedRef {
             assignment_id: p1[0].assignment_id.clone(),
             action_id: "action-accepted".to_owned(),
