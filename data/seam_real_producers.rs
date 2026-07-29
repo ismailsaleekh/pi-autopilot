@@ -155,18 +155,104 @@ fn next_planning_outcome(workstream: &str, state: &CoreState) -> Result<planning
     let refs = planning_refs_from_state(workstream, state);
     Ok(planning::next_planning_wave(&manifest, &refs, manifest.planning_wave_cap))
 }
-fn unacknowledged_planning_actions(state: &CoreState, active: &[planning::PlanningActiveRef]) -> Result<Vec<BackgroundAction>, AnyError> {
+fn unacknowledged_planning_actions(state: &mut CoreState, active: &[planning::PlanningActiveRef]) -> Result<Vec<BackgroundAction>, AnyError> {
     let issued = issued_actions(state);
     let mut actions = Vec::new();
+    let mut recovered = Vec::new();
     for active_ref in active.iter().filter(|active_ref| !active_ref.launch_acknowledged) {
-        let action = issued.iter().find(|action| {
-            action.assignment_id.0 == active_ref.assignment_id
-                && action.action_id.0 == active_ref.action_id
-                && action.run_revision == active_ref.run_revision
-        }).ok_or_else(|| format!("CONTEXT_GAP:planning-reemit:missing-control-action:{}:{}:{}", active_ref.assignment_id, active_ref.action_id, active_ref.run_revision))?;
-        actions.push(action.clone());
+        match issued_action_for_active_ref(&issued, active_ref)? {
+            Some(action) => actions.push(action),
+            None => {
+                let binding = binding_for_active_ref(state, active_ref)?;
+                let action = planning_action_from_binding(&binding)?;
+                recovered.push(action.clone());
+                actions.push(action);
+            }
+        }
+    }
+    if !actions.is_empty() {
+        validate_spawn_wave_actions(&actions)?;
+    }
+    if !recovered.is_empty() {
+        record_recovered_planning_control_actions(state, &recovered)?;
     }
     Ok(actions)
+}
+
+fn issued_action_for_active_ref(issued: &[BackgroundAction], active_ref: &planning::PlanningActiveRef) -> Result<Option<BackgroundAction>, AnyError> {
+    let mut matches = issued.iter().filter(|action| action.assignment_id.0 == active_ref.assignment_id && action.action_id.0 == active_ref.action_id && action.run_revision == active_ref.run_revision).cloned().collect::<Vec<_>>();
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(Some(matches.remove(0))),
+        count => Err(format!("CONTEXT_GAP:planning-reemit:ambiguous-control-action:{}:{}:{}:{count}", active_ref.assignment_id, active_ref.action_id, active_ref.run_revision).into()),
+    }
+}
+
+fn binding_for_active_ref(state: &CoreState, active_ref: &planning::PlanningActiveRef) -> Result<runner::IssuedRunnerBinding, AnyError> {
+    let mut matches = state.state.refs.keys().filter_map(|reference| runner::decode_binding_ref(&reference.0)).filter(|binding| binding.assignment_id.0 == active_ref.assignment_id && binding.action_id.0 == active_ref.action_id && binding.run_revision == active_ref.run_revision && binding.result_contract.0.starts_with("planning.")).collect::<Vec<_>>();
+    match matches.len() {
+        1 => Ok(matches.remove(0)),
+        0 => Err(format!("CONTEXT_GAP:planning-reemit:missing-binding:{}:{}:{}", active_ref.assignment_id, active_ref.action_id, active_ref.run_revision).into()),
+        count => Err(format!("CONTEXT_GAP:planning-reemit:ambiguous-binding:{}:{}:{}:{count}", active_ref.assignment_id, active_ref.action_id, active_ref.run_revision).into()),
+    }
+}
+
+fn planning_action_from_binding(binding: &runner::IssuedRunnerBinding) -> Result<BackgroundAction, AnyError> {
+    let spec_path = PathBuf::from(&binding.spec_path);
+    let spec_bytes = fs::read(&spec_path).map_err(|error| format!("CONTEXT_GAP:planning-reemit:spec-read:{}:{error}", binding.spec_path))?;
+    let digest = sha256_hex_local(&spec_bytes);
+    if digest != binding.spec_digest { return Err(format!("CONTEXT_GAP:planning-reemit:spec-digest:{}", binding.assignment_id.0).into()); }
+    let spec: kernel::generated::AgentRunSpec = serde_json::from_slice(&spec_bytes).map_err(|error| format!("CONTEXT_GAP:planning-reemit:spec-json:{}:{error}", binding.spec_path))?;
+    validate_reemit_spec_binding(&spec, binding)?;
+    let facts = runner::RunnerTransportFacts::from_env().map_err(|error| format!("CONTEXT_GAP:planning-reemit:transport:{error:?}"))?;
+    Ok(BackgroundAction {
+        action_id: binding.action_id.clone(),
+        assignment_id: binding.assignment_id.clone(),
+        kind: kernel::generated::ActionKind::LaunchBackground,
+        bg_run: kernel::generated::BackgroundActionBgRun {
+            name: format!("autopilot-agent-run {}", binding.assignment_id.0),
+            command: kernel::generated::Bytes(runner::try_command_for_spec(&facts, &spec_path).map_err(|error| format!("CONTEXT_GAP:planning-reemit:command:{error:?}"))?),
+            is_agent: true,
+            timeout_seconds: Some(3600),
+            notify_on_completion: true,
+            trigger_on_completion: true,
+        },
+        run_revision: binding.run_revision,
+        expires_at: None,
+        supersession_state: kernel::generated::SupersessionState("live".to_owned()),
+    })
+}
+
+fn validate_reemit_spec_binding(spec: &kernel::generated::AgentRunSpec, binding: &runner::IssuedRunnerBinding) -> Result<(), AnyError> {
+    if spec.action_id != binding.action_id || spec.assignment_id != binding.assignment_id || spec.run_revision != binding.run_revision || spec.workstream != binding.workstream || spec.role_id != binding.role_id || spec.mode != binding.mode || spec.boundary_id != binding.boundary_id || spec.result_contract != binding.result_contract || spec.prompt_path.0 != binding.prompt_path || spec.prompt_digest.0 != binding.prompt_digest || spec.spec_path.0 != binding.spec_path || spec.carrier_path.0 != binding.carrier_path || spec.session_id != binding.session_id || spec.boundary_digest.0 != binding.boundary_digest || spec.result_contract_digest.0 != binding.result_contract_digest || spec.settings_digest.0 != binding.settings_digest || spec.context_digest.0 != binding.context_digest || spec.skills_digest.0 != binding.skills_digest || spec.subscription_digest.0 != binding.subscription_digest {
+        return Err(format!("CONTEXT_GAP:planning-reemit:spec-binding-drift:{}:{}:{}", binding.assignment_id.0, binding.action_id.0, binding.run_revision).into());
+    }
+    Ok(())
+}
+
+fn record_recovered_planning_control_actions(state: &mut CoreState, actions: &[BackgroundAction]) -> Result<(), AnyError> {
+    validate_spawn_wave_actions(actions)?;
+    for action in actions {
+        crate::control::admit_exact_bg_run((action, &action.bg_run)).map_err(|error| format!("control:bg-run:{}", error.actual()))?;
+    }
+    let policy = crate::control::ControlPolicy::package().map_err(|error| format!("control:policy:{error:?}"))?;
+    let ordered_ids = actions.iter().map(|action| action.action_id.0.as_str()).collect::<Vec<_>>().join("\n");
+    let frame = crate::control::ControlFrameDocument::build(crate::control::FrameInput {
+        frame_id: kernel::generated::Uuidv7(format!("control-frame-{}-planning-reemit-{}", state.state.revision + 1, sha256_hex_local(ordered_ids.as_bytes()))),
+        run_id: kernel::generated::Uuidv7(format!("run-{}", actions[0].run_revision)),
+        run_revision: actions[0].run_revision,
+        trigger_kind: kernel::generated::TriggerKind("planning-reemit".to_owned()),
+        trigger_refs: actions.iter().map(|action| Ref(action.action_id.0.clone())).collect(),
+        counts: kernel::generated::ControlFrameCounts { implementers: active_implementers(state) as u32, validators: active_validators(state) as u32, fixers: 0, deterministic_jobs: 0, queued_candidates: queued_candidates(state) as u32 },
+        observations: Vec::new(),
+        actions: actions.to_vec(),
+        next_watchdog_at: kernel::generated::Nullable(None),
+    });
+    let mut refs = control_refs(state, "planning-reemit", &policy, &frame, actions)?;
+    for action in actions {
+        refs.extend(record_context_prompt_for_action(state, action));
+    }
+    state.append(EventKind("control:frame".to_owned()), refs)
 }
 fn planning_waiting_status(wave_id: &str, active: &[planning::PlanningActiveRef], state: &CoreState) -> String {
     let active_ids = active.iter().map(|item| item.assignment_id.clone()).collect::<Vec<_>>().join(",");
