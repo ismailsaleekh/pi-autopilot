@@ -73,7 +73,7 @@ fn assignment_mode_parameter(assignments: &[AgentAssignment], assignment: &Agent
     let index = role_assignments.iter().position(|item| item.assignment_id == assignment.assignment_id).ok_or_else(|| runner::RunnerError::InvalidSpec(format!("assignment {} not found in role allocation", assignment.assignment_id)))?;
     Ok(allocations[index].clone())
 }
-fn planning_bg_action(workstream: &str, assignment: &AgentAssignment, run_revision: u64, input_set: &planning::TaskInputSet, atom_registry: Option<(String, String)>) -> Result<runner::IssuedRunnerAction, runner::RunnerError> {
+fn planning_bg_action(workstream: &str, assignment: &AgentAssignment, run_revision: u64, input_set: &planning::TaskInputSet, atom_registry: Option<(String, String)>, accepted_planning_artifacts: Vec<runner::AcceptedPlanningArtifactBinding>) -> Result<runner::IssuedRunnerAction, runner::RunnerError> {
     let context = input_set.context_documents.first().ok_or_else(|| runner::RunnerError::InvalidSpec("missing planning context".to_owned()))?;
     let assignments = planning_assignments(workstream).map_err(|error| runner::RunnerError::InvalidSpec(format!("planning assignments: {error:?}")))?;
     let mode_parameter = assignment_mode_parameter(&assignments, assignment)?;
@@ -93,6 +93,7 @@ fn planning_bg_action(workstream: &str, assignment: &AgentAssignment, run_revisi
         atom_id_prefix: assignment.atom_id_prefix.clone(),
         atom_registry_path: atom_registry.as_ref().map(|(path, _)| path.clone()),
         atom_registry_digest: atom_registry.as_ref().map(|(_, digest)| digest.clone()),
+        accepted_planning_artifacts,
     })
 }
 
@@ -104,6 +105,7 @@ fn planning_wave_actions(
     atom_registry: Option<(String, String)>,
 ) -> Result<Vec<BackgroundAction>, AnyError> {
     let run_revision = state.state.revision;
+    let accepted_artifacts = accepted_planning_artifacts_for_issue(workstream, state)?;
     let mut actions = Vec::new();
     for assignment in assignments {
         let registry = if assignment.boundary_id.as_deref() == Some("planning.work-map.v1") {
@@ -111,7 +113,14 @@ fn planning_wave_actions(
         } else {
             None
         };
-        let issue = planning_bg_action(workstream, assignment, run_revision, input_set, registry)?;
+        let issue = planning_bg_action(
+            workstream,
+            assignment,
+            run_revision,
+            input_set,
+            registry,
+            accepted_artifacts.clone(),
+        )?;
         append_runner_invocation(state, &issue.binding)?;
         actions.push(issue.action);
     }
@@ -349,6 +358,61 @@ fn ensure_atom_registry(workstream: &str, state: &CoreState) -> Result<(String, 
 
 fn accepted_binding_for_assignment(state: &CoreState, assignment_id: &str) -> Option<runner::IssuedRunnerBinding> {
     state.state.refs.keys().filter_map(|reference| runner::decode_binding_ref(&reference.0)).find(|binding| binding.assignment_id.0 == assignment_id && planning_result_consumed(state, binding))
+}
+
+fn accepted_planning_artifacts_for_issue(workstream: &str, state: &CoreState) -> Result<Vec<runner::AcceptedPlanningArtifactBinding>, AnyError> {
+    let manifest = read_planning_schedule_manifest(workstream).map_err(|error| format!("CONTEXT_GAP:planning-manifest:{error}"))?;
+    let mut assignments = std::collections::BTreeMap::new();
+    for (order, assignment) in manifest.assignments.iter().enumerate() {
+        assignments.insert(assignment.assignment_id.as_str(), (order, assignment));
+    }
+    let mut rows: Vec<(String, usize, runner::AcceptedPlanningArtifactBinding)> = Vec::new();
+    for binding in state.state.refs.keys().filter_map(|reference| runner::decode_binding_ref(&reference.0)) {
+        if binding.workstream.0 != workstream || !planning_result_consumed(state, &binding) { continue; }
+        let Some((order, assignment)) = assignments.get(binding.assignment_id.0.as_str()) else {
+            return Err(format!("CONTEXT_GAP:accepted-artifact:unknown assignment {}", binding.assignment_id.0).into());
+        };
+        let expected = assignment.boundary_id.as_deref().unwrap_or("planning.questions.v1");
+        if expected != binding.result_contract.0 {
+            return Err(format!("CONTEXT_GAP:accepted-artifact:boundary drift {} expected {expected} got {}", binding.assignment_id.0, binding.result_contract.0).into());
+        }
+        let categories = accepted_artifact_categories_for_role(&assignment.role, &binding.result_contract.0)?;
+        if categories.is_empty() { continue; }
+        let carrier_bytes = fs::read(&binding.carrier_path).map_err(|error| format!("CONTEXT_GAP:accepted-artifact-carrier:{}:{error}", binding.carrier_path))?;
+        let digest = sha256_hex_local(&carrier_bytes);
+        for category_id in categories {
+            rows.push((
+                (*category_id).to_owned(),
+                *order,
+                runner::AcceptedPlanningArtifactBinding {
+                    category_id: (*category_id).to_owned(),
+                    assignment_id: binding.assignment_id.clone(),
+                    role_id: binding.role_id.clone(),
+                    boundary_id: binding.result_contract.clone(),
+                    path: binding.carrier_path.clone(),
+                    digest: digest.clone(),
+                },
+            ));
+        }
+    }
+    rows.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+    Ok(rows.into_iter().map(|(_, _, artifact)| artifact).collect())
+}
+
+fn accepted_artifact_categories_for_role(role: &str, boundary_id: &str) -> Result<&'static [&'static str], AnyError> {
+    let categories = match (role, boundary_id) {
+        ("task-extractor", "planning.task-atoms.v1") => &["task-atoms"][..],
+        ("repository-scout" | "context-curator", "planning.scout-dossier.v1") => &["scout-findings"][..],
+        ("plan-compiler", "planning.work-map.v1") => &["compiler-work-maps"][..],
+        ("plan-synthesizer", "planning.work-map.v1") => &["synthesized-work-map"][..],
+        ("plan-reviewer", "planning.plan-review.v1") => &["review-verdicts"][..],
+        ("contradiction-resolver", "planning.questions.v1") => &["contradiction-bundle"][..],
+        _ if boundary_id.starts_with("planning.") => {
+            return Err(format!("CONTEXT_GAP:accepted-artifact:unmapped role/boundary {role}/{boundary_id}").into());
+        }
+        _ => &[][..],
+    };
+    Ok(categories)
 }
 
 fn write_work_map(workstream: &str, raw: &str) -> Result<(), AnyError> { let path = work_map_path(workstream); if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; } fs::write(path, raw)?; Ok(()) }

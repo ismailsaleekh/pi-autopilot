@@ -192,7 +192,6 @@ context_policy schema="autopilot.context_policy.v1" revision=2 {
       mandatory_inline "manifest-gaps"
       required_reads "task-atoms"
       required_reads "scout-findings"
-      required_reads "compiler-work-maps"
       required_reads "current-manifests"
       on_demand "source-anchor"
     }

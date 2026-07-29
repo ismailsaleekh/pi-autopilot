@@ -48,6 +48,12 @@ pub enum RunnerError {
     Route,
     StaleCarrier(String),
     InvalidSpec(String),
+    ContextGap {
+        assignment_id: String,
+        tier: String,
+        category_id: String,
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for RunnerError {
@@ -64,6 +70,15 @@ impl std::fmt::Display for RunnerError {
             Self::Route => write!(formatter, "runner route rejected"),
             Self::StaleCarrier(value) => write!(formatter, "runner carrier refused: {value}"),
             Self::InvalidSpec(value) => write!(formatter, "runner spec refused: {value}"),
+            Self::ContextGap {
+                assignment_id,
+                tier,
+                category_id,
+                reason,
+            } => write!(
+                formatter,
+                "runner context gap: assignment={assignment_id}; tier={tier}; category={category_id}; reason={reason}"
+            ),
         }
     }
 }
@@ -119,6 +134,17 @@ pub struct PlanningRunnerRequest {
     pub atom_id_prefix: Option<String>,
     pub atom_registry_path: Option<String>,
     pub atom_registry_digest: Option<String>,
+    pub accepted_planning_artifacts: Vec<AcceptedPlanningArtifactBinding>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AcceptedPlanningArtifactBinding {
+    pub category_id: String,
+    pub assignment_id: Id,
+    pub role_id: Id,
+    pub boundary_id: ContractId,
+    pub path: String,
+    pub digest: String,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -771,6 +797,7 @@ fn validate_planning_request(request: &PlanningRunnerRequest) -> Result<(), Runn
             "planning context alias drift".to_owned(),
         ));
     }
+    validate_accepted_planning_artifacts(request)?;
     match request.boundary_id.0.as_str() {
         "planning.task-atoms.v1" => {
             let Some(prefix) = &request.atom_id_prefix else {
@@ -818,6 +845,51 @@ fn validate_planning_request(request: &PlanningRunnerRequest) -> Result<(), Runn
                     "non atom/work-map planning assignment has atom bindings".to_owned(),
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_accepted_planning_artifacts(request: &PlanningRunnerRequest) -> Result<(), RunnerError> {
+    let policies = crate::context::policy::ContextPolicyRegistry::package()
+        .map_err(|error| RunnerError::InvalidSpec(format!("context policy registry: {error:?}")))?;
+    let mut seen = std::collections::BTreeSet::new();
+    for artifact in &request.accepted_planning_artifacts {
+        if artifact.category_id.trim().is_empty()
+            || artifact.assignment_id.0.trim().is_empty()
+            || artifact.role_id.0.trim().is_empty()
+            || artifact.boundary_id.0.trim().is_empty()
+            || artifact.path.trim().is_empty()
+            || artifact.digest.trim().is_empty()
+        {
+            return Err(RunnerError::InvalidSpec(
+                "accepted planning artifact binding has empty identity".to_owned(),
+            ));
+        }
+        let category = policies.category(&artifact.category_id).map_err(|error| {
+            RunnerError::InvalidSpec(format!("accepted planning artifact category: {error:?}"))
+        })?;
+        if category.source != "accepted-planning-artifact" {
+            return Err(RunnerError::InvalidSpec(format!(
+                "category {} is not an accepted planning artifact",
+                artifact.category_id
+            )));
+        }
+        if category.boundary.as_deref() != Some(artifact.boundary_id.0.as_str()) {
+            return Err(RunnerError::InvalidSpec(format!(
+                "accepted planning artifact {} boundary drift: expected {:?}, got {}",
+                artifact.category_id, category.boundary, artifact.boundary_id.0
+            )));
+        }
+        if !seen.insert((
+            artifact.category_id.as_str(),
+            artifact.assignment_id.0.as_str(),
+            artifact.path.as_str(),
+        )) {
+            return Err(RunnerError::InvalidSpec(format!(
+                "duplicate accepted planning artifact binding: {}:{}",
+                artifact.category_id, artifact.assignment_id.0
+            )));
         }
     }
     Ok(())
@@ -1038,6 +1110,7 @@ fn planning_assignment_digest(request: &PlanningRunnerRequest) -> Result<String,
         "atom_id_prefix": request.atom_id_prefix,
         "atom_registry_path": request.atom_registry_path,
         "atom_registry_digest": request.atom_registry_digest,
+        "accepted_planning_artifacts": request.accepted_planning_artifacts,
     }))
 }
 
@@ -1062,6 +1135,7 @@ fn planning_assignment_text(
         "terminal_path": role.terminal_path,
         "atom_id_prefix": request.atom_id_prefix,
         "atom_registry": request.atom_registry_path.as_ref().zip(request.atom_registry_digest.as_ref()).map(|(path, digest)| serde_json::json!({"path": path, "digest": digest})),
+        "accepted_planning_artifacts": request.accepted_planning_artifacts.iter().map(artifact_binding_summary).collect::<Vec<_>>(),
         "bound_authority_documents": request.authority_documents.iter().map(document_binding_summary).collect::<Vec<_>>(),
         "bound_context_documents": request.context_documents.iter().map(document_binding_summary).collect::<Vec<_>>(),
     }))
@@ -1074,6 +1148,17 @@ fn document_binding_summary(document: &RunnerTaskDocument) -> serde_json::Value 
         "class": document.class,
         "digest": document.digest,
         "body_digest": document.body_digest,
+    })
+}
+
+fn artifact_binding_summary(artifact: &AcceptedPlanningArtifactBinding) -> serde_json::Value {
+    serde_json::json!({
+        "category_id": artifact.category_id,
+        "assignment_id": artifact.assignment_id.0,
+        "role_id": artifact.role_id.0,
+        "boundary_id": artifact.boundary_id.0,
+        "path": artifact.path,
+        "digest": artifact.digest,
     })
 }
 
@@ -1105,6 +1190,7 @@ fn planning_context_manifest_text(
         "context_documents": request.context_documents.iter().map(document_binding_summary).collect::<Vec<_>>(),
         "atom_registry_path": request.atom_registry_path,
         "atom_registry_digest": request.atom_registry_digest,
+        "accepted_planning_artifacts": request.accepted_planning_artifacts.iter().map(artifact_binding_summary).collect::<Vec<_>>(),
     });
     let estimate_bytes = serde_json::to_vec(&manifest_seed).map_err(|error| {
         RunnerError::InvalidSpec(format!("context manifest seed json: {error}"))
@@ -1188,44 +1274,50 @@ fn fill_context_tier(
             .category(category_id)
             .map_err(|error| RunnerError::InvalidSpec(format!("context category: {error:?}")))?;
         let before = target.len();
-        match category.id.as_str() {
-            "task-authority" => {
-                for (index, document) in request.authority_documents.iter().enumerate() {
-                    target.push(context_item_for_document(
-                        request,
-                        tier,
-                        &category.id,
-                        index,
-                        document,
-                    ));
+        match category.source.as_str() {
+            "task-document" => match category.id.as_str() {
+                "task-authority" => {
+                    for (index, document) in request.authority_documents.iter().enumerate() {
+                        target.push(context_item_for_document(
+                            request,
+                            tier,
+                            &category.id,
+                            index,
+                            document,
+                        ));
+                    }
                 }
-            }
-            "repository-context" => {
-                for (index, document) in request.context_documents.iter().enumerate() {
-                    target.push(context_item_for_document(
-                        request,
-                        tier,
-                        &category.id,
-                        index,
-                        document,
-                    ));
+                "repository-context" => {
+                    for (index, document) in request.context_documents.iter().enumerate() {
+                        target.push(context_item_for_document(
+                            request,
+                            tier,
+                            &category.id,
+                            index,
+                            document,
+                        ));
+                    }
                 }
-            }
-            "task-atoms" => {
-                if let (Some(path), Some(digest)) = (
-                    request.atom_registry_path.as_deref(),
-                    request.atom_registry_digest.as_deref(),
-                ) {
+                _ => {}
+            },
+            "accepted-planning-artifact" => {
+                for (index, artifact) in request
+                    .accepted_planning_artifacts
+                    .iter()
+                    .filter(|artifact| artifact.category_id == category.id)
+                    .enumerate()
+                {
                     target.push(context_item_for_artifact(
                         request,
                         tier,
                         &category.id,
-                        path,
-                        digest,
+                        &category.class,
+                        index,
+                        artifact,
                     ));
                 }
             }
-            _ if category.source == "package-generated" => target.push(context_item_for_synthetic(
+            "package-generated" => target.push(context_item_for_synthetic(
                 request,
                 tier,
                 &category.id,
@@ -1234,20 +1326,29 @@ fn fill_context_tier(
             _ => {}
         }
         if target.len() == before && tier != "excluded" {
+            let reason = format!(
+                "policy {tier} requires category {} but no package binding was supplied at issue time",
+                category.id
+            );
             gaps.push(ContextGap {
                 id: Id(format!(
                     "{}:{}:{}:gap",
                     request.assignment_id.0, tier, category.id
                 )),
                 missing_fact_or_ref: format!("context category {}", category.id),
-                reason: format!(
-                    "policy {} requires category {} but no package binding was supplied at issue time",
-                    tier, category.id
-                ),
+                reason: reason.clone(),
                 affected_criterion: None,
                 affected_decision: None,
                 known_source: None,
             });
+            if matches!(tier, "mandatory_inline" | "required_reads") {
+                return Err(RunnerError::ContextGap {
+                    assignment_id: request.assignment_id.0.clone(),
+                    tier: tier.to_owned(),
+                    category_id: category.id.clone(),
+                    reason,
+                });
+            }
         }
     }
     Ok(())
@@ -1289,26 +1390,30 @@ fn context_item_for_artifact(
     request: &PlanningRunnerRequest,
     tier: &str,
     category_id: &str,
-    path: &str,
-    digest: &str,
+    class: &str,
+    index: usize,
+    artifact: &AcceptedPlanningArtifactBinding,
 ) -> ContextItem {
     ContextItem {
         id: Id(format!(
-            "{}:{}:{}",
-            request.assignment_id.0, tier, category_id
+            "{}:{}:{}:{}",
+            request.assignment_id.0, tier, category_id, index
         )),
-        authority_class: AuthorityClass("planning-artifact".to_owned()),
-        source_uri: Uri(path.to_owned()),
+        authority_class: AuthorityClass(class.to_owned()),
+        source_uri: Uri(artifact.path.clone()),
         anchor: ContextAnchor {
             anchor_form: ContextAnchorForm::Json,
             uri: Uri(format!(
-                "json://planning/{}/{category_id}#/artifact",
-                request.assignment_id.0
+                "json://planning/{}/{category_id}/{}#/carrier",
+                request.assignment_id.0, artifact.assignment_id.0
             )),
         },
-        source_digest: Digest(digest.to_owned()),
-        content_digest: Digest(digest.to_owned()),
-        purpose: format!("{tier}:{category_id}:{path}"),
+        source_digest: Digest(artifact.digest.clone()),
+        content_digest: Digest(artifact.digest.clone()),
+        purpose: format!(
+            "{tier}:{category_id}:{}:{}",
+            artifact.assignment_id.0, artifact.path
+        ),
         linked_criterion: None,
         linked_decision: None,
         linked_unit: None,

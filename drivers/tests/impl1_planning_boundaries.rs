@@ -428,6 +428,47 @@ else:
         )
     }
 
+    fn accepted_artifacts_for_role(
+        &self,
+        role: &str,
+    ) -> Vec<runner::AcceptedPlanningArtifactBinding> {
+        let categories: &[(&str, &str, &str, &str)] = match role {
+            "plan-compiler" => &[
+                ("task-atoms", "planning.task-atoms.v1", "task-extractor", "planning-ws-task-extractor-01"),
+                ("scout-findings", "planning.scout-dossier.v1", "repository-scout", "planning-ws-repository-scout-01"),
+            ],
+            "plan-reviewer" => &[
+                ("task-atoms", "planning.task-atoms.v1", "task-extractor", "planning-ws-task-extractor-01"),
+                ("scout-findings", "planning.scout-dossier.v1", "repository-scout", "planning-ws-repository-scout-01"),
+                ("compiler-work-maps", "planning.work-map.v1", "plan-compiler", "planning-ws-plan-compiler-01"),
+                ("synthesized-work-map", "planning.work-map.v1", "plan-synthesizer", "planning-ws-plan-synthesizer-02"),
+            ],
+            _ => &[],
+        };
+        categories
+            .iter()
+            .map(|(category_id, boundary_id, role_id, assignment_id)| {
+                let path = self.root.join("accepted").join(format!("{category_id}.json"));
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                let bytes = serde_json::to_vec_pretty(&json!({
+                    "category_id": category_id,
+                    "boundary_id": boundary_id,
+                    "assignment_id": assignment_id,
+                }))
+                .unwrap();
+                fs::write(&path, &bytes).unwrap();
+                runner::AcceptedPlanningArtifactBinding {
+                    category_id: (*category_id).to_owned(),
+                    assignment_id: Id((*assignment_id).to_owned()),
+                    role_id: Id((*role_id).to_owned()),
+                    boundary_id: ContractId((*boundary_id).to_owned()),
+                    path: path.display().to_string(),
+                    digest: sha256_hex(&bytes),
+                }
+            })
+            .collect()
+    }
+
     fn write_atom_registry(&self, atoms: &[(&str, &str)]) -> (String, String) {
         let path = self
             .root
@@ -555,6 +596,7 @@ else:
             atom_id_prefix: prefix.map(str::to_owned),
             atom_registry_path: registry_path,
             atom_registry_digest: registry_digest,
+            accepted_planning_artifacts: self.accepted_artifacts_for_role(role),
         };
         runner::planning_issue(&request).unwrap()
     }
