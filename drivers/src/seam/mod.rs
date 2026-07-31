@@ -11,17 +11,18 @@ use kernel::generated::{
     AllocationLaneProposal, BackgroundAction, CONTRACT_VERSION, CoreToHostDonePayload,
     CoreToHostSpawnPayload, CoreToHostSpawnWavePayload, CoreToHostUiPayload, DeliveryBoundary,
     DeliveryResult, EventKind, EventRow, HostToCoreAgentResultPayload, HostToCoreCommandPayload,
-    HostToCoreOperatorAnswerPayload, HostToCoreShutdownPayload, HostToCoreSpawnResultPayload,
-    HostToCoreTaskCompletedPayload, Id, ModeId, Ref, SeamEnvelope, Sha, TestId, UiKind,
+    HostToCoreSpawnResultPayload, HostToCoreTaskCompletedPayload, Id, ModeId, Ref, SeamEnvelope,
+    Sha, TestId, UiKind,
 };
 use kernel::schedule::ResourceFacts;
 use kernel::state::{State, apply};
 use kernel_macros::acceptance_boundary;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize};
 
 use crate::allocation::{self, AllocationPolicy, AllocationSubmission, ApprovedUnit, FutureUnit};
 use crate::bgtasks;
 use crate::dispatch::{self, DispatchInput, LaneReadiness};
+use crate::generated::tables::{self, HostToCoreRoute, SeamAdmissionError};
 use crate::handoff::{self, AssignmentHandle, CooperativeCheckpoint};
 use crate::lifecycle::{self, AbortRequest, LocalLifecycle};
 use crate::planning::{self, TaskAuthority};
@@ -113,33 +114,28 @@ pub fn handle_line(line: &str, state: &mut CoreState) -> Result<SeamEnvelope, An
         Err(error) => return done(0, rejection("malformed-json", &error.to_string())),
     };
     let id = envelope.id;
-    match admit_host_frame(envelope) {
-        Ok(frame) => dispatch(frame, state),
-        Err(error) => done(id, rejection(error.boundary_id(), error.actual())),
+    if envelope.v != CONTRACT_VERSION as u32 {
+        return done(
+            id,
+            rejection(BOUNDARY_ID, &format!("version-mismatch:{}", envelope.v)),
+        );
+    }
+    match tables::admit_host_to_core(&envelope.kind, envelope.payload) {
+        Ok(route) => dispatch(id, route, state),
+        Err(error) => done(id, seam_admission_status(error)),
     }
 }
 
-#[acceptance_boundary(
-    id = "seam.host-frame.v1",
-    producer = Producer::Host,
-    visible = true,
-    admits = "Host newline JSON must be contract v=1 with a known host-to-core kind and generated payload shape.",
-    mode = BoundaryMode::Enforce
-)]
-pub fn admit_host_frame(frame: SeamEnvelope) -> Result<SeamEnvelope, Rejection> {
-    if frame.v != CONTRACT_VERSION as u32 {
-        boundary_runtime(BOUNDARY_ID).reject(format!("version-mismatch:{}", frame.v))?;
+fn seam_admission_status(error: SeamAdmissionError) -> String {
+    match error {
+        SeamAdmissionError::Unknown(kind) => rejection("unknown-kind", &kind),
+        SeamAdmissionError::Unsupported(row) => {
+            rejection("unsupported-kind", &format!("{}:{}", row.kind, row.adapter))
+        }
+        SeamAdmissionError::Payload { kind, error } => {
+            rejection("payload-mismatch", &format!("{kind}:{error}"))
+        }
     }
-    match frame.kind.as_str() {
-        "agent-result" => payload::<HostToCoreAgentResultPayload>(&frame)?,
-        "command" => payload::<HostToCoreCommandPayload>(&frame)?,
-        "operator-answer" => payload::<HostToCoreOperatorAnswerPayload>(&frame)?,
-        "shutdown" => payload::<HostToCoreShutdownPayload>(&frame)?,
-        "spawn-result" => payload::<HostToCoreSpawnResultPayload>(&frame)?,
-        "task-completed" => payload::<HostToCoreTaskCompletedPayload>(&frame)?,
-        other => boundary_runtime(BOUNDARY_ID).reject(format!("unknown-kind:{other}"))?,
-    }
-    Ok(frame)
 }
 
 #[acceptance_boundary(
@@ -169,40 +165,45 @@ pub fn admit_operator_command(raw: &str) -> Result<ParsedCommand, Rejection> {
     Ok(ParsedCommand { route, args })
 }
 
-fn dispatch(frame: SeamEnvelope, state: &mut CoreState) -> Result<SeamEnvelope, AnyError> {
-    match frame.kind.as_str() {
-        "command" => command(frame, state),
-        "agent-result" => route_agent_result(frame, state),
-        "shutdown" => done(frame.id, "ok:shutdown".to_owned()),
-        "spawn-result" => route_spawn_result(frame, state),
-        "task-completed" => route_task_completed(frame, state),
-        "operator-answer" => done(frame.id, "ok:recorded".to_owned()),
-        other => done(frame.id, rejection("unknown-kind", other)),
+fn dispatch(
+    id: u64,
+    route: HostToCoreRoute,
+    state: &mut CoreState,
+) -> Result<SeamEnvelope, AnyError> {
+    match route {
+        HostToCoreRoute::Command(payload) => command(id, payload, state),
+        HostToCoreRoute::TaskCompleted(payload) => route_task_completed(id, payload, state),
+        HostToCoreRoute::SpawnResult(payload) => route_spawn_result(id, payload, state),
+        HostToCoreRoute::AgentResult(payload) => route_agent_result(id, payload, state),
+        HostToCoreRoute::OperatorAnswer(_) => done(id, "ok:recorded".to_owned()),
+        HostToCoreRoute::Shutdown(_) => done(id, "ok:shutdown".to_owned()),
     }
 }
 
-fn command(frame: SeamEnvelope, state: &mut CoreState) -> Result<SeamEnvelope, AnyError> {
-    let HostToCoreCommandPayload {
+fn command(
+    id: u64,
+    HostToCoreCommandPayload {
         raw,
         background_capabilities,
         background_capability_diagnostic,
-    } = serde_json::from_value(frame.payload)?;
+    }: HostToCoreCommandPayload,
+    state: &mut CoreState,
+) -> Result<SeamEnvelope, AnyError> {
     if raw == "state" {
-        return done(frame.id, state.summary());
+        return done(id, state.summary());
     }
     if matches!(raw.as_str(), "append" | "crash-window") {
-        return done(frame.id, rejection("malformed-command", &raw));
+        return done(id, rejection("malformed-command", &raw));
     }
     if (raw.starts_with("append:") || raw.starts_with("crash-window:") || raw.starts_with("state:"))
         && let Some((verb, rest)) = raw.split_once(':')
     {
-        return legacy_command(frame.id, verb, rest, state);
+        return legacy_command(id, verb, rest, state);
     }
     let parsed = match admit_operator_command(&raw) {
         Ok(value) => value,
-        Err(error) => return done(frame.id, boundary_status(&error)),
+        Err(error) => return done(id, boundary_status(&error)),
     };
-    let id = frame.id;
     let caps = bgtasks::BgCapabilities::from_generated(&background_capabilities);
     let diagnostic = background_capability_diagnostic.as_deref();
     let result = match parsed.route.driver.as_str() {
@@ -355,23 +356,18 @@ fn route_run(id: u64, workstream: &str, state: &mut CoreState) -> Result<SeamEnv
 }
 
 fn route_agent_result(
-    frame: SeamEnvelope,
-    state: &mut CoreState,
-) -> Result<SeamEnvelope, AnyError> {
-    let HostToCoreAgentResultPayload {
+    id: u64,
+    HostToCoreAgentResultPayload {
         assignment_id,
         carrier,
-    } = serde_json::from_value(frame.payload)?;
+    }: HostToCoreAgentResultPayload,
+    state: &mut CoreState,
+) -> Result<SeamEnvelope, AnyError> {
     let carrier: AgentCarrier = match serde_json::from_value(carrier) {
         Ok(value) => value,
-        Err(error) => {
-            return done(
-                frame.id,
-                rejection("agent-result-carrier", &error.to_string()),
-            );
-        }
+        Err(error) => return done(id, rejection("agent-result-carrier", &error.to_string())),
     };
-    accept_planning_carrier(frame.id, &assignment_id, carrier, state, None)
+    accept_planning_carrier(id, &assignment_id, carrier, state, None)
 }
 
 fn accept_planning_carrier(
@@ -511,51 +507,42 @@ fn accept_planning_carrier(
 }
 
 fn route_spawn_result(
-    frame: SeamEnvelope,
+    id: u64,
+    payload: HostToCoreSpawnResultPayload,
     state: &mut CoreState,
 ) -> Result<SeamEnvelope, AnyError> {
-    let payload: HostToCoreSpawnResultPayload = serde_json::from_value(frame.payload)?;
     let binding = match binding_for(state, &payload.action_id.0, &payload.assignment_id.0) {
         Ok(value) => value,
-        Err(error) => return done(frame.id, rejection("spawn-result-binding", &error)),
+        Err(error) => return done(id, rejection("spawn-result-binding", &error)),
     };
     match payload.status.as_str() {
         "launched" => {
             let Some(task_id) = payload.task_id.as_ref() else {
-                return done(
-                    frame.id,
-                    rejection("spawn-result", "launched-missing-task-id"),
-                );
+                return done(id, rejection("spawn-result", "launched-missing-task-id"));
             };
             if payload.diagnostic.is_some() {
-                return done(
-                    frame.id,
-                    rejection("spawn-result", "launched-with-diagnostic"),
-                );
+                return done(id, rejection("spawn-result", "launched-with-diagnostic"));
             }
             if launch_ack_consumed(state, &binding) {
-                return done(frame.id, rejection("spawn-result", "already-acknowledged"));
+                return done(id, rejection("spawn-result", "already-acknowledged"));
             }
             append_launch_ack_event(state, task_id, &binding)?;
-            done(frame.id, state.summary())
+            done(id, state.summary())
         }
         "launch-failed" => {
             let Some(diagnostic) = payload.diagnostic.as_ref() else {
-                return done(
-                    frame.id,
-                    rejection("spawn-result", "failed-missing-diagnostic"),
-                );
+                return done(id, rejection("spawn-result", "failed-missing-diagnostic"));
             };
             if payload.task_id.is_some() {
-                return done(frame.id, rejection("spawn-result", "failed-with-task-id"));
+                return done(id, rejection("spawn-result", "failed-with-task-id"));
             }
             if launch_failure_consumed(state, &binding) {
-                return done(frame.id, rejection("spawn-result", "already-failed"));
+                return done(id, rejection("spawn-result", "already-failed"));
             }
             append_launch_failure_event(state, diagnostic, &binding)?;
-            planning_blocked_or_summary(frame.id, &binding.workstream.0, state)
+            planning_blocked_or_summary(id, &binding.workstream.0, state)
         }
-        other => done(frame.id, rejection("spawn-result-status", other)),
+        other => done(id, rejection("spawn-result-status", other)),
     }
 }
 
@@ -577,61 +564,63 @@ fn planning_blocked_or_summary(
 }
 
 fn route_task_completed(
-    frame: SeamEnvelope,
+    id: u64,
+    payload: HostToCoreTaskCompletedPayload,
     state: &mut CoreState,
 ) -> Result<SeamEnvelope, AnyError> {
-    let payload: HostToCoreTaskCompletedPayload = serde_json::from_value(frame.payload)?;
     let binding = match binding_for(state, &payload.action_id.0, &payload.assignment_id.0) {
         Ok(value) => value,
-        Err(error) => return done(frame.id, rejection("terminal-binding", &error)),
+        Err(error) => return done(id, rejection("terminal-binding", &error)),
     };
     if terminal_consumed(state, &binding) {
-        return done(frame.id, rejection("terminal-binding", "already-consumed"));
+        return done(id, rejection("terminal-binding", "already-consumed"));
     }
     if !terminal_status_allowed(&payload.status) {
-        return done(frame.id, rejection("terminal-status", &payload.status));
+        return done(id, rejection("terminal-status", &payload.status));
     }
     if payload.status != "completed" {
         append_terminal_event(state, &payload, &binding)?;
         if binding.result_contract.0.starts_with("planning.") {
-            return planning_blocked_or_summary(frame.id, &binding.workstream.0, state);
+            return planning_blocked_or_summary(id, &binding.workstream.0, state);
         }
-        return done(frame.id, state.summary());
+        return done(id, state.summary());
     }
-    if binding.result_contract.0 == "autopilot.delivery_result.v1" {
+    if binding.result_contract.0 == "autopilot.delivery_result.v2" {
         let carrier_path = PathBuf::from(&binding.carrier_path);
         let carrier_text = match fs::read_to_string(&carrier_path) {
             Ok(value) => value,
             Err(error) => {
                 return done(
-                    frame.id,
+                    id,
                     rejection("carrier-read", &format!("{}:{error}", binding.carrier_path)),
                 );
             }
         };
-        let result: DeliveryResult = match serde_json::from_str(&carrier_text) {
-            Ok(value) => value,
-            Err(error) => {
-                return done(
-                    frame.id,
-                    rejection(
-                        "delivery-carrier",
-                        &format!("{}:{error}", binding.carrier_path),
-                    ),
-                );
-            }
-        };
+        let result_v2: kernel::generated::DeliveryResultV2 =
+            match serde_json::from_str(&carrier_text) {
+                Ok(value) => value,
+                Err(error) => {
+                    return done(
+                        id,
+                        rejection(
+                            "delivery-carrier",
+                            &format!("{}:{error}", binding.carrier_path),
+                        ),
+                    );
+                }
+            };
+        if let Err(error) = validate_delivery_result_v2(&result_v2, &binding) {
+            return done(id, rejection("delivery-carrier-binding", &error));
+        }
+        let result = delivery_v1_projection(&result_v2);
         let expected = match delivery_expectation_from_binding(&binding) {
             Ok(value) => value,
-            Err(error) => return done(frame.id, rejection("delivery-binding", &error)),
+            Err(error) => return done(id, rejection("delivery-binding", &error)),
         };
         let package = match runner::establish_delivery_package(&result, &expected) {
             Ok(value) => value,
             Err(error) => {
-                return done(
-                    frame.id,
-                    rejection("delivery-rejected", &format!("{error:?}")),
-                );
+                return done(id, rejection("delivery-rejected", &format!("{error:?}")));
             }
         };
         let accepted = match runner::accept_delivery_with_package_facts(
@@ -641,10 +630,7 @@ fn route_task_completed(
         ) {
             Ok(value) => value,
             Err(error) => {
-                return done(
-                    frame.id,
-                    rejection("delivery-rejected", &format!("{error:?}")),
-                );
+                return done(id, rejection("delivery-rejected", &format!("{error:?}")));
             }
         };
         append_terminal_event(state, &payload, &binding)?;
@@ -660,19 +646,17 @@ fn route_task_completed(
             ],
         )?;
         record_delivery_transcript(&binding, &carrier_text, state)?;
-        return delivery_accepted(frame.id, &binding, &accepted, state);
+        return delivery_accepted(id, &binding, &accepted, state);
     }
-    if binding.result_contract.0 == "validation.verdict.v1" {
-        append_terminal_event(state, &payload, &binding)?;
-        record_task_completion_control(state, &payload)?;
-        return validation_completed(frame.id, &binding, state);
+    if binding.result_contract.0 == "autopilot.validation_result.v2" {
+        return validation_completed(id, &binding, &payload, state);
     }
     if binding.result_contract.0.starts_with("planning.") {
         let carrier_text = match fs::read_to_string(&binding.carrier_path) {
             Ok(value) => value,
             Err(error) => {
                 return done(
-                    frame.id,
+                    id,
                     rejection("carrier-read", &format!("{}:{error}", binding.carrier_path)),
                 );
             }
@@ -681,7 +665,7 @@ fn route_task_completed(
             Ok(value) => value,
             Err(error) => {
                 return done(
-                    frame.id,
+                    id,
                     rejection(
                         "planning-carrier",
                         &format!("{}:{error}", binding.carrier_path),
@@ -689,17 +673,11 @@ fn route_task_completed(
                 );
             }
         };
-        return accept_planning_carrier(
-            frame.id,
-            &binding.assignment_id,
-            carrier,
-            state,
-            Some(&payload),
-        );
+        return accept_planning_carrier(id, &binding.assignment_id, carrier, state, Some(&payload));
     }
     append_terminal_event(state, &payload, &binding)?;
     record_task_completion_control(state, &payload)?;
-    done(frame.id, state.summary())
+    done(id, state.summary())
 }
 
 fn validate_planning_binding(
@@ -734,7 +712,7 @@ fn validate_planning_binding(
             binding.boundary_id.0
         ));
     }
-    if binding.result_contract.0 == "autopilot.delivery_result.v1" {
+    if binding.result_contract.0 == "autopilot.delivery_result.v2" {
         return Err("planning carrier for delivery binding".to_owned());
     }
     Ok(())
@@ -873,6 +851,107 @@ fn planning_result_consumed_ref(binding: &runner::IssuedRunnerBinding) -> Ref {
 
 fn terminal_status_allowed(status: &str) -> bool {
     matches!(status, "completed" | "failed" | "killed")
+}
+
+fn validate_delivery_result_v2(
+    result: &kernel::generated::DeliveryResultV2,
+    binding: &runner::IssuedRunnerBinding,
+) -> Result<(), String> {
+    if result.schema.0 != "autopilot.delivery_result.v2"
+        || result.action_id != binding.action_id
+        || result.assignment_id != binding.assignment_id
+        || result.run_revision != binding.run_revision
+        || result.workstream != binding.workstream
+        || result.role_id != binding.role_id
+        || result.mode != binding.mode
+        || Some(&result.lane_id) != binding.lane_id.as_ref()
+        || Some(result.attempt) != binding.attempt
+        || Some(&result.base_commit) != binding.base_commit.as_ref()
+        || Some(result.worktree.0.as_str()) != binding.worktree.as_deref()
+        || result.prompt_path.0 != binding.prompt_path
+        || result.prompt_digest.0 != binding.prompt_digest
+        || result.spec_path.0 != binding.spec_path
+        || result.spec_digest.0 != binding.spec_digest
+        || result.carrier_path.0 != binding.carrier_path
+        || result.boundary_id != binding.boundary_id
+        || result.boundary_digest.0 != binding.boundary_digest
+        || result.result_contract != binding.result_contract
+        || result.result_contract_digest.0 != binding.result_contract_digest
+        || result.settings_digest.0 != binding.settings_digest
+        || result.context_digest.0 != binding.context_digest
+        || result.skills_digest.0 != binding.skills_digest
+        || result.subscription_digest.0 != binding.subscription_digest
+    {
+        return Err("package-bound delivery identity drift".to_owned());
+    }
+    let spec_bytes = fs::read(&binding.spec_path).map_err(|error| error.to_string())?;
+    if sha256_hex_local(&spec_bytes) != binding.spec_digest {
+        return Err("delivery spec digest drift".to_owned());
+    }
+    let spec: kernel::generated::AgentRunSpec =
+        serde_json::from_slice(&spec_bytes).map_err(|error| error.to_string())?;
+    let profile = runner::terminal_profile_for(
+        &binding.role_id.0,
+        &binding.boundary_id.0,
+        &binding.result_contract.0,
+    )
+    .map_err(|error| error.to_string())?;
+    if result.terminal_profile_id != profile.0
+        || result.tool_name.0 != profile.1
+        || result.tool_schema_digest.0 != profile.4
+        || result.carrier_binding.0 != runner::child::carrier_binding(&spec)
+        || result.runtime_extension_digest.0 != kernel::generated::CHILD_ADDON_DIGEST
+    {
+        return Err("delivery terminal profile provenance drift".to_owned());
+    }
+    let expected_audit = PathBuf::from(&binding.carrier_path).with_extension("tool-audit.json");
+    if result.tool_audit_ref.0 != expected_audit.display().to_string() {
+        return Err("delivery tool audit path drift".to_owned());
+    }
+    let audit = fs::read(&expected_audit).map_err(|error| error.to_string())?;
+    if sha256_hex_local(&audit) != result.tool_audit_digest.0 {
+        return Err("delivery tool audit digest drift".to_owned());
+    }
+    let submission = serde_json::to_vec(
+        &serde_json::to_value(&result.submission).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    if sha256_hex_local(&submission) != result.submission_digest.0 {
+        return Err("delivery submission digest drift".to_owned());
+    }
+    Ok(())
+}
+
+fn delivery_v1_projection(result: &kernel::generated::DeliveryResultV2) -> DeliveryResult {
+    DeliveryResult {
+        assignment_id: result.assignment_id.clone(),
+        role_id: result.role_id.clone(),
+        mode: result.mode.clone(),
+        run_revision: result.run_revision,
+        lane_id: result.lane_id.clone(),
+        attempt: result.attempt,
+        base_commit: result.base_commit.clone(),
+        worktree: result.worktree.clone(),
+        action_id: Some(result.action_id.clone()),
+        prompt_path: Some(result.prompt_path.clone()),
+        prompt_digest: Some(result.prompt_digest.clone()),
+        spec_path: Some(result.spec_path.clone()),
+        spec_digest: Some(result.spec_digest.clone()),
+        carrier_path: Some(result.carrier_path.clone()),
+        boundary_digest: Some(result.boundary_digest.clone()),
+        result_contract_digest: Some(result.result_contract_digest.clone()),
+        settings_digest: Some(result.settings_digest.clone()),
+        context_digest: Some(result.context_digest.clone()),
+        skills_digest: Some(result.skills_digest.clone()),
+        subscription_digest: Some(result.subscription_digest.clone()),
+        package_commit: None,
+        package_tree: None,
+        actual_changed_paths: result.submission.actual_changed_paths.clone(),
+        execution_audit_ref: result.submission.execution_audit_ref.clone(),
+        focused_evidence_refs: result.submission.focused_evidence_refs.clone(),
+        terminal_status: result.submission.terminal_status.clone(),
+        hard_boundary_violations: result.submission.hard_boundary_violations.clone(),
+    }
 }
 
 fn delivery_expectation_from_binding(
@@ -1165,12 +1244,6 @@ fn event_parts(rest: &str) -> Result<(EventKind, Ref), String> {
         return Err(rejection("malformed-command", "empty-event-ref"));
     }
     Ok((EventKind(kind.to_owned()), Ref(reference.to_owned())))
-}
-fn payload<T: DeserializeOwned>(frame: &SeamEnvelope) -> Result<(), Rejection> {
-    if let Err(error) = serde_json::from_value::<T>(frame.payload.clone()) {
-        boundary_runtime(BOUNDARY_ID).reject(format!("payload-mismatch:{}:{error}", frame.kind))?;
-    }
-    Ok(())
 }
 fn done(id: u64, status: String) -> Result<SeamEnvelope, AnyError> {
     Ok(SeamEnvelope {
@@ -1473,49 +1546,182 @@ fn delivery_accepted(
     controlled_spawn(id, issue.action, state, "delivery-accepted")
 }
 
+fn validate_validation_result_v2(
+    result: &kernel::generated::ValidationResultV2,
+    binding: &runner::IssuedRunnerBinding,
+) -> Result<(), String> {
+    if result.schema.0 != "autopilot.validation_result.v2"
+        || result.action_id != binding.action_id
+        || result.assignment_id != binding.assignment_id
+        || result.run_revision != binding.run_revision
+        || result.workstream != binding.workstream
+        || result.role_id != binding.role_id
+        || result.mode != binding.mode
+        || result.prompt_path.0 != binding.prompt_path
+        || result.prompt_digest.0 != binding.prompt_digest
+        || result.spec_path.0 != binding.spec_path
+        || result.spec_digest.0 != binding.spec_digest
+        || result.carrier_path.0 != binding.carrier_path
+        || result.boundary_id != binding.boundary_id
+        || result.boundary_digest.0 != binding.boundary_digest
+        || result.result_contract != binding.result_contract
+        || result.result_contract_digest.0 != binding.result_contract_digest
+        || result.settings_digest.0 != binding.settings_digest
+        || result.skills_digest.0 != binding.skills_digest
+        || result.subscription_digest.0 != binding.subscription_digest
+    {
+        return Err("package-bound validation identity drift".to_owned());
+    }
+    let spec_bytes = fs::read(&binding.spec_path).map_err(|error| error.to_string())?;
+    if sha256_hex_local(&spec_bytes) != binding.spec_digest {
+        return Err("validation spec digest drift".to_owned());
+    }
+    let spec: kernel::generated::AgentRunSpec =
+        serde_json::from_slice(&spec_bytes).map_err(|error| error.to_string())?;
+    let profile = runner::terminal_profile_for(
+        &binding.role_id.0,
+        &binding.boundary_id.0,
+        &binding.result_contract.0,
+    )
+    .map_err(|error| error.to_string())?;
+    if result.terminal_profile_id != profile.0
+        || result.tool_name.0 != profile.1
+        || result.tool_schema_digest.0 != profile.4
+        || result.carrier_binding.0 != runner::child::carrier_binding(&spec)
+        || result.runtime_extension_digest.0 != kernel::generated::CHILD_ADDON_DIGEST
+    {
+        return Err("validation terminal profile provenance drift".to_owned());
+    }
+    let assignment_bytes =
+        fs::read(&result.assignment_path.0).map_err(|error| error.to_string())?;
+    if sha256_hex_local(&assignment_bytes) != result.assignment_digest.0 {
+        return Err("validation assignment digest drift".to_owned());
+    }
+    let assignment: kernel::generated::ValidationAssignmentV2 =
+        serde_json::from_slice(&assignment_bytes).map_err(|error| error.to_string())?;
+    if assignment.validation_id != result.validation_id
+        || assignment.validation_key != result.validation_key
+        || assignment.validation_attempt != result.validation_attempt
+        || assignment.semantic_round != result.semantic_round
+        || assignment.producer_assignment_ids != result.producer_assignment_ids
+        || assignment.exact_commit != result.exact_commit
+        || assignment.exact_tree != result.exact_tree
+        || result.submission.validation_id != result.validation_id
+        || result.submission.assignment_id != result.assignment_id
+        || result.submission.exact_commit != result.exact_commit
+        || result.submission.exact_tree != result.exact_tree
+    {
+        return Err("validation assignment/submission identity drift".to_owned());
+    }
+    let context = fs::read(&result.context_manifest_path.0).map_err(|error| error.to_string())?;
+    if sha256_hex_local(&context) != result.context_manifest_digest.0 {
+        return Err("validation context digest drift".to_owned());
+    }
+    let expected_audit = PathBuf::from(&binding.carrier_path).with_extension("tool-audit.json");
+    if result.tool_audit_ref.0 != expected_audit.display().to_string() {
+        return Err("validation tool audit path drift".to_owned());
+    }
+    let audit = fs::read(&expected_audit).map_err(|error| error.to_string())?;
+    if sha256_hex_local(&audit) != result.tool_audit_digest.0 {
+        return Err("validation tool audit digest drift".to_owned());
+    }
+    let submission = serde_json::to_vec(
+        &serde_json::to_value(&result.submission).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    if sha256_hex_local(&submission) != result.submission_digest.0 {
+        return Err("validation submission digest drift".to_owned());
+    }
+    Ok(())
+}
+
 fn validation_completed(
     id: u64,
     binding: &runner::IssuedRunnerBinding,
+    terminal: &HostToCoreTaskCompletedPayload,
     state: &mut CoreState,
 ) -> Result<SeamEnvelope, AnyError> {
     let text = fs::read_to_string(&binding.carrier_path)
         .map_err(|error| format!("validation-carrier-read:{}:{error}", binding.carrier_path))?;
-    let verdict: kernel::generated::ValidationVerdict = serde_json::from_str(&text)
+    let result: kernel::generated::ValidationResultV2 = serde_json::from_str(&text)
         .map_err(|error| format!("validation-carrier:{}:{error}", binding.carrier_path))?;
-    crate::validation::submit_validation_verdict(verdict.clone())
-        .map_err(|error| boundary_status(&error))?;
-    if verdict.assignment_id != binding.assignment_id
-        || verdict.exact_commit.0.trim().is_empty()
-        || verdict.exact_tree.0.trim().is_empty()
+    validate_validation_result_v2(&result, binding)?;
+    append_terminal_event(state, terminal, binding)?;
+    record_task_completion_control(state, terminal)?;
+    let blockers = result
+        .submission
+        .criterion_results
+        .iter()
+        .filter(|criterion| criterion.verdict != kernel::generated::CriterionVerdict::PASS)
+        .map(|criterion| criterion.criterion_id.clone())
+        .chain(
+            result
+                .submission
+                .findings
+                .iter()
+                .filter(|finding| {
+                    finding.effect == kernel::generated::FindingEffect::ForwardBlocking
+                })
+                .flat_map(|finding| finding.criterion_ids.clone()),
+        )
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if result.submission.outcome == kernel::generated::ValidationOutcomeV2::FORWARDREADY
+        && blockers.is_empty()
     {
-        return done(id, rejection("validation-binding", "identity-or-tip-drift"));
-    }
-    let required = validation_required_criteria(binding, &verdict);
-    let findings: Vec<kernel::generated::Finding> = Vec::new();
-    let decision = match crate::validation::decide_forward_round(
-        crate::validation::ForwardRound::One,
-        &required,
-        &verdict,
-        &findings,
-    ) {
-        Ok(value) => value,
-        Err(error) => return done(id, rejection("validation-verdict", &format!("{error:?}"))),
-    };
-    match decision {
-        crate::validation::ForwardDecision::Release => {
-            integrate_validated_candidate(id, binding, &verdict, state)
-        }
-        crate::validation::ForwardDecision::ConsolidatedFixer { blocker_ids } => {
-            repair_needed(id, binding, blocker_ids, state)
-        }
-        crate::validation::ForwardDecision::Tier23 { blocker_ids } => done(
+        integrate_validated_candidate_v2(id, binding, &result, state)
+    } else if result.submission.outcome != kernel::generated::ValidationOutcomeV2::FORWARDREADY
+        && !blockers.is_empty()
+    {
+        repair_needed(id, binding, blockers, state)
+    } else {
+        done(
             id,
-            rejection(
-                "validation-tier23",
-                &format!("blockers={}", ids(&blocker_ids)),
-            ),
-        ),
+            rejection("validation-verdict", "outcome/blocker incoherence"),
+        )
     }
+}
+
+fn integrate_validated_candidate_v2(
+    id: u64,
+    binding: &runner::IssuedRunnerBinding,
+    result: &kernel::generated::ValidationResultV2,
+    state: &mut CoreState,
+) -> Result<SeamEnvelope, AnyError> {
+    let verdict = kernel::generated::ValidationVerdict {
+        assignment_id: result.assignment_id.clone(),
+        validation_scope: kernel::generated::ValidationScope("forward".to_owned()),
+        exact_commit: Sha(result.exact_commit.0.clone()),
+        exact_tree: Sha(result.exact_tree.0.clone()),
+        forward_verdict: Some(kernel::generated::ForwardVerdict::FORWARDREADY),
+        closure_verdict: None,
+        criterion_results: result
+            .submission
+            .criterion_results
+            .iter()
+            .map(|criterion| kernel::generated::CriterionResult {
+                criterion_id: criterion.criterion_id.clone(),
+                verdict: criterion.verdict.clone(),
+                evidence_refs: criterion.evidence_refs.clone(),
+                finding_refs: criterion
+                    .finding_ids
+                    .iter()
+                    .map(|id| Ref(id.0.clone()))
+                    .collect(),
+                covered_paths: criterion.covered_paths.clone(),
+                semantic_surface_ids: criterion.semantic_surface_ids.clone(),
+                forward_edge_ids: criterion.forward_edge_ids.clone(),
+            })
+            .collect(),
+        finding_refs: result
+            .submission
+            .findings
+            .iter()
+            .map(|finding| Ref(finding.finding_id.0.clone()))
+            .collect(),
+    };
+    integrate_validated_candidate(id, binding, &verdict, state)
 }
 
 fn integrate_validated_candidate(
@@ -1731,175 +1937,45 @@ fn validation_issue_for_delivery(
     if binding.role_id.0 == "validator" || binding.assignment_id.0.contains("validator") {
         return Err("validator cannot validate its own assignment".to_owned());
     }
-    let cwd = fs::canonicalize(std::env::current_dir().map_err(|error| error.to_string())?)
-        .map_err(|error| error.to_string())?;
-    // The validator is a child of the same top-level run, so it resolves the
-    // same durable run identity rather than deriving one of its own.
-    let run_identity = crate::evidence::EvidenceIdentity::for_workstream(&binding.workstream.0)
-        .map_err(|error| format!("run identity unavailable for validator issue: {error:?}"))?;
-    let validation_id = format!("validation-{}", binding.assignment_id.0);
+    let lane_id = binding
+        .lane_id
+        .clone()
+        .ok_or_else(|| "delivery binding missing lane_id".to_owned())?;
+    let attempt = binding
+        .attempt
+        .ok_or_else(|| "delivery binding missing attempt".to_owned())?;
+    let base_commit = binding
+        .base_commit
+        .clone()
+        .ok_or_else(|| "delivery binding missing base_commit".to_owned())?;
+    let worktree = PathBuf::from(
+        binding
+            .worktree
+            .clone()
+            .ok_or_else(|| "delivery binding missing worktree".to_owned())?,
+    );
     let assignment_id = Id(format!("validator-{}", binding.assignment_id.0));
-    let action_id = Id(format!("action-{}", assignment_id.0));
-    let base = workstream_dir(&binding.workstream.0)
-        .join("validation")
-        .join(&assignment_id.0);
-    let prompt_path = cwd.join(base.join("prompt.md"));
-    let spec_path = cwd.join(base.join("spec.json"));
-    let carrier_path = cwd.join(base.join("carrier.json"));
-    write_parent_file_local(&prompt_path, validator_prompt(binding, accepted).as_bytes())
-        .map_err(|error| error.to_string())?;
-    let prompt_digest =
-        sha256_hex_local(&fs::read(&prompt_path).map_err(|error| error.to_string())?);
-    let spec = serde_json::json!({
-        "schema":"autopilot.validation_assignment.v1",
-        "validation_id":validation_id,
-        "assignment_id":assignment_id.0,
-        "producer_assignment_ids":[binding.assignment_id.0],
-        "role_id":"validator",
-        "mode":"forward-release",
-        "exact_commit":accepted.package_commit.0,
-        "exact_tree":accepted.package_tree.0,
-        "prompt_path":prompt_path.display().to_string(),
-        "prompt_digest":prompt_digest,
-        "carrier_path":carrier_path.display().to_string()
-    });
-    write_parent_file_local(
-        &spec_path,
-        &serde_json::to_vec_pretty(&spec).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| error.to_string())?;
-    let spec_digest = sha256_hex_local(&fs::read(&spec_path).map_err(|error| error.to_string())?);
-    let command = validator_command(&prompt_path, &carrier_path)?;
-    let binding = runner::IssuedRunnerBinding {
-        action_id: action_id.clone(),
-        assignment_id: assignment_id.clone(),
-        run_revision,
-        workstream: binding.workstream.clone(),
-        role_id: Id("validator".to_owned()),
-        mode: ModeId("forward-release".to_owned()),
-        boundary_id: kernel::generated::ContractId("validation.verdict.v1".to_owned()),
-        result_contract: kernel::generated::ContractId("validation.verdict.v1".to_owned()),
-        prompt_path: prompt_path.display().to_string(),
-        prompt_digest,
-        spec_path: spec_path.display().to_string(),
-        spec_digest,
-        carrier_path: carrier_path.display().to_string(),
-        session_id: runner::session_id_for(
-            &run_identity.run_id_as_id(),
-            &binding.workstream,
-            &assignment_id,
-            &Id("validator".to_owned()),
-            &ModeId("forward-release".to_owned()),
-            &kernel::generated::ContractId("validation.verdict.v1".to_owned()),
-        ),
-        boundary_digest: sha256_hex_local(crate::validation::BOUNDARY_ID.as_bytes()),
-        result_contract_digest: sha256_hex_local(crate::validation::BOUNDARY_ID.as_bytes()),
-        settings_digest: runner::settings_digest(false),
-        context_digest: sha256_hex_local(
-            serde_json::to_string(&spec)
-                .map_err(|error| error.to_string())?
-                .as_bytes(),
-        ),
-        skills_digest: runner::skills_digest(),
-        subscription_digest: sha256_hex_local(b"validator-subscription-pi"),
-        mode_parameter: None,
-        lane_id: binding.lane_id.clone(),
-        attempt: binding.attempt,
-        base_commit: binding.base_commit.clone(),
-        worktree: binding.worktree.clone(),
-        required_focused_evidence: 1,
-    };
-    let action = BackgroundAction {
-        action_id,
-        assignment_id,
-        kind: kernel::generated::ActionKind::LaunchBackground,
-        bg_run: kernel::generated::BackgroundActionBgRun {
-            name: format!("autopilot-validator-run {}", binding.assignment_id.0),
-            command: kernel::generated::Bytes(command),
-            is_agent: true,
-            timeout_seconds: Some(3600),
-            notify_on_completion: true,
-            trigger_on_completion: true,
+    runner::validation_issue(
+        &runner::ValidationRunnerRequest {
+            workstream: binding.workstream.clone(),
+            action_id: Id(format!("action-{}", assignment_id.0)),
+            assignment_id,
+            run_revision,
+            producer_assignment_ids: vec![binding.assignment_id.clone()],
+            exact_commit: accepted.package_commit.0.clone(),
+            exact_tree: accepted.package_tree.0.clone(),
+            candidate_root: worktree.clone(),
+            changed_paths: accepted.changed_paths.clone(),
+            execution_audit_ref: accepted.audit_ref.clone(),
+            evidence_refs: accepted.focused_evidence_refs.clone(),
+            lane_id,
+            attempt,
+            base_commit,
+            worktree,
         },
-        run_revision,
-        expires_at: None,
-        supersession_state: kernel::generated::SupersessionState("live".to_owned()),
-    };
-    Ok(runner::IssuedRunnerAction { action, binding })
-}
-
-fn validator_command(prompt_path: &Path, carrier_path: &Path) -> Result<String, String> {
-    if let Ok(command) = std::env::var("AUTOPILOT_VALIDATOR_COMMAND") {
-        if command.trim().is_empty() {
-            return Err("AUTOPILOT_VALIDATOR_COMMAND is empty".to_owned());
-        }
-        return Ok(command
-            .replace(
-                "{prompt}",
-                &shell_quote_local(&prompt_path.display().to_string()),
-            )
-            .replace(
-                "{carrier}",
-                &shell_quote_local(&carrier_path.display().to_string()),
-            ));
-    }
-    let provider = std::env::var("PI_PROVIDER")
-        .map_err(|_| "missing AUTOPILOT_VALIDATOR_COMMAND and PI_PROVIDER".to_owned())?;
-    let model = std::env::var("PI_MODEL")
-        .map_err(|_| "missing AUTOPILOT_VALIDATOR_COMMAND and PI_MODEL".to_owned())?;
-    let thinking = std::env::var("PI_REASONING_LEVEL").unwrap_or_else(|_| "high".to_owned());
-    Ok(format!(
-        "pi --mode json --provider {} --model {} --thinking {} -p \"$(cat {})\" > {}",
-        shell_quote_local(&provider),
-        shell_quote_local(&model),
-        shell_quote_local(&thinking),
-        shell_quote_local(&prompt_path.display().to_string()),
-        shell_quote_local(&carrier_path.display().to_string())
-    ))
-}
-
-fn validator_prompt(
-    binding: &runner::IssuedRunnerBinding,
-    accepted: &runner::AcceptedDelivery,
-) -> String {
-    format!(
-        "Independent Validator assignment. You are not the Implementer. Validate producer_assignment={} at exact commit={} tree={}. Return validation.verdict.v1 JSON with validation_scope=forward, FORWARD_READY only if every criterion has evidence and coverage. Changed paths: {}",
-        binding.assignment_id.0,
-        accepted.package_commit.0,
-        accepted.package_tree.0,
-        accepted.changed_paths.join(",")
+        &runner::RunnerTransportFacts::from_env().map_err(|error| error.to_string())?,
     )
-}
-
-fn validation_required_criteria(
-    binding: &runner::IssuedRunnerBinding,
-    verdict: &kernel::generated::ValidationVerdict,
-) -> Vec<crate::validation::RequiredCriterion> {
-    if verdict.criterion_results.is_empty() {
-        return vec![crate::validation::RequiredCriterion {
-            id: Id(format!("criterion:{}", binding.assignment_id.0)),
-            covered_paths: vec![kernel::generated::Path(".".to_owned())],
-            semantic_surface_ids: vec![Id("surface:default".to_owned())],
-            forward_edge_ids: vec![Id(format!(
-                "edge:{}",
-                binding
-                    .lane_id
-                    .as_ref()
-                    .map(|id| id.0.as_str())
-                    .unwrap_or("unknown")
-            ))],
-        }];
-    }
-    verdict
-        .criterion_results
-        .iter()
-        .map(|result| crate::validation::RequiredCriterion {
-            id: result.criterion_id.clone(),
-            covered_paths: result.covered_paths.clone(),
-            semantic_surface_ids: result.semantic_surface_ids.clone(),
-            forward_edge_ids: result.forward_edge_ids.clone(),
-        })
-        .collect()
+    .map_err(|error| error.to_string())
 }
 
 fn focused_integration_checks(
@@ -2141,12 +2217,6 @@ fn ids(values: &[Id]) -> String {
         .collect::<Vec<_>>()
         .join(",")
 }
-fn write_parent_file_local(path: &Path, data: &[u8]) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(path, data)
-}
 fn sha256_hex_local(data: &[u8]) -> String {
     use sha2::{Digest as _, Sha256};
     let digest = Sha256::digest(data);
@@ -2155,13 +2225,6 @@ fn sha256_hex_local(data: &[u8]) -> String {
         out.push_str(&format!("{byte:02x}"));
     }
     out
-}
-fn shell_quote_local(value: &str) -> String {
-    if value.is_empty() {
-        "''".to_owned()
-    } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
-    }
 }
 fn git_status(repo: &Path, args: &[&str]) -> Result<(), String> {
     let output = Command::new("git")

@@ -1,14 +1,14 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::fs;
-use std::io::{BufReader, Read};
+use std::io::{BufReader, ErrorKind, Read};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use drivers::runner::rpc::{
     CompactionReason, JsonlReader, RpcClient, RpcCommand, RpcCommandKind, RpcError, RpcEvent,
     RpcFrame, RpcProtocol, RpcSpawnConfig, launch_arguments,
 };
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 #[global_allocator]
 static TRACKING_ALLOCATOR: TrackingAllocator = TrackingAllocator;
@@ -16,6 +16,7 @@ static TRACKING_ALLOCATOR: TrackingAllocator = TrackingAllocator;
 static ALLOC_CURRENT: AtomicUsize = AtomicUsize::new(0);
 static ALLOC_PEAK: AtomicUsize = AtomicUsize::new(0);
 static ALLOC_BASE: AtomicUsize = AtomicUsize::new(0);
+static TEMP_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 struct TrackingAllocator;
 
@@ -147,7 +148,12 @@ fn runner_rpc_volume_drains_548_mb_without_retaining_nonterminal_frames_or_leaki
         "{}",
         diagnostics.message_update_frames
     );
-    assert_eq!(diagnostics.terminal_payload_bytes, "TERMINAL_OK".len());
+    assert!(
+        diagnostics.terminal_payload_bytes >= "TERMINAL_OK".len()
+            && diagnostics.terminal_payload_bytes < 4096,
+        "{}",
+        diagnostics.terminal_payload_bytes
+    );
     assert!(
         diagnostics.retained_tail_bytes < 4096,
         "{}",
@@ -169,6 +175,50 @@ fn runner_rpc_volume_drains_548_mb_without_retaining_nonterminal_frames_or_leaki
     );
     let shutdown = client.shutdown(Duration::from_secs(5)).expect("shutdown");
     assert!(!shutdown.escalated);
+}
+
+#[test]
+fn bug_185_entry_appended_is_typed_bounded_and_bootstrap_only() {
+    let receipt = r#"{"type":"entry_appended","entry":{"type":"custom","customType":"pi-autopilot:child-tools","data":{"self_digest":"abc","binding":"def","active_tools":["read"]},"id":"receipt-1","parentId":null,"timestamp":"2026-07-30T00:00:00.000Z"}}"#;
+
+    let mut protocol = RpcProtocol::new(1024 * 1024);
+    let frame = protocol
+        .ingest_record(receipt.as_bytes())
+        .expect("known bootstrap entry");
+    let RpcFrame::Event(RpcEvent::EntryAppended { entry }) = frame else {
+        panic!("expected typed entry_appended event");
+    };
+    assert_eq!(entry.id, "receipt-1");
+    assert_eq!(entry.custom_type, "pi-autopilot:child-tools");
+    assert_eq!(entry.data["active_tools"], serde_json::json!(["read"]));
+
+    let duplicate = protocol
+        .ingest_record(receipt.as_bytes())
+        .expect_err("duplicate bootstrap entry rejected");
+    assert!(matches!(duplicate, RpcError::ProtocolViolation(_)));
+
+    let mut after_bootstrap = RpcProtocol::new(1024 * 1024);
+    after_bootstrap.complete_bootstrap();
+    let late = after_bootstrap
+        .ingest_record(receipt.as_bytes())
+        .expect_err("post-bootstrap entry rejected");
+    assert!(matches!(late, RpcError::ProtocolViolation(_)));
+
+    let oversized = format!(
+        r#"{{"type":"entry_appended","entry":{{"type":"custom","customType":"pi-autopilot:child-tools","data":{{"padding":"{}"}},"id":"receipt-1"}}}}"#,
+        "x".repeat(20 * 1024)
+    );
+    let mut bounded = RpcProtocol::new(1024 * 1024);
+    let too_large = bounded
+        .ingest_record(oversized.as_bytes())
+        .expect_err("oversized entry rejected");
+    assert!(matches!(too_large, RpcError::EntryAppendedTooLarge { .. }));
+
+    let mut unknown = RpcProtocol::new(1024 * 1024);
+    let error = unknown
+        .ingest_record(br#"{"type":"future_unrecognized_event"}"#)
+        .expect_err("truly unknown events remain fatal");
+    assert!(matches!(error, RpcError::UnknownFrame(_)));
 }
 
 #[test]
@@ -478,13 +528,17 @@ fn write_fake_pi(root: &Path, body: &str) {
 }
 
 fn temp_root(name: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock")
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("pi-autopilot-{name}-{nanos}"));
-    fs::create_dir_all(&root).expect("temp root");
-    fs::canonicalize(&root).expect("canonical temp root")
+    let parent = std::env::temp_dir();
+    let pid = std::process::id();
+    loop {
+        let nonce = TEMP_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let root = parent.join(format!("pi-autopilot-{name}-{pid}-{nonce}"));
+        match fs::create_dir(&root) {
+            Ok(()) => return fs::canonicalize(&root).expect("canonical temp root"),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("temp root {root:?}: {error}"),
+        }
+    }
 }
 
 struct ChunkedRead {

@@ -29,7 +29,7 @@ Sources: `data/contracts.kdl`.
 | autopilot_transcript_v2 | autopilot.transcript.v2 | Package | false | Receipt-backed non-authoritative replay transcript fixture. V1 transcripts remain compatibility-only. |
 | autopilot_evidence_envelope_manifest | autopilot.evidence_envelope_manifest.v1 | Package | false | Closed evidence envelope manifest. Members are exactly refs reachable from authoritative evidence events; scans/globs/prefixes are forbidden. |
 | task_document | autopilot.task_document.v1 | Package | false | Core-classified task-pack document copied into child runner specs. The digest is over the exact admitted file bytes; body_digest is over the model-visible body only. |
-| agent_run_spec | autopilot.agent_run_spec.v3 | Package | false | Strict parent-Core written child runner specification for the package-contained autopilot-agent-run wrapper and Rust agent-run mode. |
+| agent_run_spec | autopilot.agent_run_spec.v4 | Package | false | Strict parent-Core written child runner specification for the package-contained autopilot-agent-run wrapper and Rust agent-run mode. |
 | run_identity | autopilot.run_identity.v1 | Package | false | Clean v2 runtime identity namespace (D76 §5.1). |
 | event_row | autopilot.event_row.v1 | Package | false | Append-only event row; events.jsonl is the sole state authority (D76 §5.4 + D77 Closure B). |
 | state_cache | autopilot.state_cache.v1 | Package | false | Disposable cache only, never an authority. State is fold(events); this cache may be deleted at any instant with zero semantic loss and any mismatch forces full replay (D77 Closure B). |
@@ -42,6 +42,8 @@ Sources: `data/contracts.kdl`.
 | plan_review | planning.plan-review.v1 | Model | true | Model-facing plan review verdicts. Verdict is closed; finding text is optional and advisory unless the verdict requires explanation. |
 | allocation_lane_proposal | autopilot.allocation_lane_proposal.v1 | Model | true | Allocator model proposal; package validates totality, dependencies, cap, and no invented ownership (D76 §7). |
 | delivery_result | autopilot.delivery_result.v1 | Model | true | Implementer/Fixer terminal delivery carrier pending package acceptance (D76 §8.2). |
+| delivery_submission_v2 | autopilot.delivery_submission.v2 | Model | true | Model-owned delivery status payload. Package and assignment identity are supplied only by Core and are not model parameters. |
+| delivery_result_v2 | autopilot.delivery_result.v2 | Package | false | Package-bound delivery carrier written create-once from an admitted terminal-tool submission and immutable runner identity. |
 | validation_verdict | autopilot.validation_verdict.v1 | Model | true | Independent validation verdict bundle for forward, closure, conflict, delta, or final review (D76 §9.2). |
 | finding | autopilot.finding.v1 | Model | true | Validator/Bughunter/Fixer finding with semantic scheduling effect (D76 §5.3 and D74 §11.2). |
 | validation_assignment_v2 | autopilot.validation_assignment.v1 | Package | false | Package-produced independent Validator assignment. Production validation uses v2 submissions/results; v1 verdicts remain historical. |
@@ -403,8 +405,10 @@ Sources: `data/contracts.kdl`.
 | agent_run_spec | field | assignment_digest | digest | false | true |  |
 | agent_run_spec | field | context_manifest_path | path | false | true |  |
 | agent_run_spec | field | context_manifest_digest | digest | false | true |  |
-| agent_run_spec | field | runtime_extension_path | path | false | true | Required for planning assignments and forbidden for legacy assistant-text delivery assignments; absolute path to the explicitly loaded child-only submit-tool add-on. |
+| agent_run_spec | field | runtime_extension_path | path | false | true | Required for every model assignment; absolute path to the explicitly loaded codegen-anchored child-only terminal-tool add-on. |
 | agent_run_spec | field | runtime_extension_digest | digest | false | true | Required exactly when runtime_extension_path is present; must equal the codegen-anchored digest of the file that actually loads. |
+| agent_run_spec | field | terminal_profile_id | string | false | true | Required for every model assignment; parent-selected generated terminal profile, never inferred from model payload. |
+| agent_run_spec | list | unavailable_tools | tool-name | false | true | Role-declared capabilities omitted only by an explicit retained-unavailable data disposition. |
 | agent_run_spec | list | producer_assignment_ids | id | false | true |  |
 | agent_run_spec | field | validation_id | id | false | true |  |
 | agent_run_spec | field | validation_attempt | u32 | false | true |  |
@@ -501,6 +505,45 @@ Sources: `data/contracts.kdl`.
 | delivery_result | list | focused_evidence_refs | ref | true |  |  |
 | delivery_result | field | terminal_status | delivery-terminal-status | true |  |  |
 | delivery_result | list | hard_boundary_violations | string | true |  |  |
+| delivery_submission_v2 | list | actual_changed_paths | path | true |  |  |
+| delivery_submission_v2 | field | execution_audit_ref | ref | true |  |  |
+| delivery_submission_v2 | list | focused_evidence_refs | ref | true |  |  |
+| delivery_submission_v2 | field | terminal_status | delivery-terminal-status | true |  |  |
+| delivery_submission_v2 | list | hard_boundary_violations | string | true |  |  |
+| delivery_result_v2 | field | schema | schema-id | true |  |  |
+| delivery_result_v2 | field | action_id | id | true |  |  |
+| delivery_result_v2 | field | assignment_id | id | true |  |  |
+| delivery_result_v2 | field | run_revision | u64 | true |  |  |
+| delivery_result_v2 | field | workstream | id | true |  |  |
+| delivery_result_v2 | field | role_id | id | true |  |  |
+| delivery_result_v2 | field | mode | mode-id | true |  |  |
+| delivery_result_v2 | field | lane_id | id | true |  |  |
+| delivery_result_v2 | field | attempt | u32 | true |  |  |
+| delivery_result_v2 | field | base_commit | sha | true |  |  |
+| delivery_result_v2 | field | worktree | path | true |  |  |
+| delivery_result_v2 | field | prompt_path | path | true |  |  |
+| delivery_result_v2 | field | prompt_digest | digest | true |  |  |
+| delivery_result_v2 | field | spec_path | path | true |  |  |
+| delivery_result_v2 | field | spec_digest | digest | true |  |  |
+| delivery_result_v2 | field | carrier_path | path | true |  |  |
+| delivery_result_v2 | field | boundary_id | contract-id | true |  |  |
+| delivery_result_v2 | field | boundary_digest | digest | true |  |  |
+| delivery_result_v2 | field | result_contract | contract-id | true |  |  |
+| delivery_result_v2 | field | result_contract_digest | digest | true |  |  |
+| delivery_result_v2 | field | settings_digest | digest | true |  |  |
+| delivery_result_v2 | field | context_digest | digest | true |  |  |
+| delivery_result_v2 | field | skills_digest | digest | true |  |  |
+| delivery_result_v2 | field | subscription_digest | digest | true |  |  |
+| delivery_result_v2 | field | runtime_extension_digest | digest | true |  |  |
+| delivery_result_v2 | field | terminal_profile_id | string | true |  |  |
+| delivery_result_v2 | field | tool_name | tool-name | true |  |  |
+| delivery_result_v2 | field | tool_schema_digest | digest | true |  |  |
+| delivery_result_v2 | field | carrier_binding | digest | true |  |  |
+| delivery_result_v2 | field | tool_call_id | string | true |  |  |
+| delivery_result_v2 | field | tool_audit_ref | ref | true |  |  |
+| delivery_result_v2 | field | tool_audit_digest | digest | true |  |  |
+| delivery_result_v2 | field | submission_digest | digest | true |  |  |
+| delivery_result_v2 | field | submission | delivery_submission_v2 | true |  |  |
 | validation_verdict | field | assignment_id | id | true |  |  |
 | validation_verdict | field | validation_scope | validation-scope | true |  |  |
 | validation_verdict | field | exact_commit | sha | true |  |  |
@@ -650,6 +693,11 @@ Sources: `data/contracts.kdl`.
 | validation_result_v2 | field | skills_digest | digest | true |  |  |
 | validation_result_v2 | field | subscription_digest | digest | true |  |  |
 | validation_result_v2 | field | runtime_extension_digest | digest | true |  |  |
+| validation_result_v2 | field | terminal_profile_id | string | true |  |  |
+| validation_result_v2 | field | tool_name | tool-name | true |  |  |
+| validation_result_v2 | field | tool_schema_digest | digest | true |  |  |
+| validation_result_v2 | field | carrier_binding | digest | true |  |  |
+| validation_result_v2 | field | tool_call_id | string | true |  |  |
 | validation_result_v2 | field | tool_audit_ref | ref | true |  |  |
 | validation_result_v2 | field | tool_audit_digest | digest | true |  |  |
 | validation_result_v2 | field | submission_digest | digest | true |  |  |
@@ -829,6 +877,8 @@ Sources: `data/contracts.kdl`.
 | work_map | planning.work-map.v1 | autopilot_submit_plan_cluster | Submit work map |
 | work_map | planning.work-map.v1 | autopilot_submit_synthesis | Submit synthesized work map |
 | plan_review | planning.plan-review.v1 | autopilot_submit_review | Submit plan review |
+| delivery_submission_v2 | autopilot.delivery_submission.v2 | autopilot_emit_status | Submit delivery status |
+| validation_submission_v2 | autopilot.validation_submission.v2 | autopilot_emit_status | Submit validation status |
 
 ## Enums
 

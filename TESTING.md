@@ -7,10 +7,13 @@ export PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0 CI=1
 npm run typecheck
 npm run codegen:check
 npm run gate:host-thinness
+npm run gate:readable-source:selftest
+npm run gate:readable-source
 npm run gate:kernel-purity
 npm run gate:no-inference
 npm run gate:selftest
 npm run gate:binary-parity
+npm run gate:launch-entrypoint
 npm run test:rust
 npm run test:host
 PI_BACKGROUND_TASKS_PACKAGE_ROOT="$PWD/../pi-background-tasks" npm run test:runtime-integration
@@ -18,7 +21,7 @@ npm run payload:check
 npm pack --dry-run --ignore-scripts
 ```
 
-`npm run test` is the package-local default Rust/Host gate: typecheck, real-producer gate, binary parity, Rust tests, and Host tests. Runtime pairing and payload certification are explicit release lanes and should be run in the same candidate proof.
+`npm run gate:readable-source` is the static recurrence gate for packed handwritten source; it is part of `gate:release` and is expected to fail until the readable recut removes current known violations. `npm run gate:launch-entrypoint` is the focused launch gate: it validates package bin metadata, the shared production Core resolver, shipped manifest bytes for the native platform, and one bounded real `autopilot-status` frame. `npm run test` is the package-local default Rust/Host gate: typecheck, real-producer gate, binary parity, Rust tests, and Host tests. Runtime pairing and payload certification are explicit release lanes and should be run in the same candidate proof.
 
 ## Runtime integration requirements
 

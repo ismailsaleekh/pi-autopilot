@@ -27,6 +27,7 @@ function main() {
     PI_OFFLINE: '1', PI_SKIP_VERSION_CHECK: '1', PI_TELEMETRY: '0', CI: '1',
   };
   try {
+    run(process.execPath, [join(sourceRoot, 'scripts', 'check-launch-entrypoint.mjs')], sourceRoot, env, 120_000);
     const packed = JSON.parse(run('npm', ['pack', '--ignore-scripts', '--json', '--pack-destination', root], sourceRoot, env, 900_000));
     if (!Array.isArray(packed) || packed.length !== 1 || typeof packed[0] !== 'object' || packed[0] === null || typeof packed[0].filename !== 'string') fail('npm pack did not return exactly one filename');
     const tarball = realpathSync(join(root, packed[0].filename));

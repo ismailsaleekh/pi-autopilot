@@ -42,36 +42,22 @@ try {
   const rootInfo = lstatSync(requestedRoot);
   if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new Error('installed root must be one non-symlink directory');
   const root = realpathSync(requestedRoot);
-  const sourceRoots = [join(root, 'src'), join(root, 'dist', 'src')];
-  const scanRoots = [...sourceRoots, join(root, 'dist', 'extensions'), join(root, 'bin'), join(root, 'extensions'), join(root, 'scripts')];
+  const sourceRoots = [join(root, 'src')];
+  const scanRoots = [...sourceRoots, join(root, 'bin'), join(root, 'extensions'), join(root, 'scripts')];
   for (const scanRoot of scanRoots) {
     const info = lstatSync(scanRoot);
     if (!info.isDirectory() || info.isSymbolicLink() || !under(root, realpathSync(scanRoot))) throw new Error(`production source root is unsafe: ${scanRoot}`);
   }
 
   const ownerRelativePaths = [
-    'core/agent-runner',
-    'core/coordination/client',
-    // The D65 launch signer spawner is a reviewed process owner: it spawns ONLY
-    // the external operator `autopilot-launch-signer` CLI (never Git, never a
-    // model). It is intentionally not in `allowedGitLiteralOwners`, so a stray
-    // `'git'` executable token in it is still a hard violation.
-    'core/coordination/d65-launch-signer',
-    'core/coordination/migration',
-    'core/coordination/process-identity',
-    'core/disk-gate',
-    'core/git-process',
-    'core/parallel-runtime',
-    'core/private-path',
+    'transport',
   ];
   const approvedProcessOwners = new Set();
   const allowedGitLiteralOwners = new Set();
   for (const sourceRoot of sourceRoots) {
-    const extension = sourceRoot.endsWith(join('dist', 'src')) ? '.js' : '.ts';
-    for (const relativePath of ownerRelativePaths) approvedProcessOwners.add(resolve(sourceRoot, `${relativePath}${extension}`));
-    allowedGitLiteralOwners.add(resolve(sourceRoot, `core/git-process${extension}`));
-    allowedGitLiteralOwners.add(resolve(sourceRoot, `core/git-guard${extension}`));
+    for (const relativePath of ownerRelativePaths) approvedProcessOwners.add(resolve(sourceRoot, `${relativePath}.ts`));
   }
+  approvedProcessOwners.add(resolve(root, 'bin', 'autopilot-core.mjs'));
   approvedProcessOwners.add(resolve(root, 'bin', 'autopilot-agent-run.mjs'));
   // Offline test-tooling scripts (Phase 40 / D70) own their process spawns: the
   // fast-test orchestrator launches per-lane node:test children and the build,
@@ -79,9 +65,8 @@ try {
   // root (Linux). None spawns git (the exact-`git`-literal check below still
   // applies to them and passes), so they are approved process owners exactly like
   // the existing certification/verification scripts.
-  for (const script of ['check-package-payload.mjs', 'docs-verify.mjs', 'run-certified-command.mjs', 'test-packed-consumer-release.mjs', 'verify-packed-consumer.mjs', 'test-fast.mjs', 'test-ram-root.mjs']) approvedProcessOwners.add(resolve(root, 'scripts', script));
-  allowedGitLiteralOwners.add(resolve(root, 'scripts', 'check-production-git-spawns.mjs'));
-  allowedGitLiteralOwners.add(resolve(root, 'scripts', 'docs-verify.mjs'));
+  for (const script of ['certify-runtime-repair.mjs', 'check-disposition.mjs', 'check-launch-entrypoint.mjs', 'check-package-payload.mjs', 'check-payload.mjs', 'docs-verify.mjs', 'run-tests-tree.mjs', 'test-packed-consumer.mjs', 'test-packed-consumer-release.mjs', 'verify-packed-consumer.mjs', 'verify-replacements.mjs', 'test-fast.mjs', 'test-ram-root.mjs']) approvedProcessOwners.add(resolve(root, 'scripts', script));
+  for (const script of ['certify-runtime-repair.mjs', 'check-disposition.mjs', 'check-production-git-spawns.mjs', 'docs-generate.mjs', 'docs-verify.mjs']) allowedGitLiteralOwners.add(resolve(root, 'scripts', script));
 
   const violations = [];
   const childProcessModule = /(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*|\bgetBuiltinModule\s*\(\s*)(['"])(?:node:)?child_process\1/gu;
@@ -107,7 +92,7 @@ try {
     }
   }
   if (violations.length > 0) fail('raw production Git process authority exists outside core/git-process', violations);
-  else process.stdout.write(`${JSON.stringify({ schema_version: 'autopilot.production_git_spawn_check.v1', scanned_roots: ['src', 'dist/src', 'dist/extensions', 'bin', 'extensions', 'scripts'], allowed_git_owner: ['src/core/git-process.ts', 'dist/src/core/git-process.js'], approved_process_owners: [...approvedProcessOwners].map((path) => relative(root, path).replace(/\\/gu, '/')).sort(), violations: [], passed: true }, null, 2)}\n`);
+  else process.stdout.write(`${JSON.stringify({ schema_version: 'autopilot.production_git_spawn_check.v1', scanned_roots: ['src', 'bin', 'extensions', 'scripts'], allowed_git_owner: [...allowedGitLiteralOwners].map((path) => relative(root, path).replace(/\\/gu, '/')).sort(), approved_process_owners: [...approvedProcessOwners].map((path) => relative(root, path).replace(/\\/gu, '/')).sort(), violations: [], passed: true }, null, 2)}\n`);
 } catch (error) {
   fail(error instanceof Error ? error.message : String(error));
 }

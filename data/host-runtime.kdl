@@ -1,0 +1,57 @@
+schema "autopilot.host-runtime.v1"
+version 1
+
+command "autopilot-plan" activation="activating" frame="command" adapter="raw" payload="HostToCoreCommandPayload" public=#true description="Forward /autopilot-plan to autopilot-core."
+command "autopilot" activation="activating" frame="command" adapter="raw" payload="HostToCoreCommandPayload" public=#true description="Forward /autopilot to autopilot-core."
+command "autopilot-onboard" activation="activating" frame="command" adapter="raw" payload="HostToCoreCommandPayload" public=#true description="Forward /autopilot-onboard to autopilot-core."
+command "autopilot-inject" activation="activating" frame="command" adapter="raw" payload="HostToCoreCommandPayload" public=#true description="Forward /autopilot-inject to autopilot-core."
+command "autopilot-status" activation="operating" frame="command" adapter="raw" payload="HostToCoreCommandPayload" public=#true description="Forward /autopilot-status to autopilot-core."
+command "autopilot-config" activation="operating" frame="command" adapter="raw" payload="HostToCoreCommandPayload" public=#true description="Forward /autopilot-config to autopilot-core."
+command "autopilot-handoff" activation="operating" frame="command" adapter="raw" payload="HostToCoreCommandPayload" public=#true description="Forward /autopilot-handoff to autopilot-core."
+command "autopilot-close" activation="operating" frame="command" adapter="raw" payload="HostToCoreCommandPayload" public=#true description="Forward /autopilot-close to autopilot-core."
+command "autopilot-abort" activation="operating" frame="command" adapter="raw" payload="HostToCoreCommandPayload" public=#true description="Forward /autopilot-abort to autopilot-core."
+command "autopilot-answer" activation="operating" frame="operator-answer" adapter="id-json-object" payload="HostToCoreOperatorAnswerPayload" public=#true description="Send a D72 operator-answer frame to autopilot-core: /autopilot-answer <question-id> <json-object>."
+
+background_channel "request" channel="pi-background-tasks:request:v1" schema="pi-background-tasks.extension-request.v1"
+background_channel "response" channel="pi-background-tasks:response:v1" schema="pi-background-tasks.extension-response.v1"
+background_channel "terminal" channel="pi-background-tasks:terminal:v1" schema="pi-background-tasks.extension-terminal.v1"
+background_operation "capabilities"
+background_operation "run"
+background_operation "status"
+background_operation "logs"
+background_operation "kill"
+background_status "running" terminal=#false
+background_status "completed" terminal=#true
+background_status "failed" terminal=#true
+background_status "killed" terminal=#true
+background_capability "api_version" default=1
+background_capability "run" default=#false
+background_capability "run_is_agent" default=#false
+background_capability "run_completion_trigger" default=#false
+background_capability "status" default=#false
+background_capability "logs" default=#false
+background_capability "logs_bounded" default=#false
+background_capability "kill" default=#false
+
+env_deny "ANTHROPIC_API_KEY"
+env_deny "CLAUDE_API_KEY"
+env_deny "OPENAI_API_KEY"
+env_deny "OPENROUTER_API_KEY"
+env_deny "GOOGLE_API_KEY"
+env_deny "GEMINI_API_KEY"
+env_deny "AZURE_OPENAI_API_KEY"
+env_deny "XAI_API_KEY"
+env_deny "GROQ_API_KEY"
+env_deny "MISTRAL_API_KEY"
+env_deny "COHERE_API_KEY"
+env_deny "AWS_ACCESS_KEY_ID"
+env_deny "AWS_SECRET_ACCESS_KEY"
+env_deny "AWS_SESSION_TOKEN"
+
+effect "ui" operator_level_default="info" fail_closed=#false acknowledge=#false
+effect "spawn" operator_level_default="info" fail_closed=#false acknowledge=#false
+effect "spawn-wave" operator_level_default="info" fail_closed=#false acknowledge=#true max_items=64
+effect "session" operator_level_default="error" fail_closed=#true acknowledge=#false
+effect "log" operator_level_default="info" fail_closed=#false acknowledge=#false
+effect "done" operator_level_default="info" fail_closed=#false acknowledge=#false
+activation_record "autopilot.host_activation.v1" fields="schema_version|session_id|process_identity|granted_by_command|activated_at_unix_ms"

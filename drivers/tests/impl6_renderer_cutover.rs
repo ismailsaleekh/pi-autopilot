@@ -1,7 +1,8 @@
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use drivers::runner::{self, PlanningRunnerRequest, RunnerTaskDocument};
 use drivers::seam::{self, CoreState};
@@ -11,6 +12,7 @@ use serde_json::json;
 use sha2::{Digest as ShaDigest, Sha256};
 
 static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static FIXTURE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 fn planning_prompt_is_the_rendered_seven_layer_prompt() {
@@ -108,16 +110,12 @@ fn mandatory_accepted_artifact_gap_refuses_planning_issue() {
     fixture.install_transport();
 
     let error = fixture
-        .issue_planning_request(
+        .issue_planning_request(PlanningRequestSpec::new(
             "planning-ws-plan-reviewer-01",
             "plan-reviewer",
             "full-review",
             "planning.plan-review.v1",
-            None,
-            None,
-            None,
-            Vec::new(),
-        )
+        ))
         .expect_err("missing mandatory synthesized-work-map must refuse issue");
 
     assert!(
@@ -137,23 +135,34 @@ fn on_demand_context_gap_is_rendered_but_does_not_refuse_issue() {
     fixture.install_transport();
     let registry = fixture.write_atom_registry(&[("TE01-W-001", "planning-ws-task-extractor-01")]);
     let artifacts = vec![
-        fixture.accepted_artifact("task-atoms", "planning.task-atoms.v1", "task-extractor", "planning-ws-task-extractor-01"),
-        fixture.accepted_artifact("scout-findings", "planning.scout-dossier.v1", "repository-scout", "planning-ws-repository-scout-01"),
+        fixture.accepted_artifact(
+            "task-atoms",
+            "planning.task-atoms.v1",
+            "task-extractor",
+            "planning-ws-task-extractor-01",
+        ),
+        fixture.accepted_artifact(
+            "scout-findings",
+            "planning.scout-dossier.v1",
+            "repository-scout",
+            "planning-ws-repository-scout-01",
+        ),
     ];
 
     let issue = fixture
         .issue_planning_request(
-            "planning-ws-plan-compiler-01",
-            "plan-compiler",
-            "initial-plan",
-            "planning.work-map.v1",
-            None,
-            None,
-            Some(registry),
-            artifacts,
+            PlanningRequestSpec::new(
+                "planning-ws-plan-compiler-01",
+                "plan-compiler",
+                "initial-plan",
+                "planning.work-map.v1",
+            )
+            .registry(registry)
+            .accepted_planning_artifacts(artifacts),
         )
         .expect("on_demand source-anchor gap must not block issue");
-    let manifest = context_manifest_from_prompt(&fs::read_to_string(&issue.binding.prompt_path).unwrap());
+    let manifest =
+        context_manifest_from_prompt(&fs::read_to_string(&issue.binding.prompt_path).unwrap());
     assert!(
         manifest["gaps"].as_array().unwrap().iter().any(|gap| {
             gap["id"]
@@ -172,11 +181,13 @@ fn full_planning_run_renders_no_mandatory_or_required_context_gaps() {
     let repo = fixture.install_repo_task_pack();
     std::env::set_current_dir(&repo).unwrap();
     let mut state = CoreState::open(None).unwrap();
-    let mut pending = spawn_spec_paths(&command("autopilot-plan ws task.md context.md", &mut state));
+    let mut pending =
+        spawn_spec_paths(&command("autopilot-plan ws task.md context.md", &mut state));
     let mut issued_prompts = Vec::new();
 
     while let Some(spec_path) = pending.pop() {
-        let spec: serde_json::Value = serde_json::from_slice(&fs::read(&spec_path).unwrap()).unwrap();
+        let spec: serde_json::Value =
+            serde_json::from_slice(&fs::read(&spec_path).unwrap()).unwrap();
         issued_prompts.push(PathBuf::from(spec["prompt_path"].as_str().unwrap()));
         let raw = raw_output_for_spec(&spec);
         let response = agent_response_from_spec(&spec_path, &raw, &mut state);
@@ -191,7 +202,8 @@ fn full_planning_run_renders_no_mandatory_or_required_context_gaps() {
             || repo.join(".pi/autopilot/ws/approved-plan.json").exists(),
         "planning run did not reach ready-to-execute"
     );
-    let reviewer_prompt = repo.join(".pi/autopilot/ws/planning/prompts/planning-ws-plan-reviewer-01.md");
+    let reviewer_prompt =
+        repo.join(".pi/autopilot/ws/planning/prompts/planning-ws-plan-reviewer-01.md");
     assert!(reviewer_prompt.exists(), "reviewer prompt was not rendered");
     for prompt_path in issued_prompts {
         let manifest = context_manifest_from_prompt(&fs::read_to_string(&prompt_path).unwrap());
@@ -282,22 +294,75 @@ fn lens_allocation_survives_resume() {
     );
 }
 
+struct PlanningRequestSpec<'a> {
+    assignment_id: &'a str,
+    role: &'a str,
+    mode: &'a str,
+    boundary: &'a str,
+    mode_parameter: Option<String>,
+    atom_id_prefix: Option<String>,
+    registry: Option<(String, String)>,
+    accepted_planning_artifacts: Vec<runner::AcceptedPlanningArtifactBinding>,
+}
+
+impl<'a> PlanningRequestSpec<'a> {
+    fn new(assignment_id: &'a str, role: &'a str, mode: &'a str, boundary: &'a str) -> Self {
+        Self {
+            assignment_id,
+            role,
+            mode,
+            boundary,
+            mode_parameter: None,
+            atom_id_prefix: None,
+            registry: None,
+            accepted_planning_artifacts: Vec::new(),
+        }
+    }
+
+    fn mode_parameter(mut self, value: String) -> Self {
+        self.mode_parameter = Some(value);
+        self
+    }
+
+    fn atom_id_prefix(mut self, value: String) -> Self {
+        self.atom_id_prefix = Some(value);
+        self
+    }
+
+    fn registry(mut self, value: (String, String)) -> Self {
+        self.registry = Some(value);
+        self
+    }
+
+    fn accepted_planning_artifacts(
+        mut self,
+        value: Vec<runner::AcceptedPlanningArtifactBinding>,
+    ) -> Self {
+        self.accepted_planning_artifacts = value;
+        self
+    }
+}
+
 struct Fixture {
     root: PathBuf,
 }
 
 impl Fixture {
     fn new(label: &str) -> Self {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = fs::canonicalize(std::env::temp_dir())
-            .unwrap()
-            .join(format!("pi-autopilot-impl6-{label}-{nanos}"));
-        fs::create_dir_all(&root).unwrap();
-        std::env::set_current_dir(&root).unwrap();
-        Self { root }
+        let temp = fs::canonicalize(std::env::temp_dir()).unwrap();
+        let pid = std::process::id();
+        loop {
+            let nonce = FIXTURE_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let root = temp.join(format!("pi-autopilot-impl6-{label}-{pid}-{nonce}"));
+            match fs::create_dir(&root) {
+                Ok(()) => {
+                    std::env::set_current_dir(&root).unwrap();
+                    return Self { root };
+                }
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("fixture root {root:?}: {error}"),
+            }
+        }
     }
 
     fn install_transport(&self) {
@@ -319,13 +384,13 @@ impl Fixture {
                     "ension.ts"
                 )),
             );
+            let mut path_entries = vec![bin.clone()];
+            if let Some(existing) = std::env::var_os("PATH") {
+                path_entries.extend(std::env::split_paths(&existing));
+            }
             std::env::set_var(
                 "PATH",
-                format!(
-                    "{}:{}",
-                    bin.display(),
-                    std::env::var("PATH").unwrap_or_default()
-                ),
+                std::env::join_paths(path_entries).expect("join PATH"),
             );
         }
     }
@@ -336,30 +401,23 @@ impl Fixture {
         mode_parameter: &str,
     ) -> runner::IssuedRunnerAction {
         self.issue_planning_request(
-            assignment_id,
-            "task-extractor",
-            "inventory",
-            "planning.task-atoms.v1",
-            Some(mode_parameter.to_owned()),
-            Some(format!("TE{}-", assignment_id.rsplit('-').next().unwrap())),
-            None,
-            Vec::new(),
+            PlanningRequestSpec::new(
+                assignment_id,
+                "task-extractor",
+                "inventory",
+                "planning.task-atoms.v1",
+            )
+            .mode_parameter(mode_parameter.to_owned())
+            .atom_id_prefix(format!("TE{}-", assignment_id.rsplit('-').next().unwrap())),
         )
         .unwrap()
     }
 
     fn issue_planning_request(
         &self,
-        assignment_id: &str,
-        role: &str,
-        mode: &str,
-        boundary: &str,
-        mode_parameter: Option<String>,
-        atom_id_prefix: Option<String>,
-        registry: Option<(String, String)>,
-        accepted_planning_artifacts: Vec<runner::AcceptedPlanningArtifactBinding>,
+        spec: PlanningRequestSpec<'_>,
     ) -> Result<runner::IssuedRunnerAction, runner::RunnerError> {
-        let (atom_registry_path, atom_registry_digest) = match registry {
+        let (atom_registry_path, atom_registry_digest) = match spec.registry {
             Some((path, digest)) => (Some(path), Some(digest)),
             None => (None, None),
         };
@@ -371,26 +429,28 @@ impl Fixture {
         );
         runner::planning_issue(&PlanningRunnerRequest {
             workstream: "ws".to_owned(),
-            action_id: Id(format!("action-{assignment_id}")),
-            assignment_id: Id(assignment_id.to_owned()),
-            role_id: Id(role.to_owned()),
-            mode: ModeId(mode.to_owned()),
-            boundary_id: ContractId(boundary.to_owned()),
+            action_id: Id(format!("action-{}", spec.assignment_id)),
+            assignment_id: Id(spec.assignment_id.to_owned()),
+            role_id: Id(spec.role.to_owned()),
+            mode: ModeId(spec.mode.to_owned()),
+            boundary_id: ContractId(spec.boundary.to_owned()),
             run_revision: 1,
             authority_set_id: "auth".to_owned(),
             authority_documents: vec![runner_doc("task.md", "authority", "auth", "Do the work")],
             context_document: context_document.clone(),
             context_documents: vec![context_document],
-            mode_parameter,
-            atom_id_prefix,
+            mode_parameter: spec.mode_parameter,
+            atom_id_prefix: spec.atom_id_prefix,
             atom_registry_path,
             atom_registry_digest,
-            accepted_planning_artifacts,
+            accepted_planning_artifacts: spec.accepted_planning_artifacts,
         })
     }
 
     fn write_atom_registry(&self, atoms: &[(&str, &str)]) -> (String, String) {
-        let path = self.root.join(".pi/autopilot/ws/planning/atom-registry.json");
+        let path = self
+            .root
+            .join(".pi/autopilot/ws/planning/atom-registry.json");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let bytes = serde_json::to_vec_pretty(&json!({
             "schema":"autopilot.planning_atom_registry.v1",
@@ -410,13 +470,17 @@ impl Fixture {
         role_id: &str,
         assignment_id: &str,
     ) -> runner::AcceptedPlanningArtifactBinding {
-        let path = self.root.join("accepted").join(format!("{category_id}.json"));
+        let path = self
+            .root
+            .join("accepted")
+            .join(format!("{category_id}.json"));
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let bytes = serde_json::to_vec_pretty(&json!({
             "category_id": category_id,
             "boundary_id": boundary_id,
             "assignment_id": assignment_id,
-        })).unwrap();
+        }))
+        .unwrap();
         fs::write(&path, &bytes).unwrap();
         runner::AcceptedPlanningArtifactBinding {
             category_id: category_id.to_owned(),
@@ -535,7 +599,12 @@ fn spawn_spec_paths(response: &SeamEnvelope) -> Vec<PathBuf> {
         .get("actions")
         .and_then(|actions| actions.as_array())
         .cloned()
-        .or_else(|| response.payload.get("action").map(|action| vec![action.clone()]))
+        .or_else(|| {
+            response
+                .payload
+                .get("action")
+                .map(|action| vec![action.clone()])
+        })
         .unwrap_or_default();
     actions
         .iter()

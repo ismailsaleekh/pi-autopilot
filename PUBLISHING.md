@@ -7,7 +7,7 @@ Publish only an exact clean package candidate paired with `pi-background-tasks@0
 From clean candidate roots, with no metered credentials and no network:
 
 1. In `pi-background-tasks`: `npm run test`.
-2. In `pi-autopilot`: regenerate code/docs if needed, then run typecheck, host-thinness, kernel-purity, no-inference, gate selftest, binary parity, focused Rust, full Rust, Host tests, runtime integration, payload check, and pack dry-run.
+2. In `pi-autopilot`: regenerate code/docs if needed, then run typecheck, host-thinness, kernel-purity, no-inference, gate selftest, binary parity, launch-entrypoint, focused Rust, full Rust, Host tests, runtime integration, payload check, and pack dry-run.
 3. Create two independent `npm pack --ignore-scripts` tarballs for each package and require byte-identical SHA-256 within each package.
 4. Install both tarballs into a generic temporary consumer, add only local Pi peer packages/symlinks needed for the offline SDK, and rerun the four-path runtime integration against installed package directories.
 5. Write `/tmp/smf-resolution/autopilot-runtime-repair-cert.v1.json` with format `pi-autopilot.runtime-repair-certificate.v1` and `status: PASS`.
@@ -53,5 +53,5 @@ Do not claim the SMF authority seal is closed until the root checkout is clean, 
 - No external network in package certification lanes.
 - No PATH/cwd/source-tree fallback for `autopilot-agent-run`.
 - No fake Pi `ctx.bg_run` context.
-- No stale binary manifest or source-hash waiver.
+- No stale binary manifest, source-hash waiver, or skipped `gate:launch-entrypoint` status-frame proof.
 - No skipped/todo runtime integration.

@@ -17,8 +17,9 @@
 
 1. TypeScript Host validates Core frames, obtains background capabilities, forwards exact `bg_run` descriptors over `pi.events`, retains task/action/assignment bindings, and relays terminal events back to Core.
 2. Rust Core owns command parsing, four-file task-pack classification, planning inventory, role/mode/roster selection, runner spec generation, command bytes, terminal acceptance, and state mutation.
-3. `autopilot-agent-run` is only a package-contained wrapper: it resolves sibling `bin/autopilot-core.mjs` and invokes `agent-run --spec <absolute-spec.json>`. It never falls back to PATH, cwd, source trees, `dist/`, or `target/`.
-4. Child `agent-run` mode validates the generated spec, launches `pi --mode json --no-session --no-extensions` with subscription roster facts, strips metered API-key overrides, requires exactly one final assistant result plus successful `agent_end`, and writes the deterministic carrier.
+3. `autopilot-agent-run` is only a package-contained wrapper: it resolves sibling `bin/autopilot-core.mjs` and invokes `agent-run --spec <absolute-spec.json>`. Installed packages never fall back to PATH, cwd, source trees, `dist/`, or unrelated binaries.
+4. Child `agent-run` validates `autopilot.agent_run_spec.v4`, launches Pi RPC with a run-owned session, `--no-extensions`, and one explicit codegen-anchored child add-on, and strips metered API-key overrides.
+5. Every model assignment receives one parent-selected generated terminal profile. Core accepts only correlated terminating tool-result details, validates profile/tool/boundary/schema/binding identity, and writes a package-owned carrier; assistant terminal text is never a carrier.
 
 ## Four-file planning input
 
@@ -49,6 +50,7 @@ PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0 CI=1 npm run gate:kernel-pur
 PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0 CI=1 npm run gate:no-inference
 PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0 CI=1 npm run gate:selftest
 PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0 CI=1 npm run gate:binary-parity
+PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0 CI=1 npm run gate:launch-entrypoint
 PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0 CI=1 npm run test:rust
 PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0 CI=1 npm run test:host
 PI_BACKGROUND_TASKS_PACKAGE_ROOT=../pi-background-tasks PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0 CI=1 npm run test:runtime-integration

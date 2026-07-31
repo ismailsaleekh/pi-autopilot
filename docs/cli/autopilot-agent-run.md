@@ -19,7 +19,7 @@ stability: stable
 ## Synopsis
 
 ```bash
-autopilot-agent-run --spec /absolute/path/to/autopilot.agent_run_spec.v1.json
+autopilot-agent-run --spec /absolute/path/to/autopilot.agent_run_spec.v4.json
 ```
 
 The npm bin points to `bin/autopilot-agent-run.mjs`. The wrapper resolves only the sibling `bin/autopilot-core.mjs` inside the same physical package root and invokes:
@@ -32,9 +32,9 @@ There is no PATH, cwd, ancestor, `dist/`, `target/`, or source-checkout fallback
 
 ## Contract
 
-The Rust `agent-run` mode reads one strict `autopilot.agent_run_spec.v1` document, rejects unknown fields and identity/path drift, validates the role/mode/roster/tool allowlist, verifies deterministic prompt/spec/carrier paths, removes metered API-key route overrides, and launches `pi --mode json --no-session --no-extensions` directly.
+The Rust `agent-run` mode reads one strict `autopilot.agent_run_spec.v4` document, rejects unknown fields and identity/path drift, validates the role/mode/roster/profile/tool allowlist, verifies deterministic paths and authority digests, removes metered API-key route overrides, and launches Pi RPC with a run-owned session and one explicit codegen-anchored child add-on.
 
-A successful child run must emit exactly one final assistant result, followed by a successful `agent_end`. Planning results are validated against the requested planning boundary before the planning carrier is written. Delivery results must parse as `autopilot.delivery_result.v1` and match the lane/attempt/base/worktree identity before Core accepts them.
+A successful model assignment must call exactly one selected terminating tool. Core correlates both Pi tool-result frames by call id, verifies profile/tool/boundary/result/schema/binding identity, validates the payload, and writes the package-owned carrier create-once. Assistant terminal text is never a carrier. Delivery and Validation use their v2 submission/result split.
 
 ## Failure behavior
 

@@ -427,9 +427,9 @@ artifact "task_document" schema="autopilot.task_document.v1" producer="Package" 
     field "body" type="string" required=#true
 }
 
-artifact "agent_run_spec" schema="autopilot.agent_run_spec.v3" producer="Package" model_produced=#false {
+artifact "agent_run_spec" schema="autopilot.agent_run_spec.v4" producer="Package" model_produced=#false {
     doc "Strict parent-Core written child runner specification for the package-contained autopilot-agent-run wrapper and Rust agent-run mode."
-    field "schema" type="schema-id" required=#true constant="autopilot.agent_run_spec.v3"
+    field "schema" type="schema-id" required=#true constant="autopilot.agent_run_spec.v4"
     field "assignment_kind" type="validation_assignment_kind" required=#true doc="Explicit assignment class; no runner infers planning/delivery/validation from result_contract."
     field "action_id" type="id" required=#true
     field "assignment_id" type="id" required=#true
@@ -472,8 +472,10 @@ artifact "agent_run_spec" schema="autopilot.agent_run_spec.v3" producer="Package
     field "assignment_digest" type="digest" required=#false nullable=#true
     field "context_manifest_path" type="path" required=#false nullable=#true
     field "context_manifest_digest" type="digest" required=#false nullable=#true
-    field "runtime_extension_path" type="path" required=#false nullable=#true doc="Required for planning assignments and forbidden for legacy assistant-text delivery assignments; absolute path to the explicitly loaded child-only submit-tool add-on."
+    field "runtime_extension_path" type="path" required=#false nullable=#true doc="Required for every model assignment; absolute path to the explicitly loaded codegen-anchored child-only terminal-tool add-on."
     field "runtime_extension_digest" type="digest" required=#false nullable=#true doc="Required exactly when runtime_extension_path is present; must equal the codegen-anchored digest of the file that actually loads."
+    field "terminal_profile_id" type="string" required=#false nullable=#true doc="Required for every model assignment; parent-selected generated terminal profile, never inferred from model payload."
+    list "unavailable_tools" item="tool-name" required=#false nullable=#true doc="Role-declared capabilities omitted only by an explicit retained-unavailable data disposition."
     list "producer_assignment_ids" item="id" required=#false nullable=#true
     field "validation_id" type="id" required=#false nullable=#true
     field "validation_attempt" type="u32" required=#false nullable=#true
@@ -650,6 +652,55 @@ artifact "delivery_result" schema="autopilot.delivery_result.v1" producer="Model
     list "hard_boundary_violations" item="string" required=#true
 }
 
+artifact "delivery_submission_v2" schema="autopilot.delivery_submission.v2" producer="Model" model_produced=#true {
+    doc "Model-owned delivery status payload. Package and assignment identity are supplied only by Core and are not model parameters."
+    admits "Call autopilot_emit_status exactly once with the actual changed paths, execution audit reference, focused evidence references, terminal status, and every hard-boundary violation. Do not include assignment or package identity."
+    submit_tool "autopilot_emit_status" label="Submit delivery status" profile="delivery-status.v2" result_contract="autopilot.delivery_result.v2" closed=#true
+    list "actual_changed_paths" item="path" required=#true
+    field "execution_audit_ref" type="ref" required=#true
+    list "focused_evidence_refs" item="ref" required=#true
+    field "terminal_status" type="delivery-terminal-status" required=#true
+    list "hard_boundary_violations" item="string" required=#true
+}
+
+artifact "delivery_result_v2" schema="autopilot.delivery_result.v2" producer="Package" model_produced=#false {
+    doc "Package-bound delivery carrier written create-once from an admitted terminal-tool submission and immutable runner identity."
+    field "schema" type="schema-id" required=#true constant="autopilot.delivery_result.v2"
+    field "action_id" type="id" required=#true
+    field "assignment_id" type="id" required=#true
+    field "run_revision" type="u64" required=#true
+    field "workstream" type="id" required=#true
+    field "role_id" type="id" required=#true
+    field "mode" type="mode-id" required=#true
+    field "lane_id" type="id" required=#true
+    field "attempt" type="u32" required=#true
+    field "base_commit" type="sha" required=#true
+    field "worktree" type="path" required=#true
+    field "prompt_path" type="path" required=#true
+    field "prompt_digest" type="digest" required=#true
+    field "spec_path" type="path" required=#true
+    field "spec_digest" type="digest" required=#true
+    field "carrier_path" type="path" required=#true
+    field "boundary_id" type="contract-id" required=#true
+    field "boundary_digest" type="digest" required=#true
+    field "result_contract" type="contract-id" required=#true
+    field "result_contract_digest" type="digest" required=#true
+    field "settings_digest" type="digest" required=#true
+    field "context_digest" type="digest" required=#true
+    field "skills_digest" type="digest" required=#true
+    field "subscription_digest" type="digest" required=#true
+    field "runtime_extension_digest" type="digest" required=#true
+    field "terminal_profile_id" type="string" required=#true
+    field "tool_name" type="tool-name" required=#true
+    field "tool_schema_digest" type="digest" required=#true
+    field "carrier_binding" type="digest" required=#true
+    field "tool_call_id" type="string" required=#true
+    field "tool_audit_ref" type="ref" required=#true
+    field "tool_audit_digest" type="digest" required=#true
+    field "submission_digest" type="digest" required=#true
+    field "submission" type="delivery_submission_v2" required=#true
+}
+
 artifact "validation_verdict" schema="autopilot.validation_verdict.v1" producer="Model" model_produced=#true {
     doc "Independent validation verdict bundle for forward, closure, conflict, delta, or final review (D76 §9.2)."
     admits "Verdict every required criterion independently as PASS, FAIL, or BLOCKED, and attach evidence refs, finding refs, covered paths, semantic surfaces, and forward-edge ids. Do not issue an overall PASS while any required criterion is unverdicted, stale, failed, or blocked. Use FORWARD_READY, FORWARD_BLOCKED, or BLOCKED only for forward validation, and PASS, NEEDS_FIX, or BLOCKED only for closure/final validation."
@@ -787,6 +838,7 @@ artifact "validation_context_v2" schema="autopilot.validation_context.v1" produc
 artifact "validation_submission_v2" schema="autopilot.validation_submission.v2" producer="Model" model_produced=#true {
     doc "Only payload accepted by the Validator terminal tool. Assistant-text JSON without the terminal tool is not a carrier."
     admits "Call autopilot_emit_status exactly once with this closed JSON object. Verdict every required criterion exactly once, cite only declared evidence refs, embed every finding, and do not claim PASS/READY when Core would compute a material blocker."
+    submit_tool "autopilot_emit_status" label="Submit validation status" profile="validation-status.v2" result_contract="autopilot.validation_result.v2" closed=#true
     field "schema" type="schema-id" required=#true
     field "validation_id" type="id" required=#true
     field "assignment_id" type="id" required=#true
@@ -841,6 +893,11 @@ artifact "validation_result_v2" schema="autopilot.validation_result.v2" producer
     field "skills_digest" type="digest" required=#true
     field "subscription_digest" type="digest" required=#true
     field "runtime_extension_digest" type="digest" required=#true
+    field "terminal_profile_id" type="string" required=#true
+    field "tool_name" type="tool-name" required=#true
+    field "tool_schema_digest" type="digest" required=#true
+    field "carrier_binding" type="digest" required=#true
+    field "tool_call_id" type="string" required=#true
     field "tool_audit_ref" type="ref" required=#true
     field "tool_audit_digest" type="digest" required=#true
     field "submission_digest" type="digest" required=#true

@@ -4,6 +4,7 @@ use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
+use kdl::{KdlDocument, KdlEntry};
 use kernel::failure::{Failure, HardBoundary};
 use kernel::generated::{
     ActionKind, AgentRunSpec, AuthorityClass, BackgroundAction, BackgroundActionBgRun, Bytes,
@@ -24,6 +25,7 @@ pub mod child;
 pub mod rpc;
 
 const ROLES_KDL: &str = include_str!("../../../data/roles.kdl");
+const KNOWN_INCOMPLETE_TOOLS_KDL: &str = include_str!("../../../data/known-incomplete-tools.kdl");
 const DEFAULT_BG_TIMEOUT_SECONDS: u32 = 3600;
 const DEFAULT_REQUIRED_FOCUSED_EVIDENCE: u32 = 2;
 const SKILLS_IDENTITY: &str = "agent-run-skills:disabled:v1";
@@ -149,6 +151,25 @@ pub struct AcceptedPlanningArtifactBinding {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ValidationRunnerRequest {
+    pub workstream: Id,
+    pub action_id: Id,
+    pub assignment_id: Id,
+    pub run_revision: u64,
+    pub producer_assignment_ids: Vec<Id>,
+    pub exact_commit: String,
+    pub exact_tree: String,
+    pub candidate_root: PathBuf,
+    pub changed_paths: Vec<String>,
+    pub execution_audit_ref: Ref,
+    pub evidence_refs: Vec<Ref>,
+    pub lane_id: Id,
+    pub attempt: u32,
+    pub base_commit: Sha,
+    pub worktree: PathBuf,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct RunnerAssignment {
     pub workstream: Id,
     pub action_id: Id,
@@ -200,6 +221,7 @@ pub struct AcceptedDelivery {
     pub package_tree: Sha,
     pub changed_paths: Vec<String>,
     pub audit_ref: Ref,
+    pub focused_evidence_refs: Vec<Ref>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -261,6 +283,12 @@ pub struct IssuedRunnerBinding {
 pub struct IssuedRunnerAction {
     pub action: BackgroundAction,
     pub binding: IssuedRunnerBinding,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ResolvedRoleTools {
+    pub active: Vec<String>,
+    pub unavailable: Vec<String>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -337,7 +365,13 @@ pub fn planning_issue(request: &PlanningRunnerRequest) -> Result<IssuedRunnerAct
     validate_planning_request(request)?;
     let facts = RunnerTransportFacts::from_env()?;
     let route = route_for_role(&request.role_id.0)?;
-    let tools = role_tool_names(&request.role_id.0)?;
+    let profile = terminal_profile_for(
+        &request.role_id.0,
+        &request.boundary_id.0,
+        &request.boundary_id.0,
+    )?;
+    let resolved_tools = resolve_role_tools(&request.role_id.0, profile.0)?;
+    let tools = resolved_tools.active.clone();
     let (terminal_tool, _) = terminal_submit_tool(&request.role_id.0)?.ok_or_else(|| {
         RunnerError::InvalidSpec(format!(
             "planning role {} has no terminating submit tool",
@@ -368,7 +402,7 @@ pub fn planning_issue(request: &PlanningRunnerRequest) -> Result<IssuedRunnerAct
     let prompt_digest = sha256_hex(rendered.text.as_bytes());
     let binding_digests = planning_binding_digests(request, &route)?;
     let spec = AgentRunSpec {
-        schema: kernel::generated::SchemaId("autopilot.agent_run_spec.v3".to_owned()),
+        schema: kernel::generated::SchemaId("autopilot.agent_run_spec.v4".to_owned()),
         assignment_kind: ValidationAssignmentKind::PlanningReview,
         action_id: request.action_id.clone(),
         assignment_id: request.assignment_id.clone(),
@@ -427,6 +461,14 @@ pub fn planning_issue(request: &PlanningRunnerRequest) -> Result<IssuedRunnerAct
         context_manifest_digest: None,
         runtime_extension_path: Some(to_contract_path(&addon_path)?),
         runtime_extension_digest: Some(Digest(addon_digest)),
+        terminal_profile_id: Some(profile.0.to_owned()),
+        unavailable_tools: Some(
+            resolved_tools
+                .unavailable
+                .into_iter()
+                .map(ToolName)
+                .collect(),
+        ),
         producer_assignment_ids: None,
         validation_id: None,
         validation_attempt: None,
@@ -503,7 +545,15 @@ pub fn delivery_issue_with_facts(
     let worktree = absolute_path(&assignment.worktree)?;
     reject_link_components_for_path(&worktree)?;
     verify_distinct_git_worktree(&worktree, &assignment.base_commit)?;
+    let delivery_boundary = ContractId("autopilot.delivery_submission.v2".to_owned());
     let delivery_contract = delivery_contract_id();
+    let profile = terminal_profile_for(
+        &assignment.role_id.0,
+        &delivery_boundary.0,
+        &delivery_contract.0,
+    )?;
+    let resolved_tools = resolve_role_tools(&assignment.role_id.0, profile.0)?;
+    let (addon_path, addon_digest) = child_addon()?;
     let paths = delivery_paths(&worktree, &assignment.assignment_id);
     reject_link_components_for_path(&paths.carrier_path)?;
     let worktree_text = path_to_string(&worktree)?;
@@ -515,14 +565,20 @@ pub fn delivery_issue_with_facts(
         &assignment.assignment_id,
         &assignment.role_id,
         &assignment.mode,
-        &delivery_contract,
+        &delivery_boundary,
     );
     let prompt = delivery_prompt(assignment, &route, &worktree_text);
     write_parent_file(&paths.prompt_path, prompt.as_bytes())?;
     let prompt_digest = sha256_hex(prompt.as_bytes());
-    let binding_digests = delivery_binding_digests(assignment, &route, &worktree_text)?;
+    let binding_digests = delivery_binding_digests(
+        assignment,
+        &route,
+        &worktree_text,
+        &delivery_boundary.0,
+        &delivery_contract.0,
+    )?;
     let spec = AgentRunSpec {
-        schema: kernel::generated::SchemaId("autopilot.agent_run_spec.v3".to_owned()),
+        schema: kernel::generated::SchemaId("autopilot.agent_run_spec.v4".to_owned()),
         assignment_kind: ValidationAssignmentKind::Delivery,
         action_id: assignment.action_id.clone(),
         assignment_id: assignment.assignment_id.clone(),
@@ -536,15 +592,17 @@ pub fn delivery_issue_with_facts(
         thinking: kernel::generated::ThinkingLevel(route.thinking.clone()),
         route: "subscription".to_owned(),
         cwd: ContractPath(worktree_text.clone()),
-        allowed_tools: role_tool_names(&assignment.role_id.0)?
-            .into_iter()
+        allowed_tools: resolved_tools
+            .active
+            .iter()
+            .cloned()
             .map(ToolName)
             .collect(),
         spec_path: to_contract_path(&paths.spec_path)?,
         prompt_path: to_contract_path(&paths.prompt_path)?,
         prompt_digest: Digest(prompt_digest.clone()),
         session_dir: to_contract_path(&session_dir)?,
-        boundary_id: delivery_contract.clone(),
+        boundary_id: delivery_boundary.clone(),
         boundary_digest: Digest(binding_digests.boundary_digest.clone()),
         result_contract: delivery_contract.clone(),
         result_contract_digest: Digest(binding_digests.result_contract_digest.clone()),
@@ -575,8 +633,16 @@ pub fn delivery_issue_with_facts(
         assignment_digest: None,
         context_manifest_path: None,
         context_manifest_digest: None,
-        runtime_extension_path: None,
-        runtime_extension_digest: None,
+        runtime_extension_path: Some(to_contract_path(&addon_path)?),
+        runtime_extension_digest: Some(Digest(addon_digest)),
+        terminal_profile_id: Some(profile.0.to_owned()),
+        unavailable_tools: Some(
+            resolved_tools
+                .unavailable
+                .into_iter()
+                .map(ToolName)
+                .collect(),
+        ),
         producer_assignment_ids: None,
         validation_id: None,
         validation_attempt: None,
@@ -596,7 +662,7 @@ pub fn delivery_issue_with_facts(
         workstream: assignment.workstream.clone(),
         role_id: assignment.role_id.clone(),
         mode: assignment.mode.clone(),
-        boundary_id: delivery_contract.clone(),
+        boundary_id: delivery_boundary,
         result_contract: delivery_contract,
         prompt_path: path_to_string(&paths.prompt_path)?,
         prompt_digest,
@@ -616,6 +682,278 @@ pub fn delivery_issue_with_facts(
         base_commit: Some(assignment.base_commit.clone()),
         worktree: Some(worktree_text),
         required_focused_evidence: DEFAULT_REQUIRED_FOCUSED_EVIDENCE,
+    };
+    let action = action_from_doc(
+        facts,
+        &paths.spec_path,
+        &spec,
+        Some(DEFAULT_BG_TIMEOUT_SECONDS),
+    )?;
+    Ok(IssuedRunnerAction { action, binding })
+}
+
+pub fn validation_issue(
+    request: &ValidationRunnerRequest,
+    facts: &RunnerTransportFacts,
+) -> Result<IssuedRunnerAction, RunnerError> {
+    let role_id = Id("validator".to_owned());
+    let mode = ModeId("forward-release".to_owned());
+    let boundary = ContractId("autopilot.validation_submission.v2".to_owned());
+    let result_contract = ContractId("autopilot.validation_result.v2".to_owned());
+    let profile = terminal_profile_for(&role_id.0, &boundary.0, &result_contract.0)?;
+    let resolved_tools = resolve_role_tools(&role_id.0, profile.0)?;
+    let route = route_for_role(&role_id.0)?;
+    let cwd = absolute_path(&request.candidate_root)?;
+    let paths = validation_paths(&cwd, &request.workstream.0, &request.assignment_id);
+    let base = paths
+        .spec_path
+        .parent()
+        .ok_or_else(|| RunnerError::InvalidSpec("validation paths have no parent".to_owned()))?;
+    let assignment_path = base.join("assignment.json");
+    let context_path = base.join("context.json");
+    let model_submission_path = base.join("model-submission.json");
+    let validation_id = Id(format!("validation-{}", request.assignment_id.0));
+    let validation_key = sha256_hex(
+        format!(
+            "validation.v2\0{}\0{}\0{}",
+            validation_id.0, request.exact_commit, request.exact_tree
+        )
+        .as_bytes(),
+    );
+    let criteria = request
+        .changed_paths
+        .iter()
+        .enumerate()
+        .map(|(index, path)| serde_json::json!({
+            "criterion_id": format!("criterion-{}-{}", request.assignment_id.0, index + 1),
+            "mandatory": true,
+            "covered_paths": [path],
+            "semantic_surface_ids": [format!("surface:{path}")],
+            "forward_edge_ids": [format!("edge:{}", request.lane_id.0)],
+            "witness_ids": request.evidence_refs.iter().map(|reference| reference.0.clone()).collect::<Vec<_>>(),
+        }))
+        .collect::<Vec<_>>();
+    if criteria.is_empty() || request.evidence_refs.is_empty() {
+        return Err(RunnerError::InvalidSpec(
+            "validation requires changed-path criteria and delivery evidence".to_owned(),
+        ));
+    }
+    let assignment_value = serde_json::json!({
+        "schema": "autopilot.validation_assignment.v1",
+        "validation_id": validation_id,
+        "validation_key": validation_key,
+        "workstream": request.workstream,
+        "run_revision": request.run_revision,
+        "role_id": role_id,
+        "mode": mode,
+        "assignment_id": request.assignment_id,
+        "action_id": request.action_id,
+        "validation_attempt": 1,
+        "semantic_round": 1,
+        "scope": "forward",
+        "subject_kind": "lane-delivery",
+        "producer_assignment_ids": request.producer_assignment_ids,
+        "producer_result_refs": request.producer_assignment_ids.iter().map(|id| format!("delivery-result:{}", id.0)).collect::<Vec<_>>(),
+        "lane_id": request.lane_id,
+        "exact_commit": request.exact_commit,
+        "exact_tree": request.exact_tree,
+        "candidate_root": cwd,
+        "forward_round": 1,
+        "criteria_manifest_ref": context_path.display().to_string(),
+        "criteria_manifest_digest": "pending-context-digest",
+        "evidence_manifest_ref": context_path.display().to_string(),
+        "evidence_manifest_digest": "pending-context-digest",
+        "diff_ref": format!("delivery-diff:{}", request.assignment_id.0),
+        "diff_digest": sha256_hex(request.changed_paths.join("\n").as_bytes()),
+        "prior_finding_refs": [],
+        "allowed_read_roots": [cwd],
+        "allowed_command_ids": [],
+        "max_transport_attempts": 3,
+    });
+    let context_value = serde_json::json!({
+        "schema": "autopilot.validation_context.v1",
+        "context_id": format!("context-{validation_id}", validation_id = validation_id.0),
+        "revision": 1,
+        "validation_id": validation_id,
+        "assignment_id": request.assignment_id,
+        "exact_commit": request.exact_commit,
+        "exact_tree": request.exact_tree,
+        "candidate": {
+            "source_root": cwd,
+            "diff_ref": format!("delivery-diff:{}", request.assignment_id.0),
+            "diff_digest": sha256_hex(request.changed_paths.join("\n").as_bytes()),
+            "actual_changed_paths": request.changed_paths,
+            "execution_audit_ref": request.execution_audit_ref,
+        },
+        "criteria": criteria,
+        "evidence": request.evidence_refs.iter().map(|reference| serde_json::json!({
+            "evidence_ref": reference,
+            "digest": sha256_hex(reference.0.as_bytes()),
+            "kind": "delivery-focused",
+            "exact_commit": request.exact_commit,
+            "exact_tree": request.exact_tree,
+        })).collect::<Vec<_>>(),
+        "prior_findings": [],
+        "applicable_decision_refs": [],
+        "applicable_constraint_refs": [],
+        "included_context_classes": ["candidate-facts", "criteria", "evidence"],
+        "forbidden_context_classes": ["producer-reasoning", "producer-session"],
+        "allowed_read_roots": [cwd],
+        "excluded_refs": [],
+    });
+    let _: kernel::generated::ValidationContextV2 =
+        serde_json::from_value(context_value.clone())
+            .map_err(|error| RunnerError::InvalidSpec(format!("validation context: {error}")))?;
+    let context_bytes = serde_json::to_vec_pretty(&context_value)
+        .map_err(|error| RunnerError::Io(error.to_string()))?;
+    let context_digest = sha256_hex(&context_bytes);
+    let mut assignment_value = assignment_value;
+    assignment_value["criteria_manifest_digest"] = serde_json::json!(context_digest);
+    assignment_value["evidence_manifest_digest"] = serde_json::json!(context_digest);
+    let _: kernel::generated::ValidationAssignmentV2 =
+        serde_json::from_value(assignment_value.clone())
+            .map_err(|error| RunnerError::InvalidSpec(format!("validation assignment: {error}")))?;
+    write_parent_file(&context_path, &context_bytes)?;
+    let assignment_bytes = serde_json::to_vec_pretty(&assignment_value)
+        .map_err(|error| RunnerError::Io(error.to_string()))?;
+    write_parent_file(&assignment_path, &assignment_bytes)?;
+    let assignment_digest = sha256_hex(&assignment_bytes);
+    let prompt = format!(
+        "Independent forward Validator assignment. Read the package-issued assignment at {} and fact-only context at {}. Validate exact commit {} and tree {}. Call autopilot_emit_status exactly once with autopilot.validation_submission.v2. The declared test-request capability is unavailable; if issued evidence is insufficient, return BLOCKED rather than inventing evidence or using shell.",
+        assignment_path.display(),
+        context_path.display(),
+        request.exact_commit,
+        request.exact_tree
+    );
+    write_parent_file(&paths.prompt_path, prompt.as_bytes())?;
+    let prompt_digest = sha256_hex(prompt.as_bytes());
+    let (addon_path, addon_digest) = child_addon()?;
+    let run_identity = run_identity_for(&request.workstream.0)?;
+    let session_dir = session_dir_for(&run_identity.run_root);
+    let session_id = session_id_for(
+        &run_identity.run_id_as_id(),
+        &request.workstream,
+        &request.assignment_id,
+        &role_id,
+        &mode,
+        &boundary,
+    );
+    let context_binding_digest = sha_json(&serde_json::json!({
+        "assignment_path": to_contract_path(&assignment_path)?,
+        "assignment_digest": assignment_digest,
+        "context_manifest_path": to_contract_path(&context_path)?,
+        "context_manifest_digest": context_digest,
+        "producer_assignment_ids": request.producer_assignment_ids,
+        "validation_id": validation_id,
+        "validation_attempt": 1,
+        "semantic_round": 1,
+    }))?;
+    let binding_digests = BindingDigests {
+        boundary_digest: contract_digest(&boundary.0)?,
+        result_contract_digest: contract_digest(&result_contract.0)?,
+        settings_digest: settings_digest(true),
+        context_digest: context_binding_digest,
+        skills_digest: skills_digest(),
+        subscription_digest: subscription_digest(&route),
+    };
+    let spec = AgentRunSpec {
+        schema: kernel::generated::SchemaId("autopilot.agent_run_spec.v4".to_owned()),
+        assignment_kind: ValidationAssignmentKind::Validation,
+        action_id: request.action_id.clone(),
+        assignment_id: request.assignment_id.clone(),
+        run_id: run_identity.run_id_as_id(),
+        run_revision: request.run_revision,
+        workstream: request.workstream.clone(),
+        role_id: role_id.clone(),
+        mode: mode.clone(),
+        provider: route.provider.clone(),
+        model: route.model.clone(),
+        thinking: kernel::generated::ThinkingLevel(route.thinking.clone()),
+        route: "subscription".to_owned(),
+        cwd: to_contract_path(&cwd)?,
+        allowed_tools: resolved_tools
+            .active
+            .iter()
+            .cloned()
+            .map(ToolName)
+            .collect(),
+        spec_path: to_contract_path(&paths.spec_path)?,
+        prompt_path: to_contract_path(&paths.prompt_path)?,
+        prompt_digest: Digest(prompt_digest.clone()),
+        session_dir: to_contract_path(&session_dir)?,
+        boundary_id: boundary.clone(),
+        boundary_digest: Digest(binding_digests.boundary_digest.clone()),
+        result_contract: result_contract.clone(),
+        result_contract_digest: Digest(binding_digests.result_contract_digest.clone()),
+        carrier_path: to_contract_path(&paths.carrier_path)?,
+        session_id: session_id.clone(),
+        session_continuity: kernel::generated::SessionContinuity::Fresh,
+        settings_digest: Digest(binding_digests.settings_digest.clone()),
+        context_digest: Digest(binding_digests.context_digest.clone()),
+        skills_digest: Digest(binding_digests.skills_digest.clone()),
+        subscription_digest: Digest(binding_digests.subscription_digest.clone()),
+        lane_id: Some(request.lane_id.clone()),
+        attempt: Some(request.attempt),
+        base_commit: Some(request.base_commit.clone()),
+        worktree: Some(to_contract_path(&request.worktree)?),
+        required_focused_evidence: Some(1),
+        authority_set_id: None,
+        authority_documents: None,
+        context_document: None,
+        context_documents: None,
+        assignment_path: Some(to_contract_path(&assignment_path)?),
+        assignment_digest: Some(Digest(assignment_digest)),
+        context_manifest_path: Some(to_contract_path(&context_path)?),
+        context_manifest_digest: Some(Digest(context_digest)),
+        runtime_extension_path: Some(to_contract_path(&addon_path)?),
+        runtime_extension_digest: Some(Digest(addon_digest)),
+        terminal_profile_id: Some(profile.0.to_owned()),
+        unavailable_tools: Some(
+            resolved_tools
+                .unavailable
+                .into_iter()
+                .map(ToolName)
+                .collect(),
+        ),
+        producer_assignment_ids: Some(request.producer_assignment_ids.clone()),
+        validation_id: Some(validation_id),
+        validation_attempt: Some(1),
+        semantic_round: Some(1),
+        model_submission_path: Some(to_contract_path(&model_submission_path)?),
+        atom_id_prefix: None,
+        atom_registry_path: None,
+        atom_registry_digest: None,
+        planning_inputs_path: None,
+        planning_inputs_digest: None,
+    };
+    let spec_digest = write_spec_document(&paths.spec_path, &spec)?;
+    let binding = IssuedRunnerBinding {
+        action_id: request.action_id.clone(),
+        assignment_id: request.assignment_id.clone(),
+        run_revision: request.run_revision,
+        workstream: request.workstream.clone(),
+        role_id,
+        mode,
+        boundary_id: boundary,
+        result_contract,
+        prompt_path: path_to_string(&paths.prompt_path)?,
+        prompt_digest,
+        spec_path: path_to_string(&paths.spec_path)?,
+        spec_digest,
+        carrier_path: path_to_string(&paths.carrier_path)?,
+        session_id,
+        boundary_digest: binding_digests.boundary_digest,
+        result_contract_digest: binding_digests.result_contract_digest,
+        settings_digest: binding_digests.settings_digest,
+        context_digest: binding_digests.context_digest,
+        skills_digest: binding_digests.skills_digest,
+        subscription_digest: binding_digests.subscription_digest,
+        mode_parameter: None,
+        lane_id: Some(request.lane_id.clone()),
+        attempt: Some(request.attempt),
+        base_commit: Some(request.base_commit.clone()),
+        worktree: Some(path_to_string(&request.worktree)?),
+        required_focused_evidence: 1,
     };
     let action = action_from_doc(
         facts,
@@ -664,6 +1002,19 @@ pub fn delivery_paths(cwd: &Path, assignment_id: &Id) -> RunnerPaths {
     }
 }
 
+pub fn validation_paths(cwd: &Path, workstream: &str, assignment_id: &Id) -> RunnerPaths {
+    let base = cwd
+        .join(".pi/autopilot")
+        .join(workstream)
+        .join("validation")
+        .join(&assignment_id.0);
+    RunnerPaths {
+        prompt_path: base.join("prompt.md"),
+        spec_path: base.join("agent-run-spec.json"),
+        carrier_path: base.join("carrier.json"),
+    }
+}
+
 pub fn role_runtime(role_id: &str) -> Result<RoleRuntime, RunnerError> {
     let roster = Roster::package().map_err(|error| RunnerError::Roster(format!("{error:?}")))?;
     for block in blocks(ROLES_KDL, "role").map_err(RunnerError::Roster)? {
@@ -700,31 +1051,111 @@ pub fn role_runtime(role_id: &str) -> Result<RoleRuntime, RunnerError> {
     Err(RunnerError::Roster(format!("missing role {role_id}")))
 }
 
-/// Runtime tools for one role.
+/// Runtime tools for one planning role.
 ///
-/// Planning roles receive every declared capability verbatim. The pre-prompt
-/// active-set receipt makes an unknown or unavailable name a loud error.
-/// Delivery is intentionally still on its legacy assistant-text channel; its
-/// built-in-only projection remains isolated here until that declared channel
-/// is cut over in its own change.
+/// Planning roles receive their generated terminal profile plus the declared
+/// builtin capabilities that Pi can activate for child sessions. Delivery and
+/// validation issue their role-specific tool projections directly from the
+/// runner spec builders.
 pub fn role_tool_names(role_id: &str) -> Result<Vec<String>, RunnerError> {
+    let boundary = planning_boundary_for_role(role_id)?.ok_or_else(|| {
+        RunnerError::Roster(format!(
+            "role {role_id} requires an explicit terminal profile"
+        ))
+    })?;
+    let profile = terminal_profile_for(role_id, &boundary, &boundary)?;
+    Ok(resolve_role_tools(role_id, profile.0)?.active)
+}
+
+pub fn resolve_role_tools(
+    role_id: &str,
+    profile_id: &str,
+) -> Result<ResolvedRoleTools, RunnerError> {
     let runtime = role_runtime(role_id)?;
-    let planning = planning_boundary_for_role(role_id)?.is_some();
-    let tools = if planning {
-        runtime.declared_tools
-    } else {
-        runtime
-            .declared_tools
-            .into_iter()
-            .filter(|tool| legacy_delivery_builtin(tool))
-            .collect::<Vec<_>>()
-    };
-    if tools.is_empty() {
-        return Err(RunnerError::Roster(format!(
-            "role {role_id} has no runtime tools"
+    let profile = kernel::generated::TERMINAL_PROFILES
+        .iter()
+        .find(|row| row.0 == profile_id)
+        .ok_or_else(|| {
+            RunnerError::InvalidSpec(format!("unknown terminal profile {profile_id}"))
+        })?;
+    let role = crate::roles::RoleRegistry::package()
+        .map_err(|error| RunnerError::Roster(format!("{error:?}")))?
+        .get(role_id)
+        .map_err(|error| RunnerError::Roster(format!("{error:?}")))?
+        .clone();
+    if role.terminal_path != profile.1 {
+        return Err(RunnerError::InvalidSpec(format!(
+            "terminal profile {profile_id} tool {} differs from role {role_id} terminal {}",
+            profile.1, role.terminal_path
         )));
     }
-    Ok(tools)
+    let incomplete = known_incomplete_tools()?;
+    let mut active = Vec::new();
+    let mut unavailable = Vec::new();
+    for tool in runtime.declared_tools {
+        if legacy_delivery_builtin(&tool) || tool == profile.1 {
+            active.push(tool);
+            continue;
+        }
+        let retained = incomplete.iter().any(|row| {
+            row.0 == tool
+                && row.1 == role_id
+                && row.2 == "declared-undeliverable"
+                && row.3 == "retain"
+        });
+        if retained {
+            unavailable.push(tool);
+        } else {
+            return Err(RunnerError::InvalidSpec(format!(
+                "role {role_id} tool {tool} is neither active nor explicitly retained-unavailable"
+            )));
+        }
+    }
+    if active.is_empty() || !active.iter().any(|tool| tool == profile.1) {
+        return Err(RunnerError::InvalidSpec(format!(
+            "role {role_id} terminal profile {profile_id} is not active"
+        )));
+    }
+    Ok(ResolvedRoleTools {
+        active,
+        unavailable,
+    })
+}
+
+fn known_incomplete_tools() -> Result<Vec<(String, String, String, String)>, RunnerError> {
+    let doc = KNOWN_INCOMPLETE_TOOLS_KDL
+        .parse::<KdlDocument>()
+        .map_err(|error| RunnerError::Roster(format!("known incomplete tools KDL: {error}")))?;
+    let mut rows = Vec::new();
+    for node in doc.nodes() {
+        match node.name().value() {
+            "schema" | "version" => continue,
+            "tool" => {}
+            other => {
+                return Err(RunnerError::Roster(format!(
+                    "unknown known-incomplete-tools node {other}"
+                )));
+            }
+        }
+        let string = |entry: Option<&KdlEntry>, label: &str| {
+            entry
+                .and_then(|entry| entry.value().as_string())
+                .map(str::to_owned)
+                .ok_or_else(|| RunnerError::Roster(format!("tool missing string {label}")))
+        };
+        let name = node
+            .get(0)
+            .and_then(|value| value.as_string())
+            .map(str::to_owned)
+            .ok_or_else(|| RunnerError::Roster("tool missing string name".to_owned()))?;
+        rows.push((
+            name,
+            string(node.entry("role"), "role")?,
+            string(node.entry("status"), "status")?,
+            string(node.entry("disposition"), "disposition")?,
+        ));
+    }
+    Ok(rows)
 }
 
 fn planning_boundary_for_role(role_id: &str) -> Result<Option<String>, RunnerError> {
@@ -734,6 +1165,41 @@ fn planning_boundary_for_role(role_id: &str) -> Result<Option<String>, RunnerErr
         .into_iter()
         .find(|row| row.role == role_id)
         .map(|row| row.boundary_id))
+}
+
+pub(crate) fn terminal_profile_for(
+    role_id: &str,
+    boundary_id: &str,
+    result_contract: &str,
+) -> Result<
+    &'static (
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+    ),
+    RunnerError,
+> {
+    let role = crate::roles::RoleRegistry::package()
+        .map_err(|error| RunnerError::Roster(format!("{error:?}")))?
+        .get(role_id)
+        .map_err(|error| RunnerError::Roster(format!("{error:?}")))?
+        .clone();
+    let matches = kernel::generated::TERMINAL_PROFILES
+        .iter()
+        .filter(|row| {
+            row.1 == role.terminal_path && row.2 == boundary_id && row.3 == result_contract
+        })
+        .collect::<Vec<_>>();
+    if matches.len() != 1 {
+        return Err(RunnerError::InvalidSpec(format!(
+            "role {role_id} terminal {} resolved {} profiles for {boundary_id}/{result_contract}",
+            role.terminal_path,
+            matches.len()
+        )));
+    }
+    Ok(matches[0])
 }
 
 fn terminal_submit_tool(
@@ -754,18 +1220,8 @@ fn terminal_submit_tool(
             role.terminal_path, role_id
         )));
     }
-    kernel::generated::SUBMIT_TOOLS
-        .iter()
-        .find(|(tool, declared_boundary, _)| {
-            *tool == role.terminal_path && *declared_boundary == boundary
-        })
-        .map(|(tool, _, digest)| Some((*tool, *digest)))
-        .ok_or_else(|| {
-            RunnerError::InvalidSpec(format!(
-                "planning terminal tool {} has no generated binding for {}",
-                role.terminal_path, boundary
-            ))
-        })
+    let profile = terminal_profile_for(role_id, &boundary, &boundary)?;
+    Ok(Some((profile.1, profile.4)))
 }
 
 fn legacy_delivery_builtin(tool: &str) -> bool {
@@ -857,7 +1313,7 @@ fn child_addon() -> Result<(PathBuf, String), RunnerError> {
 }
 
 fn delivery_contract_id() -> ContractId {
-    ContractId("autopilot.delivery_result.v1".to_owned())
+    ContractId("autopilot.delivery_result.v2".to_owned())
 }
 
 pub fn binding_ref(binding: &IssuedRunnerBinding) -> Result<Ref, RunnerError> {
@@ -1053,15 +1509,11 @@ fn validate_delivery_assignment(assignment: &RunnerAssignment) -> Result<(), Run
             assignment.role_id.0, assignment.mode.0
         )));
     }
-    if !matches!(
-        assignment.role_id.0.as_str(),
-        "implementer" | "fixer-integrator"
-    ) {
-        return Err(RunnerError::InvalidSpec(format!(
-            "delivery role drift: {}",
-            assignment.role_id.0
-        )));
-    }
+    terminal_profile_for(
+        &assignment.role_id.0,
+        "autopilot.delivery_submission.v2",
+        "autopilot.delivery_result.v2",
+    )?;
     if assignment.lane_id.0.trim().is_empty()
         || assignment.attempt == 0
         || assignment.base_commit.0.trim().is_empty()
@@ -1138,6 +1590,8 @@ fn delivery_binding_digests(
     assignment: &RunnerAssignment,
     route: &roster::Route,
     worktree: &str,
+    boundary: &str,
+    result_contract: &str,
 ) -> Result<BindingDigests, RunnerError> {
     let context_digest = sha_json(&serde_json::json!({
         "workstream": assignment.workstream,
@@ -1147,11 +1601,10 @@ fn delivery_binding_digests(
         "worktree": worktree,
         "required_focused_evidence": DEFAULT_REQUIRED_FOCUSED_EVIDENCE,
     }))?;
-    let contract = "autopilot.delivery_result.v1";
     Ok(BindingDigests {
-        boundary_digest: contract_digest(contract)?,
-        result_contract_digest: contract_digest(contract)?,
-        settings_digest: settings_digest(false),
+        boundary_digest: contract_digest(boundary)?,
+        result_contract_digest: contract_digest(result_contract)?,
+        settings_digest: settings_digest(true),
         context_digest,
         skills_digest: sha256_hex(SKILLS_IDENTITY.as_bytes()),
         subscription_digest: subscription_digest(route),
@@ -1166,6 +1619,9 @@ pub(crate) fn contract_digest(contract_id: &str) -> Result<String, RunnerError> 
         "planning.work-map.v1" => WORK_MAP_ADMITS,
         "planning.plan-review.v1" => PLAN_REVIEW_ADMITS,
         "autopilot.delivery_result.v1" => kernel::generated::DELIVERY_RESULT_ADMITS,
+        "autopilot.delivery_submission.v2" => kernel::generated::DELIVERY_SUBMISSION_V2_ADMITS,
+        "autopilot.validation_submission.v2" => kernel::generated::VALIDATION_SUBMISSION_V2_ADMITS,
+        "autopilot.delivery_result.v2" | "autopilot.validation_result.v2" => contract_id,
         other => {
             return Err(RunnerError::InvalidSpec(format!(
                 "unknown contract digest: {other}"
@@ -1609,7 +2065,7 @@ fn context_item_for_synthetic(
 
 fn delivery_prompt(assignment: &RunnerAssignment, route: &roster::Route, worktree: &str) -> String {
     format!(
-        "Autopilot delivery child assignment.\nassignment_id: {}\naction_id: {}\nworkstream: {}\nlane_id: {}\nattempt: {}\nrole: {}\nmode: {}\nrun_revision: {}\nbase_commit: {}\nworktree: {}\nprovider: {}\nmodel: {}\nthinking: {}\nroute: subscription\nrequired_focused_evidence: {}\n\nReturn exactly one autopilot.delivery_result.v1 carrier matching every identity field above.",
+        "Autopilot delivery child assignment.\nassignment_id: {}\naction_id: {}\nworkstream: {}\nlane_id: {}\nattempt: {}\nrole: {}\nmode: {}\nrun_revision: {}\nbase_commit: {}\nworktree: {}\nprovider: {}\nmodel: {}\nthinking: {}\nroute: subscription\nrequired_focused_evidence: {}\n\nCall autopilot_emit_status exactly once with one autopilot.delivery_submission.v2 payload. Assignment identity is package-owned; do not return it in assistant prose.",
         assignment.assignment_id.0,
         assignment.action_id.0,
         assignment.workstream.0,
@@ -1983,6 +2439,7 @@ fn accepted_delivery_from(result: &DeliveryResult, package: PackageFacts) -> Acc
             .map(|path| path.0.clone())
             .collect(),
         audit_ref: result.execution_audit_ref.clone(),
+        focused_evidence_refs: result.focused_evidence_refs.clone(),
     }
 }
 

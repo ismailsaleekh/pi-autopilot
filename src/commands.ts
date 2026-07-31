@@ -1,183 +1,87 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
 import type { BackgroundAction, CoreToHostFrame, HostToCoreCommandPayload, HostToCoreOperatorAnswerPayload, HostToCoreSpawnResultPayload } from "./generated/index.ts";
+import { ACTIVATING_COMMANDS, HOST_COMMANDS } from "./generated/host-runtime-tables.ts";
+import { boundedDiagnostic, unavailableCapabilities, type BgTaskSnapshot, type PiBackgroundTaskClient } from "./background-tasks.ts";
 import { applyCoreEffect, type CoreEffectResult, type HostEffectContext, type HostEffectServices, type OperatorMessageSink } from "./effects.ts";
-import type { BgTaskSnapshot, PiBackgroundTaskClient } from "./background-tasks.ts";
-import { boundedDiagnostic, unavailableCapabilities } from "./background-tasks.ts";
-import { ACTIVATING_COMMANDS } from "./activation.ts";
+import { parseCommandAdapterPayload } from "./host-runtime.ts";
 import type { CoreTransport } from "./transport.ts";
 
-export const AUTOPILOT_COMMANDS = Object.freeze([
-  "autopilot-plan",
-  "autopilot",
-  "autopilot-onboard",
-  "autopilot-inject",
-  "autopilot-status",
-  "autopilot-config",
-  "autopilot-handoff",
-  "autopilot-close",
-  "autopilot-abort",
-] as const);
+export const AUTOPILOT_COMMANDS = Object.freeze(HOST_COMMANDS.filter((row) => row.frame === "command").map((row) => row.name));
+const OPERATOR_ANSWER_DESCRIPTOR = HOST_COMMANDS.find((row) => row.frame === "operator-answer")!;
+export const AUTOPILOT_OPERATOR_ANSWER_COMMAND = OPERATOR_ANSWER_DESCRIPTOR.name;
 
-export const AUTOPILOT_OPERATOR_ANSWER_COMMAND = "autopilot-answer" as const;
-
-export interface CommandDefinitionLike {
-  readonly description: string;
-  handler(args: string, ctx: ExtensionCommandContext): Promise<void>;
-}
-
-export interface CommandHostLike {
-  registerCommand(name: string, definition: CommandDefinitionLike): void;
-}
-
+export interface CommandDefinitionLike { readonly description: string; handler(args: string, ctx: ExtensionCommandContext): Promise<void>; }
+export interface CommandHostLike { registerCommand(name: string, definition: CommandDefinitionLike): void; }
 export interface CommandTransportLike {
   request(kind: "command", payload: HostToCoreCommandPayload): Promise<CoreToHostFrame>;
   request(kind: "operator-answer", payload: HostToCoreOperatorAnswerPayload): Promise<CoreToHostFrame>;
   request(kind: "spawn-result", payload: HostToCoreSpawnResultPayload): Promise<CoreToHostFrame>;
 }
-
 export interface RegisterCommandOptions {
   readonly transport: CommandTransportLike | CoreTransport;
   readonly backgroundTasks: Pick<PiBackgroundTaskClient, "capabilities" | "run">;
   readonly operatorMessage: OperatorMessageSink;
   readonly onSpawn?: (binding: { readonly action: BackgroundAction; readonly task: BgTaskSnapshot }) => void | Promise<void>;
 }
-
-/**
- * Resolves per-command services at CALL time.
- *
- * Commands are the only load-time surface Autopilot keeps, because a command
- * that is not registered cannot be typed and is therefore the irreducible
- * activation entrypoint. The services behind them must not exist yet at load,
- * so handlers receive a resolver instead of captured instances:
- *
- *   - `activate(command)` runs the one activation seam (activating commands).
- *   - `requireActive(command)` refuses loudly in an unarmed session
- *     (operating commands) and never activates implicitly.
- */
 export interface CommandServiceResolver {
   activate(command: string): Promise<RegisterCommandOptions>;
   requireActive(command: string): RegisterCommandOptions;
 }
 
 export function registerAutopilotCommands(pi: CommandHostLike, resolver: CommandServiceResolver): void {
-  for (const name of AUTOPILOT_COMMANDS) {
-    // The activating/operating split is resolved HERE, at registration, so each
-    // registered handler body stays a single unconditional forward.
-    const acquire = serviceAcquirer(resolver, name);
-    pi.registerCommand(name, {
-      description: `Forward /${name} to autopilot-core.`,
-      handler: async (args, ctx) => forwardCommand(name, args, ctx, await acquire()),
+  for (const row of HOST_COMMANDS) {
+    const acquire = serviceAcquirer(resolver, row.name);
+    pi.registerCommand(row.name, row.frame === "operator-answer" ? {
+      description: row.description,
+      handler: async (args, ctx) => forwardOperatorAnswer(args, ctx, await acquire()),
+    } : {
+      description: row.description,
+      handler: async (args, ctx) => forwardCommand(row.name, args, ctx, await acquire()),
     });
   }
-  const acquireForAnswer = serviceAcquirer(resolver, AUTOPILOT_OPERATOR_ANSWER_COMMAND);
-  pi.registerCommand(AUTOPILOT_OPERATOR_ANSWER_COMMAND, {
-    description: "Send a D72 operator-answer frame to autopilot-core: /autopilot-answer <question-id> <json-object>.",
-    handler: async (args, ctx) => forwardOperatorAnswer(args, ctx, await acquireForAnswer()),
-  });
 }
 
 function serviceAcquirer(resolver: CommandServiceResolver, name: string): () => Promise<RegisterCommandOptions> {
-  if ((ACTIVATING_COMMANDS as readonly string[]).includes(name)) {
-    return async () => resolver.activate(name);
-  }
-  return async () => resolver.requireActive(name);
+  return (ACTIVATING_COMMANDS as readonly string[]).includes(name) ? async () => resolver.activate(name) : async () => resolver.requireActive(name);
 }
 
-/** Resolver that hands every command the same eagerly-supplied services. */
 export function fixedServiceResolver(options: RegisterCommandOptions): CommandServiceResolver {
-  return {
-    async activate() { return options; },
-    requireActive() { return options; },
-  };
+  return { async activate() { return options; }, requireActive() { return options; } };
 }
 
 async function forwardOperatorAnswer(args: string, ctx: ExtensionCommandContext, options: RegisterCommandOptions): Promise<void> {
-  const frame = await options.transport.request("operator-answer", operatorAnswerPayload(args));
-  await applyAndRecord(frame, ctx, options);
+  await applyAndRecord(await options.transport.request("operator-answer", parseCommandAdapterPayload(OPERATOR_ANSWER_DESCRIPTOR, args) as unknown as HostToCoreOperatorAnswerPayload), ctx, options);
 }
 
 async function forwardCommand(name: string, args: string, ctx: ExtensionCommandContext, options: RegisterCommandOptions): Promise<void> {
-  const payload = await commandPayload(name, args, options.backgroundTasks);
-  const frame = await options.transport.request("command", payload);
-  await applyAndRecord(frame, ctx, options);
+  await applyAndRecord(await options.transport.request("command", await commandPayload(name, args, options.backgroundTasks)), ctx, options);
 }
 
 export async function applyAndRecord(frame: CoreToHostFrame, ctx: HostEffectContext, options: Pick<RegisterCommandOptions, "transport" | "backgroundTasks" | "operatorMessage" | "onSpawn">): Promise<CoreEffectResult> {
-  const result = await applyCoreEffect(frame, ctx, { backgroundTasks: options.backgroundTasks, operatorMessage: options.operatorMessage } satisfies HostEffectServices);
+  const services = { backgroundTasks: options.backgroundTasks, operatorMessage: options.operatorMessage } satisfies HostEffectServices;
+  const result = await applyCoreEffect(frame, ctx, services);
   if (result?.kind !== "spawn") return result;
   if (!result.acknowledge) {
-    for (const launched of result.launched) {
-      await options.onSpawn?.({ action: launched.action, task: launched.task });
-    }
+    for (const launched of result.launched) await options.onSpawn?.({ action: launched.action, task: launched.task });
     return result;
   }
   for (const launched of result.launched) {
-    const ack = await options.transport.request("spawn-result", {
-      action_id: launched.action.action_id,
-      assignment_id: launched.action.assignment_id,
-      status: "launched",
-      task_id: launched.task.id,
-    });
-    await applyCoreEffect(ack, ctx, { backgroundTasks: options.backgroundTasks, operatorMessage: options.operatorMessage } satisfies HostEffectServices);
+    const ack = await options.transport.request("spawn-result", { action_id: launched.action.action_id, assignment_id: launched.action.assignment_id, status: "launched", task_id: launched.task.id });
+    await applyCoreEffect(ack, ctx, services);
     await options.onSpawn?.({ action: launched.action, task: launched.task });
   }
   for (const failure of result.failures) {
-    const ack = await options.transport.request("spawn-result", {
-      action_id: failure.action.action_id,
-      assignment_id: failure.action.assignment_id,
-      status: "launch-failed",
-      diagnostic: failure.diagnostic,
-    });
-    await applyCoreEffect(ack, ctx, { backgroundTasks: options.backgroundTasks, operatorMessage: options.operatorMessage } satisfies HostEffectServices);
+    const ack = await options.transport.request("spawn-result", { action_id: failure.action.action_id, assignment_id: failure.action.assignment_id, status: "launch-failed", diagnostic: failure.diagnostic });
+    await applyCoreEffect(ack, ctx, services);
   }
-  if (result.failures.length > 0) {
-    throw new Error(`spawn-wave launch failures: ${result.failures.map((failure) => `${failure.action.assignment_id}:${failure.diagnostic}`).join("; ")}`);
-  }
+  if (result.failures.length > 0) throw new Error(`spawn-wave launch failures: ${result.failures.map((failure) => `${failure.action.assignment_id}:${failure.diagnostic}`).join("; ")}`);
   return result;
 }
 
 async function commandPayload(name: string, args: string, backgroundTasks: Pick<PiBackgroundTaskClient, "capabilities">): Promise<HostToCoreCommandPayload> {
-  try {
-    return {
-      raw: frameRawCommand(name, args),
-      background_capabilities: await backgroundTasks.capabilities(),
-    };
-  } catch (error) {
-    return {
-      raw: frameRawCommand(name, args),
-      background_capabilities: unavailableCapabilities(),
-      background_capability_diagnostic: boundedDiagnostic(error),
-    };
-  }
+  try { return { raw: frameRawCommand(name, args), background_capabilities: await backgroundTasks.capabilities() }; }
+  catch (error) { return { raw: frameRawCommand(name, args), background_capabilities: unavailableCapabilities(), background_capability_diagnostic: boundedDiagnostic(error) }; }
 }
 
-function operatorAnswerPayload(args: string): HostToCoreOperatorAnswerPayload {
-  const trimmed = args.trim();
-  const separator = trimmed.search(/\s/u);
-  if (separator <= 0) {
-    throw new Error("/autopilot-answer requires <question-id> followed by a JSON object answer");
-  }
-  const questionId = trimmed.slice(0, separator);
-  const answerText = trimmed.slice(separator).trim();
-  if (!validId(questionId)) throw new Error(`/autopilot-answer question-id is invalid: ${questionId}`);
-  let answer: unknown;
-  try {
-    answer = JSON.parse(answerText);
-  } catch (error) {
-    throw new Error(`/autopilot-answer answer is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  if (typeof answer !== "object" || answer === null || Array.isArray(answer)) {
-    throw new Error("/autopilot-answer answer must be a JSON object");
-  }
-  return { question_id: questionId, answer: answer as Record<string, unknown> };
-}
-
-function validId(value: string): boolean {
-  return value.length > 0 && !/[\\/\0]/u.test(value);
-}
-
-function frameRawCommand(name: string, args: string): string {
-  const separator = args.length > 0 && !/^\s/u.test(args) ? " " : "";
-  return `${name}${separator}${args}`;
-}
+function frameRawCommand(name: string, args: string): string { return `${name}${args.length > 0 && !/^\s/u.test(args) ? " " : ""}${args}`; }

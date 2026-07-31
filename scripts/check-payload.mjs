@@ -171,6 +171,9 @@ function runtimeInputsFromSource(filePath) {
 function allowedRuntimePath(path, binEntries) {
   if (path === 'package.json' || path === 'README.md' || path === 'LICENSE' || path === 'logo.png' || path === 'AUTOPILOT-INSTRUCTIONS.md') return true;
   if (binEntries.has(path)) return true;
+  if (path === 'extensions/autopilot.ts') return true;
+  if (path === 'src/resolve-runner.ts' || path === 'src/resolve-core-runtime.d.ts') return false;
+  if (path === 'src/resolve-core-runtime.js') return true;
   if (path.startsWith('src/') && path.endsWith('.ts')) return true;
   if (path.startsWith('docs/generated/') && path.endsWith('.md')) return true;
   if (path === 'binaries/MANIFEST.json') return true;
@@ -188,7 +191,7 @@ function main() {
   const pkg = packageMetadata();
   const coreBinEntry = pkg.bin?.['autopilot-core'];
   const runnerBinEntry = pkg.bin?.['autopilot-agent-run'];
-  if (typeof coreBinEntry !== 'string' || coreBinEntry.length === 0) throw new Error('package.json bin.autopilot-core must be a non-empty string');
+  if (coreBinEntry !== 'bin/autopilot-core.mjs') throw new Error('package.json bin.autopilot-core must be bin/autopilot-core.mjs');
   if (typeof runnerBinEntry !== 'string' || runnerBinEntry !== 'bin/autopilot-agent-run.mjs') throw new Error('package.json bin.autopilot-agent-run must be bin/autopilot-agent-run.mjs');
   const binEntries = new Set([coreBinEntry, runnerBinEntry]);
   const manifestPath = resolve(PACKAGE_ROOT, MANIFEST);
@@ -199,8 +202,9 @@ function main() {
   const files = new Set(packFiles.map((entry) => entry.path));
   const errors = [];
   const requireFile = (path, reason) => { if (!files.has(path)) errors.push(`missing required payload path ${path} (${reason})`); };
-  const hostRuntimeSources = ['src/extension.ts', 'src/activation.ts', 'src/commands.ts', 'src/effects.ts', 'src/background-tasks.ts', 'src/resolve-core.ts', 'src/resolve-runner.ts', 'src/transport.ts'];
+  const hostRuntimeSources = ['src/extension.ts', 'src/activation.ts', 'src/commands.ts', 'src/effects.ts', 'src/background-tasks.ts', 'src/resolve-core.ts', 'src/resolve-core-runtime.js', 'src/transport.ts'];
   const runtimeInputs = [
+    { path: 'extensions/autopilot.ts', reason: 'package.json pi extension entrypoint' },
     { path: coreBinEntry, reason: 'package.json bin.autopilot-core' },
     { path: runnerBinEntry, reason: 'package.json bin.autopilot-agent-run' },
     { path: 'src/generated/index.ts', reason: 'generated seam types' },

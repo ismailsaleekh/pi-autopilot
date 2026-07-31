@@ -1,7 +1,8 @@
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use drivers::planning::{self, TaskAnchorRegistry, TaskDocument, TaskDocumentClass, TaskInputSet};
 use drivers::runner::{self, PlanningRunnerRequest, RunnerTaskDocument};
@@ -13,6 +14,7 @@ use serde_json::json;
 use sha2::{Digest as ShaDigest, Sha256};
 
 static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static FIXTURE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 fn runner_child_rejects_atom_outside_runner_namespace() {
@@ -102,22 +104,24 @@ fn accepted_registry_rejects_cross_extractor_duplicate_and_is_resume_stable() {
     let mut state = CoreState::open(None).unwrap();
     let first = duplicate.seed_planning_binding(
         &mut state,
-        "task-extractor",
-        "inventory",
-        "planning.task-atoms.v1",
-        "planning-ws-task-extractor-01",
-        Some("TE01-"),
-        None,
+        PlanningIssueSpec::new(
+            "task-extractor",
+            "inventory",
+            "planning.task-atoms.v1",
+            "planning-ws-task-extractor-01",
+        )
+        .prefix("TE01-"),
         task_atoms("TE01-DUP"),
     );
     let second = duplicate.seed_planning_binding(
         &mut state,
-        "task-extractor",
-        "inventory",
-        "planning.task-atoms.v1",
-        "planning-ws-task-extractor-02",
-        Some("TE02-"),
-        None,
+        PlanningIssueSpec::new(
+            "task-extractor",
+            "inventory",
+            "planning.task-atoms.v1",
+            "planning-ws-task-extractor-02",
+        )
+        .prefix("TE02-"),
         task_atoms("TE02-OK"),
     );
     duplicate.overwrite_carrier_raw(&second, task_atoms("TE01-DUP"));
@@ -155,12 +159,13 @@ fn accepted_registry_rejects_cross_extractor_duplicate_and_is_resume_stable() {
     let mut state = CoreState::open(Some(event_log.clone())).unwrap();
     let a = stable.seed_planning_binding(
         &mut state,
-        "task-extractor",
-        "inventory",
-        "planning.task-atoms.v1",
-        "planning-ws-task-extractor-01",
-        Some("TE01-"),
-        None,
+        PlanningIssueSpec::new(
+            "task-extractor",
+            "inventory",
+            "planning.task-atoms.v1",
+            "planning-ws-task-extractor-01",
+        )
+        .prefix("TE01-"),
         task_atoms("TE01-A"),
     );
     let next = stable.agent_response(&mut state, &a, task_atoms("TE01-A"));
@@ -206,12 +211,12 @@ fn approved_units_preserve_atom_links() {
     let mut state = CoreState::open(None).unwrap();
     let binding = fixture.seed_planning_binding(
         &mut state,
-        "plan-reviewer",
-        "full-review",
-        "planning.plan-review.v1",
-        "planning-ws-plan-reviewer-01",
-        None,
-        None,
+        PlanningIssueSpec::new(
+            "plan-reviewer",
+            "full-review",
+            "planning.plan-review.v1",
+            "planning-ws-plan-reviewer-01",
+        ),
         plan_review(),
     );
 
@@ -290,21 +295,55 @@ fn task_anchor_registry_accepts_real_section_and_rejects_unverified_sources() {
     assert_source_rejected(&ambiguous, "task://TASK.md#3-work-breakdown");
 }
 
+struct PlanningIssueSpec<'a> {
+    role: &'a str,
+    mode: &'a str,
+    boundary: &'a str,
+    assignment_id: &'a str,
+    prefix: Option<&'a str>,
+    registry: Option<(String, String)>,
+    run_revision: u64,
+}
+
+impl<'a> PlanningIssueSpec<'a> {
+    fn new(role: &'a str, mode: &'a str, boundary: &'a str, assignment_id: &'a str) -> Self {
+        Self {
+            role,
+            mode,
+            boundary,
+            assignment_id,
+            prefix: None,
+            registry: None,
+            run_revision: 1,
+        }
+    }
+
+    fn prefix(mut self, prefix: &'a str) -> Self {
+        self.prefix = Some(prefix);
+        self
+    }
+}
+
 struct Fixture {
     root: PathBuf,
 }
 
 impl Fixture {
     fn new(label: &str) -> Self {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
         let temp = fs::canonicalize(std::env::temp_dir()).unwrap();
-        let root = temp.join(format!("pi-autopilot-impl1-{label}-{nanos}"));
-        fs::create_dir_all(&root).unwrap();
-        std::env::set_current_dir(&root).unwrap();
-        Self { root }
+        let pid = std::process::id();
+        loop {
+            let nonce = FIXTURE_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let root = temp.join(format!("pi-autopilot-impl1-{label}-{pid}-{nonce}"));
+            match fs::create_dir(&root) {
+                Ok(()) => {
+                    std::env::set_current_dir(&root).unwrap();
+                    return Self { root };
+                }
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("fixture root {root:?}: {error}"),
+            }
+        }
     }
 
     fn install_transport(&self) {
@@ -326,13 +365,13 @@ impl Fixture {
                     "ension.ts"
                 )),
             );
+            let mut path_entries = vec![bin.clone()];
+            if let Some(existing) = std::env::var_os("PATH") {
+                path_entries.extend(std::env::split_paths(&existing));
+            }
             std::env::set_var(
                 "PATH",
-                format!(
-                    "{}:{}",
-                    bin.display(),
-                    std::env::var("PATH").unwrap_or_default()
-                ),
+                std::env::join_paths(path_entries).expect("join PATH"),
             );
         }
     }
@@ -406,7 +445,15 @@ try:
 except OSError:
     stored_messages = []
 
+with open(addon_path, "rb") as handle:
+    addon_digest = hashlib.sha256(handle.read()).hexdigest()
+terminal_tool = next((tool for tool in active_tools if tool.startswith("autopilot_submit_")), "")
+boundary, schema_digest = bindings.get(terminal_tool, ("", ""))
+profile_id = os.environ.get("AUTOPILOT_TERMINAL_PROFILE", "")
+receipt = {{"type":"custom","customType":"pi-autopilot:child-tools","data":{{"self_digest":addon_digest,"profile_id":profile_id,"tool_name":terminal_tool,"boundary_id":boundary,"result_contract":boundary,"schema_digest":schema_digest,"binding":os.environ.get("AUTOPILOT_CARRIER_BINDING", ""),"active_tools":active_tools}},"id":"receipt-1","parentId":None}}
+
 if mode == "rpc":
+    emit({{"type":"entry_appended","entry":receipt}})
     for line in sys.stdin:
         command = json.loads(line)
         command_id = command["id"]
@@ -416,9 +463,7 @@ if mode == "rpc":
         elif command_type == "get_state":
             emit({{"type":"response","id":command_id,"command":command_type,"success":True,"data":{{"sessionId":session_id,"model":{{"provider":provider,"id":model}},"thinkingLevel":thinking,"autoCompactionEnabled":False,"messageCount":len(stored_messages)}}}})
         elif command_type == "get_entries":
-            with open(addon_path, "rb") as handle:
-                addon_digest = hashlib.sha256(handle.read()).hexdigest()
-            emit({{"type":"response","id":command_id,"command":command_type,"success":True,"data":{{"entries":[{{"type":"custom","customType":"pi-autopilot:child-tools","data":{{"self_digest":addon_digest,"binding":os.environ.get("AUTOPILOT_CARRIER_BINDING", ""),"active_tools":active_tools}},"id":"receipt-1","parentId":None}}],"leafId":"receipt-1"}}}})
+            emit({{"type":"response","id":command_id,"command":command_type,"success":True,"data":{{"entries":[receipt],"leafId":"receipt-1"}}}})
         elif command_type == "prompt":
             content = next_output()
             entry = json.dumps({{"role":"user","content":command.get("message")}}, separators=(",", ":"))
@@ -429,7 +474,7 @@ if mode == "rpc":
             emit({{"type":"response","id":command_id,"command":command_type,"success":True}})
             tool = submit_tools[0]
             boundary, schema_digest = bindings[tool]
-            details = {{"boundary_id":boundary,"schema_digest":schema_digest,"binding":os.environ.get("AUTOPILOT_CARRIER_BINDING", ""),"payload":json.loads(content)}}
+            details = {{"profile_id":os.environ.get("AUTOPILOT_TERMINAL_PROFILE", ""),"tool_name":tool,"boundary_id":boundary,"result_contract":boundary,"schema_digest":schema_digest,"binding":os.environ.get("AUTOPILOT_CARRIER_BINDING", ""),"payload":json.loads(content)}}
             call_id = "call_fake_submit"
             emit({{"type":"agent_start"}})
             emit({{"type":"turn_start"}})
@@ -596,25 +641,14 @@ else:
     fn seed_planning_binding(
         &self,
         state: &mut CoreState,
-        role: &str,
-        mode: &str,
-        boundary: &str,
-        assignment_id: &str,
-        prefix: Option<&str>,
-        registry: Option<(String, String)>,
+        spec: PlanningIssueSpec<'_>,
         raw: String,
     ) -> runner::IssuedRunnerBinding {
-        let issue = self.issue_planning_with_assignment(
-            role,
-            mode,
-            boundary,
-            assignment_id,
-            prefix,
-            registry,
-        );
+        let assignment_id = spec.assignment_id.to_owned();
+        let issue = self.issue_planning_from_spec(spec);
         self.overwrite_carrier_raw(&issue.binding, raw);
         self.append_ref(state, &runner::binding_ref(&issue.binding).unwrap());
-        self.append_ref(state, &Ref(assignment_id.to_owned()));
+        self.append_ref(state, &Ref(assignment_id));
         issue.binding
     }
 
@@ -627,28 +661,19 @@ else:
         prefix: Option<&str>,
         registry: Option<(String, String)>,
     ) -> runner::IssuedRunnerAction {
-        self.issue_planning_with_assignment_revision(
+        self.issue_planning_from_spec(PlanningIssueSpec {
             role,
             mode,
             boundary,
             assignment_id,
             prefix,
             registry,
-            1,
-        )
+            run_revision: 1,
+        })
     }
 
-    fn issue_planning_with_assignment_revision(
-        &self,
-        role: &str,
-        mode: &str,
-        boundary: &str,
-        assignment_id: &str,
-        prefix: Option<&str>,
-        registry: Option<(String, String)>,
-        run_revision: u64,
-    ) -> runner::IssuedRunnerAction {
-        let (registry_path, registry_digest) = match registry {
+    fn issue_planning_from_spec(&self, spec: PlanningIssueSpec<'_>) -> runner::IssuedRunnerAction {
+        let (registry_path, registry_digest) = match spec.registry {
             Some((p, d)) => (Some(p), Some(d)),
             None => (None, None),
         };
@@ -660,21 +685,21 @@ else:
         );
         let request = PlanningRunnerRequest {
             workstream: "ws".to_owned(),
-            action_id: Id(format!("action-{assignment_id}")),
-            assignment_id: Id(assignment_id.to_owned()),
-            role_id: Id(role.to_owned()),
-            mode: ModeId(mode.to_owned()),
-            boundary_id: ContractId(boundary.to_owned()),
-            run_revision,
+            action_id: Id(format!("action-{}", spec.assignment_id)),
+            assignment_id: Id(spec.assignment_id.to_owned()),
+            role_id: Id(spec.role.to_owned()),
+            mode: ModeId(spec.mode.to_owned()),
+            boundary_id: ContractId(spec.boundary.to_owned()),
+            run_revision: spec.run_revision,
             authority_set_id: "auth".to_owned(),
             authority_documents: vec![runner_doc("task.md", "authority", "auth", "Do the work")],
             context_document: context_document.clone(),
             context_documents: vec![context_document],
-            mode_parameter: first_mode_parameter_for(role),
-            atom_id_prefix: prefix.map(str::to_owned),
+            mode_parameter: first_mode_parameter_for(spec.role),
+            atom_id_prefix: spec.prefix.map(str::to_owned),
             atom_registry_path: registry_path,
             atom_registry_digest: registry_digest,
-            accepted_planning_artifacts: self.accepted_artifacts_for_role(role),
+            accepted_planning_artifacts: self.accepted_artifacts_for_role(spec.role),
         };
         runner::planning_issue(&request).unwrap()
     }

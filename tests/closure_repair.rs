@@ -1,4 +1,9 @@
-use std::{fs, path::PathBuf, time::SystemTime};
+use std::{
+    fs,
+    io::ErrorKind,
+    path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use drivers::{
     closure::{
@@ -13,6 +18,8 @@ use drivers::{
     vcs::GitVcs,
 };
 use kernel::failure::{Failure, OperatorDecision, RecoveryRoute};
+
+static FIXTURE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 fn deep_validation_emits_one_bundle_and_delta_revalidates_only_affected_criteria() {
@@ -238,15 +245,15 @@ fn fixture(name: &str) -> Fixture {
     let mut platform = SimPlatform::new(0x6_2);
     platform.advance(name.len() as u64);
     let tick = kernel::platform::Platform::clock(&platform).read().0;
-    let nonce = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .expect("system time after epoch")
-        .as_nanos();
     let pid = std::process::id();
-    let root = std::env::temp_dir().join(format!("pi-autopilot-{name}-{tick}-{pid}-{nonce}"));
-    if root.exists() {
-        fs::remove_dir_all(&root).expect("clean fixture root");
+    let parent = std::env::temp_dir();
+    loop {
+        let nonce = FIXTURE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let root = parent.join(format!("pi-autopilot-{name}-{tick}-{pid}-{nonce}"));
+        match fs::create_dir(&root) {
+            Ok(()) => return Fixture { root },
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("fixture root {root:?}: {error}"),
+        }
     }
-    fs::create_dir_all(&root).expect("fixture root");
-    Fixture { root }
 }

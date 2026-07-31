@@ -5,6 +5,7 @@ version = "0.0.0"
 publish = false
 
 [dependencies]
+codegen = { path = "../codegen" }
 kdl.workspace = true
 
 [[test]]

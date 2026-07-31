@@ -16,6 +16,7 @@ pub mod entropy;
 pub mod evidence;
 pub mod finalize;
 pub mod fs;
+pub mod generated;
 pub mod handoff;
 pub mod integration;
 pub mod lifecycle;

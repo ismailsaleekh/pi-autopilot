@@ -159,6 +159,134 @@ fn registered_but_not_active_terminal_tool_is_rejected_before_prompt() {
 }
 
 #[test]
+fn streamed_registration_entry_cannot_replace_or_drift_from_durable_receipt() {
+    let missing_root = temp_root("runner-streamed-only-receipt");
+    write_fake_pi(
+        &missing_root,
+        &rpc_fake_pi("const suppressDurableReceipt = true;", "process.exit(93);"),
+    );
+    let missing_spec = write_planning_spec(
+        &missing_root,
+        |value| value,
+        "planning.task-atoms.v1",
+        "gpt-5.5",
+    );
+    let missing = with_fake_path(&missing_root, || {
+        child::main(&["--spec".to_owned(), missing_spec.display().to_string()])
+    })
+    .expect_err("streamed notification cannot replace durable receipt");
+    assert!(
+        missing.contains("registration receipt count was 0"),
+        "{missing}"
+    );
+
+    let drift_root = temp_root("runner-streamed-receipt-drift");
+    write_fake_pi(
+        &drift_root,
+        &rpc_fake_pi(
+            "const streamedReceiptBinding = 'wrong';",
+            "process.exit(94);",
+        ),
+    );
+    let drift_spec = write_planning_spec(
+        &drift_root,
+        |value| value,
+        "planning.task-atoms.v1",
+        "gpt-5.5",
+    );
+    let drift = with_fake_path(&drift_root, || {
+        child::main(&["--spec".to_owned(), drift_spec.display().to_string()])
+    })
+    .expect_err("streamed and durable receipts must agree");
+    assert!(
+        drift.contains("streamed child registration entry drift"),
+        "{drift}"
+    );
+}
+
+#[test]
+fn bootstrap_entry_rejects_duplicates_wrong_types_and_post_bootstrap_appends() {
+    let duplicate_root = temp_root("runner-duplicate-streamed-receipt");
+    write_fake_pi(
+        &duplicate_root,
+        &rpc_fake_pi(
+            "const duplicateStreamedReceipt = true;",
+            "process.exit(95);",
+        ),
+    );
+    let duplicate_spec = write_planning_spec(
+        &duplicate_root,
+        |value| value,
+        "planning.task-atoms.v1",
+        "gpt-5.5",
+    );
+    let duplicate = with_fake_path(&duplicate_root, || {
+        child::main(&["--spec".to_owned(), duplicate_spec.display().to_string()])
+    })
+    .expect_err("duplicate streamed receipt rejected");
+    assert!(
+        duplicate.contains("duplicate entry_appended"),
+        "{duplicate}"
+    );
+
+    let wrong_root = temp_root("runner-wrong-streamed-receipt-type");
+    write_fake_pi(
+        &wrong_root,
+        &rpc_fake_pi(
+            "const streamedReceiptCustomType = 'foreign-entry';",
+            "process.exit(96);",
+        ),
+    );
+    let wrong_spec = write_planning_spec(
+        &wrong_root,
+        |value| value,
+        "planning.task-atoms.v1",
+        "gpt-5.5",
+    );
+    let wrong = with_fake_path(&wrong_root, || {
+        child::main(&["--spec".to_owned(), wrong_spec.display().to_string()])
+    })
+    .expect_err("wrong bootstrap custom type rejected");
+    assert!(wrong.contains("unexpected bootstrap entry type"), "{wrong}");
+
+    // BUG-185: real Pi emits entry_appended synchronously from appendEntry.
+    // Submit-time custom entries are forbidden after bootstrap, not skipped.
+    let late_root = temp_root("runner-post-bootstrap-entry");
+    let accepted = transcript("planning.task-atoms.v1");
+    write_fake_pi(
+        &late_root,
+        &rpc_fake_pi(
+            "const emitPlanningCarrierEntry = true;",
+            &format!("emitCarrier({accepted:?});"),
+        ),
+    );
+    let late_spec = write_planning_spec(
+        &late_root,
+        |value| value,
+        "planning.task-atoms.v1",
+        "gpt-5.5",
+    );
+    let late = with_fake_path(&late_root, || {
+        child::main(&["--spec".to_owned(), late_spec.display().to_string()])
+    })
+    .expect_err("post-bootstrap append rejected");
+    assert!(
+        late.contains("entry_appended emitted after child bootstrap"),
+        "{late}"
+    );
+    assert!(!carrier_path(&late_root).exists());
+}
+
+#[test]
+fn generated_child_addon_persists_only_the_consumed_registration_receipt() {
+    let source = fs::read_to_string(child_addon_path()).expect("generated child add-on");
+    assert_eq!(source.matches("pi.appendEntry(").count(), 1);
+    assert!(source.contains("pi.appendEntry(CHILD_RECEIPT_ENTRY"));
+    assert!(!source.contains("pi-autopilot:planning-carrier"));
+    assert!(!source.contains("CHILD_CARRIER_ENTRY"));
+}
+
+#[test]
 fn tool_schema_identity_error_does_not_consume_value_repair() {
     let root = temp_root("runner-tool-schema-identity");
     let accepted = transcript("planning.task-atoms.v1");
@@ -211,6 +339,37 @@ fn wrong_tool_name_is_identity_error_even_with_expected_boundary_and_schema() {
 }
 
 #[test]
+fn terminal_profile_detail_identity_drift_is_rejected() {
+    for (label, overrides) in [
+        (
+            "result-contract",
+            "{result_contract:'planning.questions.v1'}",
+        ),
+        ("binding", "{binding:'wrong-binding'}"),
+    ] {
+        let root = temp_root(&format!("runner-terminal-detail-{label}"));
+        let accepted = transcript("planning.task-atoms.v1");
+        write_fake_pi(
+            &root,
+            &rpc_fake_pi(
+                "",
+                &format!("emitCarrier({accepted:?}, 'gpt-5.5', {overrides});"),
+            ),
+        );
+        let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+        let error = with_fake_path(&root, || {
+            child::main(&["--spec".to_owned(), spec.display().to_string()])
+        })
+        .expect_err("terminal detail drift must fail before value repair");
+        assert!(
+            error.contains("identity rejected before value repair"),
+            "{label}: {error}"
+        );
+        assert!(!carrier_path(&root).exists(), "{label}");
+    }
+}
+
+#[test]
 fn errored_submit_result_is_never_a_carrier() {
     let root = temp_root("runner-submit-is-error");
     let accepted = transcript("planning.task-atoms.v1");
@@ -227,6 +386,26 @@ fn errored_submit_result_is_never_a_carrier() {
     })
     .expect_err("isError submit result must fail");
     assert!(error.contains("isError=true"), "{error}");
+    assert!(!carrier_path(&root).exists());
+}
+
+#[test]
+fn nonterminating_submit_result_is_never_a_carrier() {
+    let root = temp_root("runner-submit-nonterminating");
+    let accepted = transcript("planning.task-atoms.v1");
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            "const submitTerminates = false;",
+            &format!("emitCarrier({accepted:?});"),
+        ),
+    );
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("nonterminating submit result must fail");
+    assert!(error.contains("terminate=false"), "{error}");
     assert!(!carrier_path(&root).exists());
 }
 
@@ -248,6 +427,46 @@ fn duplicate_tool_result_details_must_match_exactly() {
     .expect_err("two RPC copies of details must match");
     assert!(error.contains("details drift"), "{error}");
     assert!(!carrier_path(&root).exists());
+}
+
+#[test]
+fn terminal_tool_result_must_correlate_by_opaque_call_id() {
+    let root = temp_root("runner-tool-result-call-id-drift");
+    let accepted = transcript("planning.task-atoms.v1");
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            "const overrideToolResultCallId = 'different-call';",
+            &format!("emitCarrier({accepted:?});"),
+        ),
+    );
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("uncorrelated toolResult must fail");
+    assert!(error.contains("missing correlated toolResult"), "{error}");
+}
+
+#[test]
+fn terminal_tool_cannot_share_a_turn_with_another_tool() {
+    let root = temp_root("runner-mixed-terminal-tool-batch");
+    let accepted = transcript("planning.task-atoms.v1");
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            "",
+            &format!(
+                "send({{type:'agent_start'}}); emitReadTool(); emitCarrierResult({accepted:?}); send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}});"
+            ),
+        ),
+    );
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("mixed terminal batch must fail");
+    assert!(error.contains("mixed 2 tool executions"), "{error}");
 }
 
 #[test]
@@ -737,7 +956,7 @@ fn fake_pi_nonzero_malformed_wrong_model_boundary_and_jsonl_protocol_fail_loudly
     })
     .expect_err("assistant text is never a planning carrier");
     assert!(
-        duplicate_error.contains("terminating submit tool result is required"),
+        duplicate_error.contains("selected terminating tool result is required"),
         "{duplicate_error}"
     );
     fs::remove_file(carrier_path(&root)).ok();
@@ -779,7 +998,7 @@ fn fake_pi_nonzero_malformed_wrong_model_boundary_and_jsonl_protocol_fail_loudly
     })
     .expect_err("planning assistant text must be rejected after tool activity");
     assert!(
-        text_error.contains("terminating submit tool result is required"),
+        text_error.contains("selected terminating tool result is required"),
         "{text_error}"
     );
 
@@ -807,109 +1026,114 @@ fn fake_pi_nonzero_malformed_wrong_model_boundary_and_jsonl_protocol_fail_loudly
 
 #[test]
 fn drifted_spec_fields_are_rejected_before_pi_launch() {
-    let cases: Vec<(&str, Box<dyn Fn(Value) -> Value>)> = vec![
-        (
-            "role",
-            Box::new(|mut value| {
+    struct SpecDriftCase {
+        label: &'static str,
+        mutate: fn(Value) -> Value,
+    }
+
+    let cases = [
+        SpecDriftCase {
+            label: "role",
+            mutate: |mut value| {
                 value["role_id"] = json!("not-a-registered-role");
                 value
-            }),
-        ),
-        (
-            "mode",
-            Box::new(|mut value| {
+            },
+        },
+        SpecDriftCase {
+            label: "mode",
+            mutate: |mut value| {
                 value["mode"] = json!("not-a-registered-mode");
                 value
-            }),
-        ),
-        (
-            "provider",
-            Box::new(|mut value| {
+            },
+        },
+        SpecDriftCase {
+            label: "provider",
+            mutate: |mut value| {
                 value["provider"] = json!("openrouter");
                 value
-            }),
-        ),
-        (
-            "model",
-            Box::new(|mut value| {
+            },
+        },
+        SpecDriftCase {
+            label: "model",
+            mutate: |mut value| {
                 value["model"] = json!("not-rostered");
                 value
-            }),
-        ),
-        (
-            "thinking",
-            Box::new(|mut value| {
+            },
+        },
+        SpecDriftCase {
+            label: "thinking",
+            mutate: |mut value| {
                 value["thinking"] = json!("max");
                 value
-            }),
-        ),
-        (
-            "route",
-            Box::new(|mut value| {
+            },
+        },
+        SpecDriftCase {
+            label: "route",
+            mutate: |mut value| {
                 value["route"] = json!("api-key");
                 value
-            }),
-        ),
-        (
-            "tools",
-            Box::new(|mut value| {
+            },
+        },
+        SpecDriftCase {
+            label: "tools",
+            mutate: |mut value| {
                 value["allowed_tools"] = json!(["bash"]);
                 value
-            }),
-        ),
-        (
-            "boundary",
-            Box::new(|mut value| {
+            },
+        },
+        SpecDriftCase {
+            label: "boundary",
+            mutate: |mut value| {
                 value["boundary_id"] = json!("planning.questions.v1");
                 value
-            }),
-        ),
-        (
-            "result",
-            Box::new(|mut value| {
+            },
+        },
+        SpecDriftCase {
+            label: "result",
+            mutate: |mut value| {
                 value["result_contract"] = json!("planning.questions.v1");
                 value
-            }),
-        ),
-        (
-            "prompt",
-            Box::new(|mut value| {
+            },
+        },
+        SpecDriftCase {
+            label: "prompt",
+            mutate: |mut value| {
                 let other =
                     PathBuf::from(value["cwd"].as_str().expect("cwd")).join("not-the-prompt.md");
                 value["prompt_path"] = json!(other);
                 value
-            }),
-        ),
-        (
-            "boundary_digest",
-            Box::new(|mut value| {
+            },
+        },
+        SpecDriftCase {
+            label: "boundary_digest",
+            mutate: |mut value| {
                 value["boundary_digest"] = json!("0".repeat(64));
                 value
-            }),
-        ),
-        (
-            "context_digest",
-            Box::new(|mut value| {
+            },
+        },
+        SpecDriftCase {
+            label: "context_digest",
+            mutate: |mut value| {
                 value["context_digest"] = json!("1".repeat(64));
                 value
-            }),
-        ),
-        (
-            "doc_digest",
-            Box::new(|mut value| {
+            },
+        },
+        SpecDriftCase {
+            label: "doc_digest",
+            mutate: |mut value| {
                 value["authority_documents"][0]["digest"] = json!("2".repeat(64));
                 value
-            }),
-        ),
-        (
-            "assignment",
-            Box::new(|mut value| {
+            },
+        },
+        SpecDriftCase {
+            label: "assignment",
+            mutate: |mut value| {
                 value["assignment_id"] = json!("planning-main-task-extractor-forged");
                 value
-            }),
-        ),
+            },
+        },
     ];
-    for (label, mutate) in cases {
+    for SpecDriftCase { label, mutate } in cases {
         let root = temp_root(&format!("runner-drift-{label}"));
         write_fake_pi(
             &root,
@@ -924,7 +1148,8 @@ fn drifted_spec_fields_are_rejected_before_pi_launch() {
             error.contains("drift")
                 || error.contains("validation")
                 || error.contains("roster")
-                || error.contains("tools"),
+                || error.contains("tools")
+                || error.contains("resolved 0 profiles"),
             "{label}: {error}"
         );
     }
@@ -947,7 +1172,7 @@ fn runner_stale_or_linked_carrier_output_and_resource_limits_fail_closed() {
             spec.display().to_string()
         ]))
         .expect_err("stale")
-        .contains("stale carrier rejected")
+        .contains("unconsumed pre-existing carrier refused")
     );
 
     let root = temp_root("runner-bounded");
@@ -1159,7 +1384,7 @@ fn write_planning_spec_inner(
         &ContractId(boundary.to_owned()),
     );
     let spec = json!({
-        "schema":"autopilot.agent_run_spec.v3",
+        "schema":"autopilot.agent_run_spec.v4",
         "assignment_kind":"planning-review",
         "action_id":"action-planning-main-task-extractor-01",
         "assignment_id":"planning-main-task-extractor-01",
@@ -1195,7 +1420,9 @@ fn write_planning_spec_inner(
         "context_document":context_document,
         "context_documents":context_documents,
         "runtime_extension_path":child_addon_path(),
-        "runtime_extension_digest":sha256_hex(&fs::read(child_addon_path()).expect("child addon"))
+        "runtime_extension_digest":sha256_hex(&fs::read(child_addon_path()).expect("child addon")),
+        "terminal_profile_id":"planning.task-atoms.v1:autopilot_submit_atoms",
+        "unavailable_tools":[]
     });
     let spec = mutate(spec);
     fs::create_dir_all(paths.spec_path.parent().expect("spec parent")).expect("spec dir");
@@ -1289,17 +1516,21 @@ function emitCarrier(payload, model='gpt-5.5', overrides={{}}) {{
 }}
 function emitCarrierResult(payload, model='gpt-5.5', overrides={{}}) {{
   const [boundary_id, schema_digest] = submitBindings[terminalTool];
-  const details = {{boundary_id, schema_digest, binding:process.env.AUTOPILOT_CARRIER_BINDING ?? '', payload:typeof payload === 'string' ? JSON.parse(payload) : payload, ...overrides}};
+  const profile_id = process.env.AUTOPILOT_TERMINAL_PROFILE ?? `${{boundary_id}}:${{terminalTool}}`;
+  const details = {{profile_id,tool_name:terminalTool,boundary_id,result_contract:boundary_id,schema_digest,binding:process.env.AUTOPILOT_CARRIER_BINDING ?? '',payload:typeof payload === 'string' ? JSON.parse(payload) : payload,...overrides}};
   const resultTool = typeof overrideToolName === 'string' ? overrideToolName : terminalTool;
   const callId = 'call_fake_submit_' + promptCount;
   send({{type:'message_start'}});
   send({{type:'message_end',message:{{role:'assistant',provider:'openai-codex',model,content:[{{type:'toolCall',id:callId,name:resultTool,arguments:details.payload}}],stopReason:'toolUse'}}}});
   send({{type:'tool_execution_start',toolCallId:callId,toolName:resultTool,args:details.payload}});
+  if (typeof emitPlanningCarrierEntry === 'boolean' && emitPlanningCarrierEntry) send({{type:'entry_appended',entry:{{type:'custom',customType:'pi-autopilot:planning-carrier',data:details,id:'carrier-entry-1',parentId:null,timestamp:new Date(0).toISOString()}}}});
   const submitError = typeof submitIsError === 'boolean' ? submitIsError : false;
-  send({{type:'tool_execution_end',toolCallId:callId,toolName:resultTool,result:{{content:[{{type:'text',text:'submitted'}}],details,terminate:true}},isError:submitError}});
+  const submitTerminate = typeof submitTerminates === 'boolean' ? submitTerminates : true;
+  send({{type:'tool_execution_end',toolCallId:callId,toolName:resultTool,result:{{content:[{{type:'text',text:'submitted'}}],details,terminate:submitTerminate}},isError:submitError}});
   const copiedDetails = typeof toolResultSchemaDigest === 'string' ? {{...details,schema_digest:toolResultSchemaDigest}} : details;
   send({{type:'message_start'}});
-  send({{type:'message_end',message:{{role:'toolResult',toolCallId:callId,toolName:resultTool,content:[{{type:'text',text:'submitted'}}],details:copiedDetails,isError:submitError}}}});
+  const resultCallId = typeof overrideToolResultCallId === 'string' ? overrideToolResultCallId : callId;
+  send({{type:'message_end',message:{{role:'toolResult',toolCallId:resultCallId,toolName:resultTool,content:[{{type:'text',text:'submitted'}}],details:copiedDetails,isError:submitError}}}});
 }}
 function emitReadTool() {{ const callId='call_fake_read'; send({{type:'tool_execution_start',toolCallId:callId,toolName:'read',args:{{}}}}); send({{type:'tool_execution_end',toolCallId:callId,toolName:'read',result:{{content:[{{type:'text',text:'ok'}}],details:{{}},terminate:false}},isError:false}}); }}
 // Reproduces an upstream capacity refusal exactly as observed in production:
@@ -1308,6 +1539,16 @@ function emitReadTool() {{ const callId='call_fake_read'; send({{type:'tool_exec
 function emitCapacityRefusal() {{ send({{type:'agent_start'}}); send({{type:'message_start'}}); send({{type:'message_end', message:{{role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[], stopReason:'error', errorMessage:'Codex error: Our servers are currently overloaded. Please try again later.', usage:{{input:0,output:0}}}}}}); send({{type:'agent_end', willRetry:false}}); send({{type:'agent_settled'}}); }}
 function statsData() {{ return {{ sessionId, contextUsage: {{ tokens: Math.round(contextPercent * 1000), contextWindow: 100000, percent: contextPercent }} }}; }}
 {setup}
+const receiptBoundary = submitBindings[terminalTool]?.[0] ?? '';
+const receiptSchema = submitBindings[terminalTool]?.[1] ?? '';
+const receiptProfile = process.env.AUTOPILOT_TERMINAL_PROFILE ?? `${{receiptBoundary}}:${{terminalTool}}`;
+const receiptData = {{self_digest:addonPath === undefined ? '' : createHash('sha256').update(readFileSync(addonPath)).digest('hex'),profile_id:receiptProfile,tool_name:terminalTool,boundary_id:receiptBoundary,result_contract:receiptBoundary,schema_digest:receiptSchema,binding:process.env.AUTOPILOT_CARRIER_BINDING ?? '',active_tools:[...activeTools].sort()}};
+const durableReceipt = {{type:'custom',customType:'pi-autopilot:child-tools',data:receiptData,id:'receipt-1',parentId:null,timestamp:new Date(0).toISOString()}};
+if (addonPath !== undefined && !(typeof suppressReceipt !== 'undefined' && suppressReceipt) && !(typeof suppressStreamedReceipt !== 'undefined' && suppressStreamedReceipt)) {{
+  const streamed = {{...durableReceipt,customType:typeof streamedReceiptCustomType === 'string' ? streamedReceiptCustomType : durableReceipt.customType,data:{{...receiptData,binding:typeof streamedReceiptBinding === 'string' ? streamedReceiptBinding : receiptData.binding}}}};
+  send({{type:'entry_appended',entry:streamed}});
+  if (typeof duplicateStreamedReceipt !== 'undefined' && duplicateStreamedReceipt) send({{type:'entry_appended',entry:streamed}});
+}}
 let buffer = '';
 process.stdin.on('data', chunk => {{ buffer += chunk; let lines = buffer.split('\n'); buffer = lines.pop(); for (const line of lines) {{ if (line.trim()) handle(JSON.parse(line)); }} }});
 process.stdin.on('end', () => process.exit(0));
@@ -1316,7 +1557,7 @@ function handle(cmd) {{
   if (cmd.type === 'get_state') return send({{id:cmd.id,type:'response',command:'get_state',success:true,data:{{model:{{id:'gpt-5.5',provider:'openai-codex'}},thinkingLevel:'high',sessionId,autoCompactionEnabled:false,messageCount:storedMessages.length,pendingMessageCount:0}}}});
   if (cmd.type === 'get_session_stats') return send({{id:cmd.id,type:'response',command:'get_session_stats',success:true,data:statsData()}});
   if (cmd.type === 'get_entries') {{
-    const entries = addonPath === undefined || (typeof suppressReceipt !== 'undefined' && suppressReceipt) ? [] : [{{type:'custom',customType:'pi-autopilot:child-tools',data:{{self_digest:createHash('sha256').update(readFileSync(addonPath)).digest('hex'),binding:process.env.AUTOPILOT_CARRIER_BINDING ?? '',active_tools:[...activeTools].sort()}},id:'receipt-1',parentId:null,timestamp:new Date(0).toISOString()}}];
+    const entries = addonPath === undefined || (typeof suppressReceipt !== 'undefined' && suppressReceipt) || (typeof suppressDurableReceipt !== 'undefined' && suppressDurableReceipt) ? [] : [durableReceipt];
     return send({{id:cmd.id,type:'response',command:'get_entries',success:true,data:{{entries,leafId:entries[0]?.id ?? null}}}});
   }}
   if (cmd.type === 'abort') return send({{id:cmd.id,type:'response',command:'abort',success:true}});
@@ -1727,7 +1968,7 @@ fn content_failure_is_not_misclassified_as_capacity_refusal() {
         "content failure must not be classified as upstream capacity: {error}"
     );
     assert!(
-        error.contains("terminating submit tool result is required"),
+        error.contains("selected terminating tool result is required"),
         "planning text must fail on the carrier channel: {error}"
     );
     assert_eq!(

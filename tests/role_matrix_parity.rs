@@ -216,6 +216,45 @@ fn every_planning_terminal_has_one_generated_tool_boundary_binding() {
 }
 
 #[test]
+fn live_delivery_and_validation_profiles_are_exact_and_capability_backed() {
+    for (role, profile_id, boundary, result, unavailable) in [
+        (
+            "implementer",
+            "delivery-status.v2",
+            "autopilot.delivery_submission.v2",
+            "autopilot.delivery_result.v2",
+            Vec::<String>::new(),
+        ),
+        (
+            "validator",
+            "validation-status.v2",
+            "autopilot.validation_submission.v2",
+            "autopilot.validation_result.v2",
+            vec!["autopilot_request_test".to_owned()],
+        ),
+    ] {
+        let matches = kernel::generated::TERMINAL_PROFILES
+            .iter()
+            .filter(|row| {
+                row.0 == profile_id
+                    && row.1 == "autopilot_emit_status"
+                    && row.2 == boundary
+                    && row.3 == result
+            })
+            .count();
+        assert_eq!(matches, 1, "{role} terminal profile must be unique");
+        let resolved = drivers::runner::resolve_role_tools(role, profile_id).expect("tools");
+        assert!(
+            resolved
+                .active
+                .iter()
+                .any(|tool| tool == "autopilot_emit_status")
+        );
+        assert_eq!(resolved.unavailable, unavailable);
+    }
+}
+
+#[test]
 fn retained_undeliverable_tools_are_declared_as_known_incomplete() {
     let registry = RoleRegistry::package().expect("role registry loads");
     let record = include_str!("../data/known-incomplete-tools.kdl");

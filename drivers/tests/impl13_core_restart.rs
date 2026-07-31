@@ -1,10 +1,14 @@
+#![allow(clippy::disallowed_types)]
+
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use kernel::generated::{CoreToHostDonePayload, CoreToHostSpawnWavePayload, SeamEnvelope};
+
+static TEMP_REPO_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 fn release_core_reemits_unacknowledged_planning_wave_after_restart() {
@@ -51,8 +55,12 @@ fn release_core_reemits_unacknowledged_planning_wave_after_restart() {
 
 fn send_command(raw: &str, event_log: &Path, cwd: &Path, id: u64) -> SeamEnvelope {
     let mut child = spawn_core(event_log, cwd);
-    writeln!(child.stdin.as_mut().expect("stdin"), "{}", command_frame(id, raw))
-        .expect("write command frame");
+    writeln!(
+        child.stdin.as_mut().expect("stdin"),
+        "{}",
+        command_frame(id, raw)
+    )
+    .expect("write command frame");
     drop(child.stdin.take());
     let mut stdout = BufReader::new(child.stdout.take().expect("stdout"));
     let mut line = String::new();
@@ -65,10 +73,17 @@ fn send_command(raw: &str, event_log: &Path, cwd: &Path, id: u64) -> SeamEnvelop
         .read_to_string(&mut stderr_text)
         .expect("read stderr");
     let status = child.wait().expect("wait core");
-    assert!(status.success(), "core exited {status}; stderr={stderr_text}");
-    assert!(!line.trim().is_empty(), "core produced no stdout; stderr={stderr_text}");
-    serde_json::from_str(&line)
-        .unwrap_or_else(|error| panic!("core stdout was not JSON: {error}; line={line:?}; stderr={stderr_text}"))
+    assert!(
+        status.success(),
+        "core exited {status}; stderr={stderr_text}"
+    );
+    assert!(
+        !line.trim().is_empty(),
+        "core produced no stdout; stderr={stderr_text}"
+    );
+    serde_json::from_str(&line).unwrap_or_else(|error| {
+        panic!("core stdout was not JSON: {error}; line={line:?}; stderr={stderr_text}")
+    })
 }
 
 fn spawn_core(event_log: &Path, cwd: &Path) -> Child {
@@ -174,13 +189,17 @@ fn write_task_pack(repo: &Path, authority_set_id: &str) {
 }
 
 fn temp_repo(prefix: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock")
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("{prefix}-{nanos}"));
-    fs::create_dir_all(&path).expect("temp repo dir");
-    path
+    let parent = std::env::temp_dir();
+    let pid = std::process::id();
+    loop {
+        let nonce = TEMP_REPO_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = parent.join(format!("{prefix}-{pid}-{nonce}"));
+        match fs::create_dir(&path) {
+            Ok(()) => return path,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("temp repo dir {path:?}: {error}"),
+        }
+    }
 }
 
 fn git(repo: &Path, args: &[&str]) {

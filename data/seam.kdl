@@ -1,0 +1,18 @@
+schema "autopilot.seam.v1"
+version 1
+
+route kind="spawn-attested" direction="core-to-host" posture="unsupported" payload="CoreToHostSpawnAttestedPayload" adapter="unsupported-attested-spawn" effect="unsupported-attested-spawn" doc="Attested spawn is declared but not consumed by runtime Host yet."
+route kind="reconcile-attested" direction="core-to-host" posture="unsupported" payload="CoreToHostReconcileAttestedPayload" adapter="unsupported-attested-reconcile" effect="unsupported-attested-reconcile" doc="Attested reconcile is declared but not consumed by runtime Host yet."
+route kind="attested-task-observation" direction="host-to-core" posture="unsupported" payload="HostToCoreAttestedTaskObservationPayload" adapter="unsupported-attested-observation" effect="unsupported-attested-observation" doc="Attested observation is declared but not consumed by runtime Core yet."
+route kind="command" direction="host-to-core" posture="supported" payload="HostToCoreCommandPayload" adapter="command" effect="none"
+route kind="task-completed" direction="host-to-core" posture="supported" payload="HostToCoreTaskCompletedPayload" adapter="task-completed" effect="none"
+route kind="spawn-result" direction="host-to-core" posture="supported" payload="HostToCoreSpawnResultPayload" adapter="spawn-result" effect="none"
+route kind="agent-result" direction="host-to-core" posture="supported" payload="HostToCoreAgentResultPayload" adapter="agent-result" effect="none"
+route kind="operator-answer" direction="host-to-core" posture="supported" payload="HostToCoreOperatorAnswerPayload" adapter="operator-answer" effect="none"
+route kind="shutdown" direction="host-to-core" posture="supported" payload="HostToCoreShutdownPayload" adapter="shutdown" effect="none"
+route kind="ui" direction="core-to-host" posture="supported" payload="CoreToHostUiPayload" adapter="none" effect="ui"
+route kind="spawn" direction="core-to-host" posture="supported" payload="CoreToHostSpawnPayload" adapter="none" effect="spawn"
+route kind="spawn-wave" direction="core-to-host" posture="supported" payload="CoreToHostSpawnWavePayload" adapter="none" effect="spawn-wave" max_items=64 unique="action_id|assignment_id"
+route kind="session" direction="core-to-host" posture="supported" payload="CoreToHostSessionPayload" adapter="none" effect="session-fail-closed"
+route kind="log" direction="core-to-host" posture="supported" payload="CoreToHostLogPayload" adapter="none" effect="log"
+route kind="done" direction="core-to-host" posture="supported" payload="CoreToHostDonePayload" adapter="none" effect="done"

@@ -219,9 +219,10 @@ fn private_dir(path: &Path) -> Result<(), StateRootError> {
     Ok(())
 }
 
-fn private_handle(file: &File) -> Result<(), StateRootError> {
+fn private_handle(_file: &File) -> Result<(), StateRootError> {
     #[cfg(unix)]
-    file.set_permissions(fs::Permissions::from_mode(0o600))
+    _file
+        .set_permissions(fs::Permissions::from_mode(0o600))
         .map_err(map_io)?;
     Ok(())
 }

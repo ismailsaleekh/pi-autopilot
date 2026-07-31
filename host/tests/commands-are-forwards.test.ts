@@ -1,4 +1,3 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +6,7 @@ import assert from "node:assert/strict";
 
 import autopilotExtension from "../src/extension.ts";
 import { AUTOPILOT_COMMANDS, AUTOPILOT_OPERATOR_ANSWER_COMMAND, fixedServiceResolver, registerAutopilotCommands } from "../src/commands.ts";
+import { parseCommandAdapterPayload } from "../src/host-runtime.ts";
 
 const D76_PUBLIC_COMMANDS = Object.freeze([
   "autopilot-plan",
@@ -134,26 +134,24 @@ test("operator-answer command sends a typed operator-answer frame", async () => 
   assert.deepEqual(transport.calls, [{ kind: "operator-answer", payload: { question_id: "q-1", answer: { decision: "answered", notes: ["real sender"] } } }]);
 });
 
-test("completed planning terminal sends task-completed then agent-result with real carrier identity", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "autopilot-host-agent-result-"));
-  const specPath = join(dir, "spec.json");
-  const carrierPath = join(dir, "carrier.json");
-  const action = terminalAction("action-plan", "assignment-plan", "planning task", `node wrapper --spec '${specPath}'`);
-  const carrier = {
-    schema: "autopilot.planning_carrier.v1",
-    action_id: action.action_id,
-    assignment_id: action.assignment_id,
-    boundary_id: "planning.task-atoms.v1",
-    raw_output: "atom: host sender",
-  };
-  await writeFile(specPath, JSON.stringify({
-    action_id: action.action_id,
-    assignment_id: action.assignment_id,
-    boundary_id: carrier.boundary_id,
-    result_contract: carrier.boundary_id,
-    carrier_path: carrierPath,
-  }), "utf8");
-  await writeFile(carrierPath, JSON.stringify(carrier), "utf8");
+test("operator-answer adapter rejects malformed id, JSON, non-object values, unknown adapter, and shape drift", async () => {
+  const pi = fakePi();
+  const transport = fakeTransport();
+  registerAutopilotCommands(pi, fixedServiceResolver({ transport, backgroundTasks: fakeBackgroundTasks(), operatorMessage: fakeOperatorMessage() }));
+  const handler = pi.registrations.get("autopilot-answer").handler;
+
+  await assert.rejects(handler("", fakeCtx()), /requires an id/u);
+  await assert.rejects(handler('bad/id {"ok":true}', fakeCtx()), /id is malformed/u);
+  await assert.rejects(handler("q-1 not-json", fakeCtx()), /not valid JSON/u);
+  await assert.rejects(handler("q-1 null", fakeCtx()), /JSON object/u);
+  await assert.rejects(handler("q-1 []", fakeCtx()), /JSON object/u);
+  assert.throws(() => parseCommandAdapterPayload({ adapter: "bogus", fields: [] }, "q {}"), /unknown command adapter/u);
+  assert.throws(() => parseCommandAdapterPayload({ adapter: "id-json-object", fields: [{ name: "q", type: "string", required: true }] }, "q {}"), /shape drift|field drift/u);
+  assert.deepEqual(transport.calls, []);
+});
+
+test("completed terminal sends only task-completed without Host carrier reads", async () => {
+  const action = terminalAction("action-plan", "assignment-plan", "planning task", "nonexistent-runner --not-a-spec /definitely/missing");
   const pi = fakePi();
   let terminalHandler;
   const transport = {
@@ -177,8 +175,8 @@ test("completed planning terminal sends task-completed then agent-result with re
   await pi.registrations.get("autopilot-plan").handler("main TASK-A.md TASK-B.md TASK-C.md CONTEXT.md", fakeCtx());
   await terminalHandler(taskFromDescriptor(action.bg_run, "task-plan", "completed"));
 
-  assert.deepEqual(transport.calls.map((call) => call.kind), ["command", "task-completed", "agent-result"]);
-  assert.deepEqual(transport.calls.at(-1).payload, { assignment_id: action.assignment_id, carrier });
+  assert.deepEqual(transport.calls.map((call) => call.kind), ["command", "task-completed"]);
+  assert.deepEqual(transport.calls.at(-1).payload, { task_id: "task-plan", action_id: action.action_id, assignment_id: action.assignment_id, status: "completed" });
 });
 
 test("extension buffers an immediate terminal task until its exact action binding is recorded", async () => {

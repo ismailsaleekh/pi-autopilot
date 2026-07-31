@@ -386,7 +386,7 @@ test("BUG-184 T9b: a missing Core binary is a blocking failure at activation, no
 
     await assert.rejects(
       () => pi.commands.get("autopilot-plan").handler("main A.md B.md C.md CTX.md", commandCtx(SESSION_A)),
-      /autopilot-core binary missing for darwin-arm64/u,
+      /autopilot-core is not installed/u,
     );
     assert.equal(
       existsSync(activationRecordPath(SESSION_A, { stateRoot: state.root })),

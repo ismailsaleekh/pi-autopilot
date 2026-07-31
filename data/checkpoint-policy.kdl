@@ -53,7 +53,7 @@ slot_set "plan-review-ledger" output_contract="planning.plan-review.v1" rational
   slot "blocker_advisory_split" type="array<string>" required=#true max_entries=64 max_bytes=1024 doc="Preserves blocker/advisory classification boundaries that affect release decisions."
 }
 
-slot_set "delivery-ledger" output_contract="autopilot.delivery_result.v1" rationale="Implementer and fixer-integrator both terminate through delivery_result; fixer state is an additive repair ledger, not a separate Rust branch." {
+slot_set "delivery-ledger" output_contract="autopilot.delivery_result.v2" rationale="Implementer and fixer-integrator share the package-owned delivery result v2; fixer state is an additive repair ledger, not a separate Rust branch." {
   slot "worktree_identity" type="string" required=#true max_bytes=512 doc="Preserves exact base commit, worktree, assignment, lane, attempt, and revision identity."
   slot "scope_boundaries" type="array<string>" required=#true max_entries=128 max_bytes=2048 doc="Preserves owned, read-only, and untouchable scopes so resume cannot cross boundaries."
   slot "edit_ledger" type="array<string>" required=#true max_entries=256 max_bytes=4096 doc="Preserves actual dirty paths and edit decisions that must be mechanically checked."

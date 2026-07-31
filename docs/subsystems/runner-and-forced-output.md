@@ -31,7 +31,7 @@ Autopilot's child runner is split between a tiny npm wrapper and Rust Core-owned
 ## Parent-to-child launch
 
 1. `CoreTransport` resolves `process.execPath` and `bin/autopilot-agent-run.mjs` from the installed package and passes them to Core as transport facts.
-2. Core writes a strict `autopilot.agent_run_spec.v1` and rendered prompt under deterministic `.pi/autopilot/<workstream>/...` paths.
+2. Core writes a strict `autopilot.agent_run_spec.v4`, rendered prompt, and a parent-selected generated terminal profile under deterministic `.pi/autopilot/<workstream>/...` paths.
 3. Core emits a `background_action` whose nested `bg_run` object is byte-exactly the public `pi-background-tasks@0.6.1` `run` payload.
 4. The Host forwards that object over `pi.events`; it does not rewrite fields, synthesize defaults, or call a Pi context method named `bg_run`.
 5. The background service executes the package-contained runner command and publishes one terminal event after durability.
@@ -40,6 +40,6 @@ Autopilot's child runner is split between a tiny npm wrapper and Rust Core-owned
 
 `agent-run` validates all identity and route facts before launching Pi. It rejects stale carrier files, path symlinks, non-UTF-8 paths, role/mode drift, roster/provider/model/thinking drift, non-subscription/API-key routes, unknown tools, prompt digest mismatch, and deterministic path mismatch.
 
-The child Pi process is isolated with `--no-session` and `--no-extensions`, stdout/stderr are bounded while running, wall timeout is enforced, and metered API-key environment variables are removed. Output acceptance requires one final assistant result and a successful `agent_end`; tool activity after the assistant result, multiple assistant results, missing `agent_end`, malformed JSONL, or provider/model drift fail loudly.
+The child Pi process uses a run-owned session directory with `--no-extensions` plus the one codegen-anchored child add-on, bounded stdout/stderr, a wall timeout, and no metered API-key environment variables. Before prompting, Core verifies the streamed and durable registration receipt, selected profile, exact active tools, add-on digest, and assignment binding.
 
-Planning carriers bind action, assignment, run revision, workstream, role, mode, boundary, prompt/spec digest, spec path, carrier path, and raw output. Delivery carriers are routed through Core `accept_delivery()` with lane, attempt, base commit, worktree, and focused-evidence expectations.
+Every model assignment terminates through one parent-selected generated tool profile. `tool_execution_end.result.details`, correlated to `message_end(toolResult)` by opaque call id, is authoritative; assistant terminal text, mixed tool batches, duplicate results, identity drift, and stale unconsumed carrier files fail loudly. Planning carriers retain their planning boundary payload. Delivery and Validation use model-only v2 submissions wrapped in package-owned v2 results with immutable runner identity and a digest-bound tool audit.

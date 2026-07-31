@@ -65,12 +65,35 @@ expect() {
   fi
 }
 
+# expect_loc EXPECTED_CODE EXPECTED_LOC LABEL COMMAND...
+expect_loc() {
+  local want="$1" want_loc="$2" label="$3"; shift 3
+  local got=0
+  local loc_ok=1
+  "$@" >"$tmp/out.log" 2>&1 || got=$?
+  if grep -Eq "(^|[[:space:]])loc=${want_loc}([[:space:]]|$)" "$tmp/out.log"; then
+    loc_ok=0
+  fi
+  if [ "$got" -eq "$want" ] && [ "$loc_ok" -eq 0 ]; then
+    printf '  ok    %s (exit %d, loc %s)\n' "$label" "$got" "$want_loc"
+    passes=$((passes + 1))
+  else
+    printf '  FAIL  %s — expected exit %d with loc=%s, got exit %d\n' "$label" "$want" "$want_loc" "$got" >&2
+    if [ "$loc_ok" -ne 0 ]; then
+      printf '          expected loc=%s was not present in output\n' "$want_loc" >&2
+    fi
+    sed 's/^/          /' "$tmp/out.log" >&2
+    failures=$((failures + 1))
+  fi
+}
+
 write_binary_parity_fixture() {
   local root="$1" mode="$2"
 
   mkdir -p \
     "$root/bin" \
     "$root/binaries/darwin-arm64" \
+    "$root/src" \
     "$root/kernel/src" \
     "$root/drivers/src" \
     "$root/codegen/src" \
@@ -78,9 +101,18 @@ write_binary_parity_fixture() {
 
   cat > "$root/bin/autopilot-core.mjs" <<'JS'
 #!/usr/bin/env node
-const supported = {
+import { resolveCoreBinary } from '../src/resolve-core-runtime.js';
+resolveCoreBinary();
+JS
+
+  cat > "$root/src/resolve-core-runtime.js" <<'JS'
+export const SUPPORTED_CORE_BINARIES = Object.freeze({
   'darwin-arm64': 'autopilot-core',
-};
+});
+
+export function resolveCoreBinary() {
+  return new URL('../binaries/darwin-arm64/autopilot-core', import.meta.url).pathname;
+}
 JS
 
   cat > "$root/kernel/src/lib.rs" <<'RS'
@@ -258,6 +290,77 @@ for i in $(seq 1 10); do echo "let c$i = $i;"; done > "$toolingclean/codegen/mai
 for i in $(seq 1 10); do echo "let m$i = $i;"; done > "$toolingclean/modelcheck/lib.rs"
 expect 0 "tooling ignores a huge drivers tree" "$LOC" --root "$toolingclean" tooling
 
+# tests/ directory components are fixture-only and must not affect LOC in any scope.
+testsx="$tmp/loc-tests-excluded"
+mkdir -p \
+  "$testsx/kernel/src" "$testsx/kernel/tests/nested" \
+  "$testsx/drivers/src" "$testsx/drivers/tests/nested" \
+  "$testsx/codegen/src" "$testsx/codegen/tests/nested" \
+  "$testsx/modelcheck/src" "$testsx/modelcheck/tests/nested"
+echo 'pub fn kernel_live() -> u8 { 1 }' > "$testsx/kernel/src/lib.rs"
+echo 'pub fn driver_live() -> u8 { 2 }' > "$testsx/drivers/src/lib.rs"
+echo 'pub fn codegen_live() -> u8 { 3 }' > "$testsx/codegen/src/lib.rs"
+echo 'pub fn modelcheck_live() -> u8 { 4 }' > "$testsx/modelcheck/src/lib.rs"
+for crate in kernel drivers codegen modelcheck; do
+  for i in $(seq 1 7000); do echo "pub fn ignored_${crate}_test_$i() -> usize { $i }"; done > "$testsx/$crate/tests/nested/huge.rs"
+done
+expect_loc 0 1 "kernel excludes an arbitrarily huge kernel/tests tree" "$LOC" --root "$testsx" kernel
+expect_loc 0 2 "core excludes arbitrarily huge kernel/tests and drivers/tests trees" "$LOC" --root "$testsx" core
+expect_loc 0 2 "tooling excludes arbitrarily huge codegen/tests and modelcheck/tests trees" "$LOC" --root "$testsx" tooling
+expect_loc 0 4 "all excludes arbitrarily huge tests trees from every crate" "$LOC" --root "$testsx" all
+
+regressed_loc="$tmp/loc-regressed-collector.sh"
+python3 - "$LOC" "$regressed_loc" <<'PY'
+import sys
+from pathlib import Path
+
+src = Path(sys.argv[1])
+dst = Path(sys.argv[2])
+text = src.read_text()
+old = "      \\( -type d \\( -name target -o -name tests \\) -prune \\) -o \\" + "\n"
+new = "      \\( -type d -name target -prune \\) -o \\" + "\n"
+if old not in text:
+    raise SystemExit("selftest mutation setup failed: collector prune line not found")
+dst.write_text(text.replace(old, new, 1))
+PY
+chmod +x "$regressed_loc"
+expect_loc 1 7001 "mutation proof: regressed collector counts kernel/tests and fails the fixture" "$regressed_loc" --root "$testsx" kernel
+
+# The same kind of bytes under src/ are production source and must trip budgets.
+kernelsrcbad="$tmp/loc-kernel-src-bad"
+mkdir -p "$kernelsrcbad/kernel/src"
+for i in $(seq 1 2500); do echo "pub fn counted_kernel_src_$i() -> usize { $i }"; done > "$kernelsrcbad/kernel/src/huge.rs"
+expect_loc 1 2500 "kernel counts huge kernel/src files and trips budget" "$LOC" --root "$kernelsrcbad" kernel
+
+coresrcbad="$tmp/loc-core-src-bad"
+mkdir -p "$coresrcbad/drivers/src"
+for i in $(seq 1 6600); do echo "pub fn counted_driver_src_$i() -> usize { $i }"; done > "$coresrcbad/drivers/src/huge.rs"
+expect_loc 1 6600 "core counts huge drivers/src files and trips budget" "$LOC" --root "$coresrcbad" core
+
+toolingsrcbad="$tmp/loc-tooling-src-bad"
+mkdir -p "$toolingsrcbad/codegen/src"
+for i in $(seq 1 2100); do echo "pub fn counted_codegen_src_$i() -> usize { $i }"; done > "$toolingsrcbad/codegen/src/huge.rs"
+expect_loc 1 2100 "tooling counts huge codegen/src files and trips budget" "$LOC" --root "$toolingsrcbad" tooling
+
+cfgtestsrc="$tmp/loc-cfg-test-src-counted"
+mkdir -p "$cfgtestsrc/kernel/src"
+{
+  echo '#[cfg(test)]'
+  echo 'mod tests {'
+  for i in $(seq 1 2100); do echo "fn counted_cfg_test_$i() -> usize { $i }"; done
+  echo '}'
+} > "$cfgtestsrc/kernel/src/lib.rs"
+expect_loc 1 2103 "counts #[cfg(test)] modules inside production source files" "$LOC" --root "$cfgtestsrc" kernel
+
+# Only a path component exactly named tests is excluded; lookalikes count.
+lookalikes="$tmp/loc-tests-lookalikes"
+mkdir -p "$lookalikes/kernel/src/nested/tests" "$lookalikes/kernel/tests_support" "$lookalikes/kernel/src/contest"
+echo 'pub fn live() -> u8 { 1 }' > "$lookalikes/kernel/src/lib.rs"
+for i in $(seq 1 7000); do echo "pub fn ignored_nested_tests_$i() -> usize { $i }"; done > "$lookalikes/kernel/src/nested/tests/ignored.rs"
+for i in $(seq 1 1000); do echo "pub fn counted_tests_support_$i() -> usize { $i }"; done > "$lookalikes/kernel/tests_support/counted.rs"
+for i in $(seq 1 1001); do echo "pub fn counted_contest_$i() -> usize { $i }"; done > "$lookalikes/kernel/src/contest/counted.rs"
+expect_loc 1 2002 "excludes nested tests component but counts tests_support and contest" "$LOC" --root "$lookalikes" kernel
+
 # Comments/blanks must not be counted: 2500 comment lines must PASS.
 cmt="$tmp/loc-comments"
 mkdir -p "$cmt/kernel"
@@ -291,6 +394,15 @@ mkdir -p "$toolinggen/codegen" "$toolinggen/modelcheck"
 for i in $(seq 1 10); do echo "let m$i = $i;"; done > "$toolinggen/modelcheck/lib.rs"
 expect 0 "tooling excludes @generated files" "$LOC" --root "$toolinggen" tooling
 
+genlate="$tmp/loc-generated-marker-too-late"
+mkdir -p "$genlate/kernel"
+{
+  for i in $(seq 1 5); do echo "// preamble $i"; done
+  echo '// @generated by codegen'
+  for i in $(seq 1 2500); do echo "let late_generated_$i = $i;"; done
+} > "$genlate/kernel/generated_too_late.rs"
+expect_loc 1 2500 "rejects over-budget source when @generated marker appears after line 5" "$LOC" --root "$genlate" kernel
+
 # `all` scope aggregates across dirs and uses the combined 8500 reporting budget.
 allbad="$tmp/loc-all-bad"
 mkdir -p "$allbad/kernel" "$allbad/drivers" "$allbad/codegen"
@@ -300,9 +412,12 @@ for i in $(seq 1 1900); do echo "let c$i = $i;"; done > "$allbad/codegen/main.rs
 expect 0 "kernel alone (1900) is within 2000" "$LOC" --root "$allbad" kernel
 expect 0 "all reports 5700 total against the combined 8500 budget without enforcing" "$LOC" --root "$allbad" all
 
-# Absent dirs are not an error (pre-W1).
+# Absent dirs are not an error (pre-W1); malformed roots are usage errors.
 mkdir -p "$tmp/loc-empty-root"
 expect 0 "tolerates an absent kernel/ (pre-W1)" "$LOC" --root "$tmp/loc-empty-root" kernel
+expect 2 "rejects a missing --root directory with exit 2" "$LOC" --root "$tmp/loc-missing-root" kernel
+printf 'not a directory\n' > "$tmp/loc-root-is-file"
+expect 2 "rejects a non-directory --root with exit 2" "$LOC" --root "$tmp/loc-root-is-file" kernel
 
 # Usage errors are exit 2, distinct from a budget failure.
 expect 2 "rejects an unknown scope with exit 2" "$LOC" --root "$good" bogus-scope

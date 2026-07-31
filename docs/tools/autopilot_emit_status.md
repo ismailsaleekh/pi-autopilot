@@ -5,7 +5,8 @@ review_policy: contract
 covers_surfaces:
   - autopilot_emit_status
 covers_sources:
-  - src/internal/status-extension.ts
+  - codegen/templates/child-extension.ts.tmpl
+  - drivers/src/runner/child.rs
 signature_hash: 'sha256:82786edeaa54051548f1e7a5b3d5257408d8f7b836481e5e5a227e774ffd5dba'
 body_hash: 'sha256:d1233d73030eeca1cd584ba56c80a4f939e59b37667cb98c1ed15706e16c100a'
 stability: stable
@@ -18,21 +19,15 @@ The internal child-only forced-output/status tool made available by
 
 ## Signature
 
-Emits the child's terminal `autopilot.status.v1` status and a matching
-`autopilot.receipt.v1` receipt carrier; the receipt binds the status hash, provider
-identity, and tool-call id.
+The generated child add-on registers one parent-selected status profile. Delivery emits `autopilot.delivery_submission.v2`; Validation emits `autopilot.validation_submission.v2`. Core wraps the admitted payload in its package-owned v2 result with profile, schema, assignment-binding, and tool-call audit identity.
 
 ## Availability
 
-Child runner only. It is loaded solely by `autopilot-agent-run` with an explicit
-context file (`AUTOPILOT_AGENT_STATUS_CONTEXT`); it is never registered as a parent
-command or a normal parent/global tool.
+Child runner only. `autopilot-agent-run` explicitly loads the codegen-anchored add-on and selects one generated profile before prompting. It is never registered as a parent command or normal parent/global tool.
 
 ## Effects / authority
 
-Produces the single valid structured status carrier the runner requires for a
-successful unit. Assistant text alone is rejected; the runner revalidates success
-statuses against the execution audit before transport acceptance.
+Its Pi tool-result details are the only model terminal carrier. Assistant text, a different profile/schema/boundary, mixed tool batches, and uncorrelated tool-result frames are rejected. Core then revalidates the package-owned result and exact delivery or validation subject before downstream acceptance.
 
 ## Failure classes
 

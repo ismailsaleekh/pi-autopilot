@@ -1,8 +1,9 @@
 use std::{
     cell::Cell,
     fs,
+    io::ErrorKind,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use drivers::planning::{
@@ -13,6 +14,8 @@ use drivers::planning::{
     question_class_from_d72, require_material_backlinks, require_total_dispositions,
 };
 use kernel::generated::{PlanningQuestion, PlanningQuestionClass, Questions};
+
+static TEMP_REPO_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 struct TaskOnly {
     reads: Cell<u32>,
@@ -457,13 +460,16 @@ fn doc(marker: &str, id: &str, body: &str) -> String {
 }
 
 fn temp_repo(name: &str) -> PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time")
-        .as_nanos();
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("target/test-tmp")
-        .join(format!("pi-autopilot-{name}-{unique}"));
-    fs::create_dir_all(&root).expect("temp repo");
-    root
+    let parent = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/test-tmp");
+    fs::create_dir_all(&parent).expect("temp repo parent");
+    let pid = std::process::id();
+    loop {
+        let unique = TEMP_REPO_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let root = parent.join(format!("pi-autopilot-{name}-{pid}-{unique}"));
+        match fs::create_dir(&root) {
+            Ok(()) => return root,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("temp repo {root:?}: {error}"),
+        }
+    }
 }

@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { applyCoreEffect } from "../src/effects.ts";
-import { CoreFrameValidationError } from "../src/frame-validation.ts";
+import { CoreFrameValidationError, validateCoreToHostFrame } from "../src/generated/frame-validation.ts";
 
 test("routes generated Core effects through supported Pi Host APIs", async () => {
   const calls = [];
@@ -28,7 +28,7 @@ test("routes generated Core effects through supported Pi Host APIs", async () =>
   ]);
 });
 
-test("uses ctx.ui.notify only when Pi reports UI availability", async () => {
+test("uses ctx.ui.notify with generated default levels only when Pi reports UI availability", async () => {
   const calls = [];
   await applyCoreEffect(
     { v: 1, id: 1, kind: "done", payload: { status: "rejection:example" } },
@@ -36,8 +36,8 @@ test("uses ctx.ui.notify only when Pi reports UI availability", async () => {
     effectServices(calls),
   );
   assert.deepEqual(calls, [
-    ["notify", "warning", "Autopilot done: rejection:example"],
-    ["operator", "warning", "Autopilot done: rejection:example"],
+    ["notify", "info", "Autopilot done: rejection:example"],
+    ["operator", "info", "Autopilot done: rejection:example"],
   ]);
 });
 
@@ -88,6 +88,48 @@ test("malformed core-to-host frames are rejected before side effects", async () 
     CoreFrameValidationError,
   );
   assert.deepEqual(calls, []);
+
+  assert.throws(
+    () => validateCoreToHostFrame({ v: 1, id: 1, kind: "done", payload: { status: "ok" }, extra: true }),
+    /core frame contains unknown key extra/u,
+  );
+  assert.throws(
+    () => validateCoreToHostFrame({ v: 1, id: 1, kind: "spawn-attested", payload: { action: {} } }),
+    /generated seam posture unsupported/u,
+  );
+});
+
+test("generated validator rejects malformed background actions and spawn-wave constraints", () => {
+  const valid = backgroundAction();
+  assert.throws(
+    () => validateCoreToHostFrame({ v: 1, id: 1, kind: "spawn", payload: { action: { ...valid, extra: true } } }),
+    /background action contains unknown key extra/u,
+  );
+  assert.throws(
+    () => validateCoreToHostFrame({ v: 1, id: 1, kind: "spawn", payload: { action: { ...valid, bg_run: { ...valid.bg_run, timeoutSeconds: 0 } } } }),
+    /bg_run\.timeoutSeconds must be a positive integer/u,
+  );
+  assert.throws(
+    () => validateCoreToHostFrame({ v: 1, id: 1, kind: "spawn-wave", payload: { actions: [] } }),
+    /spawn-wave\.actions must be non-empty/u,
+  );
+  assert.throws(
+    () => validateCoreToHostFrame({
+      v: 1,
+      id: 1,
+      kind: "spawn-wave",
+      payload: { actions: Array.from({ length: 65 }, (_, index) => ({ ...backgroundAction(), action_id: `a-${index}`, assignment_id: `u-${index}` })) },
+    }),
+    /spawn-wave\.actions exceeds maximum 64/u,
+  );
+  assert.throws(
+    () => validateCoreToHostFrame({ v: 1, id: 1, kind: "spawn-wave", payload: { actions: [{ ...valid }, { ...valid, assignment_id: "unit-2" }] } }),
+    /spawn-wave action_id must be unique/u,
+  );
+  assert.throws(
+    () => validateCoreToHostFrame({ v: 1, id: 1, kind: "spawn-wave", payload: { actions: [{ ...valid }, { ...valid, action_id: "a2" }] } }),
+    /spawn-wave assignment_id must be unique/u,
+  );
 });
 
 function effectContext(calls, hasUI) {

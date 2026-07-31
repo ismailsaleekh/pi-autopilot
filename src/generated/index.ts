@@ -148,6 +148,8 @@ export interface AgentRunSpec {
   context_manifest_digest?: Digest | null;
   runtime_extension_path?: Path | null;
   runtime_extension_digest?: Digest | null;
+  terminal_profile_id?: string | null;
+  unavailable_tools?: ToolName[] | null;
   producer_assignment_ids?: Id[] | null;
   validation_id?: Id | null;
   validation_attempt?: number | null;
@@ -626,6 +628,51 @@ export interface DeliveryResult {
   hard_boundary_violations: string[];
 }
 
+export interface DeliveryResultV2 {
+  schema: SchemaId;
+  action_id: Id;
+  assignment_id: Id;
+  run_revision: number;
+  workstream: Id;
+  role_id: Id;
+  mode: ModeId;
+  lane_id: Id;
+  attempt: number;
+  base_commit: Sha;
+  worktree: Path;
+  prompt_path: Path;
+  prompt_digest: Digest;
+  spec_path: Path;
+  spec_digest: Digest;
+  carrier_path: Path;
+  boundary_id: ContractId;
+  boundary_digest: Digest;
+  result_contract: ContractId;
+  result_contract_digest: Digest;
+  settings_digest: Digest;
+  context_digest: Digest;
+  skills_digest: Digest;
+  subscription_digest: Digest;
+  runtime_extension_digest: Digest;
+  terminal_profile_id: string;
+  tool_name: ToolName;
+  tool_schema_digest: Digest;
+  carrier_binding: Digest;
+  tool_call_id: string;
+  tool_audit_ref: Ref;
+  tool_audit_digest: Digest;
+  submission_digest: Digest;
+  submission: DeliverySubmissionV2;
+}
+
+export interface DeliverySubmissionV2 {
+  actual_changed_paths: Path[];
+  execution_audit_ref: Ref;
+  focused_evidence_refs: Ref[];
+  terminal_status: DeliveryTerminalStatus;
+  hard_boundary_violations: string[];
+}
+
 export interface EventRow {
   sequence: number;
   previous_revision: number;
@@ -996,6 +1043,11 @@ export interface ValidationResultV2 {
   skills_digest: Digest;
   subscription_digest: Digest;
   runtime_extension_digest: Digest;
+  terminal_profile_id: string;
+  tool_name: ToolName;
+  tool_schema_digest: Digest;
+  carrier_binding: Digest;
+  tool_call_id: string;
   tool_audit_ref: Ref;
   tool_audit_digest: Digest;
   submission_digest: Digest;

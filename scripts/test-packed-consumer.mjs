@@ -1,11 +1,13 @@
 #!/usr/bin/env node
-import { accessSync, chmodSync, constants, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { accessSync, chmodSync, constants, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const PACKAGE_ROOT = realpathSync(resolve(fileURLToPath(new URL('..', import.meta.url))));
+const GLOBAL_PI_ROOT = realpathSync('/usr/local/lib/node_modules/@earendil-works/pi-coding-agent');
+const GLOBAL_TYPEBOX_ROOT = realpathSync(join(GLOBAL_PI_ROOT, 'node_modules', 'typebox'));
 
 function fail(message) {
   throw new Error(`packed-consumer-invalid: ${message}`);
@@ -81,7 +83,7 @@ function main() {
   mkdirSync(env.HOME, { mode: 0o700 });
   mkdirSync(env.npm_config_cache, { mode: 0o700 });
   try {
-    const pack = jsonRun('npm', ['pack', '--json', '--pack-destination', root], PACKAGE_ROOT, env, 900_000);
+    const pack = jsonRun('npm', ['pack', '--json', '--ignore-scripts', '--pack-destination', root], PACKAGE_ROOT, env, 900_000);
     if (!Array.isArray(pack) || pack.length !== 1 || typeof pack[0]?.filename !== 'string') fail('npm pack did not report exactly one tarball filename');
     const tarball = realpathSync(join(root, pack[0].filename));
     assertFile(tarball, 'packed tarball');
@@ -91,9 +93,19 @@ function main() {
     mkdirSync(consumer, { mode: 0o700 });
     run('npm', ['init', '-y'], consumer, env, 120_000);
     run('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund', '--legacy-peer-deps', tarball], consumer, env, 300_000);
+    const publicPi = readPackageJson(join(GLOBAL_PI_ROOT, 'package.json'), 'global Pi public alias package.json');
+    const publicTypebox = readPackageJson(join(GLOBAL_TYPEBOX_ROOT, 'package.json'), 'global TypeBox public alias package.json');
+    if (publicPi.name !== '@earendil-works/pi-coding-agent' || publicPi.version !== '0.83.0') fail(`global Pi public alias must be 0.83.0, got ${publicPi.name}@${publicPi.version}`);
+    if (publicTypebox.name !== 'typebox' || publicTypebox.version !== '1.3.7') fail(`global TypeBox public alias must be 1.3.7, got ${publicTypebox.name}@${publicTypebox.version}`);
+    mkdirSync(join(consumer, 'node_modules', '@earendil-works'), { recursive: true });
+    symlinkSync(GLOBAL_PI_ROOT, join(consumer, 'node_modules', '@earendil-works', 'pi-coding-agent'), 'dir');
+    symlinkSync(GLOBAL_TYPEBOX_ROOT, join(consumer, 'node_modules', 'typebox'), 'dir');
 
     const installed = realpathSync(join(consumer, 'node_modules', 'pi-autopilot'));
     if (!under(consumer, installed)) fail(`installed package is outside the consumer tree: ${installed}`);
+    for (const rel of [join('node_modules', 'typebox'), join('node_modules', '@earendil-works', 'pi-coding-agent')]) {
+      if (lstatSync(join(installed, rel), { throwIfNoEntry: false })) fail(`packed runtime contains private peer copy: ${rel}`);
+    }
     const packageJsonPath = join(installed, 'package.json');
     const metadata = JSON.parse(run(process.execPath, ['-e', `console.log(JSON.stringify(require(${JSON.stringify(packageJsonPath)}).bin['autopilot-core']))`], consumer, env, 60_000));
     if (typeof metadata !== 'string' || metadata.length === 0) fail('installed package.json bin.autopilot-core is absent');
@@ -120,9 +132,11 @@ function main() {
       const hostEntry = ${JSON.stringify(hostEntry.path)};
       const mod = await import(pathToFileURL(hostEntry).href);
       if (typeof mod.default !== 'function') throw new Error('default export is not a function');
-      const resolver = await import(pathToFileURL(join(dirname(hostEntry), 'resolve-core.ts')).href);
+      const resolver = await import(pathToFileURL(join(dirname(hostEntry), '..', 'src', 'resolve-core.ts')).href);
+      const platformKey = resolver.corePlatformKey();
+      const expected = join(dirname(hostEntry), '..', 'binaries', platformKey, resolver.SUPPORTED_CORE_BINARIES[platformKey]);
       const actual = resolver.resolveCoreBinary({ packageJsonPath: ${JSON.stringify(packageJsonPath)} });
-      if (actual !== ${JSON.stringify(binPath)}) throw new Error('core resolver returned ' + actual);
+      if (actual !== expected) throw new Error('core resolver returned ' + actual + ', expected ' + expected);
       console.log(JSON.stringify({ host_entry_loaded: true, resolved_core: actual }));
     `;
     const loadResult = JSON.parse(run(process.execPath, ['--experimental-loader', loaderPath, '--input-type=module', '--eval', loadScript], consumer, env, 120_000));
@@ -133,7 +147,10 @@ function main() {
       host_entry: relative(installed, hostEntry.path),
       bin_entry: metadata,
       resolved_core: relative(installed, loadResult.resolved_core),
-      does_not_prove: 'This offline witness does not drive Pi headlessly or prove extension registration inside a live Pi process; it proves the installed package layout exposes the Host entry and package.json bin path a loader would use.',
+      pi_peer: `${publicPi.name}@${publicPi.version}`,
+      typebox_peer: `${publicTypebox.name}@${publicTypebox.version}`,
+      runtime_private_peer_copies: 0,
+      does_not_prove: 'This offline witness does not drive Pi headlessly; it proves the installed package layout loads through Pi 0.83 public peer aliases and exposes the Host entry and package.json bin path a loader would use.',
     };
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   } finally {

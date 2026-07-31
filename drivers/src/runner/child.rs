@@ -9,12 +9,13 @@ use crate::checkpoint::{
     ContextBudget,
 };
 use crate::runner::rpc::{
-    CompactionReason, RpcClient, RpcCommand, RpcCommandKind, RpcDiagnostics, RpcEvent, RpcFrame,
-    RpcResponse, RpcSpawnConfig, TerminalMessage, ToolCarrierDetails,
+    AppendedEntry, CompactionReason, RpcClient, RpcCommand, RpcCommandKind, RpcDiagnostics,
+    RpcEvent, RpcFrame, RpcResponse, RpcSpawnConfig, TerminalMessage, ToolCarrierDetails,
 };
 
 use kernel::failure::{Failure, OperatorDecision, RetryPolicy};
-use kernel::generated::{AgentRunSpec, DeliveryResult, SessionContinuity, TaskDocument};
+use kernel::generated::{AgentRunSpec, SessionContinuity, TaskDocument};
+use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest as ShaDigest, Sha256};
 
@@ -48,9 +49,34 @@ struct ToolTerminal {
     details_value: Value,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct ChildToolReceipt {
+    entry_id: String,
+    self_digest: String,
+    profile_id: String,
+    tool_name: String,
+    boundary_id: String,
+    result_contract: String,
+    schema_digest: String,
+    binding: String,
+    active_tools: Vec<String>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChildToolReceiptData {
+    self_digest: String,
+    profile_id: String,
+    tool_name: String,
+    boundary_id: String,
+    result_contract: String,
+    schema_digest: String,
+    binding: String,
+    active_tools: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum CarrierSource {
-    Assistant(String),
     Tool(ToolTerminal),
 }
 
@@ -92,9 +118,18 @@ pub fn main(args: &[String]) -> Result<(), String> {
             spec.prompt_digest.0, digest
         ));
     }
-    if existing_carrier_valid(&spec_path, &spec_digest, &spec)? {
-        append_attempt_event(&spec, 0, "existing-carrier-accepted", None)?;
-        return Ok(());
+    ensure_carrier_absent(&spec)?;
+    let audit_path = PathBuf::from(&spec.carrier_path.0).with_extension("tool-audit.json");
+    super::reject_link_components_for_path(&audit_path).map_err(|error| error.to_string())?;
+    match fs::symlink_metadata(&audit_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) => {
+            return Err(format!(
+                "agent-run unconsumed pre-existing tool audit refused at {}",
+                audit_path.display()
+            ));
+        }
+        Err(error) => return Err(error.to_string()),
     }
     let mut runner = RpcAssignment::spawn_and_configure(&spec)?;
     let result = run_value_attempts(&mut runner, &spec_path, &spec_digest, &spec, prompt);
@@ -186,6 +221,7 @@ struct RpcAssignment {
     last_capacity_refusal: Option<String>,
     last_known_percent: Option<f64>,
     checkpoint_armed: bool,
+    bootstrap_entry: Option<AppendedEntry>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -209,7 +245,8 @@ struct CycleState {
     terminal_count: usize,
     tool_terminal: Option<ToolTerminal>,
     tool_terminal_count: usize,
-    tool_result_details: Option<Value>,
+    tool_execution_count: usize,
+    tool_result_details: std::collections::BTreeMap<String, Value>,
     tool_after_terminal: bool,
     awaiting_handoff: bool,
     steer_response_seen: bool,
@@ -231,7 +268,8 @@ impl CycleState {
             terminal_count: 0,
             tool_terminal: None,
             tool_terminal_count: 0,
-            tool_result_details: None,
+            tool_execution_count: 0,
+            tool_result_details: std::collections::BTreeMap::new(),
             tool_after_terminal: false,
             awaiting_handoff: matches!(purpose, PromptPurpose::Handoff),
             steer_response_seen: false,
@@ -242,6 +280,65 @@ impl CycleState {
             upstream_capacity_failure: None,
         }
     }
+}
+
+fn normalize_child_tool_receipt(entry: &Value) -> Result<ChildToolReceipt, String> {
+    if entry.get("type").and_then(Value::as_str) != Some("custom") {
+        return Err("agent-run child add-on receipt is not a custom entry".to_owned());
+    }
+    if entry.get("customType").and_then(Value::as_str) != Some("pi-autopilot:child-tools") {
+        return Err("agent-run child add-on receipt has the wrong custom type".to_owned());
+    }
+    let entry_id = entry
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "agent-run child add-on receipt missing entry id".to_owned())?;
+    let data = entry
+        .get("data")
+        .cloned()
+        .ok_or_else(|| "agent-run child add-on receipt missing data".to_owned())?;
+    normalize_child_tool_receipt_data(entry_id, data)
+}
+
+fn normalize_streamed_child_tool_receipt(
+    entry: &AppendedEntry,
+) -> Result<ChildToolReceipt, String> {
+    if entry.custom_type != "pi-autopilot:child-tools" {
+        return Err(format!(
+            "agent-run unexpected bootstrap entry type {}",
+            entry.custom_type
+        ));
+    }
+    normalize_child_tool_receipt_data(&entry.id, entry.data.clone())
+}
+
+fn normalize_child_tool_receipt_data(
+    entry_id: &str,
+    data: Value,
+) -> Result<ChildToolReceipt, String> {
+    let ChildToolReceiptData {
+        self_digest,
+        profile_id,
+        tool_name,
+        boundary_id,
+        result_contract,
+        schema_digest,
+        binding,
+        mut active_tools,
+    } = serde_json::from_value(data)
+        .map_err(|error| format!("agent-run child add-on receipt data malformed: {error}"))?;
+    active_tools.sort();
+    Ok(ChildToolReceipt {
+        entry_id: entry_id.to_owned(),
+        self_digest,
+        profile_id,
+        tool_name,
+        boundary_id,
+        result_contract,
+        schema_digest,
+        binding,
+        active_tools,
+    })
 }
 
 impl RpcAssignment {
@@ -273,6 +370,7 @@ impl RpcAssignment {
         config.max_terminal_bytes = stdout_limit.max(DEFAULT_MAX_PI_STDOUT_BYTES);
         if let Some((path, _)) = runtime_addon(spec) {
             config.runtime_addon = Some(PathBuf::from(&path.0));
+            config.terminal_profile = spec.terminal_profile_id.clone();
             config.carrier_binding = Some(carrier_binding(spec));
         }
         let client = RpcClient::spawn(config).map_err(|error| error.to_string())?;
@@ -283,6 +381,7 @@ impl RpcAssignment {
             last_capacity_refusal: None,
             last_known_percent: None,
             checkpoint_armed: false,
+            bootstrap_entry: None,
         };
         let auto_id = runner.next_id("auto-off");
         let response = runner.command_response(RpcCommand::set_auto_compaction(auto_id, false))?;
@@ -296,7 +395,13 @@ impl RpcAssignment {
             let entries_id = runner.next_id("entries");
             let entries = runner.command_response(RpcCommand::get_entries(entries_id))?;
             runner.validate_child_receipt(spec, &entries)?;
+        } else if runner.bootstrap_entry.is_some() {
+            return Err(
+                "agent-run child emitted a registration entry without a runtime add-on".to_owned(),
+            );
         }
+        runner.client.complete_bootstrap();
+        runner.bootstrap_entry = None;
         Ok(runner)
     }
 
@@ -431,12 +536,13 @@ impl RpcAssignment {
                 is_error,
                 terminate,
             } => {
+                state.tool_execution_count = state.tool_execution_count.saturating_add(1);
                 if state.final_record.is_some() || state.tool_terminal.is_some() {
                     state.tool_after_terminal = true;
                 }
-                if kernel::generated::SUBMIT_TOOLS
+                if kernel::generated::TERMINAL_PROFILES
                     .iter()
-                    .any(|(name, _, _)| *name == tool_name)
+                    .any(|profile| profile.1 == tool_name)
                 {
                     if is_error || !terminate {
                         return Err(format!(
@@ -467,6 +573,10 @@ impl RpcAssignment {
             RpcEvent::CompactionStart {
                 reason: CompactionReason::Threshold | CompactionReason::Overflow,
             } => Err("agent-run Pi attempted automatic compaction".to_owned()),
+            RpcEvent::EntryAppended { entry } => Err(format!(
+                "agent-run child appended unexpected entry {} after bootstrap",
+                entry.custom_type
+            )),
             _ => Ok(()),
         }
     }
@@ -478,10 +588,20 @@ impl RpcAssignment {
         message: TerminalMessage,
     ) -> Result<(), String> {
         if message.role == "toolResult" {
-            if let Some(details) = message.details
-                && state.tool_result_details.replace(details).is_some()
+            let call_id = message
+                .tool_call_id
+                .ok_or_else(|| "agent-run toolResult missing toolCallId".to_owned())?;
+            let details = message
+                .details
+                .ok_or_else(|| "agent-run toolResult missing details".to_owned())?;
+            if state
+                .tool_result_details
+                .insert(call_id.clone(), details)
+                .is_some()
             {
-                return Err("agent-run received duplicate toolResult details".to_owned());
+                return Err(format!(
+                    "agent-run received duplicate toolResult details for {call_id}"
+                ));
             }
             return Ok(());
         }
@@ -682,10 +802,23 @@ impl RpcAssignment {
             let terminal = state
                 .tool_terminal
                 .ok_or_else(|| "agent-run terminating tool count without carrier".to_owned())?;
-            let duplicate = state.tool_result_details.ok_or_else(|| {
-                "agent-run terminating tool missing message_end(toolResult) details".to_owned()
-            })?;
-            if duplicate != terminal.details_value {
+            if state.tool_execution_count != 1 || state.tool_result_details.len() != 1 {
+                return Err(format!(
+                    "agent-run terminal turn mixed {} tool executions and {} tool results",
+                    state.tool_execution_count,
+                    state.tool_result_details.len()
+                ));
+            }
+            let duplicate = state
+                .tool_result_details
+                .get(&terminal.tool_call_id)
+                .ok_or_else(|| {
+                    format!(
+                        "agent-run terminating tool missing correlated toolResult details for {}",
+                        terminal.tool_call_id
+                    )
+                })?;
+            if duplicate != &terminal.details_value {
                 return Err(format!(
                     "agent-run tool details drift between tool_execution_end and toolResult for {}",
                     terminal.tool_call_id
@@ -702,15 +835,6 @@ impl RpcAssignment {
             return self.run_prompt(spec, &resume, PromptPurpose::Resume);
         }
         if state.awaiting_handoff {
-            match &state.final_record {
-                Some(candidate)
-                    if runtime_addon(spec).is_none()
-                        && validate_assistant_value(spec, &candidate.record.text).is_ok() =>
-                {
-                    return Ok(CarrierSource::Assistant(candidate.record.text.clone()));
-                }
-                _ => {}
-            }
             self.abort_stale_queue()?;
             let handoff_prompt = self.handoff_prompt(spec)?;
             return self.run_prompt(spec, &handoff_prompt, PromptPurpose::Handoff);
@@ -718,25 +842,10 @@ impl RpcAssignment {
         if state.terminal_count == 0 {
             return Err("agent-run Pi JSONL contained no final carrier result".to_owned());
         }
-        if runtime_addon(spec).is_some() {
-            return Err(
-                "agent-run planning child returned assistant text; a terminating submit tool result is required"
-                    .to_owned(),
-            );
-        }
-        if state.terminal_count != 1 {
-            return Err(format!(
-                "agent-run Pi JSONL contained {} terminal assistant results; expected exactly one",
-                state.terminal_count
-            ));
-        }
-        let record = state
-            .final_record
-            .ok_or_else(|| "agent-run Pi JSONL contained no final assistant result".to_owned())?;
-        if record.record.text.trim().is_empty() {
-            return Err("agent-run Pi JSONL contained empty final assistant result".to_owned());
-        }
-        Ok(CarrierSource::Assistant(record.record.text))
+        Err(
+            "agent-run child returned assistant text; the selected terminating tool result is required"
+                .to_owned(),
+        )
     }
 
     fn request_stats(&mut self, state: &mut CycleState) -> Result<(), String> {
@@ -753,20 +862,33 @@ impl RpcAssignment {
         self.client
             .send_command(command)
             .map_err(|error| error.to_string())?;
-        let frame = self
-            .client
-            .next_frame()
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "agent-run rpc stream ended before command response".to_owned())?;
-        match frame {
-            RpcFrame::Response(response) if response.id == expected => Ok(response),
-            RpcFrame::Response(response) => Err(format!(
-                "agent-run unexpected rpc response id {}; expected {expected}",
-                response.id
-            )),
-            RpcFrame::Event(event) => Err(format!(
-                "agent-run unexpected rpc event before configuration completed: {event:?}"
-            )),
+        loop {
+            let frame = self
+                .client
+                .next_frame()
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "agent-run rpc stream ended before command response".to_owned())?;
+            match frame {
+                RpcFrame::Response(response) if response.id == expected => return Ok(response),
+                RpcFrame::Response(response) => {
+                    return Err(format!(
+                        "agent-run unexpected rpc response id {}; expected {expected}",
+                        response.id
+                    ));
+                }
+                RpcFrame::Event(RpcEvent::EntryAppended { entry }) => {
+                    if self.bootstrap_entry.replace(entry).is_some() {
+                        return Err(
+                            "agent-run received duplicate child registration entry".to_owned()
+                        );
+                    }
+                }
+                RpcFrame::Event(event) => {
+                    return Err(format!(
+                        "agent-run unexpected rpc event before configuration completed: {event:?}"
+                    ));
+                }
+            }
         }
     }
 
@@ -799,36 +921,50 @@ impl RpcAssignment {
                 receipts.len()
             ));
         }
-        let receipt = receipts[0]
-            .get("data")
-            .and_then(Value::as_object)
-            .ok_or_else(|| "agent-run child add-on receipt missing data".to_owned())?;
-        let self_digest = receipt.get("self_digest").and_then(Value::as_str);
-        if self_digest != Some(expected_digest.0.as_str()) {
+        let durable = normalize_child_tool_receipt(receipts[0])?;
+        if let Some(streamed) = &self.bootstrap_entry {
+            let streamed = normalize_streamed_child_tool_receipt(streamed)?;
+            if streamed != durable {
+                return Err(format!(
+                    "agent-run streamed child registration entry drift: expected {durable:?}, got {streamed:?}"
+                ));
+            }
+        }
+        if durable.self_digest != expected_digest.0 {
             return Err(format!(
-                "agent-run child add-on digest mismatch: expected {}, got {self_digest:?}",
-                expected_digest.0
+                "agent-run child add-on digest mismatch: expected {}, got {}",
+                expected_digest.0, durable.self_digest
             ));
         }
-        let receipt_binding = receipt.get("binding").and_then(Value::as_str);
-        if receipt_binding != Some(carrier_binding(spec).as_str()) {
+        let expected_binding = carrier_binding(spec);
+        if durable.binding != expected_binding {
             return Err(format!(
-                "agent-run child add-on binding receipt mismatch: expected {}, got {receipt_binding:?}",
-                carrier_binding(spec)
+                "agent-run child add-on binding receipt mismatch: expected {expected_binding}, got {}",
+                durable.binding
             ));
         }
-        let mut active = receipt
-            .get("active_tools")
-            .and_then(Value::as_array)
-            .ok_or_else(|| "agent-run child add-on receipt missing active_tools".to_owned())?
-            .iter()
-            .map(|value| {
-                value
-                    .as_str()
-                    .map(str::to_owned)
-                    .ok_or_else(|| "agent-run active tool is not a string".to_owned())
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let profile_id = spec
+            .terminal_profile_id
+            .as_deref()
+            .ok_or_else(|| "agent-run spec missing terminal profile".to_owned())?;
+        let profile = super::terminal_profile_for(
+            &spec.role_id.0,
+            &spec.boundary_id.0,
+            &spec.result_contract.0,
+        )
+        .map_err(|error| error.to_string())?;
+        if durable.profile_id != profile_id
+            || profile.0 != profile_id
+            || durable.tool_name != profile.1
+            || durable.boundary_id != profile.2
+            || durable.result_contract != profile.3
+            || durable.schema_digest != profile.4
+        {
+            return Err(format!(
+                "agent-run child terminal profile receipt drift: expected {profile:?}, got {durable:?}"
+            ));
+        }
+        let mut active = durable.active_tools;
         active.sort();
         let mut expected = spec
             .allowed_tools
@@ -841,12 +977,10 @@ impl RpcAssignment {
                 "agent-run active tools drift before prompt: expected {expected:?}, got {active:?}"
             ));
         }
-        let (terminal_tool, _) = super::terminal_submit_tool(&spec.role_id.0)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "agent-run planning role has no terminal submit tool".to_owned())?;
-        if !active.iter().any(|tool| tool == terminal_tool) {
+        if !active.iter().any(|tool| tool == profile.1) {
             return Err(format!(
-                "agent-run terminal tool {terminal_tool} is not active before prompt"
+                "agent-run terminal tool {} is not active before prompt",
+                profile.1
             ));
         }
         Ok(())
@@ -916,7 +1050,10 @@ impl RpcAssignment {
         let percent = self
             .last_known_percent
             .ok_or_else(|| "agent-run checkpoint missing known context percent".to_owned())?;
-        let input = if spec.result_contract.0 == "autopilot.delivery_result.v1" {
+        let input = if matches!(
+            spec.assignment_kind,
+            kernel::generated::ValidationAssignmentKind::Delivery
+        ) {
             let lane_id = spec
                 .lane_id
                 .clone()
@@ -1272,29 +1409,6 @@ fn assistant_from_terminal(message: TerminalMessage) -> Result<AssistantRecord, 
     })
 }
 
-fn validate_assistant_value(spec: &AgentRunSpec, assistant: &str) -> Result<(), ValueRejection> {
-    if spec.result_contract.0 == "autopilot.delivery_result.v1" {
-        let carrier: DeliveryResult = serde_json::from_str(assistant).map_err(|error| {
-            value_rejection(
-                "carrier",
-                "autopilot.delivery_result.v1 JSON object",
-                format!("invalid JSON: {error}"),
-            )
-        })?;
-        validate_delivery_carrier(spec, &carrier)
-    } else {
-        crate::runner::validate_child_boundary(spec, assistant)
-            .map(|_| ())
-            .map_err(|error| {
-                value_rejection(
-                    "raw_output",
-                    format!("{} admitted value", error.boundary_id()),
-                    error.actual().to_owned(),
-                )
-            })
-    }
-}
-
 fn write_rpc_stats_if_requested(diagnostics: &RpcDiagnostics) -> Result<(), String> {
     let Some(path) = std::env::var_os("AUTOPILOT_AGENT_RUN_STATS_PATH") else {
         return Ok(());
@@ -1339,7 +1453,7 @@ fn parse_args(args: &[String]) -> Result<PathBuf, String> {
 }
 
 fn validate_spec(strict: &AgentRunSpec, spec_path: &Path) -> Result<(), String> {
-    if strict.schema.0 != "autopilot.agent_run_spec.v3" {
+    if strict.schema.0 != "autopilot.agent_run_spec.v4" {
         return Err(format!(
             "unsupported agent-run spec schema: {}",
             strict.schema.0
@@ -1419,44 +1533,55 @@ fn validate_route_and_role(strict: &AgentRunSpec) -> Result<(), String> {
     {
         return Err("agent-run refuses OpenRouter/API-key route substitution".to_owned());
     }
-    let tools = super::role_tool_names(&strict.role_id.0).map_err(|error| error.to_string())?;
+    let profile_id = strict
+        .terminal_profile_id
+        .as_deref()
+        .ok_or_else(|| "agent-run missing terminal_profile_id".to_owned())?;
+    let profile = super::terminal_profile_for(
+        &strict.role_id.0,
+        &strict.boundary_id.0,
+        &strict.result_contract.0,
+    )
+    .map_err(|error| error.to_string())?;
+    if profile.0 != profile_id {
+        return Err(format!(
+            "agent-run terminal profile drift: expected {}, got {profile_id}",
+            profile.0
+        ));
+    }
+    let resolved = super::resolve_role_tools(&strict.role_id.0, profile_id)
+        .map_err(|error| error.to_string())?;
     let actual_tools = strict
         .allowed_tools
         .iter()
         .map(|tool| tool.0.clone())
         .collect::<Vec<_>>();
-    if actual_tools != tools {
+    let unavailable = strict
+        .unavailable_tools
+        .as_ref()
+        .map(|tools| tools.iter().map(|tool| tool.0.clone()).collect::<Vec<_>>())
+        .unwrap_or_default();
+    if actual_tools != resolved.active || unavailable != resolved.unavailable {
         return Err(format!(
-            "agent-run allowed tools drift: expected {:?}, got {:?}",
-            tools, actual_tools
+            "agent-run capability drift: expected active={:?} unavailable={:?}, got active={actual_tools:?} unavailable={unavailable:?}",
+            resolved.active, resolved.unavailable
         ));
     }
-    let expected_boundary = if strict.result_contract.0 == "autopilot.delivery_result.v1" {
-        if !matches!(
-            strict.role_id.0.as_str(),
-            "implementer" | "fixer-integrator"
-        ) {
+    match strict.assignment_kind {
+        kernel::generated::ValidationAssignmentKind::PlanningReview
+            if strict.boundary_id.0.starts_with("planning.") => {}
+        kernel::generated::ValidationAssignmentKind::Delivery
+            if strict.boundary_id.0 == "autopilot.delivery_submission.v2"
+                && strict.result_contract.0 == "autopilot.delivery_result.v2" => {}
+        kernel::generated::ValidationAssignmentKind::Validation
+            if strict.boundary_id.0 == "autopilot.validation_submission.v2"
+                && strict.result_contract.0 == "autopilot.validation_result.v2" => {}
+        _ => {
             return Err(format!(
-                "agent-run role has no delivery boundary: {}",
-                strict.role_id.0
+                "agent-run assignment kind/boundary/result drift: {:?}/{}/{}",
+                strict.assignment_kind, strict.boundary_id.0, strict.result_contract.0
             ));
         }
-        "autopilot.delivery_result.v1".to_owned()
-    } else {
-        super::planning_boundary_for_role(&strict.role_id.0)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| {
-                format!(
-                    "agent-run role has no planning boundary: {}",
-                    strict.role_id.0
-                )
-            })?
-    };
-    if strict.boundary_id.0 != expected_boundary || strict.result_contract.0 != expected_boundary {
-        return Err(format!(
-            "agent-run result contract drift: expected {expected_boundary}, got boundary={} result={}",
-            strict.boundary_id.0, strict.result_contract.0
-        ));
     }
     Ok(())
 }
@@ -1470,10 +1595,16 @@ fn validate_paths(strict: &AgentRunSpec, spec_path: &Path) -> Result<(), String>
     super::reject_link_components_for_path(&declared_spec).map_err(|error| error.to_string())?;
     super::reject_link_components_for_path(&prompt).map_err(|error| error.to_string())?;
     super::reject_link_components_for_path(&carrier).map_err(|error| error.to_string())?;
-    let expected_paths = if strict.result_contract.0 == "autopilot.delivery_result.v1" {
-        super::delivery_paths(&cwd, &strict.assignment_id)
-    } else {
-        super::planning_paths(&cwd, &strict.workstream.0, &strict.assignment_id)
+    let expected_paths = match strict.assignment_kind {
+        kernel::generated::ValidationAssignmentKind::PlanningReview => {
+            super::planning_paths(&cwd, &strict.workstream.0, &strict.assignment_id)
+        }
+        kernel::generated::ValidationAssignmentKind::Delivery => {
+            super::delivery_paths(&cwd, &strict.assignment_id)
+        }
+        kernel::generated::ValidationAssignmentKind::Validation => {
+            super::validation_paths(&cwd, &strict.workstream.0, &strict.assignment_id)
+        }
     };
     compare_path("spec_path", spec_path, &expected_paths.spec_path)?;
     compare_path(
@@ -1487,9 +1618,8 @@ fn validate_paths(strict: &AgentRunSpec, spec_path: &Path) -> Result<(), String>
 }
 
 fn validate_runtime_addon(strict: &AgentRunSpec) -> Result<(), String> {
-    let planning = strict.result_contract.0 != "autopilot.delivery_result.v1";
     match runtime_addon(strict) {
-        Some((path, expected)) if planning => {
+        Some((path, expected)) => {
             let path = path_value("runtime_addon_path", &path.0)?;
             super::reject_link_components_for_path(&path).map_err(|error| error.to_string())?;
             super::require_regular_file(&path).map_err(|error| error.to_string())?;
@@ -1514,23 +1644,22 @@ fn validate_runtime_addon(strict: &AgentRunSpec) -> Result<(), String> {
             }
             Ok(())
         }
-        None if !planning => Ok(()),
-        _ if planning => {
-            Err("agent-run planning spec requires child add-on path and digest".to_owned())
-        }
-        _ => Err("agent-run delivery spec must not load child add-on".to_owned()),
+        None => Err("agent-run spec requires child add-on path and digest".to_owned()),
     }
 }
 
-fn carrier_binding(spec: &AgentRunSpec) -> String {
+pub fn carrier_binding(spec: &AgentRunSpec) -> String {
     sha256_hex(
         format!(
-            "autopilot.tool-carrier.v1\0{}\0{}\0{}\0{}\0{}\0{}",
+            "autopilot.tool-carrier.v2\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
             spec.run_id.0,
             spec.action_id.0,
             spec.assignment_id.0,
             spec.run_revision,
             spec.boundary_id.0,
+            spec.result_contract.0,
+            spec.terminal_profile_id.as_deref().unwrap_or("<missing>"),
+            runtime_addon(spec).map_or("<missing>", |(_, digest)| digest.0.as_str()),
             spec.prompt_digest.0
         )
         .as_bytes(),
@@ -1552,7 +1681,10 @@ fn validate_digests(strict: &AgentRunSpec) -> Result<(), String> {
     {
         return Err("agent-run authority/settings/subscription digest drift".to_owned());
     }
-    let context_digest = if strict.result_contract.0 == "autopilot.delivery_result.v1" {
+    let context_digest = if matches!(
+        strict.assignment_kind,
+        kernel::generated::ValidationAssignmentKind::Delivery
+    ) {
         sha_json(&serde_json::json!({
             "workstream": strict.workstream.0,
             "lane_id": strict.lane_id.as_ref().map(|id| id.0.as_str()),
@@ -1561,7 +1693,10 @@ fn validate_digests(strict: &AgentRunSpec) -> Result<(), String> {
             "worktree": strict.worktree.as_ref().map(|path| path.0.as_str()),
             "required_focused_evidence": strict.required_focused_evidence,
         }))?
-    } else {
+    } else if matches!(
+        strict.assignment_kind,
+        kernel::generated::ValidationAssignmentKind::PlanningReview
+    ) {
         let authority_set_id = strict
             .authority_set_id
             .as_deref()
@@ -1576,6 +1711,17 @@ fn validate_digests(strict: &AgentRunSpec) -> Result<(), String> {
             .ok_or_else(|| "agent-run missing context_documents".to_owned())?;
         super::planning_context_digest(authority_set_id, authority_documents, context_documents)
             .map_err(|error| error.to_string())?
+    } else {
+        sha_json(&serde_json::json!({
+            "assignment_path": strict.assignment_path,
+            "assignment_digest": strict.assignment_digest,
+            "context_manifest_path": strict.context_manifest_path,
+            "context_manifest_digest": strict.context_manifest_digest,
+            "producer_assignment_ids": strict.producer_assignment_ids,
+            "validation_id": strict.validation_id,
+            "validation_attempt": strict.validation_attempt,
+            "semantic_round": strict.semantic_round,
+        }))?
     };
     if strict.context_digest.0 != context_digest {
         return Err("agent-run context digest drift".to_owned());
@@ -1584,7 +1730,10 @@ fn validate_digests(strict: &AgentRunSpec) -> Result<(), String> {
 }
 
 fn validate_delivery_identity(strict: &AgentRunSpec) -> Result<(), String> {
-    if strict.result_contract.0 != "autopilot.delivery_result.v1" {
+    if matches!(
+        strict.assignment_kind,
+        kernel::generated::ValidationAssignmentKind::PlanningReview
+    ) {
         let prefix = format!("planning-{}-{}-", strict.workstream.0, strict.role_id.0);
         if strict.assignment_id.0.strip_prefix(&prefix).is_none() {
             return Err(format!(
@@ -1608,6 +1757,12 @@ fn validate_delivery_identity(strict: &AgentRunSpec) -> Result<(), String> {
             return Err("agent-run planning spec contains delivery identity fields".to_owned());
         }
         return Ok(());
+    }
+    if matches!(
+        strict.assignment_kind,
+        kernel::generated::ValidationAssignmentKind::Validation
+    ) {
+        return validate_validation_spec_identity(strict);
     }
     let lane_id = strict
         .lane_id
@@ -1647,8 +1802,114 @@ fn validate_delivery_identity(strict: &AgentRunSpec) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_validation_spec_identity(strict: &AgentRunSpec) -> Result<(), String> {
+    let assignment_path = strict
+        .assignment_path
+        .as_ref()
+        .ok_or_else(|| "agent-run validation missing assignment_path".to_owned())?;
+    let assignment_digest = strict
+        .assignment_digest
+        .as_ref()
+        .ok_or_else(|| "agent-run validation missing assignment_digest".to_owned())?;
+    let context_path = strict
+        .context_manifest_path
+        .as_ref()
+        .ok_or_else(|| "agent-run validation missing context_manifest_path".to_owned())?;
+    let context_digest = strict
+        .context_manifest_digest
+        .as_ref()
+        .ok_or_else(|| "agent-run validation missing context_manifest_digest".to_owned())?;
+    let model_submission_path = strict
+        .model_submission_path
+        .as_ref()
+        .ok_or_else(|| "agent-run validation missing model_submission_path".to_owned())?;
+    let expected_submission = Path::new(&assignment_path.0)
+        .parent()
+        .ok_or_else(|| "agent-run validation assignment path has no parent".to_owned())?
+        .join("model-submission.json");
+    if Path::new(&model_submission_path.0) != expected_submission {
+        return Err("agent-run validation model submission path drift".to_owned());
+    }
+    for path in [
+        PathBuf::from(&model_submission_path.0),
+        PathBuf::from(&strict.carrier_path.0).with_extension("tool-audit.json"),
+    ] {
+        super::reject_link_components_for_path(&path).map_err(|error| error.to_string())?;
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => {
+                return Err(format!(
+                    "agent-run validation stale package output refused at {}",
+                    path.display()
+                ));
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    for (label, path, digest) in [
+        ("assignment", &assignment_path.0, &assignment_digest.0),
+        ("context", &context_path.0, &context_digest.0),
+    ] {
+        let bytes = fs::read(path)
+            .map_err(|error| format!("agent-run validation {label} read failed: {error}"))?;
+        if sha256_hex(&bytes) != *digest {
+            return Err(format!("agent-run validation {label} digest drift"));
+        }
+    }
+    if strict
+        .producer_assignment_ids
+        .as_ref()
+        .is_none_or(Vec::is_empty)
+        || strict
+            .validation_id
+            .as_ref()
+            .is_none_or(|id| id.0.trim().is_empty())
+        || strict.validation_attempt.is_none_or(|attempt| attempt == 0)
+        || strict.semantic_round.is_none_or(|round| round == 0)
+    {
+        return Err("agent-run validation identity fields are incomplete".to_owned());
+    }
+    let assignment: kernel::generated::ValidationAssignmentV2 =
+        serde_json::from_slice(&fs::read(&assignment_path.0).map_err(|error| error.to_string())?)
+            .map_err(|error| format!("agent-run validation assignment malformed: {error}"))?;
+    let context: kernel::generated::ValidationContextV2 =
+        serde_json::from_slice(&fs::read(&context_path.0).map_err(|error| error.to_string())?)
+            .map_err(|error| format!("agent-run validation context malformed: {error}"))?;
+    if assignment.action_id != strict.action_id
+        || assignment.assignment_id != strict.assignment_id
+        || assignment.workstream != strict.workstream
+        || assignment.run_revision != strict.run_revision
+        || assignment.role_id != strict.role_id
+        || assignment.mode != strict.mode
+        || Some(&assignment.validation_id) != strict.validation_id.as_ref()
+        || Some(assignment.validation_attempt) != strict.validation_attempt
+        || Some(assignment.semantic_round) != strict.semantic_round
+        || Some(&assignment.producer_assignment_ids) != strict.producer_assignment_ids.as_ref()
+        || assignment.candidate_root.0 != strict.cwd.0
+        || context.validation_id != assignment.validation_id
+        || context.assignment_id != assignment.assignment_id
+        || context.exact_commit != assignment.exact_commit
+        || context.exact_tree != assignment.exact_tree
+        || context.candidate.source_root != assignment.candidate_root
+    {
+        return Err("agent-run validation assignment/context identity drift".to_owned());
+    }
+    let candidate = Path::new(&strict.cwd.0);
+    let head = super::git_stdout_checked(candidate, &["rev-parse", "--verify", "HEAD^{commit}"])
+        .map_err(|error| format!("agent-run validation candidate HEAD: {error}"))?;
+    let tree = super::git_stdout_checked(candidate, &["rev-parse", "--verify", "HEAD^{tree}"])
+        .map_err(|error| format!("agent-run validation candidate tree: {error}"))?;
+    if head.trim() != assignment.exact_commit.0 || tree.trim() != assignment.exact_tree.0 {
+        return Err("agent-run validation candidate commit/tree drift before prompt".to_owned());
+    }
+    Ok(())
+}
+
 fn validate_planning_documents(strict: &AgentRunSpec) -> Result<(), String> {
-    if strict.result_contract.0 == "autopilot.delivery_result.v1" {
+    if !matches!(
+        strict.assignment_kind,
+        kernel::generated::ValidationAssignmentKind::PlanningReview
+    ) {
         if strict.authority_set_id.is_some()
             || strict.authority_documents.is_some()
             || strict.context_document.is_some()
@@ -1847,53 +2108,17 @@ fn append_attempt_event(
     Ok(())
 }
 
-fn existing_carrier_valid(
-    spec_path: &Path,
-    spec_digest: &str,
-    spec: &AgentRunSpec,
-) -> Result<bool, String> {
+fn ensure_carrier_absent(spec: &AgentRunSpec) -> Result<(), String> {
     let path = Path::new(&spec.carrier_path.0);
     super::reject_link_components_for_path(path).map_err(|error| error.to_string())?;
-    let text = match fs::read_to_string(path) {
-        Ok(value) => value,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(format!("carrier inspection failed {:?}: {error}", path)),
-    };
-    validate_existing_carrier(spec_path, spec_digest, spec, &text).map_err(|rejection| {
-        format!(
-            "agent-run stale carrier rejected field={} expected={} got={}",
-            rejection.field, rejection.expected, rejection.got
-        )
-    })?;
-    Ok(true)
-}
-
-fn validate_existing_carrier(
-    spec_path: &Path,
-    spec_digest: &str,
-    spec: &AgentRunSpec,
-    text: &str,
-) -> Result<(), ValueRejection> {
-    if spec.result_contract.0 == "autopilot.delivery_result.v1" {
-        let mut carrier: DeliveryResult = serde_json::from_str(text).map_err(|error| {
-            value_rejection(
-                "carrier",
-                "existing autopilot.delivery_result.v1 JSON object",
-                format!("invalid JSON: {error}"),
-            )
-        })?;
-        validate_delivery_carrier(spec, &carrier)?;
-        bind_delivery_carrier(spec_path, spec_digest, spec, &mut carrier)?;
-        return Ok(());
+    match fs::symlink_metadata(path) {
+        Ok(_) => Err(format!(
+            "agent-run unconsumed pre-existing carrier refused at {:?}",
+            path
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("carrier inspection failed {:?}: {error}", path)),
     }
-    let value: Value = serde_json::from_str(text).map_err(|error| {
-        value_rejection(
-            "carrier",
-            "existing autopilot.planning_carrier.v1 JSON object",
-            format!("invalid JSON: {error}"),
-        )
-    })?;
-    validate_existing_planning_carrier(spec_path, spec_digest, spec, &value)
 }
 
 fn write_carrier(
@@ -1902,51 +2127,25 @@ fn write_carrier(
     spec: &AgentRunSpec,
     source: &CarrierSource,
 ) -> Result<(), CarrierRejection> {
-    if spec.result_contract.0 == "autopilot.delivery_result.v1" {
-        let CarrierSource::Assistant(assistant) = source else {
-            return Err(CarrierRejection::Identity(
-                "delivery assignment returned a planning submit tool".to_owned(),
-            ));
-        };
-        let mut carrier: DeliveryResult = serde_json::from_str(assistant).map_err(|error| {
-            value_rejection(
-                "carrier",
-                "autopilot.delivery_result.v1 JSON object",
-                format!("invalid JSON: {error}"),
-            )
-        })?;
-        validate_delivery_carrier(spec, &carrier)?;
-        bind_delivery_carrier(spec_path, spec_digest, spec, &mut carrier)?;
-        return write_json_new(&spec.carrier_path.0, &carrier)
-            .map_err(|error| {
-                value_rejection("carrier_path", "create-once writable carrier path", error)
-            })
-            .map_err(Into::into);
-    }
-
-    let CarrierSource::Tool(terminal) = source else {
-        return Err(CarrierRejection::Identity(
-            "planning assignment returned assistant text instead of a submit tool".to_owned(),
-        ));
-    };
-    let (expected_tool, expected_schema) = super::terminal_submit_tool(&spec.role_id.0)
-        .map_err(|error| CarrierRejection::Identity(error.to_string()))?
-        .ok_or_else(|| {
-            CarrierRejection::Identity("planning role has no terminal submit tool".to_owned())
-        })?;
-    if terminal.tool_name != expected_tool
-        || terminal.details.boundary_id != spec.boundary_id.0
-        || terminal.details.schema_digest != expected_schema
-        || terminal.details.binding != carrier_binding(spec)
+    let CarrierSource::Tool(terminal) = source;
+    let profile = super::terminal_profile_for(
+        &spec.role_id.0,
+        &spec.boundary_id.0,
+        &spec.result_contract.0,
+    )
+    .map_err(|error| CarrierRejection::Identity(error.to_string()))?;
+    let expected_binding = carrier_binding(spec);
+    if spec.terminal_profile_id.as_deref() != Some(profile.0)
+        || terminal.tool_name != profile.1
+        || terminal.details.profile_id != profile.0
+        || terminal.details.tool_name != profile.1
+        || terminal.details.boundary_id != profile.2
+        || terminal.details.result_contract != profile.3
+        || terminal.details.schema_digest != profile.4
+        || terminal.details.binding != expected_binding
     {
         return Err(CarrierRejection::Identity(format!(
-            "tool/boundary/schema/binding drift: expected {expected_tool}/{}/{expected_schema}/{}, got {}/{}/{}/{}",
-            spec.boundary_id.0,
-            carrier_binding(spec),
-            terminal.tool_name,
-            terminal.details.boundary_id,
-            terminal.details.schema_digest,
-            terminal.details.binding
+            "terminal profile identity drift: expected {profile:?}/{expected_binding}, got {terminal:?}"
         )));
     }
     let raw_output = serde_json::to_string(&terminal.details.payload).map_err(|error| {
@@ -1956,6 +2155,68 @@ fn write_carrier(
             error.to_string(),
         ))
     })?;
+    if matches!(
+        spec.assignment_kind,
+        kernel::generated::ValidationAssignmentKind::Delivery
+    ) {
+        let submission: kernel::generated::DeliverySubmissionV2 =
+            serde_json::from_value(terminal.details.payload.clone()).map_err(|error| {
+                value_rejection(
+                    "payload",
+                    "closed autopilot.delivery_submission.v2",
+                    error.to_string(),
+                )
+            })?;
+        validate_delivery_submission(spec, &submission)?;
+        let carrier = package_tool_result(
+            spec_path,
+            spec_digest,
+            spec,
+            terminal,
+            serde_json::to_value(&submission).map_err(|error| {
+                value_rejection(
+                    "payload",
+                    "serializable delivery submission",
+                    error.to_string(),
+                )
+            })?,
+            "autopilot.delivery_result.v2",
+        )?;
+        return write_json_new(&spec.carrier_path.0, &carrier)
+            .map_err(|error| value_rejection("carrier_path", "create-once carrier", error))
+            .map_err(Into::into);
+    }
+    if matches!(
+        spec.assignment_kind,
+        kernel::generated::ValidationAssignmentKind::Validation
+    ) {
+        let submission: kernel::generated::ValidationSubmissionV2 =
+            serde_json::from_value(terminal.details.payload.clone()).map_err(|error| {
+                value_rejection(
+                    "payload",
+                    "closed autopilot.validation_submission.v2",
+                    error.to_string(),
+                )
+            })?;
+        validate_validation_submission(spec, &submission)?;
+        let carrier = package_tool_result(
+            spec_path,
+            spec_digest,
+            spec,
+            terminal,
+            serde_json::to_value(&submission).map_err(|error| {
+                value_rejection(
+                    "payload",
+                    "serializable validation submission",
+                    error.to_string(),
+                )
+            })?,
+            "autopilot.validation_result.v2",
+        )?;
+        return write_json_new(&spec.carrier_path.0, &carrier)
+            .map_err(|error| value_rejection("carrier_path", "create-once carrier", error))
+            .map_err(Into::into);
+    }
     crate::runner::validate_child_boundary(spec, &raw_output).map_err(|error| {
         value_rejection(
             "payload",
@@ -2000,207 +2261,340 @@ fn write_carrier(
         .map_err(Into::into)
 }
 
-fn validate_existing_planning_carrier(
-    spec_path: &Path,
-    spec_digest: &str,
+fn validate_delivery_submission(
     spec: &AgentRunSpec,
-    value: &Value,
+    submission: &kernel::generated::DeliverySubmissionV2,
 ) -> Result<(), ValueRejection> {
-    let (_, runtime_digest) = runtime_addon(spec)
-        .ok_or_else(|| value_rejection(RUNTIME_ADDON_DIGEST_FIELD, "bound digest", "missing"))?;
-    let (terminal_tool, schema_digest) = super::terminal_submit_tool(&spec.role_id.0)
-        .map_err(|error| value_rejection("tool_name", "declared terminal tool", error.to_string()))?
-        .ok_or_else(|| value_rejection("tool_name", "declared terminal tool", "missing"))?;
-    for (field, expected) in [
-        ("schema", "autopilot.planning_carrier.v1".to_owned()),
-        ("action_id", spec.action_id.0.clone()),
-        ("assignment_id", spec.assignment_id.0.clone()),
-        ("run_revision", spec.run_revision.to_string()),
-        ("workstream", spec.workstream.0.clone()),
-        ("role_id", spec.role_id.0.clone()),
-        ("mode", spec.mode.0.clone()),
-        ("boundary_id", spec.boundary_id.0.clone()),
-        ("result_contract", spec.result_contract.0.clone()),
-        ("prompt_path", spec.prompt_path.0.clone()),
-        ("prompt_digest", spec.prompt_digest.0.clone()),
-        ("boundary_digest", spec.boundary_digest.0.clone()),
-        (
-            "result_contract_digest",
-            spec.result_contract_digest.0.clone(),
-        ),
-        ("settings_digest", spec.settings_digest.0.clone()),
-        ("context_digest", spec.context_digest.0.clone()),
-        ("skills_digest", spec.skills_digest.0.clone()),
-        ("subscription_digest", spec.subscription_digest.0.clone()),
-        (RUNTIME_ADDON_DIGEST_FIELD, runtime_digest.0.clone()),
-        ("carrier_channel", "tool".to_owned()),
-        ("tool_name", terminal_tool.to_owned()),
-        ("tool_schema_digest", schema_digest.to_owned()),
-        ("carrier_binding", carrier_binding(spec)),
-        ("spec_digest", spec_digest.to_owned()),
-        (
-            "spec_path",
-            super::path_to_string(spec_path).map_err(|error| {
-                value_rejection("spec_path", "absolute runner spec path", error.to_string())
-            })?,
-        ),
-        ("carrier_path", spec.carrier_path.0.clone()),
-    ] {
-        let got = if field == "run_revision" {
-            value
-                .get(field)
-                .and_then(Value::as_u64)
-                .map(|v| v.to_string())
-        } else {
-            value.get(field).and_then(Value::as_str).map(str::to_owned)
-        };
-        if got.as_deref() != Some(expected.as_str()) {
+    let required = spec.required_focused_evidence.unwrap_or(0) as usize;
+    if submission.actual_changed_paths.is_empty()
+        || submission.execution_audit_ref.0.trim().is_empty()
+        || submission.focused_evidence_refs.len() < required
+    {
+        return Err(value_rejection(
+            "delivery_submission",
+            format!("changed paths, audit ref, and at least {required} focused evidence refs"),
+            "missing required delivery evidence",
+        ));
+    }
+    if !submission.hard_boundary_violations.is_empty() {
+        return Err(value_rejection(
+            "hard_boundary_violations",
+            "empty array",
+            submission.hard_boundary_violations.join(","),
+        ));
+    }
+    Ok(())
+}
+
+pub fn admit_validation_submission(
+    spec: &AgentRunSpec,
+    submission: &kernel::generated::ValidationSubmissionV2,
+) -> Result<(), String> {
+    validate_validation_submission(spec, submission).map_err(|rejection| {
+        format!(
+            "field={} expected={} got={}",
+            rejection.field, rejection.expected, rejection.got
+        )
+    })
+}
+
+fn validate_validation_submission(
+    spec: &AgentRunSpec,
+    submission: &kernel::generated::ValidationSubmissionV2,
+) -> Result<(), ValueRejection> {
+    let assignment_path = spec
+        .assignment_path
+        .as_ref()
+        .ok_or_else(|| value_rejection("assignment_path", "validation assignment", "missing"))?;
+    let context_path = spec
+        .context_manifest_path
+        .as_ref()
+        .ok_or_else(|| value_rejection("context_manifest_path", "validation context", "missing"))?;
+    let assignment: kernel::generated::ValidationAssignmentV2 =
+        serde_json::from_slice(&fs::read(&assignment_path.0).map_err(|error| {
+            value_rejection("assignment_path", "readable assignment", error.to_string())
+        })?)
+        .map_err(|error| value_rejection("assignment", "valid assignment", error.to_string()))?;
+    let context: kernel::generated::ValidationContextV2 =
+        serde_json::from_slice(&fs::read(&context_path.0).map_err(|error| {
+            value_rejection(
+                "context_manifest_path",
+                "readable context",
+                error.to_string(),
+            )
+        })?)
+        .map_err(|error| {
+            value_rejection("context", "valid validation context", error.to_string())
+        })?;
+    if submission.validation_id != assignment.validation_id
+        || submission.assignment_id != assignment.assignment_id
+        || submission.scope != assignment.scope
+        || submission.exact_commit != assignment.exact_commit
+        || submission.exact_tree != assignment.exact_tree
+        || context.validation_id != assignment.validation_id
+        || context.assignment_id != assignment.assignment_id
+        || context.exact_commit != assignment.exact_commit
+        || context.exact_tree != assignment.exact_tree
+    {
+        return Err(value_rejection(
+            "validation_identity",
+            "assignment/context-bound validation identity",
+            "identity drift",
+        ));
+    }
+    let required = context
+        .criteria
+        .iter()
+        .map(|criterion| criterion.criterion_id.clone())
+        .collect::<BTreeSet<_>>();
+    let actual = submission
+        .criterion_results
+        .iter()
+        .map(|result| result.criterion_id.clone())
+        .collect::<BTreeSet<_>>();
+    if required.len() != context.criteria.len()
+        || actual.len() != submission.criterion_results.len()
+        || actual != required
+    {
+        return Err(value_rejection(
+            "criterion_results",
+            "every issued criterion exactly once",
+            "missing, duplicate, or unknown criterion",
+        ));
+    }
+    let evidence = context
+        .evidence
+        .iter()
+        .map(|item| item.evidence_ref.clone())
+        .collect::<BTreeSet<_>>();
+    let mut blocked = false;
+    for result in &submission.criterion_results {
+        if result.evidence_refs.is_empty()
+            || result
+                .evidence_refs
+                .iter()
+                .any(|reference| !evidence.contains(reference))
+        {
             return Err(value_rejection(
-                field,
-                expected,
-                got.unwrap_or_else(|| "missing-or-wrong-type".to_owned()),
+                "criterion_results.evidence_refs",
+                "nonempty issued evidence refs",
+                result.criterion_id.0.clone(),
             ));
         }
+        let criterion = context
+            .criteria
+            .iter()
+            .find(|criterion| criterion.criterion_id == result.criterion_id)
+            .expect("criterion sets were proven equal");
+        if !criterion
+            .covered_paths
+            .iter()
+            .all(|path| result.covered_paths.contains(path))
+            || !criterion
+                .semantic_surface_ids
+                .iter()
+                .all(|id| result.semantic_surface_ids.contains(id))
+            || !criterion
+                .forward_edge_ids
+                .iter()
+                .all(|id| result.forward_edge_ids.contains(id))
+        {
+            return Err(value_rejection(
+                "criterion_results.coverage",
+                "issued criterion coverage",
+                result.criterion_id.0.clone(),
+            ));
+        }
+        blocked |= result.verdict != kernel::generated::CriterionVerdict::PASS;
     }
-    let raw = value
-        .get("raw_output")
-        .and_then(Value::as_str)
-        .ok_or_else(|| value_rejection("raw_output", "string", "missing-or-wrong-type"))?;
-    crate::runner::validate_child_boundary(spec, raw).map_err(|error| {
-        value_rejection(
-            "raw_output",
-            format!("{} admitted value", error.boundary_id()),
-            error.actual().to_owned(),
-        )
-    })?;
+    blocked |= submission
+        .findings
+        .iter()
+        .any(|finding| finding.effect == kernel::generated::FindingEffect::ForwardBlocking);
+    let ready = submission.outcome == kernel::generated::ValidationOutcomeV2::FORWARDREADY;
+    if ready == blocked {
+        return Err(value_rejection(
+            "outcome",
+            "FORWARD_READY iff no criterion or finding blocks",
+            format!("{:?}", submission.outcome),
+        ));
+    }
     Ok(())
 }
 
-fn bind_delivery_carrier(
+fn package_tool_result(
     spec_path: &Path,
     spec_digest: &str,
     spec: &AgentRunSpec,
-    carrier: &mut DeliveryResult,
-) -> Result<(), ValueRejection> {
-    carrier.action_id = Some(spec.action_id.clone());
-    carrier.prompt_path = Some(spec.prompt_path.clone());
-    carrier.prompt_digest = Some(spec.prompt_digest.clone());
-    carrier.spec_path = Some(kernel::generated::Path(
-        super::path_to_string(spec_path).map_err(|error| {
-            value_rejection("spec_path", "absolute runner spec path", error.to_string())
-        })?,
-    ));
-    carrier.spec_digest = Some(kernel::generated::Digest(spec_digest.to_owned()));
-    carrier.carrier_path = Some(spec.carrier_path.clone());
-    carrier.boundary_digest = Some(spec.boundary_digest.clone());
-    carrier.result_contract_digest = Some(spec.result_contract_digest.clone());
-    carrier.settings_digest = Some(spec.settings_digest.clone());
-    carrier.context_digest = Some(spec.context_digest.clone());
-    carrier.skills_digest = Some(spec.skills_digest.clone());
-    carrier.subscription_digest = Some(spec.subscription_digest.clone());
-    Ok(())
-}
-
-fn delivery_identity_got(carrier: &DeliveryResult) -> String {
-    format!(
-        "assignment_id={} role_id={} mode={} run_revision={} lane_id={} attempt={} base_commit={} worktree={}",
-        carrier.assignment_id.0,
-        carrier.role_id.0,
-        carrier.mode.0,
-        carrier.run_revision,
-        carrier.lane_id.0,
-        carrier.attempt,
-        carrier.base_commit.0,
-        carrier.worktree.0
+    terminal: &ToolTerminal,
+    submission: Value,
+    schema: &str,
+) -> Result<Value, ValueRejection> {
+    let (_, runtime_digest) = runtime_addon(spec)
+        .ok_or_else(|| value_rejection(RUNTIME_ADDON_DIGEST_FIELD, "digest", "missing"))?;
+    let submission_bytes = serde_json::to_vec(&submission)
+        .map_err(|error| value_rejection("submission", "serializable", error.to_string()))?;
+    let submission_digest = sha256_hex(&submission_bytes);
+    if matches!(
+        spec.assignment_kind,
+        kernel::generated::ValidationAssignmentKind::Validation
+    ) {
+        let path = spec.model_submission_path.as_ref().ok_or_else(|| {
+            value_rejection(
+                "model_submission_path",
+                "validation submission path",
+                "missing",
+            )
+        })?;
+        write_json_new(&path.0, &submission).map_err(|error| {
+            value_rejection(
+                "model_submission_path",
+                "create-once model submission",
+                error,
+            )
+        })?;
+    }
+    let audit = serde_json::json!({
+        "schema": "autopilot.tool_audit.v1",
+        "tool_call_id": terminal.tool_call_id,
+        "profile_id": terminal.details.profile_id,
+        "tool_name": terminal.tool_name,
+        "boundary_id": terminal.details.boundary_id,
+        "result_contract": terminal.details.result_contract,
+        "schema_digest": terminal.details.schema_digest,
+        "binding": terminal.details.binding,
+        "submission_digest": submission_digest,
+    });
+    let audit_bytes = serde_json::to_vec_pretty(&audit)
+        .map_err(|error| value_rejection("tool_audit", "serializable", error.to_string()))?;
+    let audit_path = PathBuf::from(&spec.carrier_path.0).with_extension("tool-audit.json");
+    write_json_new(
+        audit_path
+            .to_str()
+            .ok_or_else(|| value_rejection("tool_audit", "UTF-8 path", "non-UTF-8"))?,
+        &audit,
     )
-}
-
-fn validate_delivery_carrier(
-    spec: &AgentRunSpec,
-    carrier: &DeliveryResult,
-) -> Result<(), ValueRejection> {
-    let lane = spec
-        .lane_id
-        .as_ref()
-        .ok_or_else(|| value_rejection("lane_id", "runner-issued lane identity", "missing"))?;
-    let attempt = spec
-        .attempt
-        .ok_or_else(|| value_rejection("attempt", "runner-issued attempt identity", "missing"))?;
-    let base = spec
-        .base_commit
-        .as_ref()
-        .ok_or_else(|| value_rejection("base_commit", "runner-issued base identity", "missing"))?;
-    let worktree = spec
-        .worktree
-        .as_ref()
-        .ok_or_else(|| value_rejection("worktree", "runner-issued worktree identity", "missing"))?;
-    if carrier.assignment_id != spec.assignment_id
-        || carrier.role_id != spec.role_id
-        || carrier.mode != spec.mode
-        || carrier.run_revision != spec.run_revision
-        || carrier.lane_id != *lane
-        || carrier.attempt != attempt
-        || carrier.base_commit != *base
-        || carrier.worktree.0 != worktree.0
-    {
-        return Err(value_rejection(
-            "carrier.identity",
-            "assignment_id/role_id/mode/run_revision/lane_id/attempt/base_commit/worktree matching spec",
-            delivery_identity_got(carrier),
-        ));
+    .map_err(|error| value_rejection("tool_audit", "create-once audit", error))?;
+    let mut carrier = serde_json::json!({
+        "schema": schema,
+        "action_id": spec.action_id,
+        "assignment_id": spec.assignment_id,
+        "run_revision": spec.run_revision,
+        "workstream": spec.workstream,
+        "role_id": spec.role_id,
+        "mode": spec.mode,
+        "prompt_path": spec.prompt_path,
+        "prompt_digest": spec.prompt_digest,
+        "spec_path": super::path_to_string(spec_path).map_err(|error| value_rejection("spec_path", "UTF-8 path", error.to_string()))?,
+        "spec_digest": spec_digest,
+        "carrier_path": spec.carrier_path,
+        "boundary_id": spec.boundary_id,
+        "boundary_digest": spec.boundary_digest,
+        "result_contract": spec.result_contract,
+        "result_contract_digest": spec.result_contract_digest,
+        "settings_digest": spec.settings_digest,
+        "skills_digest": spec.skills_digest,
+        "subscription_digest": spec.subscription_digest,
+        "runtime_extension_digest": runtime_digest,
+        "terminal_profile_id": terminal.details.profile_id,
+        "tool_name": terminal.tool_name,
+        "tool_schema_digest": terminal.details.schema_digest,
+        "carrier_binding": terminal.details.binding,
+        "tool_call_id": terminal.tool_call_id,
+        "tool_audit_ref": audit_path.display().to_string(),
+        "tool_audit_digest": sha256_hex(&audit_bytes),
+        "submission_digest": submission_digest,
+        "submission": submission,
+    });
+    let object = carrier
+        .as_object_mut()
+        .expect("package tool result is an object");
+    if matches!(
+        spec.assignment_kind,
+        kernel::generated::ValidationAssignmentKind::Delivery
+    ) {
+        object.insert(
+            "lane_id".to_owned(),
+            serde_json::to_value(spec.lane_id.as_ref().expect("validated lane")).unwrap(),
+        );
+        object.insert(
+            "attempt".to_owned(),
+            serde_json::json!(spec.attempt.expect("validated attempt")),
+        );
+        object.insert(
+            "base_commit".to_owned(),
+            serde_json::to_value(spec.base_commit.as_ref().expect("validated base")).unwrap(),
+        );
+        object.insert(
+            "worktree".to_owned(),
+            serde_json::to_value(spec.worktree.as_ref().expect("validated worktree")).unwrap(),
+        );
+        object.insert(
+            "context_digest".to_owned(),
+            serde_json::to_value(&spec.context_digest).unwrap(),
+        );
+    } else {
+        let assignment_bytes = fs::read(
+            &spec
+                .assignment_path
+                .as_ref()
+                .expect("validated assignment path")
+                .0,
+        )
+        .map_err(|error| value_rejection("assignment", "readable", error.to_string()))?;
+        let assignment: kernel::generated::ValidationAssignmentV2 =
+            serde_json::from_slice(&assignment_bytes)
+                .map_err(|error| value_rejection("assignment", "valid", error.to_string()))?;
+        for (key, value) in [
+            (
+                "validation_id",
+                serde_json::to_value(&assignment.validation_id).unwrap(),
+            ),
+            (
+                "validation_key",
+                serde_json::to_value(&assignment.validation_key).unwrap(),
+            ),
+            (
+                "validation_attempt",
+                serde_json::json!(assignment.validation_attempt),
+            ),
+            (
+                "semantic_round",
+                serde_json::json!(assignment.semantic_round),
+            ),
+            (
+                "producer_assignment_ids",
+                serde_json::to_value(&assignment.producer_assignment_ids).unwrap(),
+            ),
+            (
+                "exact_commit",
+                serde_json::to_value(&assignment.exact_commit).unwrap(),
+            ),
+            (
+                "exact_tree",
+                serde_json::to_value(&assignment.exact_tree).unwrap(),
+            ),
+            (
+                "assignment_path",
+                serde_json::to_value(spec.assignment_path.as_ref().unwrap()).unwrap(),
+            ),
+            (
+                "assignment_digest",
+                serde_json::to_value(spec.assignment_digest.as_ref().unwrap()).unwrap(),
+            ),
+            (
+                "context_manifest_path",
+                serde_json::to_value(spec.context_manifest_path.as_ref().unwrap()).unwrap(),
+            ),
+            (
+                "context_manifest_digest",
+                serde_json::to_value(spec.context_manifest_digest.as_ref().unwrap()).unwrap(),
+            ),
+        ] {
+            object.insert(key.to_owned(), value);
+        }
     }
-    if carrier
-        .action_id
-        .as_ref()
-        .is_some_and(|value| value != &spec.action_id)
-        || carrier
-            .prompt_path
-            .as_ref()
-            .is_some_and(|value| value != &spec.prompt_path)
-        || carrier
-            .prompt_digest
-            .as_ref()
-            .is_some_and(|value| value != &spec.prompt_digest)
-        || carrier
-            .spec_path
-            .as_ref()
-            .is_some_and(|value| value != &spec.spec_path)
-        || carrier
-            .carrier_path
-            .as_ref()
-            .is_some_and(|value| value != &spec.carrier_path)
-        || carrier
-            .boundary_digest
-            .as_ref()
-            .is_some_and(|value| value != &spec.boundary_digest)
-        || carrier
-            .result_contract_digest
-            .as_ref()
-            .is_some_and(|value| value != &spec.result_contract_digest)
-        || carrier
-            .settings_digest
-            .as_ref()
-            .is_some_and(|value| value != &spec.settings_digest)
-        || carrier
-            .context_digest
-            .as_ref()
-            .is_some_and(|value| value != &spec.context_digest)
-        || carrier
-            .skills_digest
-            .as_ref()
-            .is_some_and(|value| value != &spec.skills_digest)
-        || carrier
-            .subscription_digest
-            .as_ref()
-            .is_some_and(|value| value != &spec.subscription_digest)
-    {
-        return Err(value_rejection(
-            "carrier.binding",
-            "optional binding fields absent or matching runner spec",
-            "binding drift",
-        ));
-    }
-    Ok(())
+    Ok(carrier)
 }
 
 fn write_json_new(path: &str, value: &impl serde::Serialize) -> Result<(), String> {

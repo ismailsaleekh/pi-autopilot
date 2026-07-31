@@ -25,7 +25,7 @@ node scripts/certify-runtime-repair.mjs \
   --evidence-dir /absolute/external/evidence-dir
 ```
 
-The driver refuses metered credential variables, requires absolute clean package roots, writes evidence outside both repositories, and fails if package commit/tree identity changes during certification.
+The driver refuses metered credential variables, requires absolute clean package roots, writes evidence outside both repositories, and fails if package commit/tree identity changes during certification. Payload certification treats `extensions/autopilot.ts` as the package-declared Pi entrypoint and requires it alongside the Host source, bin wrappers, generated contracts/add-on files, and shipped binaries. The offline security scan allowlists only exact reviewed install-script packages and three Pi 0.83 SDK nested-lock integrity exceptions. TypeBox is a Pi-provided peer (`peerDependencies.typebox="*"`) plus dev-only `typebox@1.3.7` for local compile/type tests; it must not appear as a runtime or bundled dependency.
 
 ## Ledger IDs expected by the SMF validator
 

@@ -218,28 +218,204 @@ export const PLAN_REVIEW_TOOL_PARAMETERS = {
 } as unknown as TSchema;
 export const PLAN_REVIEW_TOOL_SCHEMA_DIGEST = "073f22c10d42166d5ec5d0a6465a1fa8f0df8fc1af2ce6a0702bed9b955786d8";
 
-export const PLANNING_TOOL_SCHEMAS = {
+export const DELIVERY_SUBMISSION_V2_TOOL_PARAMETERS = {
+  "additionalProperties": false,
+  "properties": {
+    "actual_changed_paths": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "execution_audit_ref": {
+      "type": "string"
+    },
+    "focused_evidence_refs": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "hard_boundary_violations": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "terminal_status": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "actual_changed_paths",
+    "execution_audit_ref",
+    "focused_evidence_refs",
+    "terminal_status",
+    "hard_boundary_violations"
+  ],
+  "type": "object"
+} as unknown as TSchema;
+export const DELIVERY_SUBMISSION_V2_TOOL_SCHEMA_DIGEST = "dc3894c6b09e07ffb83c1719b19caf501257c60d5b1c847917068ab75643d55d";
+
+export const VALIDATION_SUBMISSION_V2_TOOL_PARAMETERS = {
+  "additionalProperties": false,
+  "properties": {
+    "assignment_id": {
+      "type": "string"
+    },
+    "criterion_results": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "blocker_kind": {
+            "enum": [
+              "missing-evidence",
+              "stale-evidence",
+              "context-gap",
+              "external-prerequisite",
+              "unsafe-boundary"
+            ],
+            "type": "string"
+          },
+          "covered_paths": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "criterion_id": {
+            "type": "string"
+          },
+          "evidence_refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "finding_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "forward_edge_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "semantic_surface_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "verdict": {
+            "enum": [
+              "PASS",
+              "FAIL",
+              "BLOCKED"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "criterion_id",
+          "verdict",
+          "evidence_refs",
+          "finding_ids",
+          "covered_paths",
+          "semantic_surface_ids",
+          "forward_edge_ids"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "exact_commit": {
+      "type": "string"
+    },
+    "exact_tree": {
+      "type": "string"
+    },
+    "findings": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "outcome": {
+      "enum": [
+        "FORWARD_READY",
+        "FORWARD_BLOCKED",
+        "PASS",
+        "NEEDS_FIX",
+        "BLOCKED"
+      ],
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "scope": {
+      "enum": [
+        "forward",
+        "closure",
+        "delta",
+        "conflict",
+        "final"
+      ],
+      "type": "string"
+    },
+    "validation_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema",
+    "validation_id",
+    "assignment_id",
+    "scope",
+    "exact_commit",
+    "exact_tree",
+    "outcome",
+    "criterion_results",
+    "findings"
+  ],
+  "type": "object"
+} as unknown as TSchema;
+export const VALIDATION_SUBMISSION_V2_TOOL_SCHEMA_DIGEST = "3fb76a96ab8ea6c3bce27fb7fc9cbe4f4f0b411717f7805ea32ba4d8f9514c15";
+
+export const TERMINAL_TOOL_SCHEMAS = {
   "planning.task-atoms.v1": { boundary_id: "planning.task-atoms.v1", schema_digest: TASK_ATOMS_TOOL_SCHEMA_DIGEST, parameters: TASK_ATOMS_TOOL_PARAMETERS },
   "planning.scout-dossier.v1": { boundary_id: "planning.scout-dossier.v1", schema_digest: SCOUT_DOSSIER_TOOL_SCHEMA_DIGEST, parameters: SCOUT_DOSSIER_TOOL_PARAMETERS },
   "planning.questions.v1": { boundary_id: "planning.questions.v1", schema_digest: QUESTIONS_TOOL_SCHEMA_DIGEST, parameters: QUESTIONS_TOOL_PARAMETERS },
   "planning.work-map.v1": { boundary_id: "planning.work-map.v1", schema_digest: WORK_MAP_TOOL_SCHEMA_DIGEST, parameters: WORK_MAP_TOOL_PARAMETERS },
   "planning.plan-review.v1": { boundary_id: "planning.plan-review.v1", schema_digest: PLAN_REVIEW_TOOL_SCHEMA_DIGEST, parameters: PLAN_REVIEW_TOOL_PARAMETERS },
+  "autopilot.delivery_submission.v2": { boundary_id: "autopilot.delivery_submission.v2", schema_digest: DELIVERY_SUBMISSION_V2_TOOL_SCHEMA_DIGEST, parameters: DELIVERY_SUBMISSION_V2_TOOL_PARAMETERS },
+  "autopilot.validation_submission.v2": { boundary_id: "autopilot.validation_submission.v2", schema_digest: VALIDATION_SUBMISSION_V2_TOOL_SCHEMA_DIGEST, parameters: VALIDATION_SUBMISSION_V2_TOOL_PARAMETERS },
 } as const satisfies Record<string, ToolSchemaDescriptor>;
 
+export const PLANNING_TOOL_SCHEMAS = Object.fromEntries(Object.entries(TERMINAL_TOOL_SCHEMAS).filter(([boundary]) => boundary.startsWith("planning."))) as Record<string, ToolSchemaDescriptor>;
+
 export interface SubmitToolDescriptor {
+  profile_id: string;
   name: string;
   label: string;
   boundary_id: string;
+  result_contract: string;
   schema_digest: string;
   parameters: TSchema;
 }
 
 export const SUBMIT_TOOLS: readonly SubmitToolDescriptor[] = [
-  { name: "autopilot_submit_atoms", label: "Submit task atoms", boundary_id: "planning.task-atoms.v1", schema_digest: TASK_ATOMS_TOOL_SCHEMA_DIGEST, parameters: TASK_ATOMS_TOOL_PARAMETERS },
-  { name: "autopilot_submit_context", label: "Submit curated context dossier", boundary_id: "planning.scout-dossier.v1", schema_digest: SCOUT_DOSSIER_TOOL_SCHEMA_DIGEST, parameters: SCOUT_DOSSIER_TOOL_PARAMETERS },
-  { name: "autopilot_submit_plan_cluster", label: "Submit work map", boundary_id: "planning.work-map.v1", schema_digest: WORK_MAP_TOOL_SCHEMA_DIGEST, parameters: WORK_MAP_TOOL_PARAMETERS },
-  { name: "autopilot_submit_resolution", label: "Submit planning questions", boundary_id: "planning.questions.v1", schema_digest: QUESTIONS_TOOL_SCHEMA_DIGEST, parameters: QUESTIONS_TOOL_PARAMETERS },
-  { name: "autopilot_submit_review", label: "Submit plan review", boundary_id: "planning.plan-review.v1", schema_digest: PLAN_REVIEW_TOOL_SCHEMA_DIGEST, parameters: PLAN_REVIEW_TOOL_PARAMETERS },
-  { name: "autopilot_submit_scout_report", label: "Submit scout dossier", boundary_id: "planning.scout-dossier.v1", schema_digest: SCOUT_DOSSIER_TOOL_SCHEMA_DIGEST, parameters: SCOUT_DOSSIER_TOOL_PARAMETERS },
-  { name: "autopilot_submit_synthesis", label: "Submit synthesized work map", boundary_id: "planning.work-map.v1", schema_digest: WORK_MAP_TOOL_SCHEMA_DIGEST, parameters: WORK_MAP_TOOL_PARAMETERS },
+  { profile_id: "delivery-status.v2", name: "autopilot_emit_status", label: "Submit delivery status", boundary_id: "autopilot.delivery_submission.v2", result_contract: "autopilot.delivery_result.v2", schema_digest: DELIVERY_SUBMISSION_V2_TOOL_SCHEMA_DIGEST, parameters: DELIVERY_SUBMISSION_V2_TOOL_PARAMETERS },
+  { profile_id: "planning.plan-review.v1:autopilot_submit_review", name: "autopilot_submit_review", label: "Submit plan review", boundary_id: "planning.plan-review.v1", result_contract: "planning.plan-review.v1", schema_digest: PLAN_REVIEW_TOOL_SCHEMA_DIGEST, parameters: PLAN_REVIEW_TOOL_PARAMETERS },
+  { profile_id: "planning.questions.v1:autopilot_submit_resolution", name: "autopilot_submit_resolution", label: "Submit planning questions", boundary_id: "planning.questions.v1", result_contract: "planning.questions.v1", schema_digest: QUESTIONS_TOOL_SCHEMA_DIGEST, parameters: QUESTIONS_TOOL_PARAMETERS },
+  { profile_id: "planning.scout-dossier.v1:autopilot_submit_context", name: "autopilot_submit_context", label: "Submit curated context dossier", boundary_id: "planning.scout-dossier.v1", result_contract: "planning.scout-dossier.v1", schema_digest: SCOUT_DOSSIER_TOOL_SCHEMA_DIGEST, parameters: SCOUT_DOSSIER_TOOL_PARAMETERS },
+  { profile_id: "planning.scout-dossier.v1:autopilot_submit_scout_report", name: "autopilot_submit_scout_report", label: "Submit scout dossier", boundary_id: "planning.scout-dossier.v1", result_contract: "planning.scout-dossier.v1", schema_digest: SCOUT_DOSSIER_TOOL_SCHEMA_DIGEST, parameters: SCOUT_DOSSIER_TOOL_PARAMETERS },
+  { profile_id: "planning.task-atoms.v1:autopilot_submit_atoms", name: "autopilot_submit_atoms", label: "Submit task atoms", boundary_id: "planning.task-atoms.v1", result_contract: "planning.task-atoms.v1", schema_digest: TASK_ATOMS_TOOL_SCHEMA_DIGEST, parameters: TASK_ATOMS_TOOL_PARAMETERS },
+  { profile_id: "planning.work-map.v1:autopilot_submit_plan_cluster", name: "autopilot_submit_plan_cluster", label: "Submit work map", boundary_id: "planning.work-map.v1", result_contract: "planning.work-map.v1", schema_digest: WORK_MAP_TOOL_SCHEMA_DIGEST, parameters: WORK_MAP_TOOL_PARAMETERS },
+  { profile_id: "planning.work-map.v1:autopilot_submit_synthesis", name: "autopilot_submit_synthesis", label: "Submit synthesized work map", boundary_id: "planning.work-map.v1", result_contract: "planning.work-map.v1", schema_digest: WORK_MAP_TOOL_SCHEMA_DIGEST, parameters: WORK_MAP_TOOL_PARAMETERS },
+  { profile_id: "validation-status.v2", name: "autopilot_emit_status", label: "Submit validation status", boundary_id: "autopilot.validation_submission.v2", result_contract: "autopilot.validation_result.v2", schema_digest: VALIDATION_SUBMISSION_V2_TOOL_SCHEMA_DIGEST, parameters: VALIDATION_SUBMISSION_V2_TOOL_PARAMETERS },
 ] as const;

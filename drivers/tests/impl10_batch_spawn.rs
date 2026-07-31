@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_types)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -143,8 +145,9 @@ fn planning_wave_respects_lower_cap_and_tops_up() {
         .filter(|assignment| assignment.role == "task-extractor")
         .collect::<Vec<_>>();
 
-    let PlanningWaveOutcome::Launch { assignments: first, .. } =
-        next_planning_wave(&manifest, &PlanningRefs::default(), 3)
+    let PlanningWaveOutcome::Launch {
+        assignments: first, ..
+    } = next_planning_wave(&manifest, &PlanningRefs::default(), 3)
     else {
         panic!("first wave must launch assignments");
     };
@@ -185,8 +188,9 @@ fn planning_wave_respects_lower_cap_and_tops_up() {
         activation_refs: BTreeSet::new(),
     };
 
-    let PlanningWaveOutcome::Launch { assignments: topup, .. } =
-        next_planning_wave(&manifest, &refs, 3)
+    let PlanningWaveOutcome::Launch {
+        assignments: topup, ..
+    } = next_planning_wave(&manifest, &refs, 3)
     else {
         panic!("top-up must launch one assignment");
     };

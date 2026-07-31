@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_types)]
+
 use std::{
     fs,
     io::{BufRead, BufReader, Write},
@@ -303,6 +305,12 @@ fn lane_delivery_agent_git_mutation_and_incomplete_delivery_are_refused_without_
     fs::create_dir_all(wrapper.parent().expect("wrapper parent")).expect("wrapper dir");
     fs::write(&wrapper, "runner\n").expect("fake wrapper");
     let facts = RunnerTransportFacts::new(node, wrapper).expect("facts");
+    unsafe {
+        std::env::set_var(
+            "AUTOPILOT_CHILD_ADDON_PATH",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/generated/child-extension.ts"),
+        );
+    }
     let issue = delivery_issue_with_facts(&runner, &facts).expect("runner issue");
     let action = delivery_bg_action_with_facts(&runner, &facts).expect("runner action");
     assert!(action.bg_run.command.0.contains(" --spec "));
@@ -343,7 +351,7 @@ fn lane_delivery_core_stdout_stays_json_when_runtime_packages_uncommitted_change
 
     let mut core = CoreProcess::spawn(&root);
     let launch = core.send_json(serde_json::json!({"v":1,"id":1,"kind":"command","payload":{"raw":"autopilot main","background_capabilities":{"api_version":1,"run":true,"run_is_agent":true,"run_completion_trigger":true,"status":true,"logs":true,"logs_bounded":true,"kill":true}}}));
-    assert_eq!(launch.kind, "spawn");
+    assert_eq!(launch.kind, "spawn", "launch response: {launch:?}");
     let spawn: CoreToHostSpawnPayload =
         serde_json::from_value(launch.payload).expect("delivery spawn payload");
     let spec_path = root
@@ -368,7 +376,7 @@ fn lane_delivery_core_stdout_stays_json_when_runtime_packages_uncommitted_change
     .expect("carrier write");
 
     let accepted = core.send_json(serde_json::json!({"v":1,"id":2,"kind":"task-completed","payload":{"task_id":"task-stdout-purity","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}));
-    assert_eq!(accepted.kind, "spawn");
+    assert_eq!(accepted.kind, "spawn", "accepted response: {accepted:?}");
     core.shutdown();
 }
 
@@ -529,27 +537,13 @@ fn delivery_carrier_without_package_for_core(
     spec: &serde_json::Value,
     evidence_count: usize,
 ) -> serde_json::Value {
-    serde_json::json!({
-        "assignment_id": spec["assignment_id"],
-        "role_id": spec["role_id"],
-        "mode": spec["mode"],
-        "run_revision": spec["run_revision"],
-        "lane_id": spec["lane_id"],
-        "attempt": spec["attempt"],
-        "base_commit": spec["base_commit"],
-        "worktree": spec["worktree"],
-        "action_id": spec["action_id"],
-        "prompt_path": spec["prompt_path"],
-        "prompt_digest": spec["prompt_digest"],
-        "spec_path": spec["spec_path"],
-        "spec_digest": sha256_hex(&fs::read(spec["spec_path"].as_str().expect("spec path")).expect("spec bytes")),
-        "carrier_path": spec["carrier_path"],
-        "boundary_digest": spec["boundary_digest"],
-        "result_contract_digest": spec["result_contract_digest"],
-        "settings_digest": spec["settings_digest"],
-        "context_digest": spec["context_digest"],
-        "skills_digest": spec["skills_digest"],
-        "subscription_digest": spec["subscription_digest"],
+    let typed: kernel::generated::AgentRunSpec =
+        serde_json::from_value(spec.clone()).expect("typed runner spec");
+    let profile = kernel::generated::TERMINAL_PROFILES
+        .iter()
+        .find(|profile| profile.0 == "delivery-status.v2")
+        .expect("delivery profile");
+    let submission = serde_json::json!({
         "actual_changed_paths": ["README.md"],
         "execution_audit_ref": "audit:delivery",
         "focused_evidence_refs": (0..evidence_count)
@@ -557,6 +551,41 @@ fn delivery_carrier_without_package_for_core(
             .collect::<Vec<_>>(),
         "terminal_status": "done",
         "hard_boundary_violations": []
+    });
+    let submission_digest = sha256_hex(&serde_json::to_vec(&submission).expect("submission"));
+    let tool_call_id = "delivery-tool-call-1";
+    let binding = drivers::runner::child::carrier_binding(&typed);
+    let audit = serde_json::json!({
+        "schema":"autopilot.tool_audit.v1",
+        "tool_call_id":tool_call_id,
+        "profile_id":profile.0,
+        "tool_name":profile.1,
+        "boundary_id":profile.2,
+        "result_contract":profile.3,
+        "schema_digest":profile.4,
+        "binding":binding,
+        "submission_digest":submission_digest,
+    });
+    let carrier_path = PathBuf::from(spec["carrier_path"].as_str().expect("carrier path"));
+    let audit_path = carrier_path.with_extension("tool-audit.json");
+    let audit_bytes = serde_json::to_vec_pretty(&audit).expect("audit");
+    fs::write(&audit_path, &audit_bytes).expect("audit write");
+    serde_json::json!({
+        "schema":"autopilot.delivery_result.v2",
+        "assignment_id":spec["assignment_id"],"role_id":spec["role_id"],"mode":spec["mode"],
+        "run_revision":spec["run_revision"],"workstream":spec["workstream"],"lane_id":spec["lane_id"],
+        "attempt":spec["attempt"],"base_commit":spec["base_commit"],"worktree":spec["worktree"],
+        "action_id":spec["action_id"],"prompt_path":spec["prompt_path"],"prompt_digest":spec["prompt_digest"],
+        "spec_path":spec["spec_path"],
+        "spec_digest":sha256_hex(&fs::read(spec["spec_path"].as_str().expect("spec path")).expect("spec bytes")),
+        "carrier_path":spec["carrier_path"],"boundary_id":spec["boundary_id"],"boundary_digest":spec["boundary_digest"],
+        "result_contract":spec["result_contract"],"result_contract_digest":spec["result_contract_digest"],
+        "settings_digest":spec["settings_digest"],"context_digest":spec["context_digest"],
+        "skills_digest":spec["skills_digest"],"subscription_digest":spec["subscription_digest"],
+        "runtime_extension_digest":spec["runtime_extension_digest"],"terminal_profile_id":profile.0,
+        "tool_name":profile.1,"tool_schema_digest":profile.4,"carrier_binding":binding,"tool_call_id":tool_call_id,
+        "tool_audit_ref":audit_path.display().to_string(),"tool_audit_digest":sha256_hex(&audit_bytes),
+        "submission_digest":submission_digest,"submission":submission
     })
 }
 

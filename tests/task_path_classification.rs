@@ -509,7 +509,12 @@ fn task_path_classification_terminal_events_require_core_issued_action_assignmen
         .as_array()
         .expect("spawn-wave actions")
         .iter()
-        .map(|action| action["assignment_id"].as_str().unwrap_or_default().to_owned())
+        .map(|action| {
+            action["assignment_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        })
         .collect::<Vec<_>>();
     assert!(
         !reemitted.contains(&"planning-main-task-extractor-01".to_owned()),
@@ -580,6 +585,19 @@ fn task_path_classification_delivery_runtime_packages_uncommitted_lane_changes_a
     let spec: serde_json::Value =
         serde_json::from_slice(&fs::read(&spec_path).expect("delivery spec"))
             .expect("delivery spec json");
+    assert_eq!(spec["schema"], "autopilot.agent_run_spec.v4");
+    assert_eq!(spec["assignment_kind"], "delivery");
+    assert_eq!(spec["terminal_profile_id"], "delivery-status.v2");
+    assert_eq!(spec["boundary_id"], "autopilot.delivery_submission.v2");
+    assert_eq!(spec["result_contract"], "autopilot.delivery_result.v2");
+    assert!(
+        spec["allowed_tools"]
+            .as_array()
+            .expect("delivery tools")
+            .iter()
+            .any(|tool| tool == "autopilot_emit_status")
+    );
+    assert!(spec["runtime_extension_path"].as_str().is_some());
     let carrier_path = PathBuf::from(spec["carrier_path"].as_str().expect("carrier path"));
     let worktree = PathBuf::from(spec["worktree"].as_str().expect("worktree path"));
     let base_commit = git_out(&worktree, &["rev-parse", "--verify", "HEAD^{commit}"]);
@@ -615,6 +633,131 @@ fn task_path_classification_delivery_runtime_packages_uncommitted_lane_changes_a
     assert_eq!(
         validation.action.assignment_id.0,
         "validator-assignment-main-L1"
+    );
+    assert!(validation.action.bg_run.command.0.contains(" --spec "));
+    assert!(
+        !validation
+            .action
+            .bg_run
+            .command
+            .0
+            .contains("pi --mode json")
+    );
+    let validation_spec_path = worktree
+        .join(".pi/autopilot/main/validation/validator-assignment-main-L1/agent-run-spec.json");
+    let validation_spec: serde_json::Value = serde_json::from_slice(
+        &fs::read(&validation_spec_path).expect("validation agent-run spec"),
+    )
+    .expect("validation spec json");
+    assert_eq!(validation_spec["schema"], "autopilot.agent_run_spec.v4");
+    assert_eq!(validation_spec["assignment_kind"], "validation");
+    assert_eq!(
+        validation_spec["terminal_profile_id"],
+        "validation-status.v2"
+    );
+    assert_eq!(
+        validation_spec["boundary_id"],
+        "autopilot.validation_submission.v2"
+    );
+    assert_eq!(
+        validation_spec["result_contract"],
+        "autopilot.validation_result.v2"
+    );
+    assert_eq!(
+        validation_spec["allowed_tools"],
+        serde_json::json!(["read", "grep", "find", "ls", "autopilot_emit_status"])
+    );
+    assert_eq!(
+        validation_spec["unavailable_tools"],
+        serde_json::json!(["autopilot_request_test"])
+    );
+    let validation_context: serde_json::Value = serde_json::from_slice(
+        &fs::read(
+            validation_spec["context_manifest_path"]
+                .as_str()
+                .expect("context path"),
+        )
+        .expect("validation context"),
+    )
+    .expect("context json");
+    assert_eq!(
+        validation_context["exact_commit"],
+        git_out(&worktree, &["rev-parse", "--verify", "HEAD^{commit}"])
+    );
+    assert_eq!(
+        validation_context["candidate"]["actual_changed_paths"],
+        serde_json::json!(["README.md"])
+    );
+    assert_eq!(
+        validation_context["criteria"]
+            .as_array()
+            .expect("criteria")
+            .len(),
+        1
+    );
+    assert_eq!(
+        validation_context["evidence"]
+            .as_array()
+            .expect("evidence")
+            .len(),
+        2
+    );
+    let criterion = &validation_context["criteria"][0];
+    let evidence_ref = validation_context["evidence"][0]["evidence_ref"]
+        .as_str()
+        .expect("evidence ref");
+    let submission_value = serde_json::json!({
+        "schema":"autopilot.validation_submission.v2",
+        "validation_id":validation_context["validation_id"],
+        "assignment_id":validation_context["assignment_id"],
+        "scope":"forward",
+        "exact_commit":validation_context["exact_commit"],
+        "exact_tree":validation_context["exact_tree"],
+        "outcome":"FORWARD_READY",
+        "criterion_results":[{
+            "criterion_id":criterion["criterion_id"],
+            "verdict":"PASS",
+            "evidence_refs":[evidence_ref],
+            "finding_ids":[],
+            "covered_paths":criterion["covered_paths"],
+            "semantic_surface_ids":criterion["semantic_surface_ids"],
+            "forward_edge_ids":criterion["forward_edge_ids"]
+        }],
+        "findings":[]
+    });
+    let typed_spec: kernel::generated::AgentRunSpec =
+        serde_json::from_value(validation_spec.clone()).expect("typed validation spec");
+    let valid_submission: kernel::generated::ValidationSubmissionV2 =
+        serde_json::from_value(submission_value.clone()).expect("typed submission");
+    drivers::runner::child::admit_validation_submission(&typed_spec, &valid_submission)
+        .expect("issued validation submission");
+    for (label, mutate) in [
+        (
+            "forged-commit",
+            serde_json::json!("0000000000000000000000000000000000000000"),
+        ),
+        ("unknown-evidence", serde_json::json!("evidence:unknown")),
+    ] {
+        let mut forged = submission_value.clone();
+        if label == "forged-commit" {
+            forged["exact_commit"] = mutate;
+        } else {
+            forged["criterion_results"][0]["evidence_refs"][0] = mutate;
+        }
+        let forged: kernel::generated::ValidationSubmissionV2 =
+            serde_json::from_value(forged).expect("typed forged submission");
+        assert!(
+            drivers::runner::child::admit_validation_submission(&typed_spec, &forged).is_err(),
+            "{label} must be rejected"
+        );
+    }
+    let mut omitted = valid_submission.clone();
+    omitted.criterion_results.clear();
+    assert!(drivers::runner::child::admit_validation_submission(&typed_spec, &omitted).is_err());
+    let mut false_ready = valid_submission.clone();
+    false_ready.criterion_results[0].verdict = kernel::generated::CriterionVerdict::FAIL;
+    assert!(
+        drivers::runner::child::admit_validation_submission(&typed_spec, &false_ready).is_err()
     );
     let package_commit = git_out(&worktree, &["rev-parse", "--verify", "HEAD^{commit}"]);
     assert_ne!(
@@ -824,42 +967,37 @@ fn delivery_carrier(
     package_tree: &str,
     evidence_count: usize,
 ) -> serde_json::Value {
-    let mut carrier = delivery_carrier_without_package(spec, evidence_count);
-    carrier["package_commit"] = serde_json::json!(package_commit);
-    carrier["package_tree"] = serde_json::json!(package_tree);
-    carrier
+    let _ = (package_commit, package_tree);
+    delivery_carrier_without_package(spec, evidence_count)
 }
 
 fn delivery_carrier_without_package(
     spec: &serde_json::Value,
     evidence_count: usize,
 ) -> serde_json::Value {
-    serde_json::json!({
-        "assignment_id":spec["assignment_id"],
-        "role_id":spec["role_id"],
-        "mode":spec["mode"],
-        "run_revision":spec["run_revision"],
-        "lane_id":spec["lane_id"],
-        "attempt":spec["attempt"],
-        "base_commit":spec["base_commit"],
-        "worktree":spec["worktree"],
-        "action_id":spec["action_id"],
-        "prompt_path":spec["prompt_path"],
-        "prompt_digest":spec["prompt_digest"],
-        "spec_path":spec["spec_path"],
-        "spec_digest":sha256_hex(&fs::read(spec["spec_path"].as_str().expect("spec path")).expect("spec bytes")),
-        "carrier_path":spec["carrier_path"],
-        "boundary_digest":spec["boundary_digest"],
-        "result_contract_digest":spec["result_contract_digest"],
-        "settings_digest":spec["settings_digest"],
-        "context_digest":spec["context_digest"],
-        "skills_digest":spec["skills_digest"],
-        "subscription_digest":spec["subscription_digest"],
+    let typed: kernel::generated::AgentRunSpec =
+        serde_json::from_value(spec.clone()).expect("spec");
+    let profile = kernel::generated::TERMINAL_PROFILES
+        .iter()
+        .find(|row| row.0 == "delivery-status.v2")
+        .expect("profile");
+    let submission = serde_json::json!({
         "actual_changed_paths":["README.md"],
         "execution_audit_ref":"audit:delivery",
         "focused_evidence_refs":(0..evidence_count).map(|index| serde_json::json!(format!("evidence:{index}"))).collect::<Vec<_>>(),
         "terminal_status":"done",
         "hard_boundary_violations":[]
+    });
+    let submission_digest = sha256_hex(&serde_json::to_vec(&submission).expect("submission"));
+    let binding = drivers::runner::child::carrier_binding(&typed);
+    let tool_call_id = "delivery-tool-call-1";
+    let audit = serde_json::json!({"schema":"autopilot.tool_audit.v1","tool_call_id":tool_call_id,"profile_id":profile.0,"tool_name":profile.1,"boundary_id":profile.2,"result_contract":profile.3,"schema_digest":profile.4,"binding":binding,"submission_digest":submission_digest});
+    let audit_bytes = serde_json::to_vec_pretty(&audit).expect("audit");
+    let audit_path = PathBuf::from(spec["carrier_path"].as_str().expect("carrier"))
+        .with_extension("tool-audit.json");
+    fs::write(&audit_path, &audit_bytes).expect("audit write");
+    serde_json::json!({
+        "schema":"autopilot.delivery_result.v2","assignment_id":spec["assignment_id"],"role_id":spec["role_id"],"mode":spec["mode"],"run_revision":spec["run_revision"],"workstream":spec["workstream"],"lane_id":spec["lane_id"],"attempt":spec["attempt"],"base_commit":spec["base_commit"],"worktree":spec["worktree"],"action_id":spec["action_id"],"prompt_path":spec["prompt_path"],"prompt_digest":spec["prompt_digest"],"spec_path":spec["spec_path"],"spec_digest":sha256_hex(&fs::read(spec["spec_path"].as_str().expect("spec path")).expect("spec bytes")),"carrier_path":spec["carrier_path"],"boundary_id":spec["boundary_id"],"boundary_digest":spec["boundary_digest"],"result_contract":spec["result_contract"],"result_contract_digest":spec["result_contract_digest"],"settings_digest":spec["settings_digest"],"context_digest":spec["context_digest"],"skills_digest":spec["skills_digest"],"subscription_digest":spec["subscription_digest"],"runtime_extension_digest":spec["runtime_extension_digest"],"terminal_profile_id":profile.0,"tool_name":profile.1,"tool_schema_digest":profile.4,"carrier_binding":binding,"tool_call_id":tool_call_id,"tool_audit_ref":audit_path.display().to_string(),"tool_audit_digest":sha256_hex(&audit_bytes),"submission_digest":submission_digest,"submission":submission
     })
 }
 
@@ -977,6 +1115,9 @@ fn temp_repo(name: &str) -> PathBuf {
 /// First action of a batched planning `spawn-wave`, as a singular payload view.
 fn first_wave_action(payload: &serde_json::Value) -> CoreToHostSpawnPayload {
     let actions = payload["actions"].as_array().expect("spawn-wave actions");
-    assert!(!actions.is_empty(), "spawn-wave must launch at least one action");
+    assert!(
+        !actions.is_empty(),
+        "spawn-wave must launch at least one action"
+    );
     serde_json::from_value(serde_json::json!({ "action": actions[0] })).expect("wave action")
 }

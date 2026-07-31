@@ -248,10 +248,7 @@ fn checkpoint_policy_agent_handoff_artifact_shape_is_five_required_fields() {
         prop_string(&artifact, "producer").expect("producer prop"),
         "Model"
     );
-    assert_eq!(
-        prop_bool(&artifact, "model_produced").expect("model_produced prop"),
-        true
-    );
+    assert!(prop_bool(&artifact, "model_produced").expect("model_produced prop"));
 
     let required = required_child_names(&artifact).expect("required fields");
     assert_eq!(
@@ -400,10 +397,8 @@ fn required_child_names(artifact: &KdlNode) -> Result<Vec<&str>, String> {
     let mut names = Vec::new();
     for child in children.nodes() {
         match child.name().value() {
-            "field" | "list" | "group" => {
-                if prop_bool(child, "required")? {
-                    names.push(arg_string(child, 0)?);
-                }
+            "field" | "list" | "group" if prop_bool(child, "required")? => {
+                names.push(arg_string(child, 0)?);
             }
             _ => {}
         }

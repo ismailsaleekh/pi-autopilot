@@ -1478,20 +1478,21 @@ fn private_dir(path: &Path) -> Result<(), EvidenceError> {
     Ok(())
 }
 
-fn private_handle(file: &fs::File) -> Result<(), EvidenceError> {
+fn private_handle(_file: &fs::File) -> Result<(), EvidenceError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(fs::Permissions::from_mode(0o600))
+        _file
+            .set_permissions(fs::Permissions::from_mode(0o600))
             .map_err(|error| EvidenceError::Store(error.to_string()))?;
     }
     Ok(())
 }
 
-fn sync_dir(path: &Path) -> Result<(), EvidenceError> {
+fn sync_dir(_path: &Path) -> Result<(), EvidenceError> {
     #[cfg(unix)]
     {
-        let dir = fs::File::open(path).map_err(|error| EvidenceError::Store(error.to_string()))?;
+        let dir = fs::File::open(_path).map_err(|error| EvidenceError::Store(error.to_string()))?;
         dir.sync_all()
             .map_err(|error| EvidenceError::Store(error.to_string()))?;
     }

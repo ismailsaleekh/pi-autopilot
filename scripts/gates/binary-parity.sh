@@ -30,7 +30,7 @@ fi
 
 python3 - "$root" <<'PY'
 from __future__ import annotations
-import hashlib, json, os, re, subprocess, sys
+import hashlib, json, os, subprocess, sys
 from pathlib import Path
 root = Path(sys.argv[1]).resolve()
 violations: list[str] = []
@@ -76,12 +76,30 @@ source_hash = hasher.hexdigest()
 
 launcher = root / "bin" / "autopilot-core.mjs"
 if not launcher.is_file(): env_error("missing bin/autopilot-core.mjs dispatch launcher")
-launcher_text = launcher.read_text(encoding="utf-8")
-match = re.search(r"const\s+supported\s*=\s*\{(?P<body>.*?)\}\s*;", launcher_text, re.S)
-if not match: env_error("could not find supported dispatch map in bin/autopilot-core.mjs")
-pairs = re.findall(r"['\"]([^'\"]+)['\"]\s*:\s*['\"]([^'\"]+)['\"]", match.group("body"))
-if not pairs: env_error("dispatch map in bin/autopilot-core.mjs is empty or unparsable")
-dispatch = dict(pairs)
+resolver = root / "src" / "resolve-core-runtime.js"
+if not resolver.is_file(): env_error("missing src/resolve-core-runtime.js production Core resolver")
+node_script = """
+import { pathToFileURL } from 'node:url';
+const mod = await import(pathToFileURL(process.argv[1]).href);
+const supported = mod.SUPPORTED_CORE_BINARIES;
+if (typeof supported !== 'object' || supported === null || Array.isArray(supported)) {
+  throw new Error('SUPPORTED_CORE_BINARIES must be an object');
+}
+console.log(JSON.stringify(supported));
+"""
+try:
+    raw_dispatch = subprocess.check_output(["node", "--input-type=module", "-e", node_script, str(resolver)], stderr=subprocess.PIPE)
+except FileNotFoundError:
+    env_error("node is required to load src/resolve-core-runtime.js")
+except subprocess.CalledProcessError as exc:
+    detail = exc.stderr.decode("utf-8", "replace").strip()
+    env_error(f"could not load SUPPORTED_CORE_BINARIES from src/resolve-core-runtime.js{': ' + detail if detail else ''}")
+try:
+    dispatch = json.loads(raw_dispatch.decode("utf-8"))
+except json.JSONDecodeError as exc:
+    env_error(f"SUPPORTED_CORE_BINARIES export returned non-JSON output: {exc}")
+if not isinstance(dispatch, dict) or not dispatch or any(not isinstance(platform, str) or not isinstance(name, str) or not platform or not name for platform, name in dispatch.items()):
+    env_error("SUPPORTED_CORE_BINARIES must be a non-empty string-to-string map")
 expected_binary_paths = {f"binaries/{platform}/{name}" for platform, name in dispatch.items()}
 
 manifest_rel = "binaries/MANIFEST.json"

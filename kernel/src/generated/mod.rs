@@ -856,7 +856,7 @@ pub struct AgentRunSpec {
     #[serde(rename = "context_manifest_digest")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_manifest_digest: Option<Digest>,
-    /// Required for planning assignments and forbidden for legacy assistant-text delivery assignments; absolute path to the explicitly loaded child-only submit-tool add-on.
+    /// Required for every model assignment; absolute path to the explicitly loaded codegen-anchored child-only terminal-tool add-on.
     #[serde(rename = "runtime_extension_path")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime_extension_path: Option<Path>,
@@ -864,6 +864,14 @@ pub struct AgentRunSpec {
     #[serde(rename = "runtime_extension_digest")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime_extension_digest: Option<Digest>,
+    /// Required for every model assignment; parent-selected generated terminal profile, never inferred from model payload.
+    #[serde(rename = "terminal_profile_id")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_profile_id: Option<String>,
+    /// Role-declared capabilities omitted only by an explicit retained-unavailable data disposition.
+    #[serde(rename = "unavailable_tools")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable_tools: Option<Vec<ToolName>>,
     #[serde(rename = "producer_assignment_ids")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub producer_assignment_ids: Option<Vec<Id>>,
@@ -1887,6 +1895,96 @@ pub struct DeliveryResult {
     pub hard_boundary_violations: Vec<String>,
 }
 
+/// Package-bound delivery carrier written create-once from an admitted terminal-tool submission and immutable runner identity.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeliveryResultV2 {
+    #[serde(rename = "schema")]
+    pub schema: SchemaId,
+    #[serde(rename = "action_id")]
+    pub action_id: Id,
+    #[serde(rename = "assignment_id")]
+    pub assignment_id: Id,
+    #[serde(rename = "run_revision")]
+    pub run_revision: u64,
+    #[serde(rename = "workstream")]
+    pub workstream: Id,
+    #[serde(rename = "role_id")]
+    pub role_id: Id,
+    #[serde(rename = "mode")]
+    pub mode: ModeId,
+    #[serde(rename = "lane_id")]
+    pub lane_id: Id,
+    #[serde(rename = "attempt")]
+    pub attempt: u32,
+    #[serde(rename = "base_commit")]
+    pub base_commit: Sha,
+    #[serde(rename = "worktree")]
+    pub worktree: Path,
+    #[serde(rename = "prompt_path")]
+    pub prompt_path: Path,
+    #[serde(rename = "prompt_digest")]
+    pub prompt_digest: Digest,
+    #[serde(rename = "spec_path")]
+    pub spec_path: Path,
+    #[serde(rename = "spec_digest")]
+    pub spec_digest: Digest,
+    #[serde(rename = "carrier_path")]
+    pub carrier_path: Path,
+    #[serde(rename = "boundary_id")]
+    pub boundary_id: ContractId,
+    #[serde(rename = "boundary_digest")]
+    pub boundary_digest: Digest,
+    #[serde(rename = "result_contract")]
+    pub result_contract: ContractId,
+    #[serde(rename = "result_contract_digest")]
+    pub result_contract_digest: Digest,
+    #[serde(rename = "settings_digest")]
+    pub settings_digest: Digest,
+    #[serde(rename = "context_digest")]
+    pub context_digest: Digest,
+    #[serde(rename = "skills_digest")]
+    pub skills_digest: Digest,
+    #[serde(rename = "subscription_digest")]
+    pub subscription_digest: Digest,
+    #[serde(rename = "runtime_extension_digest")]
+    pub runtime_extension_digest: Digest,
+    #[serde(rename = "terminal_profile_id")]
+    pub terminal_profile_id: String,
+    #[serde(rename = "tool_name")]
+    pub tool_name: ToolName,
+    #[serde(rename = "tool_schema_digest")]
+    pub tool_schema_digest: Digest,
+    #[serde(rename = "carrier_binding")]
+    pub carrier_binding: Digest,
+    #[serde(rename = "tool_call_id")]
+    pub tool_call_id: String,
+    #[serde(rename = "tool_audit_ref")]
+    pub tool_audit_ref: Ref,
+    #[serde(rename = "tool_audit_digest")]
+    pub tool_audit_digest: Digest,
+    #[serde(rename = "submission_digest")]
+    pub submission_digest: Digest,
+    #[serde(rename = "submission")]
+    pub submission: DeliverySubmissionV2,
+}
+
+/// Model-owned delivery status payload. Package and assignment identity are supplied only by Core and are not model parameters.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeliverySubmissionV2 {
+    #[serde(rename = "actual_changed_paths")]
+    pub actual_changed_paths: Vec<Path>,
+    #[serde(rename = "execution_audit_ref")]
+    pub execution_audit_ref: Ref,
+    #[serde(rename = "focused_evidence_refs")]
+    pub focused_evidence_refs: Vec<Ref>,
+    #[serde(rename = "terminal_status")]
+    pub terminal_status: DeliveryTerminalStatus,
+    #[serde(rename = "hard_boundary_violations")]
+    pub hard_boundary_violations: Vec<String>,
+}
+
 /// Append-only event row; events.jsonl is the sole state authority (D76 §5.4 + D77 Closure B).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2638,6 +2736,16 @@ pub struct ValidationResultV2 {
     pub subscription_digest: Digest,
     #[serde(rename = "runtime_extension_digest")]
     pub runtime_extension_digest: Digest,
+    #[serde(rename = "terminal_profile_id")]
+    pub terminal_profile_id: String,
+    #[serde(rename = "tool_name")]
+    pub tool_name: ToolName,
+    #[serde(rename = "tool_schema_digest")]
+    pub tool_schema_digest: Digest,
+    #[serde(rename = "carrier_binding")]
+    pub carrier_binding: Digest,
+    #[serde(rename = "tool_call_id")]
+    pub tool_call_id: String,
     #[serde(rename = "tool_audit_ref")]
     pub tool_audit_ref: Ref,
     #[serde(rename = "tool_audit_digest")]
@@ -2650,6 +2758,7 @@ pub struct ValidationResultV2 {
 
 /// Only payload accepted by the Validator terminal tool. Assistant-text JSON without the terminal tool is not a carrier.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ValidationSubmissionV2 {
     #[serde(rename = "schema")]
     pub schema: SchemaId,
@@ -2673,6 +2782,7 @@ pub struct ValidationSubmissionV2 {
 
 /// Generated record item.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CriterionResultV2 {
     #[serde(rename = "criterion_id")]
     pub criterion_id: Id,
@@ -2926,11 +3036,12 @@ pub struct HostToCoreTaskCompletedPayload {
 pub const CONTRACT_SCHEMA: &str = "autopilot.contracts.v1";
 pub const CONTRACT_VERSION: u64 = 1;
 pub const CHILD_ADDON_DIGEST: &str =
-    "76661dad2db2c9c2bdd3248adaf45e4ed671ffeab51272e2c6f8d17367bef465";
+    "99850d55dbd44403b714f97033592943ee442530e1da0a6b77f809094731c1bd";
 
 pub const AGENT_HANDOFF_ADMITS: &str = "When checkpointed, return one autopilot.agent-handoff.v1 object with exactly these required fields: schema, completed, remaining, critical_state, and next_action. Put finished obligations in completed, unfinished obligations in remaining, role-required scalar or array-of-scalar slots in critical_state, and the immediate resume instruction in next_action; do not invent completion.";
 pub const ALLOCATION_LANE_PROPOSAL_ADMITS: &str = "Return a lane proposal that groups only approved plan units. Preserve every unit id, dependency, predecessor forward criterion, downstream release edge, and verification obligation exactly as supplied. Do not invent file ownership or modify plan authority. Include ordered unit ids, one delivery boundary, context family id and estimate, focused tests, and launch wave.";
 pub const DELIVERY_RESULT_ADMITS: &str = "Submit exactly one terminal delivery carrier for your assigned role, mode, assignment, attempt, and run revision. Report the exact base, worktree, actual changed paths, execution audit reference, and required focused evidence. Do not claim validation, merge, package commit/tree, package state mutation, or success hidden behind missing evidence. The runtime establishes package commit/tree after accepting this carrier. If any hard boundary was violated or required evidence is missing, say so instead of reporting DONE.";
+pub const DELIVERY_SUBMISSION_V2_ADMITS: &str = "Call autopilot_emit_status exactly once with the actual changed paths, execution audit reference, focused evidence references, terminal status, and every hard-boundary violation. Do not include assignment or package identity.";
 pub const FINDING_ADMITS: &str = "For each material issue, record one effect: forward-blocking, closure-blocking-forward-safe, or advisory. Tie the finding to exact criteria or forward edges and evidence. Do not use severity alone to decide scheduling, do not hide a mandatory blocker as advisory, and do not report a source repair requirement without the evidence that makes it mandatory.";
 pub const FINDING_V2_ADMITS: &str = "For each material issue, emit one deterministic finding id, classify kind/effect honestly, tie it to declared criteria/edges/evidence, and never hide a required blocker as advisory.";
 pub const PLAN_REVIEW_ADMITS: &str = "Plan review output must assign a verdict to each criterion using pass, blocker, advisory, fail, blocked, or needs-fix. It must include at least one verdict. Call autopilot_submit_review as the final action.";
@@ -2976,5 +3087,71 @@ pub const SUBMIT_TOOLS: [(&str, &str, &str); 7] = [
         "autopilot_submit_synthesis",
         "planning.work-map.v1",
         "d60fa316fa8d5f2baf1d1a764028bdaf5676e094ec23710c53917e760cfe939a",
+    ),
+];
+
+pub const TERMINAL_PROFILES: [(&str, &str, &str, &str, &str); 9] = [
+    (
+        "delivery-status.v2",
+        "autopilot_emit_status",
+        "autopilot.delivery_submission.v2",
+        "autopilot.delivery_result.v2",
+        "dc3894c6b09e07ffb83c1719b19caf501257c60d5b1c847917068ab75643d55d",
+    ),
+    (
+        "planning.plan-review.v1:autopilot_submit_review",
+        "autopilot_submit_review",
+        "planning.plan-review.v1",
+        "planning.plan-review.v1",
+        "073f22c10d42166d5ec5d0a6465a1fa8f0df8fc1af2ce6a0702bed9b955786d8",
+    ),
+    (
+        "planning.questions.v1:autopilot_submit_resolution",
+        "autopilot_submit_resolution",
+        "planning.questions.v1",
+        "planning.questions.v1",
+        "a716699618f28675f8872ff8d039c40e8443c07cd6a94f907921ee2b9dd88abc",
+    ),
+    (
+        "planning.scout-dossier.v1:autopilot_submit_context",
+        "autopilot_submit_context",
+        "planning.scout-dossier.v1",
+        "planning.scout-dossier.v1",
+        "30f69b47c83079ce00ea22cab308e9a26eb7b24cae045aa1dd008221b45da618",
+    ),
+    (
+        "planning.scout-dossier.v1:autopilot_submit_scout_report",
+        "autopilot_submit_scout_report",
+        "planning.scout-dossier.v1",
+        "planning.scout-dossier.v1",
+        "30f69b47c83079ce00ea22cab308e9a26eb7b24cae045aa1dd008221b45da618",
+    ),
+    (
+        "planning.task-atoms.v1:autopilot_submit_atoms",
+        "autopilot_submit_atoms",
+        "planning.task-atoms.v1",
+        "planning.task-atoms.v1",
+        "77d000b816b3c14dcdefeba0c23d4f4f9f8bedaf5b281081f1cea138e525e091",
+    ),
+    (
+        "planning.work-map.v1:autopilot_submit_plan_cluster",
+        "autopilot_submit_plan_cluster",
+        "planning.work-map.v1",
+        "planning.work-map.v1",
+        "d60fa316fa8d5f2baf1d1a764028bdaf5676e094ec23710c53917e760cfe939a",
+    ),
+    (
+        "planning.work-map.v1:autopilot_submit_synthesis",
+        "autopilot_submit_synthesis",
+        "planning.work-map.v1",
+        "planning.work-map.v1",
+        "d60fa316fa8d5f2baf1d1a764028bdaf5676e094ec23710c53917e760cfe939a",
+    ),
+    (
+        "validation-status.v2",
+        "autopilot_emit_status",
+        "autopilot.validation_submission.v2",
+        "autopilot.validation_result.v2",
+        "3fb76a96ab8ea6c3bce27fb7fc9cbe4f4f0b411717f7805ea32ba4d8f9514c15",
     ),
 ];

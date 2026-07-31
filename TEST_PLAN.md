@@ -11,8 +11,8 @@ This plan describes the current `pi-autopilot@1.3.1` package candidate and its r
 | Core gates | `gate:host-thinness`, `gate:kernel-purity`, `gate:no-inference`, `gate:selftest`. These gates must not be weakened to pass. |
 | Rust behavior | Focused drivers tests plus `npm run test:rust`: four-file classification, no context-as-Work elevation, terminal binding, runner child validation, delivery acceptance, command routing, crash/resume, and kernel invariants. |
 | Runtime pair | `PI_BACKGROUND_TASKS_PACKAGE_ROOT=<candidate> npm run test:runtime-integration`: real Pi SDK loader, shared EventBus, real background service, fake local `pi`, exact descriptor metadata, terminal correlation, missing-service zero mutation, and historical/index no-spawn controls. |
-| Binaries | Rebuild all five shipped `autopilot-core` binaries from current Rust source and regenerate `binaries/MANIFEST.json`; `npm run gate:binary-parity` must pass. |
-| Payload | `npm run payload:check` and `npm pack --dry-run --ignore-scripts`; payload must include both bin wrappers, shipped binaries, generated docs, Host source, and no tests/private runtime state. |
+| Binaries | Rebuild all five shipped `autopilot-core` binaries from current Rust source and regenerate `binaries/MANIFEST.json`; `npm run gate:binary-parity` and `npm run gate:launch-entrypoint` must pass. |
+| Payload | `npm run payload:check` and `npm pack --dry-run --ignore-scripts`; payload must include both bin wrappers, shipped binaries, generated docs, Host source, and no tests/private runtime state. Packed-consumer release proof runs the current launch gate before the ignore-scripts pack and reuses its status-frame validator against the installed `.bin/autopilot-core` path. |
 | Paired release proof | `node scripts/certify-runtime-repair.mjs --autopilot-root <abs> --background-root <abs> --evidence-dir <abs>`: clean exact candidates, background default suite, Autopilot gates/tests, runtime pair, deterministic tarballs, installed-consumer runtime rerun, final identity comparison, and `/tmp/smf-resolution/autopilot-runtime-repair-cert.v1.json`. |
 
 ## Background service coverage
