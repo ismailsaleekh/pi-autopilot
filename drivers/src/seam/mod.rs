@@ -335,6 +335,29 @@ fn route_run(id: u64, workstream: &str, state: &mut CoreState) -> Result<SeamEnv
     {
         return done(id, status);
     }
+    let outcome = advance_run(id, workstream, state)?;
+    advance_run_envelope(id, outcome)
+}
+
+#[derive(Debug)]
+enum AdvanceRunOutcome {
+    Dispatched(SeamEnvelope),
+    Waiting(String),
+    Stuck(String),
+}
+
+fn advance_run_envelope(id: u64, outcome: AdvanceRunOutcome) -> Result<SeamEnvelope, AnyError> {
+    match outcome {
+        AdvanceRunOutcome::Dispatched(envelope) => Ok(envelope),
+        AdvanceRunOutcome::Waiting(status) | AdvanceRunOutcome::Stuck(status) => done(id, status),
+    }
+}
+
+fn advance_run(
+    id: u64,
+    workstream: &str,
+    state: &mut CoreState,
+) -> Result<AdvanceRunOutcome, AnyError> {
     let approved = read_approved_plan(workstream)
         .map_err(|error| format!("CONTEXT_GAP:approved-plan:{error}"))?;
     let submission = allocation_submission_from_plan(workstream, &approved)
@@ -351,26 +374,173 @@ fn route_run(id: u64, workstream: &str, state: &mut CoreState) -> Result<SeamEnv
     let readiness = lane_readiness_from_events(&submission.lanes, &approved, state);
     let resources =
         host_resource_facts().map_err(|error| format!("CONTEXT_GAP:resources:{error}"))?;
-    let selected = dispatch::select_ready_lanes(&DispatchInput {
+    let mut selected = dispatch::select_ready_lanes(&DispatchInput {
         lanes: allocation.lanes,
-        readiness,
+        readiness: readiness.clone(),
         active_implementers: active_implementers(state),
         parallel_cap: 8,
         resources,
     });
-    let Some(lane_id) = selected.first() else {
-        if let Some(status) =
-            advance_lifecycle_if_ready(workstream, None, ClosureTrigger::RunCommand, state)?
-        {
-            return done(id, status);
+    selected.retain(|lane_id| !lane_closed(state, lane_id));
+    // Independent of the `unit-active:` bookkeeping written at dispatch time: a lane
+    // whose implementer binding is already live must never be dispatched twice. This
+    // is derived from the runner invocation log itself, so losing the dispatch-time
+    // marker cannot silently re-enable double dispatch.
+    selected.retain(|lane_id| !lane_has_live_delivery(state, lane_id));
+    if let Some(lane_id) = selected.first() {
+        let assignment = assignment(workstream, lane_id)?;
+        let issue = runner::delivery_issue_with_facts(
+            &assignment,
+            &runner::RunnerTransportFacts::from_env()?,
+        )?;
+        append_runner_invocation(state, &issue.binding)?;
+        let envelope = controlled_spawn(id, issue.action, state, "delivery")?;
+        return Ok(AdvanceRunOutcome::Dispatched(envelope));
+    }
+
+    let diagnostics = advance_diagnostics(state, &submission, &approved, &readiness, &selected);
+    if active_or_unknown_work(state) || queued_candidates(state) > 0 {
+        Ok(AdvanceRunOutcome::Waiting(format!(
+            "dispatch:waiting:{};{}",
+            diagnostics,
+            state.summary()
+        )))
+    } else {
+        Ok(AdvanceRunOutcome::Stuck(rejection(
+            "dispatch-stuck",
+            &format!("{};{}", diagnostics, state.summary()),
+        )))
+    }
+}
+
+fn lane_has_live_delivery(state: &CoreState, lane_id: &Id) -> bool {
+    state
+        .state
+        .refs
+        .keys()
+        .filter_map(|reference| runner::decode_binding_ref(&reference.0))
+        .any(|binding| {
+            binding.role_id.0 == "implementer"
+                && binding.lane_id.as_ref().is_some_and(|lane| lane == lane_id)
+                && !terminal_consumed(state, &binding)
+        })
+}
+
+fn lane_closed(state: &CoreState, lane_id: &Id) -> bool {
+    has_exact_ref(state, &format!("unit-closed:{}", lane_id.0))
+}
+
+fn advance_diagnostics(
+    state: &CoreState,
+    submission: &AllocationSubmission,
+    approved: &[ApprovedUnit],
+    readiness: &[LaneReadiness],
+    selected: &[Id],
+) -> String {
+    let closed = submission
+        .lanes
+        .iter()
+        .filter(|lane| lane_closed(state, &lane.lane_id))
+        .map(|lane| lane.lane_id.0.clone())
+        .collect::<Vec<_>>();
+    let ready_undispatched = selected
+        .iter()
+        .map(|lane| lane.0.clone())
+        .collect::<Vec<_>>();
+    let blocked = blocked_lane_details(state, submission, approved, readiness, selected);
+    format!(
+        "closed=[{}];ready_undispatched=[{}];blocked=[{}];active_implementers={};active_validators={};active_or_unknown={};queued_candidates={}",
+        closed.join(","),
+        ready_undispatched.join(","),
+        blocked.join(","),
+        active_implementers(state),
+        active_validators(state),
+        active_or_unknown_work(state),
+        queued_candidates(state)
+    )
+}
+
+fn blocked_lane_details(
+    state: &CoreState,
+    submission: &AllocationSubmission,
+    approved: &[ApprovedUnit],
+    readiness: &[LaneReadiness],
+    selected: &[Id],
+) -> Vec<String> {
+    submission
+        .lanes
+        .iter()
+        .filter(|lane| !lane_closed(state, &lane.lane_id))
+        .filter(|lane| !selected.iter().any(|selected| selected == &lane.lane_id))
+        .map(|lane| {
+            let facts = readiness.iter().find(|item| item.lane_id == lane.lane_id);
+            let mut reasons = Vec::new();
+            if facts.is_some_and(|facts| !facts.unit_free) {
+                reasons.push("active-unit".to_owned());
+            }
+            if facts.is_some_and(|facts| !facts.predecessor_gates_met) {
+                reasons.extend(unmet_predecessor_details(state, submission, approved, lane));
+            }
+            if facts.is_some_and(|facts| !facts.blockers_clear) {
+                reasons.push("blocker".to_owned());
+            }
+            if facts.is_some_and(|facts| !facts.route_ready) {
+                reasons.push("route-not-ready".to_owned());
+            }
+            if facts.is_some_and(|facts| !facts.preflight_passed) {
+                reasons.push("preflight".to_owned());
+            }
+            if facts.is_some_and(|facts| facts.pressure_delay) {
+                reasons.push("pressure".to_owned());
+            }
+            if facts.is_none() {
+                reasons.push("missing-readiness".to_owned());
+            }
+            if reasons.is_empty() {
+                reasons.push("not-selected".to_owned());
+            }
+            format!("{}:{}", lane.lane_id.0, reasons.join("+"))
+        })
+        .collect()
+}
+
+fn unmet_predecessor_details(
+    state: &CoreState,
+    submission: &AllocationSubmission,
+    approved: &[ApprovedUnit],
+    lane: &AllocationLaneProposal,
+) -> Vec<String> {
+    let mut details = Vec::new();
+    for unit_id in &lane.ordered_unit_ids {
+        let Some(unit) = approved.iter().find(|unit| unit.id == *unit_id) else {
+            details.push(format!("unknown-unit:{}", unit_id.0));
+            continue;
+        };
+        for dependency in &unit.dependencies {
+            let dependency_lane = submission
+                .lanes
+                .iter()
+                .find(|candidate| candidate.ordered_unit_ids.contains(dependency));
+            match dependency_lane {
+                Some(dependency_lane) if !lane_closed(state, &dependency_lane.lane_id) => details
+                    .push(format!(
+                        "unmet_dependency:{}({})",
+                        dependency.0, dependency_lane.lane_id.0
+                    )),
+                None => details.push(format!("unmet_dependency:{}(unassigned)", dependency.0)),
+                Some(_) => {}
+            }
         }
-        return done(id, rejection("dispatch", "no-ready-lane"));
-    };
-    let assignment = assignment(workstream, lane_id)?;
-    let issue =
-        runner::delivery_issue_with_facts(&assignment, &runner::RunnerTransportFacts::from_env()?)?;
-    append_runner_invocation(state, &issue.binding)?;
-    controlled_spawn(id, issue.action, state, "delivery")
+        for gate in &unit.predecessor_forward_criteria {
+            if !has_exact_ref(state, &format!("gate:{}", gate.0)) {
+                details.push(format!("unmet_dependency_gate:{}", gate.0));
+            }
+        }
+    }
+    if details.is_empty() {
+        details.push("predecessor".to_owned());
+    }
+    details
 }
 
 fn route_agent_result(
@@ -1927,14 +2097,8 @@ fn integrate_validated_candidate(
     {
         return done(id, status);
     }
-    done(
-        id,
-        format!(
-            "integration:forward-integrated:{};{}",
-            prepared.new_tip,
-            state.summary()
-        ),
-    )
+    let outcome = advance_run(id, workstream, state)?;
+    advance_run_envelope(id, outcome)
 }
 
 fn conflict_response(
@@ -2554,24 +2718,87 @@ fn run_final_verification_at_tip(snapshot: &FinalSnapshot) -> Result<bool, AnyEr
     }
     let commands = live_verification_commands(&worktree)?;
     for command in commands {
+        let label = command
+            .name
+            .clone()
+            .unwrap_or_else(|| command.argv.join(" "));
         let Some((program, args)) = command.argv.split_first() else {
-            return Ok(false);
+            return Err(format!("final-evidence:verification-command-empty-argv:{label}").into());
         };
-        let status = Command::new(program)
+        // `.output()` rather than `.status()`: a failing final command is the last thing
+        // standing between a run and its result ref, and with inherited stdio the reason
+        // is never recorded anywhere. Capture it so the refusal is diagnosable.
+        let output = Command::new(program)
             .current_dir(worktree.join(command.cwd))
             .args(args)
-            .status()?;
-        if !status.success() {
-            return Ok(false);
+            .output()?;
+        if !output.status.success() {
+            return Err(FinalVerificationFailure {
+                name: label,
+                argv: command.argv.clone(),
+                code: output.status.code(),
+                stdout_tail: bounded_tail(&output.stdout),
+                stderr_tail: bounded_tail(&output.stderr),
+            }
+            .into_error());
         }
     }
     Ok(true)
+}
+
+/// A final verification command that failed at the run tip.
+///
+/// This is a hard refusal, never a downgrade to "unverified": the final gate must still
+/// refuse to publish. The only thing added is the evidence needed to diagnose it.
+struct FinalVerificationFailure {
+    name: String,
+    argv: Vec<String>,
+    code: Option<i32>,
+    stdout_tail: String,
+    stderr_tail: String,
+}
+
+impl FinalVerificationFailure {
+    fn into_error(self) -> AnyError {
+        format!(
+            "final-evidence:verification-failed:name={};argv={};exit={};stdout_tail={};stderr_tail={}",
+            self.name,
+            self.argv.join(" "),
+            self.code
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "signal".to_owned()),
+            self.stdout_tail,
+            self.stderr_tail
+        )
+        .into()
+    }
+}
+
+/// Bounded, single-line tail of captured child output for event/status embedding.
+///
+/// Counts CHARACTERS, not bytes. Slicing a `str` at a byte offset panics when the offset
+/// lands inside a multi-byte character, and real `cargo test` / `cargo clippy` output is
+/// full of multi-byte glyphs. Panicking here would destroy the very diagnostic this
+/// function exists to deliver, at the end of a long autonomous run.
+fn bounded_tail(bytes: &[u8]) -> String {
+    const MAX_CHARS: usize = 600;
+    let text = String::from_utf8_lossy(bytes);
+    let trimmed = text.trim_end();
+    let char_count = trimmed.chars().count();
+    let tail: String = if char_count > MAX_CHARS {
+        trimmed.chars().skip(char_count - MAX_CHARS).collect()
+    } else {
+        trimmed.to_owned()
+    };
+    tail.replace(['\n', '\r'], " | ")
 }
 
 #[derive(Deserialize)]
 struct LiveVerificationCommand {
     argv: Vec<String>,
     cwd: String,
+    #[serde(default)]
+    name: Option<String>,
 }
 
 fn live_verification_commands(worktree: &Path) -> Result<Vec<LiveVerificationCommand>, AnyError> {

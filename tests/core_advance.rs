@@ -1,0 +1,657 @@
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use drivers::seam::{self, CoreState};
+use kernel::generated::{CoreToHostDonePayload, CoreToHostSpawnPayload, EventRow, SeamEnvelope};
+use sha2::{Digest as ShaDigest, Sha256};
+
+static CWD_LOCK: Mutex<()> = Mutex::new(());
+
+#[test]
+fn multi_unit_plan_dispatches_next_lane_after_integration() {
+    let _guard = CWD_LOCK.lock().expect("cwd lock");
+    let fixture = AdvanceFixture::new("dispatch-next", 2, false);
+    let mut state = fixture.state();
+    let first = send_command(&mut state, "autopilot main");
+    let first_spawn = spawn_payload(first);
+    assert_eq!(first_spawn.action.assignment_id.0, "assignment-main-L1");
+
+    let after_l1 = fixture.complete_lane(&mut state, &first_spawn, "l1");
+    assert_eq!(after_l1.kind, "spawn", "response: {after_l1:?}");
+    let next = spawn_payload(after_l1);
+    assert_eq!(next.action.assignment_id.0, "assignment-main-L2");
+    assert_eq!(fixture.count_agent_spawns("assignment-main-L2"), 1);
+}
+
+#[test]
+fn sequential_plan_reaches_closure_and_result_ref() {
+    let _guard = CWD_LOCK.lock().expect("cwd lock");
+    let fixture = AdvanceFixture::new("closure", 2, false);
+    let mut state = fixture.state();
+    let first = spawn_payload(send_command(&mut state, "autopilot main"));
+    let second = spawn_payload(fixture.complete_lane(&mut state, &first, "l1"));
+    let closed = fixture.complete_lane(&mut state, &second, "l2");
+
+    assert_eq!(closed.kind, "done", "response: {closed:?}");
+    let status = done_status(&closed);
+    assert!(
+        status.contains("lifecycle:close:result_ref=refs/autopilot/results/main/"),
+        "status: {status}"
+    );
+    let refs = git_out(
+        &fixture.root,
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/autopilot/results/main",
+        ],
+    );
+    let result_refs = refs.lines().collect::<Vec<_>>();
+    assert_eq!(result_refs.len(), 1, "result refs: {result_refs:?}");
+}
+
+#[test]
+fn advance_waits_while_work_is_in_flight() {
+    let _guard = CWD_LOCK.lock().expect("cwd lock");
+    let fixture = AdvanceFixture::new("wait-in-flight", 2, true);
+    let mut state = fixture.state();
+    let first = send_command(&mut state, "autopilot main");
+    assert_eq!(first.kind, "spawn");
+    let waiting = send_command(&mut state, "autopilot main");
+
+    assert_eq!(waiting.kind, "done", "response: {waiting:?}");
+    let status = done_status(&waiting);
+    assert!(status.contains("dispatch:waiting"), "status: {status}");
+    assert!(status.contains("active_implementers=1"), "status: {status}");
+    assert!(!status.contains("dispatch-stuck"), "status: {status}");
+    assert_eq!(fixture.count_agent_spawns("assignment-main-L1"), 1);
+}
+
+#[test]
+fn quiescent_incomplete_run_fails_loudly() {
+    let _guard = CWD_LOCK.lock().expect("cwd lock");
+    let fixture = AdvanceFixture::new("stuck", 2, true);
+    let mut state = fixture.state();
+    let appended = send_command(&mut state, "append:final-precondition:unit-closed:L1");
+    assert_eq!(appended.kind, "done");
+
+    let stuck = send_command(&mut state, "autopilot main");
+    assert_eq!(stuck.kind, "done", "response: {stuck:?}");
+    let status = done_status(&stuck);
+    assert!(
+        status.contains("rejection:dispatch-stuck"),
+        "status: {status}"
+    );
+    assert!(status.contains("blocked=[L2:"), "status: {status}");
+    assert!(
+        status.contains("unmet_dependency_gate:FC1"),
+        "status: {status}"
+    );
+    assert!(status.contains("active_implementers=0"), "status: {status}");
+    assert!(status.contains("active_validators=0"), "status: {status}");
+    assert!(!status.starts_with("state:"), "status: {status}");
+    assert!(
+        git_out(
+            &fixture.root,
+            &[
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/autopilot/results/main",
+            ],
+        )
+        .is_empty(),
+        "stuck run must not publish a result ref"
+    );
+}
+
+#[test]
+fn integration_replay_does_not_double_dispatch() {
+    let _guard = CWD_LOCK.lock().expect("cwd lock");
+    let fixture = AdvanceFixture::new("replay", 2, false);
+    let mut state = fixture.state();
+    let first = spawn_payload(send_command(&mut state, "autopilot main"));
+    let completed = fixture.complete_lane_with_terminal(&mut state, &first, "l1");
+    let next = spawn_payload(completed.response.clone());
+    assert_eq!(next.action.assignment_id.0, "assignment-main-L2");
+
+    let replay = send_task_completed(
+        &mut state,
+        &completed.task_id,
+        &completed.validation_action_id,
+        &completed.validation_assignment_id,
+    );
+    assert_eq!(replay.kind, "done");
+    assert!(done_status(&replay).contains("already-consumed"));
+    assert_eq!(fixture.count_agent_spawns("assignment-main-L2"), 1);
+}
+
+/// A lane with a LIVE implementer binding must never be dispatched twice.
+///
+/// The exclusion that must do this work is `lane_has_live_delivery`, which is derived
+/// from the runner invocation log (an implementer binding for the lane that is not yet
+/// terminal-consumed). That signal is independent of the dispatch path and self-clears
+/// when the attempt becomes terminal, so it can represent *temporary* liveness in an
+/// append-only fold. A permanent `unit-active:` latch deliberately does NOT exist: in a
+/// fold that never removes refs it could never be cleared, permanently bricking any lane
+/// whose attempt ended without closing its unit.
+///
+/// This asserts the DISPATCH DECISION itself, not an incidental downstream error.
+#[test]
+fn active_lane_is_never_redispatched() {
+    let _guard = CWD_LOCK.lock().expect("cwd lock");
+    let fixture = AdvanceFixture::new("active-exclusion", 2, true);
+    let mut state = fixture.state();
+
+    let first = send_command(&mut state, "autopilot main");
+    assert_eq!(first.kind, "spawn", "first advance must dispatch L1");
+    assert_eq!(fixture.count_agent_spawns("assignment-main-L1"), 1);
+
+    // L1's delivery is live. A second advance must NOT dispatch anything, and must
+    // report Waiting (work is genuinely in flight) rather than Stuck.
+    let again = send_command(&mut state, "autopilot main");
+    assert_eq!(
+        again.kind, "done",
+        "must not spawn while L1 delivery is live: {again:?}"
+    );
+    let status = done_status(&again);
+    // A dispatch must not even be ATTEMPTED. If the exclusion is broken the run tries to
+    // re-issue L1 and dies downstream (e.g. a dirty delivery worktree); that is a
+    // second-order symptom, so name it explicitly rather than letting it masquerade as
+    // an unrelated driver error.
+    assert!(
+        !status.contains("driver-error"),
+        "second advance must not attempt a dispatch while L1 is live: {status}"
+    );
+    assert!(status.contains("dispatch:waiting"), "status: {status}");
+    assert!(!status.contains("dispatch-stuck"), "status: {status}");
+    assert!(
+        status.contains("active_implementers=1"),
+        "the live implementer must be what holds the run open: {status}"
+    );
+    assert_eq!(
+        fixture.count_agent_spawns("assignment-main-L1"),
+        1,
+        "L1 must never be dispatched twice"
+    );
+
+    // No permanent liveness latch may be reintroduced: it cannot be cleared by an
+    // append-only fold and would brick the lane forever.
+    let events = fs::read_to_string(&fixture.event_path).expect("events");
+    assert!(!events.contains("unit-active:"), "events: {events}");
+    assert!(!events.contains("lane-active:"), "events: {events}");
+}
+
+struct AdvanceFixture {
+    root: PathBuf,
+    event_path: PathBuf,
+    previous: PathBuf,
+}
+
+struct CompletedLane {
+    response: SeamEnvelope,
+    task_id: String,
+    validation_action_id: String,
+    validation_assignment_id: String,
+}
+
+impl AdvanceFixture {
+    fn new(name: &str, units: usize, block_after_first: bool) -> Self {
+        let root = temp_repo(name);
+        fs::write(root.join("README.md"), "advance fixture\n").expect("readme");
+        git_init(&root);
+        write_approved_plan(&root, units, block_after_first);
+        configure_runner_env();
+        let previous = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(&root).expect("chdir fixture");
+        let event_path = root.join(".pi/autopilot/events.jsonl");
+        Self {
+            root,
+            event_path,
+            previous,
+        }
+    }
+
+    fn state(&self) -> CoreState {
+        CoreState::open(Some(self.event_path.clone())).expect("state")
+    }
+
+    fn complete_lane(
+        &self,
+        state: &mut CoreState,
+        delivery_spawn: &CoreToHostSpawnPayload,
+        label: &str,
+    ) -> SeamEnvelope {
+        self.complete_lane_with_terminal(state, delivery_spawn, label)
+            .response
+    }
+
+    fn complete_lane_with_terminal(
+        &self,
+        state: &mut CoreState,
+        delivery_spawn: &CoreToHostSpawnPayload,
+        label: &str,
+    ) -> CompletedLane {
+        let delivery_spec = self.delivery_spec(delivery_spawn);
+        let worktree = PathBuf::from(delivery_spec["worktree"].as_str().expect("worktree"));
+        let changed_path = format!("{label}.txt");
+        fs::write(
+            worktree.join(&changed_path),
+            format!("advance fixture changed by {label}\n"),
+        )
+        .expect("worktree edit");
+        let carrier_path = PathBuf::from(delivery_spec["carrier_path"].as_str().expect("carrier"));
+        fs::create_dir_all(carrier_path.parent().expect("carrier parent")).expect("carrier dir");
+        fs::write(
+            &carrier_path,
+            serde_json::to_vec_pretty(&delivery_carrier(&delivery_spec, &changed_path))
+                .expect("delivery carrier"),
+        )
+        .expect("delivery carrier write");
+
+        let validation = send_task_completed(
+            state,
+            &format!("task-delivery-{label}"),
+            &delivery_spawn.action.action_id.0,
+            &delivery_spawn.action.assignment_id.0,
+        );
+        assert_eq!(
+            validation.kind, "spawn",
+            "validation response: {validation:?}"
+        );
+        let validation_spawn = spawn_payload(validation);
+        let validation_spec = self.validation_spec(&worktree, &validation_spawn);
+        let validation_carrier_path = PathBuf::from(
+            validation_spec["carrier_path"]
+                .as_str()
+                .expect("validation carrier"),
+        );
+        fs::create_dir_all(
+            validation_carrier_path
+                .parent()
+                .expect("validation carrier parent"),
+        )
+        .expect("validation carrier dir");
+        fs::write(
+            &validation_carrier_path,
+            serde_json::to_vec_pretty(&validation_carrier(&validation_spec))
+                .expect("validation carrier"),
+        )
+        .expect("validation carrier write");
+
+        let task_id = format!("task-validation-{label}");
+        let response = send_task_completed(
+            state,
+            &task_id,
+            &validation_spawn.action.action_id.0,
+            &validation_spawn.action.assignment_id.0,
+        );
+        CompletedLane {
+            response,
+            task_id,
+            validation_action_id: validation_spawn.action.action_id.0,
+            validation_assignment_id: validation_spawn.action.assignment_id.0,
+        }
+    }
+
+    fn delivery_spec(&self, spawn: &CoreToHostSpawnPayload) -> serde_json::Value {
+        let lane = spawn
+            .action
+            .assignment_id
+            .0
+            .rsplit('-')
+            .next()
+            .expect("lane suffix");
+        let path = self.root.join(format!(
+            ".pi/autopilot/main/worktrees/{lane}/.pi/autopilot/runner/specs/{}.json",
+            spawn.action.assignment_id.0
+        ));
+        serde_json::from_slice(&fs::read(path).expect("delivery spec")).expect("delivery spec json")
+    }
+
+    fn validation_spec(
+        &self,
+        worktree: &Path,
+        spawn: &CoreToHostSpawnPayload,
+    ) -> serde_json::Value {
+        let path = worktree.join(format!(
+            ".pi/autopilot/main/validation/{}/agent-run-spec.json",
+            spawn.action.assignment_id.0
+        ));
+        serde_json::from_slice(&fs::read(path).expect("validation spec"))
+            .expect("validation spec json")
+    }
+
+    fn count_agent_spawns(&self, assignment_id: &str) -> usize {
+        let text = fs::read_to_string(&self.event_path).unwrap_or_default();
+        text.lines()
+            .filter_map(|line| serde_json::from_str::<EventRow>(line).ok())
+            .filter(|event| event.kind.0 == "agent:spawn")
+            .filter(|event| {
+                event
+                    .artifact_refs
+                    .iter()
+                    .any(|reference| reference.0 == assignment_id)
+            })
+            .count()
+    }
+}
+
+impl Drop for AdvanceFixture {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.previous);
+    }
+}
+
+fn write_approved_plan(root: &Path, units: usize, block_after_first: bool) {
+    let rows = (1..=units)
+        .map(|index| {
+            let dependencies = if index == 1 {
+                Vec::<String>::new()
+            } else {
+                vec![format!("U{}", index - 1)]
+            };
+            let predecessor_forward_criteria = if block_after_first && index > 1 {
+                vec![format!("FC{}", index - 1)]
+            } else {
+                Vec::new()
+            };
+            serde_json::json!({
+                "id": format!("U{index}"),
+                "operator_order": index,
+                "decisions": [],
+                "criteria": [format!("AC{index}")],
+                "dependencies": dependencies,
+                "predecessor_forward_criteria": predecessor_forward_criteria,
+                "downstream_release_edges": [format!("EDGE{index}")]
+            })
+        })
+        .collect::<Vec<_>>();
+    let dir = root.join(".pi/autopilot/main");
+    fs::create_dir_all(&dir).expect("plan dir");
+    fs::write(
+        dir.join("approved-plan.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({ "units": rows })).expect("plan json"),
+    )
+    .expect("approved plan");
+}
+
+fn delivery_carrier(spec: &serde_json::Value, changed_path: &str) -> serde_json::Value {
+    let typed: kernel::generated::AgentRunSpec =
+        serde_json::from_value(spec.clone()).expect("delivery spec");
+    let profile = kernel::generated::TERMINAL_PROFILES
+        .iter()
+        .find(|row| row.0 == "delivery-status.v2")
+        .expect("delivery profile");
+    let submission = serde_json::json!({
+        "actual_changed_paths": [changed_path],
+        "execution_audit_ref": "audit:delivery",
+        "focused_evidence_refs": ["evidence:0", "evidence:1"],
+        "terminal_status": "done",
+        "hard_boundary_violations": []
+    });
+    let submission_digest = sha256_hex(&serde_json::to_vec(&submission).expect("submission"));
+    let binding = drivers::runner::child::carrier_binding(&typed);
+    let tool_call_id = "delivery-tool-call-advance";
+    let audit = serde_json::json!({"schema":"autopilot.tool_audit.v1","tool_call_id":tool_call_id,"profile_id":profile.0,"tool_name":profile.1,"boundary_id":profile.2,"result_contract":profile.3,"schema_digest":profile.4,"binding":binding,"submission_digest":submission_digest});
+    let audit_bytes = serde_json::to_vec_pretty(&audit).expect("audit");
+    let audit_path = PathBuf::from(spec["carrier_path"].as_str().expect("carrier"))
+        .with_extension("tool-audit.json");
+    fs::write(&audit_path, &audit_bytes).expect("audit write");
+    let spec_bytes =
+        fs::read_to_string(spec["spec_path"].as_str().expect("spec path")).expect("spec bytes");
+    serde_json::json!({
+        "schema":"autopilot.delivery_result.v2",
+        "assignment_id":spec["assignment_id"],
+        "role_id":spec["role_id"],
+        "mode":spec["mode"],
+        "run_revision":spec["run_revision"],
+        "workstream":spec["workstream"],
+        "lane_id":spec["lane_id"],
+        "attempt":spec["attempt"],
+        "base_commit":spec["base_commit"],
+        "worktree":spec["worktree"],
+        "action_id":spec["action_id"],
+        "prompt_path":spec["prompt_path"],
+        "prompt_digest":spec["prompt_digest"],
+        "spec_path":spec["spec_path"],
+        "spec_digest":sha256_hex(spec_bytes.as_bytes()),
+        "spec_bytes":spec_bytes,
+        "carrier_path":spec["carrier_path"],
+        "boundary_id":spec["boundary_id"],
+        "boundary_digest":spec["boundary_digest"],
+        "result_contract":spec["result_contract"],
+        "result_contract_digest":spec["result_contract_digest"],
+        "settings_digest":spec["settings_digest"],
+        "context_digest":spec["context_digest"],
+        "skills_digest":spec["skills_digest"],
+        "subscription_digest":spec["subscription_digest"],
+        "runtime_extension_digest":spec["runtime_extension_digest"],
+        "terminal_profile_id":profile.0,
+        "tool_name":profile.1,
+        "tool_schema_digest":profile.4,
+        "carrier_binding":binding,
+        "tool_call_id":tool_call_id,
+        "tool_audit_ref":audit_path.display().to_string(),
+        "tool_audit_digest":sha256_hex(&audit_bytes),
+        "submission_digest":submission_digest,
+        "submission":submission
+    })
+}
+
+fn validation_carrier(spec: &serde_json::Value) -> serde_json::Value {
+    let typed: kernel::generated::AgentRunSpec =
+        serde_json::from_value(spec.clone()).expect("validation spec");
+    let assignment_path = PathBuf::from(spec["assignment_path"].as_str().expect("assignment"));
+    let assignment_bytes = fs::read(&assignment_path).expect("assignment bytes");
+    let assignment: kernel::generated::ValidationAssignmentV2 =
+        serde_json::from_slice(&assignment_bytes).expect("assignment json");
+    let context_path = PathBuf::from(
+        spec["context_manifest_path"]
+            .as_str()
+            .expect("context manifest"),
+    );
+    let context_bytes = fs::read(&context_path).expect("context bytes");
+    let context: kernel::generated::ValidationContextV2 =
+        serde_json::from_slice(&context_bytes).expect("context json");
+    let evidence_ref = context
+        .evidence
+        .first()
+        .expect("validation evidence")
+        .evidence_ref
+        .0
+        .clone();
+    let criterion_results = context
+        .criteria
+        .iter()
+        .map(|criterion| {
+            serde_json::json!({
+                "criterion_id": criterion.criterion_id,
+                "verdict": "PASS",
+                "evidence_refs": [evidence_ref],
+                "finding_ids": [],
+                "covered_paths": criterion.covered_paths,
+                "semantic_surface_ids": criterion.semantic_surface_ids,
+                "forward_edge_ids": criterion.forward_edge_ids
+            })
+        })
+        .collect::<Vec<_>>();
+    let submission = serde_json::json!({
+        "schema":"autopilot.validation_submission.v2",
+        "validation_id": assignment.validation_id,
+        "assignment_id": assignment.assignment_id,
+        "scope": assignment.scope,
+        "exact_commit": assignment.exact_commit,
+        "exact_tree": assignment.exact_tree,
+        "outcome":"FORWARD_READY",
+        "criterion_results": criterion_results,
+        "findings": []
+    });
+    let typed_submission: kernel::generated::ValidationSubmissionV2 =
+        serde_json::from_value(submission.clone()).expect("typed submission");
+    drivers::runner::child::admit_validation_submission(&typed, &typed_submission)
+        .expect("admitted validation submission");
+    let submission_digest = sha256_hex(&serde_json::to_vec(&submission).expect("submission"));
+    let profile = kernel::generated::TERMINAL_PROFILES
+        .iter()
+        .find(|row| row.0 == "validation-status.v2")
+        .expect("validation profile");
+    let binding = drivers::runner::child::carrier_binding(&typed);
+    let tool_call_id = "validation-tool-call-advance";
+    let audit = serde_json::json!({"schema":"autopilot.tool_audit.v1","tool_call_id":tool_call_id,"profile_id":profile.0,"tool_name":profile.1,"boundary_id":profile.2,"result_contract":profile.3,"schema_digest":profile.4,"binding":binding,"submission_digest":submission_digest});
+    let audit_bytes = serde_json::to_vec_pretty(&audit).expect("audit");
+    let audit_path = PathBuf::from(spec["carrier_path"].as_str().expect("carrier"))
+        .with_extension("tool-audit.json");
+    fs::write(&audit_path, &audit_bytes).expect("audit write");
+    let spec_bytes =
+        fs::read_to_string(spec["spec_path"].as_str().expect("spec path")).expect("spec bytes");
+    serde_json::json!({
+        "schema":"autopilot.validation_result.v2",
+        "action_id":spec["action_id"],
+        "assignment_id":spec["assignment_id"],
+        "validation_id": assignment.validation_id,
+        "validation_key": assignment.validation_key,
+        "validation_attempt": assignment.validation_attempt,
+        "semantic_round": assignment.semantic_round,
+        "run_revision":spec["run_revision"],
+        "workstream":spec["workstream"],
+        "role_id":spec["role_id"],
+        "mode":spec["mode"],
+        "producer_assignment_ids": assignment.producer_assignment_ids,
+        "exact_commit": assignment.exact_commit,
+        "exact_tree": assignment.exact_tree,
+        "assignment_path": spec["assignment_path"],
+        "assignment_digest": sha256_hex(&assignment_bytes),
+        "context_manifest_path": spec["context_manifest_path"],
+        "context_manifest_digest": sha256_hex(&context_bytes),
+        "prompt_path":spec["prompt_path"],
+        "prompt_digest":spec["prompt_digest"],
+        "spec_path":spec["spec_path"],
+        "spec_digest":sha256_hex(spec_bytes.as_bytes()),
+        "spec_bytes":spec_bytes,
+        "carrier_path":spec["carrier_path"],
+        "boundary_id":spec["boundary_id"],
+        "boundary_digest":spec["boundary_digest"],
+        "result_contract":spec["result_contract"],
+        "result_contract_digest":spec["result_contract_digest"],
+        "settings_digest":spec["settings_digest"],
+        "skills_digest":spec["skills_digest"],
+        "subscription_digest":spec["subscription_digest"],
+        "runtime_extension_digest":spec["runtime_extension_digest"],
+        "terminal_profile_id":profile.0,
+        "tool_name":profile.1,
+        "tool_schema_digest":profile.4,
+        "carrier_binding":binding,
+        "tool_call_id":tool_call_id,
+        "tool_audit_ref":audit_path.display().to_string(),
+        "tool_audit_digest":sha256_hex(&audit_bytes),
+        "submission_digest":submission_digest,
+        "submission":submission
+    })
+}
+
+fn configure_runner_env() {
+    unsafe {
+        std::env::set_var(
+            "AUTOPILOT_NODE_EXECUTABLE",
+            std::env::current_exe().expect("exe"),
+        );
+        std::env::set_var(
+            "AUTOPILOT_AGENT_RUNNER_WRAPPER",
+            std::env::current_exe().expect("exe"),
+        );
+        std::env::set_var(
+            "AUTOPILOT_CHILD_ADDON_PATH",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/generated/child-extension.ts"),
+        );
+        std::env::set_var(
+            "AUTOPILOT_VALIDATOR_COMMAND",
+            std::env::current_exe().expect("exe"),
+        );
+    }
+}
+
+fn send_command(state: &mut CoreState, raw: &str) -> SeamEnvelope {
+    let frame = serde_json::json!({"v":1,"id":1,"kind":"command","payload":{"raw":raw,"background_capabilities":{"api_version":1,"run":true,"run_is_agent":true,"run_completion_trigger":true,"status":true,"logs":true,"logs_bounded":true,"kill":true}}});
+    send_frame(state, frame)
+}
+
+fn send_task_completed(
+    state: &mut CoreState,
+    task_id: &str,
+    action_id: &str,
+    assignment_id: &str,
+) -> SeamEnvelope {
+    send_frame(
+        state,
+        serde_json::json!({"v":1,"id":2,"kind":"task-completed","payload":{"task_id":task_id,"action_id":action_id,"assignment_id":assignment_id,"status":"completed"}}),
+    )
+}
+
+fn send_frame(state: &mut CoreState, frame: serde_json::Value) -> SeamEnvelope {
+    seam::handle_line(&frame.to_string(), state).expect("handle line")
+}
+
+fn spawn_payload(envelope: SeamEnvelope) -> CoreToHostSpawnPayload {
+    assert_eq!(envelope.kind, "spawn", "response: {envelope:?}");
+    serde_json::from_value(envelope.payload).expect("spawn payload")
+}
+
+fn done_status(envelope: &SeamEnvelope) -> String {
+    let payload: CoreToHostDonePayload =
+        serde_json::from_value(envelope.payload.clone()).expect("done payload");
+    payload.status
+}
+
+fn git_init(root: &Path) {
+    run(root, &["init"]);
+    run(root, &["config", "user.email", "advance@example.invalid"]);
+    run(root, &["config", "user.name", "Advance Fixture"]);
+    run(root, &["add", "."]);
+    run(root, &["commit", "-m", "fixture"]);
+}
+
+fn run(cwd: &Path, args: &[&str]) {
+    let status = Command::new("git")
+        .current_dir(cwd)
+        .args(args)
+        .status()
+        .expect("git");
+    assert!(status.success(), "git {:?} failed", args);
+}
+
+fn git_out(cwd: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .current_dir(cwd)
+        .args(args)
+        .output()
+        .expect("git output");
+    assert!(output.status.success(), "git {:?} failed", args);
+    String::from_utf8(output.stdout)
+        .expect("git utf8")
+        .trim()
+        .to_owned()
+}
+
+fn temp_repo(name: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("pi-autopilot-advance-{name}-{nanos}"));
+    fs::create_dir_all(&root).expect("temp root");
+    fs::canonicalize(&root).expect("canonical temp root")
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    let digest = Sha256::digest(data);
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}

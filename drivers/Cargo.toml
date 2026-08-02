@@ -73,6 +73,14 @@ name = "task_path_classification"
 path = "../tests/task_path_classification.rs"
 
 [[test]]
+name = "core_advance"
+path = "../tests/core_advance.rs"
+
+[[test]]
+name = "final_verification_diagnostics"
+path = "../tests/final_verification_diagnostics.rs"
+
+[[test]]
 name = "context_budget"
 path = "../tests/context_budget.rs"
 

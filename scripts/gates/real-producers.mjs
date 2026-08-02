@@ -191,7 +191,9 @@ if (!plan.includes('planning_assignments') || !plan.includes('planning_wave_acti
 const waveActions = functionBody('planning_wave_actions', productionSource);
 if (!waveActions.includes('planning_bg_action') || !waveActions.includes('append_runner_invocation')) failures.push('planning_wave_actions does not issue real runner actions per wave member');
 const run = functionBody('route_run');
-if (!run.includes('read_approved_plan') || !run.includes('host_resource_facts') || !run.includes('lane_readiness_from_events')) failures.push('route_run does not use persisted plan, event readiness, and host resources');
+const advanceRun = functionBody('advance_run');
+const runDispatchBody = run.includes('advance_run') ? `${run}\n${advanceRun}` : run;
+if (!runDispatchBody.includes('read_approved_plan') || !runDispatchBody.includes('host_resource_facts') || !runDispatchBody.includes('lane_readiness_from_events')) failures.push('route_run does not use persisted plan, event readiness, and host resources');
 const agentResult = functionBody('route_agent_result');
 if (!agentResult.includes('accept_planning_carrier')) failures.push('route_agent_result does not route through carrier acceptance');
 const taskCompleted = functionBody('route_task_completed');
