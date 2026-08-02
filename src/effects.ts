@@ -9,8 +9,9 @@ import { boundedDiagnostic } from "./host-runtime.ts";
 export class UnknownCoreEffectError extends Error { constructor(kind: string) { super(`autopilot-core returned unknown effect kind: ${kind}`); this.name = "UnknownCoreEffectError"; } }
 export type OperatorMessageLevel = "info" | "warning" | "error";
 export type OperatorMessageSink = (message: string, level: OperatorMessageLevel) => unknown | Promise<unknown>;
+export type StatusEntrySink = (status: string) => unknown | Promise<unknown>;
 export type HostEffectContext = Pick<ExtensionContext, "ui" | "hasUI" | "mode">;
-export interface HostEffectServices { readonly backgroundTasks: Pick<PiBackgroundTaskClient, "run">; readonly operatorMessage: OperatorMessageSink; }
+export interface HostEffectServices { readonly backgroundTasks: Pick<PiBackgroundTaskClient, "run">; readonly operatorMessage: OperatorMessageSink; readonly statusEntry: StatusEntrySink; }
 export interface LaunchedBackgroundTask { readonly action: BackgroundAction; readonly task: BgTaskSnapshot; }
 export interface BackgroundLaunchFailure { readonly action: BackgroundAction; readonly diagnostic: string; }
 export type CoreEffectResult = { readonly kind: "spawn"; readonly acknowledge: boolean; readonly launched: readonly LaunchedBackgroundTask[]; readonly failures: readonly BackgroundLaunchFailure[] } | undefined;
@@ -27,7 +28,7 @@ export async function applyCoreEffect(frame: CoreToHostFrame, ctx: HostEffectCon
     case "spawn-wave": return launchWave(validFrame.payload.actions, effect.acknowledge, services);
     case "session": await failClosed(ctx, services, `Autopilot requested unsupported Pi session effect ${validFrame.payload.session_action}. The installed Pi ExtensionCommandContext has only explicit session-control methods; Autopilot stopped instead of calling a fictional generic session API.`); return undefined;
     case "log": await emitOperatorMessage(ctx, services, `Autopilot log: ${validFrame.payload.line}`, effect.operator_level_default); return undefined;
-    case "done": await emitOperatorMessage(ctx, services, `Autopilot done: ${validFrame.payload.status}`, effect.operator_level_default); return undefined;
+    case "done": await services.statusEntry(validFrame.payload.status); await emitOperatorMessage(ctx, services, `Autopilot done: ${validFrame.payload.status}`, effect.operator_level_default); return undefined;
     default: throw new UnknownCoreEffectError(String((validFrame as { readonly kind: string }).kind));
   }
 }

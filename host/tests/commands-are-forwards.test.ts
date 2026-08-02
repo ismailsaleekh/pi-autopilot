@@ -25,7 +25,7 @@ const PROMPTED_EXTRA_COMMANDS = Object.freeze(["autopilot-resume", "autopilot-he
 
 test("registers the retained D76 public commands", () => {
   const pi = fakePi();
-  registerAutopilotCommands(pi, fixedServiceResolver({ transport: fakeTransport(), backgroundTasks: fakeBackgroundTasks(), operatorMessage: fakeOperatorMessage() }));
+  registerAutopilotCommands(pi, fixedServiceResolver({ transport: fakeTransport(), backgroundTasks: fakeBackgroundTasks(), operatorMessage: fakeOperatorMessage(), statusEntry: fakeStatusEntry() }));
 
   assert.deepEqual([...AUTOPILOT_COMMANDS], D76_PUBLIC_COMMANDS);
   assert.equal(AUTOPILOT_OPERATOR_ANSWER_COMMAND, "autopilot-answer");
@@ -39,7 +39,7 @@ test("each command forwards one command frame with command name and raw argument
   for (const command of AUTOPILOT_COMMANDS) {
     const pi = fakePi();
     const transport = fakeTransport();
-    registerAutopilotCommands(pi, fixedServiceResolver({ transport, backgroundTasks: fakeBackgroundTasks(), operatorMessage: fakeOperatorMessage() }));
+    registerAutopilotCommands(pi, fixedServiceResolver({ transport, backgroundTasks: fakeBackgroundTasks(), operatorMessage: fakeOperatorMessage(), statusEntry: fakeStatusEntry() }));
 
     const rawArgs = "  keep  spacing --and-bytes=✓  ";
     await pi.registrations.get(command).handler(rawArgs, fakeCtx());
@@ -51,7 +51,7 @@ test("each command forwards one command frame with command name and raw argument
 test("command framing inserts only the missing delimiter before raw arguments", async () => {
   const pi = fakePi();
   const transport = fakeTransport();
-  registerAutopilotCommands(pi, fixedServiceResolver({ transport, backgroundTasks: fakeBackgroundTasks(), operatorMessage: fakeOperatorMessage() }));
+  registerAutopilotCommands(pi, fixedServiceResolver({ transport, backgroundTasks: fakeBackgroundTasks(), operatorMessage: fakeOperatorMessage(), statusEntry: fakeStatusEntry() }));
 
   const rawArgs = "keep  spacing --and-bytes=✓";
   await pi.registrations.get("autopilot-onboard").handler(rawArgs, fakeCtx());
@@ -61,7 +61,7 @@ test("command framing inserts only the missing delimiter before raw arguments", 
 
 test("registered command handlers contain no local control branch", () => {
   const pi = fakePi();
-  registerAutopilotCommands(pi, fixedServiceResolver({ transport: fakeTransport(), backgroundTasks: fakeBackgroundTasks(), operatorMessage: fakeOperatorMessage() }));
+  registerAutopilotCommands(pi, fixedServiceResolver({ transport: fakeTransport(), backgroundTasks: fakeBackgroundTasks(), operatorMessage: fakeOperatorMessage(), statusEntry: fakeStatusEntry() }));
 
   for (const [name, definition] of pi.registrations) {
     if (name === AUTOPILOT_OPERATOR_ANSWER_COMMAND) continue;
@@ -124,10 +124,23 @@ test("BUG-184: an ACTIVATED session still sends core shutdown and closes transpo
   assert.equal(transport.closed, true);
 });
 
+test("extension emits machine status entry through appendEntry before operator prose", async () => {
+  const pi = fakePi();
+  autopilotExtension(pi, extensionOptions({ transport: fakeTransport(), backgroundTasks: fakeBackgroundTasks() }));
+
+  await pi.events.get("session_start")({ reason: "startup" }, fakeCtx());
+  await pi.registrations.get("autopilot-plan").handler("main TASK-A.md TASK-B.md TASK-C.md CONTEXT.md", fakeCtx());
+
+  assert.deepEqual(pi.messages, [
+    { appendEntry: { customType: "pi-autopilot-status-v1", data: { status: "ok" } } },
+    { message: { customType: "pi-autopilot", content: "Autopilot done: ok", display: true, details: { level: "info" } }, options: { triggerTurn: false, deliverAs: "nextTurn" } },
+  ]);
+});
+
 test("operator-answer command sends a typed operator-answer frame", async () => {
   const pi = fakePi();
   const transport = fakeTransport();
-  registerAutopilotCommands(pi, fixedServiceResolver({ transport, backgroundTasks: fakeBackgroundTasks(), operatorMessage: fakeOperatorMessage() }));
+  registerAutopilotCommands(pi, fixedServiceResolver({ transport, backgroundTasks: fakeBackgroundTasks(), operatorMessage: fakeOperatorMessage(), statusEntry: fakeStatusEntry() }));
 
   await pi.registrations.get("autopilot-answer").handler('q-1 {"decision":"answered","notes":["real sender"]}', fakeCtx());
 
@@ -137,7 +150,7 @@ test("operator-answer command sends a typed operator-answer frame", async () => 
 test("operator-answer adapter rejects malformed id, JSON, non-object values, unknown adapter, and shape drift", async () => {
   const pi = fakePi();
   const transport = fakeTransport();
-  registerAutopilotCommands(pi, fixedServiceResolver({ transport, backgroundTasks: fakeBackgroundTasks(), operatorMessage: fakeOperatorMessage() }));
+  registerAutopilotCommands(pi, fixedServiceResolver({ transport, backgroundTasks: fakeBackgroundTasks(), operatorMessage: fakeOperatorMessage(), statusEntry: fakeStatusEntry() }));
   const handler = pi.registrations.get("autopilot-answer").handler;
 
   await assert.rejects(handler("", fakeCtx()), /requires an id/u);
@@ -242,6 +255,9 @@ function fakePi() {
     sendMessage(message, options) {
       messages.push({ message, options });
     },
+    appendEntry(customType, data) {
+      messages.push({ appendEntry: { customType, data } });
+    },
   };
 }
 
@@ -335,5 +351,9 @@ function taskFromDescriptor(descriptor, id, status) {
 }
 
 function fakeOperatorMessage() {
+  return async () => {};
+}
+
+function fakeStatusEntry() {
   return async () => {};
 }

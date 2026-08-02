@@ -42,6 +42,7 @@ test("spawn_wave_launches_all_before_await_and_records_partial_failure", async (
     {
       transport: transport as never,
       operatorMessage: async () => {},
+      statusEntry: async () => {},
       onSpawn: async ({ action, task }) => remembered.push({ action: action.action_id, task: task.id }),
       backgroundTasks: {
         run(descriptor) {

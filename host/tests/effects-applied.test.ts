@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { applyCoreEffect } from "../src/effects.ts";
+import { AUTOPILOT_STATUS_CUSTOM_TYPE, buildAutopilotStatusEntryData } from "../src/status-channel.ts";
 import { CoreFrameValidationError, validateCoreToHostFrame } from "../src/generated/frame-validation.ts";
 
 test("routes generated Core effects through supported Pi Host APIs", async () => {
@@ -24,6 +25,7 @@ test("routes generated Core effects through supported Pi Host APIs", async () =>
     ["operator", "info", "Autopilot: hello"],
     ["bg_run", backgroundAction().bg_run],
     ["operator", "info", "Autopilot log: diagnostic"],
+    ["status", "ok"],
     ["operator", "info", "Autopilot done: ok"],
   ]);
 });
@@ -36,9 +38,43 @@ test("uses ctx.ui.notify with generated default levels only when Pi reports UI a
     effectServices(calls),
   );
   assert.deepEqual(calls, [
+    ["status", "rejection:example"],
     ["notify", "info", "Autopilot done: rejection:example"],
     ["operator", "info", "Autopilot done: rejection:example"],
   ]);
+});
+
+test("done status emits a machine status entry before unchanged prose", async () => {
+  const calls = [];
+  const status = "  ready-to-execute:workstream=w1;state:key=value:still=raw  ";
+  await applyCoreEffect(
+    { v: 1, id: 1, kind: "done", payload: { status } },
+    effectContext(calls, true),
+    effectServices(calls),
+  );
+  assert.deepEqual(buildAutopilotStatusEntryData(status), { status });
+  assert.deepEqual(Object.keys(buildAutopilotStatusEntryData(status)), ["status"]);
+  assert.equal(AUTOPILOT_STATUS_CUSTOM_TYPE, "pi-autopilot-status-v1");
+  assert.deepEqual(calls, [
+    ["status", status],
+    ["notify", "info", `Autopilot done: ${status}`],
+    ["operator", "info", `Autopilot done: ${status}`],
+  ]);
+  assert.equal(calls[0][1], status);
+  assert.notEqual(calls[0][1], `Autopilot done: ${status}`);
+});
+
+test("done status entry emission failure propagates before prose", async () => {
+  const calls = [];
+  await assert.rejects(
+    applyCoreEffect(
+      { v: 1, id: 1, kind: "done", payload: { status: "ok" } },
+      effectContext(calls, true),
+      { ...effectServices(calls), statusEntry: async () => { throw new Error("appendEntry failed"); } },
+    ),
+    /appendEntry failed/u,
+  );
+  assert.deepEqual(calls, []);
 });
 
 test("unsupported fictional session/UI effects fail closed with operator-visible messages", async () => {
@@ -148,6 +184,9 @@ function effectServices(calls) {
   return {
     async operatorMessage(message, level) {
       calls.push(["operator", level, message]);
+    },
+    async statusEntry(status) {
+      calls.push(["status", status]);
     },
     backgroundTasks: {
       async run(payload) {

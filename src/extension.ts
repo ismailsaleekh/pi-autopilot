@@ -13,6 +13,7 @@ import {
 import type { ResolveCoreOptions } from "./resolve-core.ts";
 import { CoreTransport } from "./transport.ts";
 import type { BackgroundAction } from "./generated/index.ts";
+import { AUTOPILOT_STATUS_CUSTOM_TYPE, buildAutopilotStatusEntryData } from "./status-channel.ts";
 
 export interface AutopilotExtensionOptions extends ResolveCoreOptions {
   readonly transport?: CoreTransport;
@@ -38,6 +39,7 @@ interface TaskBinding {
 
 export default function autopilotExtension(pi: ExtensionAPI, options: AutopilotExtensionOptions = {}): void {
   const operatorMessage = operatorMessageSink(pi);
+  const statusEntry = (status: string) => pi.appendEntry(AUTOPILOT_STATUS_CUSTOM_TYPE, buildAutopilotStatusEntryData(status));
   const taskBindings = new Map<string, TaskBinding>();
   const unmatchedTerminalTasks = new Map<string, BgTaskSnapshot>();
   /**
@@ -64,6 +66,7 @@ export default function autopilotExtension(pi: ExtensionAPI, options: AutopilotE
       transport: services.transport,
       backgroundTasks: services.backgroundTasks,
       operatorMessage,
+      statusEntry,
       onSpawn: rememberSpawn,
     };
   }

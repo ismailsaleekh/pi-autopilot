@@ -1,0 +1,11 @@
+[
+  {
+    "from": 1200,
+    "to": 1207,
+    "actualBefore": 1199,
+    "actualAfter": 1207,
+    "sourceDelta": 8,
+    "date": "2026-08-02",
+    "justification": "Host budget exception: ceiling 1200 -> 1207. Canonically formatted Host LOC changes from 1199 to 1207 (+8 source LOC). The machine-readable status transport must use pi.appendEntry, which exists only on ExtensionAPI, not ExtensionContext. applyCoreEffect receives only ctx and HostEffectServices, so the adapter must capture this capability at the extension entrypoint and thread it through the existing services seam, exactly as the sibling operatorMessage sink already is. Delta: +3 shared status-channel constant/type/payload builder, +1 StatusEntrySink type, +2 service/options fields, +1 services pass-through, +1 entrypoint closure. The done-case edit is net-zero. The shared builder is imported by BOTH production and the LIVE controller fixture, so a fixture can no longer hand-roll a status frame the product never emits. The delta adds no branch, parsing, classification, mapping, default, retry, fallback, or status policy: Core remains the sole semantic authority. 1207 is the minimum sufficient ceiling, with no discretionary headroom. Any later increase requires a new before/after measurement, itemized boundary justification, and architecture-owner approval."
+  }
+]

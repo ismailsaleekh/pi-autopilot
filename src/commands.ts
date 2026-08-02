@@ -3,7 +3,7 @@ import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { BackgroundAction, CoreToHostFrame, HostToCoreCommandPayload, HostToCoreOperatorAnswerPayload, HostToCoreSpawnResultPayload } from "./generated/index.ts";
 import { ACTIVATING_COMMANDS, HOST_COMMANDS } from "./generated/host-runtime-tables.ts";
 import { boundedDiagnostic, unavailableCapabilities, type BgTaskSnapshot, type PiBackgroundTaskClient } from "./background-tasks.ts";
-import { applyCoreEffect, type CoreEffectResult, type HostEffectContext, type HostEffectServices, type OperatorMessageSink } from "./effects.ts";
+import { applyCoreEffect, type CoreEffectResult, type HostEffectContext, type HostEffectServices, type OperatorMessageSink, type StatusEntrySink } from "./effects.ts";
 import { parseCommandAdapterPayload } from "./host-runtime.ts";
 import type { CoreTransport } from "./transport.ts";
 
@@ -22,6 +22,7 @@ export interface RegisterCommandOptions {
   readonly transport: CommandTransportLike | CoreTransport;
   readonly backgroundTasks: Pick<PiBackgroundTaskClient, "capabilities" | "run">;
   readonly operatorMessage: OperatorMessageSink;
+  readonly statusEntry: StatusEntrySink;
   readonly onSpawn?: (binding: { readonly action: BackgroundAction; readonly task: BgTaskSnapshot }) => void | Promise<void>;
 }
 export interface CommandServiceResolver {
@@ -70,8 +71,8 @@ async function forwardCommand(name: string, args: string, ctx: ExtensionCommandC
   await applyAndRecord(await options.transport.request("command", await commandPayload(name, args, options.backgroundTasks)), ctx, options);
 }
 
-export async function applyAndRecord(frame: CoreToHostFrame, ctx: HostEffectContext, options: Pick<RegisterCommandOptions, "transport" | "backgroundTasks" | "operatorMessage" | "onSpawn">): Promise<CoreEffectResult> {
-  const services = { backgroundTasks: options.backgroundTasks, operatorMessage: options.operatorMessage } satisfies HostEffectServices;
+export async function applyAndRecord(frame: CoreToHostFrame, ctx: HostEffectContext, options: Pick<RegisterCommandOptions, "transport" | "backgroundTasks" | "operatorMessage" | "statusEntry" | "onSpawn">): Promise<CoreEffectResult> {
+  const services = { backgroundTasks: options.backgroundTasks, operatorMessage: options.operatorMessage, statusEntry: options.statusEntry } satisfies HostEffectServices;
   const result = await applyCoreEffect(frame, ctx, services);
   if (result?.kind !== "spawn") return result;
   if (!result.acknowledge) {

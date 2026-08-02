@@ -10,7 +10,7 @@ test("spawn executes the exact Core bg_run descriptor object without rewriting",
   await applyCoreEffect(
     { v: 1, id: 1, kind: "spawn", payload: { action } },
     effectContext(),
-    { backgroundTasks: { async run(descriptor) { actual = descriptor; return { id: "task-1", command: descriptor.command, status: "running", outputPath: "/tmp/out" }; } }, operatorMessage: async () => {} },
+    { backgroundTasks: { async run(descriptor) { actual = descriptor; return { id: "task-1", command: descriptor.command, status: "running", outputPath: "/tmp/out" }; } }, operatorMessage: async () => {}, statusEntry: async () => {} },
   );
 
   assert.equal(actual, action.bg_run);
@@ -26,7 +26,7 @@ test("spawn validator rejects null timeout before event-bus mutation", async () 
     applyCoreEffect(
       { v: 1, id: 1, kind: "spawn", payload: { action } },
       effectContext(),
-      { backgroundTasks: { async run() { called = true; throw new Error("must not run"); } }, operatorMessage: async () => {} },
+      { backgroundTasks: { async run() { called = true; throw new Error("must not run"); } }, operatorMessage: async () => {}, statusEntry: async () => {} },
     ),
     /bg_run.timeoutSeconds must be a positive integer/u,
   );
