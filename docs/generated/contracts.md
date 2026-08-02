@@ -525,6 +525,7 @@ Sources: `data/contracts.kdl`.
 | delivery_result_v2 | field | prompt_digest | digest | true |  |  |
 | delivery_result_v2 | field | spec_path | path | true |  |  |
 | delivery_result_v2 | field | spec_digest | digest | true |  |  |
+| delivery_result_v2 | field | spec_bytes | bytes | true |  | Exact UTF-8 agent_run_spec bytes captured by the child before invoking the model; validation hashes these bytes instead of trusting transient runner files. |
 | delivery_result_v2 | field | carrier_path | path | true |  |  |
 | delivery_result_v2 | field | boundary_id | contract-id | true |  |  |
 | delivery_result_v2 | field | boundary_digest | digest | true |  |  |
@@ -684,6 +685,7 @@ Sources: `data/contracts.kdl`.
 | validation_result_v2 | field | prompt_digest | digest | true |  |  |
 | validation_result_v2 | field | spec_path | path | true |  |  |
 | validation_result_v2 | field | spec_digest | digest | true |  |  |
+| validation_result_v2 | field | spec_bytes | bytes | true |  | Exact UTF-8 agent_run_spec bytes captured by the child before invoking the model; validation hashes these bytes instead of trusting transient runner files. |
 | validation_result_v2 | field | carrier_path | path | true |  |  |
 | validation_result_v2 | field | boundary_id | contract-id | true |  |  |
 | validation_result_v2 | field | boundary_digest | digest | true |  |  |

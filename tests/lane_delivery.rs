@@ -356,7 +356,88 @@ fn lane_delivery_agent_git_mutation_and_incomplete_delivery_are_refused_without_
 
 #[test]
 fn lane_delivery_core_stdout_stays_json_when_runtime_packages_uncommitted_changes() {
-    let fixture = fixture("stdout-purity");
+    let (mut core, spawn, spec, carrier_path, worktree) = launched_core_delivery("stdout-purity");
+    fs::write(
+        worktree.join("README.md"),
+        "delivery terminal fixture changed\n",
+    )
+    .expect("worktree edit");
+    fs::write(worktree.join("Cargo.lock"), "# untracked residue\n").expect("residue");
+    fs::create_dir_all(carrier_path.parent().expect("carrier parent")).expect("carrier dir");
+    fs::write(
+        &carrier_path,
+        serde_json::to_vec_pretty(&delivery_carrier_without_package_for_core(&spec, 2))
+            .expect("delivery carrier"),
+    )
+    .expect("carrier write");
+
+    let accepted = core.send_json(serde_json::json!({"v":1,"id":2,"kind":"task-completed","payload":{"task_id":"task-stdout-purity","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}));
+    assert_eq!(accepted.kind, "spawn", "accepted response: {accepted:?}");
+    core.shutdown();
+}
+
+#[test]
+fn lane_delivery_core_accepts_captured_spec_when_runner_spec_and_prompt_are_transient() {
+    let (mut core, spawn, spec, carrier_path, worktree) =
+        launched_core_delivery("transient-runner-files");
+    fs::write(
+        worktree.join("README.md"),
+        "delivery terminal fixture changed\n",
+    )
+    .expect("worktree edit");
+    fs::create_dir_all(carrier_path.parent().expect("carrier parent")).expect("carrier dir");
+    fs::write(
+        &carrier_path,
+        serde_json::to_vec_pretty(&delivery_carrier_without_package_for_core(&spec, 2))
+            .expect("delivery carrier"),
+    )
+    .expect("carrier write");
+    remove_runner_spec_and_prompt_dirs(&spec);
+
+    let accepted = core.send_json(serde_json::json!({"v":1,"id":2,"kind":"task-completed","payload":{"task_id":"task-transient-runner-files","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}));
+    assert_eq!(accepted.kind, "spawn", "accepted response: {accepted:?}");
+    core.shutdown();
+}
+
+#[test]
+fn lane_delivery_core_rejects_captured_spec_bytes_digest_drift() {
+    let (mut core, spawn, spec, carrier_path, worktree) =
+        launched_core_delivery("captured-spec-drift");
+    fs::write(
+        worktree.join("README.md"),
+        "delivery terminal fixture changed\n",
+    )
+    .expect("worktree edit");
+    let mut carrier = delivery_carrier_without_package_for_core(&spec, 2);
+    carrier["spec_bytes"] = serde_json::json!("{}");
+    fs::create_dir_all(carrier_path.parent().expect("carrier parent")).expect("carrier dir");
+    fs::write(
+        &carrier_path,
+        serde_json::to_vec_pretty(&carrier).expect("delivery carrier"),
+    )
+    .expect("carrier write");
+    remove_runner_spec_and_prompt_dirs(&spec);
+
+    let rejected = core.send_json(serde_json::json!({"v":1,"id":2,"kind":"task-completed","payload":{"task_id":"task-captured-spec-drift","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}));
+    assert_eq!(rejected.kind, "done", "rejected response: {rejected:?}");
+    assert!(
+        done_status(&rejected)
+            .contains("rejection:delivery-carrier-binding:delivery spec receipt mismatch"),
+        "rejection did not report spec drift: {rejected:?}"
+    );
+    core.shutdown();
+}
+
+fn launched_core_delivery(
+    fixture_name: &str,
+) -> (
+    CoreProcess,
+    CoreToHostSpawnPayload,
+    serde_json::Value,
+    PathBuf,
+    PathBuf,
+) {
+    let fixture = fixture(fixture_name);
     let root = fixture.root;
     fs::write(root.join("README.md"), "delivery terminal fixture\n").expect("fixture file");
     git_init_for_core(&root);
@@ -384,23 +465,27 @@ fn lane_delivery_core_stdout_stays_json_when_runtime_packages_uncommitted_change
             .expect("delivery spec json");
     let carrier_path = PathBuf::from(spec["carrier_path"].as_str().expect("carrier path"));
     let worktree = PathBuf::from(spec["worktree"].as_str().expect("worktree path"));
-    fs::write(
-        worktree.join("README.md"),
-        "delivery terminal fixture changed\n",
-    )
-    .expect("worktree edit");
-    fs::write(worktree.join("Cargo.lock"), "# untracked residue\n").expect("residue");
-    fs::create_dir_all(carrier_path.parent().expect("carrier parent")).expect("carrier dir");
-    fs::write(
-        &carrier_path,
-        serde_json::to_vec_pretty(&delivery_carrier_without_package_for_core(&spec, 2))
-            .expect("delivery carrier"),
-    )
-    .expect("carrier write");
+    (core, spawn, spec, carrier_path, worktree)
+}
 
-    let accepted = core.send_json(serde_json::json!({"v":1,"id":2,"kind":"task-completed","payload":{"task_id":"task-stdout-purity","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}));
-    assert_eq!(accepted.kind, "spawn", "accepted response: {accepted:?}");
-    core.shutdown();
+fn remove_runner_spec_and_prompt_dirs(spec: &serde_json::Value) {
+    for key in ["spec_path", "prompt_path"] {
+        let dir = Path::new(spec[key].as_str().expect("runner path"))
+            .parent()
+            .expect("runner parent");
+        fs::remove_dir_all(dir).expect("remove transient runner directory");
+        assert!(
+            !dir.exists(),
+            "runner directory survived: {}",
+            dir.display()
+        );
+    }
+}
+
+fn done_status(envelope: &SeamEnvelope) -> &str {
+    envelope.payload["status"]
+        .as_str()
+        .expect("done payload status")
 }
 
 fn delivery(
@@ -589,9 +674,12 @@ fn delivery_carrier_without_package_for_core(
         "binding":binding,
         "submission_digest":submission_digest,
     });
+    let spec_bytes =
+        fs::read_to_string(spec["spec_path"].as_str().expect("spec path")).expect("spec bytes");
     let carrier_path = PathBuf::from(spec["carrier_path"].as_str().expect("carrier path"));
     let audit_path = carrier_path.with_extension("tool-audit.json");
     let audit_bytes = serde_json::to_vec_pretty(&audit).expect("audit");
+    fs::create_dir_all(audit_path.parent().expect("audit parent")).expect("audit dir");
     fs::write(&audit_path, &audit_bytes).expect("audit write");
     serde_json::json!({
         "schema":"autopilot.delivery_result.v2",
@@ -600,7 +688,8 @@ fn delivery_carrier_without_package_for_core(
         "attempt":spec["attempt"],"base_commit":spec["base_commit"],"worktree":spec["worktree"],
         "action_id":spec["action_id"],"prompt_path":spec["prompt_path"],"prompt_digest":spec["prompt_digest"],
         "spec_path":spec["spec_path"],
-        "spec_digest":sha256_hex(&fs::read(spec["spec_path"].as_str().expect("spec path")).expect("spec bytes")),
+        "spec_digest":sha256_hex(spec_bytes.as_bytes()),
+        "spec_bytes":spec_bytes,
         "carrier_path":spec["carrier_path"],"boundary_id":spec["boundary_id"],"boundary_digest":spec["boundary_digest"],
         "result_contract":spec["result_contract"],"result_contract_digest":spec["result_contract_digest"],
         "settings_digest":spec["settings_digest"],"context_digest":spec["context_digest"],

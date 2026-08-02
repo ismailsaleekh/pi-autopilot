@@ -33,6 +33,11 @@ use crate::runner::{self, RunnerAssignment};
 pub mod sim_host;
 
 const BOUNDARY_ID: &str = "seam.host-frame.v1";
+/// Upper bound on carrier-transported spec bytes hashed during delivery and
+/// validation acceptance. The carrier is child-produced, so an unbounded field
+/// would let a child force an arbitrary parent-side allocation before the
+/// receipt comparison can reject it.
+const MAX_CARRIER_SPEC_BYTES: usize = 1 << 20;
 const COMMAND_BOUNDARY_ID: &str = "seam.operator-command.v1";
 const COMMANDS_KDL: &str = include_str!("../../../data/commands.kdl");
 type AnyError = Box<dyn std::error::Error>;
@@ -887,12 +892,30 @@ fn validate_delivery_result_v2(
     {
         return Err("package-bound delivery identity drift".to_owned());
     }
-    let spec_bytes = fs::read(&binding.spec_path).map_err(|error| error.to_string())?;
-    if sha256_hex_local(&spec_bytes) != binding.spec_digest {
-        return Err("delivery spec digest drift".to_owned());
+    // The runner spec under `binding.spec_path` is transient: it lives inside the
+    // child-writable worktree and is gone by acceptance time. `spec_path` is
+    // retained for forensics only and MUST NEVER be read during validation --
+    // reading it followed symlinks, could block forever on a FIFO, was
+    // unbounded, and bound the carrier to whatever attempt last wrote that path
+    // rather than to this carrier's own bytes.
+    //
+    // Integrity comes from the EXPECTED value being parent-held:
+    // `binding.spec_digest` is computed by the parent at dispatch. Hashing
+    // carrier-transported bytes against it is the same construction as
+    // signature verification -- untrusted carrier, trusted expectation.
+    // This is a dispatch-binding receipt, NOT proof the child executed the spec.
+    let spec_bytes = result.spec_bytes.0.as_bytes();
+    if spec_bytes.len() > MAX_CARRIER_SPEC_BYTES {
+        return Err(format!(
+            "delivery spec receipt oversized: {} bytes exceeds {MAX_CARRIER_SPEC_BYTES}",
+            spec_bytes.len()
+        ));
+    }
+    if sha256_hex_local(spec_bytes) != binding.spec_digest {
+        return Err("delivery spec receipt mismatch".to_owned());
     }
     let spec: kernel::generated::AgentRunSpec =
-        serde_json::from_slice(&spec_bytes).map_err(|error| error.to_string())?;
+        serde_json::from_slice(spec_bytes).map_err(|error| error.to_string())?;
     let profile = runner::terminal_profile_for(
         &binding.role_id.0,
         &binding.boundary_id.0,
@@ -1575,12 +1598,21 @@ fn validate_validation_result_v2(
     {
         return Err("package-bound validation identity drift".to_owned());
     }
-    let spec_bytes = fs::read(&binding.spec_path).map_err(|error| error.to_string())?;
-    if sha256_hex_local(&spec_bytes) != binding.spec_digest {
-        return Err("validation spec digest drift".to_owned());
+    // See validate_delivery_result_v2: `spec_path` is forensics-only and must
+    // never be read here; the parent-held `binding.spec_digest` is the trusted
+    // expectation this receipt is compared against.
+    let spec_bytes = result.spec_bytes.0.as_bytes();
+    if spec_bytes.len() > MAX_CARRIER_SPEC_BYTES {
+        return Err(format!(
+            "validation spec receipt oversized: {} bytes exceeds {MAX_CARRIER_SPEC_BYTES}",
+            spec_bytes.len()
+        ));
+    }
+    if sha256_hex_local(spec_bytes) != binding.spec_digest {
+        return Err("validation spec receipt mismatch".to_owned());
     }
     let spec: kernel::generated::AgentRunSpec =
-        serde_json::from_slice(&spec_bytes).map_err(|error| error.to_string())?;
+        serde_json::from_slice(spec_bytes).map_err(|error| error.to_string())?;
     let profile = runner::terminal_profile_for(
         &binding.role_id.0,
         &binding.boundary_id.0,
