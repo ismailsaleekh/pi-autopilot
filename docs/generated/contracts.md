@@ -132,7 +132,7 @@ Sources: `data/contracts.kdl`.
 | control_frame | field | run_id | uuidv7 | true |  |  |
 | control_frame | field | run_revision | u64 | true |  |  |
 | control_frame | field | trigger.kind | trigger-kind | true |  | Example from D76: background-completed. |
-| control_frame | list | trigger.refs | ref | true |  | Example from D76: [<action-id>]. |
+| control_frame | list | trigger.refs | ref | true |  | Example from D76: `<action-id>`. |
 | control_frame | field | counts.implementers | u32 | true |  |  |
 | control_frame | field | counts.validators | u32 | true |  |  |
 | control_frame | field | counts.fixers | u32 | true |  |  |
@@ -366,7 +366,7 @@ Sources: `data/contracts.kdl`.
 | agent_run_spec | field | assignment_kind | validation_assignment_kind | true |  | Explicit assignment class; no runner infers planning/delivery/validation from result_contract. |
 | agent_run_spec | field | action_id | id | true |  |  |
 | agent_run_spec | field | assignment_id | id | true |  |  |
-| agent_run_spec | field | run_id | id | true |  | Durable top-level UUIDv7 run identity from .pi/autopilot/<workstream>/run-identity.json; scopes physical child-session identity so a new top-level run can never adopt a prior run's Pi session. |
+| agent_run_spec | field | run_id | id | true |  | Durable top-level UUIDv7 run identity from `.pi/autopilot/<workstream>/run-identity.json`; scopes physical child-session identity so a new top-level run can never adopt a prior run's Pi session. |
 | agent_run_spec | field | run_revision | u64 | true |  |  |
 | agent_run_spec | field | workstream | id | true |  |  |
 | agent_run_spec | field | role_id | id | true |  |  |

@@ -6,13 +6,17 @@
     "exactOptionalPropertyTypes": false,
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
+    "baseUrl": "..",
+    "paths": {
+      "@earendil-works/pi-coding-agent": ["host/src/pi-coding-agent-shim.d.ts"]
+    },
     "noEmit": true,
     "noFallthroughCasesInSwitch": true,
     "noImplicitOverride": true,
     "noImplicitReturns": true,
     "noUncheckedIndexedAccess": true,
     "strict": true,
-    "skipLibCheck": true,
+    "skipLibCheck": false,
     "target": "ES2024",
     "types": ["node"]
   },

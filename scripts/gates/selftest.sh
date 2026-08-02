@@ -789,6 +789,51 @@ fn accept_planning_carrier(id: u64, assignment_id: &Id, carrier: AgentCarrier, s
 RS
 expect 0 "accepts reachable routes backed by real producers and recorded spawns" node "$REALPROD" --root "$rgood"
 
+rdestructured="$tmp/real-producers-destructured-signature"
+mkdir -p "$rdestructured/drivers/src/seam"
+cat > "$rdestructured/drivers/src/seam/mod.rs" <<'RS'
+fn dispatch(frame: SeamEnvelope, state: &mut CoreState) -> Result<SeamEnvelope, AnyError> {
+    match frame.kind.as_str() { "command" => command::<fn(&str)>(frame.id, payload, state), "agent-result" => route_agent_result(frame.id, payload, state), "task-completed" => route_task_completed(frame.id, payload, state), other => done(frame.id, rejection("unknown-kind", other)), }
+}
+fn command<'a, T>(
+    id: u64,
+    HostToCoreCommandPayload {
+        raw,
+        background_capabilities: HostCapabilities { enabled },
+    }: HostToCoreCommandPayload,
+    state: &'a mut CoreState,
+) -> Result<SeamEnvelope, AnyError>
+where
+    T: Fn(&'a str),
+{
+    match raw.as_str() { "planning" => route_plan(id, &[raw], state), "allocation-dispatch-runner" => route_run(id, &raw, state), other => done(id, rejection("unknown-driver", other)), }
+}
+fn route_plan(id: u64, args: &[String], state: &mut CoreState) -> Result<SeamEnvelope, AnyError> {
+    let dossier = p2_ground(&RepoGrounding { repo: current_dir()? }, &inventory)?;
+    let assignments = planning_assignments(&args[0], &plan);
+    let actions = planning_wave_actions(&args[0], &assignments, state)?;
+    spawn_wave(id, actions)
+}
+fn planning_wave_actions(workstream: &str, assignments: &[AgentAssignment], state: &mut CoreState) -> Result<Vec<BackgroundAction>, AnyError> {
+    let mut actions = Vec::new();
+    for assignment in assignments {
+        let issue = planning_bg_action(assignment, state.state.revision);
+        append_runner_invocation(state, &issue.binding)?;
+        actions.push(issue.action);
+    }
+    Ok(actions)
+}
+fn route_run(id: u64, workstream: &str, state: &mut CoreState) -> Result<SeamEnvelope, AnyError> { let approved = read_approved_plan(workstream)?; let readiness = lane_readiness_from_events(&lanes, &approved, state); let resources = host_resource_facts()?; append_runner_invocation(state, &binding)?; spawn(id, action) }
+fn route_agent_result(
+    id: u64,
+    HostToCoreAgentResultPayload { assignment_id, carrier }: HostToCoreAgentResultPayload,
+    state: &mut CoreState,
+) -> Result<SeamEnvelope, AnyError> { accept_planning_carrier(id, &assignment_id, carrier, state, None) }
+fn route_task_completed(frame: SeamEnvelope, state: &mut CoreState) -> Result<SeamEnvelope, AnyError> { let binding = binding_for(state, &payload.action_id, &payload.assignment_id)?; append_terminal_event(state, &payload, &binding)?; done(frame.id, state.summary()) }
+fn accept_planning_carrier(id: u64, assignment_id: &Id, carrier: AgentCarrier, state: &mut CoreState, terminal: Option<&Payload>) -> Result<SeamEnvelope, AnyError> { done(id, "accepted".to_owned()) }
+RS
+expect 0 "extracts destructured, generic, multi-line function signatures from the real body brace" node "$REALPROD" --root "$rdestructured"
+
 rbad="$tmp/real-producers-bad"
 mkdir -p "$rbad/drivers/src/seam"
 cat > "$rbad/drivers/src/seam/mod.rs" <<'RS'

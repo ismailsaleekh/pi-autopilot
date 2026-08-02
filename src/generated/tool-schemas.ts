@@ -55,7 +55,7 @@ export const TASK_ATOMS_TOOL_PARAMETERS = {
     "atoms"
   ],
   "type": "object"
-} as unknown as TSchema;
+} as TSchema;
 export const TASK_ATOMS_TOOL_SCHEMA_DIGEST = "77d000b816b3c14dcdefeba0c23d4f4f9f8bedaf5b281081f1cea138e525e091";
 
 export const SCOUT_DOSSIER_TOOL_PARAMETERS = {
@@ -89,7 +89,7 @@ export const SCOUT_DOSSIER_TOOL_PARAMETERS = {
     "findings"
   ],
   "type": "object"
-} as unknown as TSchema;
+} as TSchema;
 export const SCOUT_DOSSIER_TOOL_SCHEMA_DIGEST = "30f69b47c83079ce00ea22cab308e9a26eb7b24cae045aa1dd008221b45da618";
 
 export const QUESTIONS_TOOL_PARAMETERS = {
@@ -130,7 +130,7 @@ export const QUESTIONS_TOOL_PARAMETERS = {
     "questions"
   ],
   "type": "object"
-} as unknown as TSchema;
+} as TSchema;
 export const QUESTIONS_TOOL_SCHEMA_DIGEST = "a716699618f28675f8872ff8d039c40e8443c07cd6a94f907921ee2b9dd88abc";
 
 export const WORK_MAP_TOOL_PARAMETERS = {
@@ -174,7 +174,7 @@ export const WORK_MAP_TOOL_PARAMETERS = {
     "units"
   ],
   "type": "object"
-} as unknown as TSchema;
+} as TSchema;
 export const WORK_MAP_TOOL_SCHEMA_DIGEST = "d60fa316fa8d5f2baf1d1a764028bdaf5676e094ec23710c53917e760cfe939a";
 
 export const PLAN_REVIEW_TOOL_PARAMETERS = {
@@ -215,7 +215,7 @@ export const PLAN_REVIEW_TOOL_PARAMETERS = {
     "verdicts"
   ],
   "type": "object"
-} as unknown as TSchema;
+} as TSchema;
 export const PLAN_REVIEW_TOOL_SCHEMA_DIGEST = "073f22c10d42166d5ec5d0a6465a1fa8f0df8fc1af2ce6a0702bed9b955786d8";
 
 export const DELIVERY_SUBMISSION_V2_TOOL_PARAMETERS = {
@@ -254,7 +254,7 @@ export const DELIVERY_SUBMISSION_V2_TOOL_PARAMETERS = {
     "hard_boundary_violations"
   ],
   "type": "object"
-} as unknown as TSchema;
+} as TSchema;
 export const DELIVERY_SUBMISSION_V2_TOOL_SCHEMA_DIGEST = "dc3894c6b09e07ffb83c1719b19caf501257c60d5b1c847917068ab75643d55d";
 
 export const VALIDATION_SUBMISSION_V2_TOOL_PARAMETERS = {
@@ -383,7 +383,7 @@ export const VALIDATION_SUBMISSION_V2_TOOL_PARAMETERS = {
     "findings"
   ],
   "type": "object"
-} as unknown as TSchema;
+} as TSchema;
 export const VALIDATION_SUBMISSION_V2_TOOL_SCHEMA_DIGEST = "3fb76a96ab8ea6c3bce27fb7fc9cbe4f4f0b411717f7805ea32ba4d8f9514c15";
 
 export const TERMINAL_TOOL_SCHEMAS = {

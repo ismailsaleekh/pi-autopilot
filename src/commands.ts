@@ -8,7 +8,7 @@ import { parseCommandAdapterPayload } from "./host-runtime.ts";
 import type { CoreTransport } from "./transport.ts";
 
 export const AUTOPILOT_COMMANDS = Object.freeze(HOST_COMMANDS.filter((row) => row.frame === "command").map((row) => row.name));
-const OPERATOR_ANSWER_DESCRIPTOR = HOST_COMMANDS.find((row) => row.frame === "operator-answer")!;
+const OPERATOR_ANSWER_DESCRIPTOR = operatorAnswerDescriptor();
 export const AUTOPILOT_OPERATOR_ANSWER_COMMAND = OPERATOR_ANSWER_DESCRIPTOR.name;
 
 export interface CommandDefinitionLike { readonly description: string; handler(args: string, ctx: ExtensionCommandContext): Promise<void>; }
@@ -42,6 +42,12 @@ export function registerAutopilotCommands(pi: CommandHostLike, resolver: Command
   }
 }
 
+function operatorAnswerDescriptor(): (typeof HOST_COMMANDS)[number] {
+  const descriptor = HOST_COMMANDS.find((row) => row.frame === "operator-answer");
+  if (descriptor === undefined) throw new Error("operator-answer command descriptor missing");
+  return descriptor;
+}
+
 function serviceAcquirer(resolver: CommandServiceResolver, name: string): () => Promise<RegisterCommandOptions> {
   return (ACTIVATING_COMMANDS as readonly string[]).includes(name) ? async () => resolver.activate(name) : async () => resolver.requireActive(name);
 }
@@ -51,7 +57,13 @@ export function fixedServiceResolver(options: RegisterCommandOptions): CommandSe
 }
 
 async function forwardOperatorAnswer(args: string, ctx: ExtensionCommandContext, options: RegisterCommandOptions): Promise<void> {
-  await applyAndRecord(await options.transport.request("operator-answer", parseCommandAdapterPayload(OPERATOR_ANSWER_DESCRIPTOR, args) as unknown as HostToCoreOperatorAnswerPayload), ctx, options);
+  const parsed = parseCommandAdapterPayload(OPERATOR_ANSWER_DESCRIPTOR, args);
+  const questionId = parsed.question_id;
+  const answer = parsed.answer;
+  if (typeof questionId !== "string") throw new Error("operator-answer question_id must be a string");
+  if (typeof answer !== "object" || answer === null || Array.isArray(answer)) throw new Error("operator-answer answer must be a JSON object");
+  const payload: HostToCoreOperatorAnswerPayload = { question_id: questionId, answer: answer as Record<string, unknown> };
+  await applyAndRecord(await options.transport.request("operator-answer", payload), ctx, options);
 }
 
 async function forwardCommand(name: string, args: string, ctx: ExtensionCommandContext, options: RegisterCommandOptions): Promise<void> {

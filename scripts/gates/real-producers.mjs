@@ -40,21 +40,114 @@ const forbidden = [
 ];
 for (const [needle, label] of forbidden) if (productionSource.includes(needle)) failures.push(label);
 
-function functionBody(name, source = seam) {
-  const re = new RegExp(`(?:pub(?:\\([^)]*\\))?\\s+)?fn\\s+${name}\\s*\\(`, 'u');
-  const match = re.exec(source);
-  if (match === null) { failures.push(`missing production function ${name}`); return ''; }
-  const open = source.indexOf('{', match.index);
-  if (open < 0) { failures.push(`production function ${name} has no body`); return ''; }
-  let depth = 0;
-  for (let index = open; index < source.length; index += 1) {
-    const ch = source[index];
-    if (ch === '{') depth += 1;
-    if (ch === '}') {
-      depth -= 1;
-      if (depth === 0) return source.slice(open + 1, index);
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+}
+
+function skipRustTriviaOrLiteral(source, index) {
+  if (source.startsWith('//', index)) {
+    const newline = source.indexOf('\n', index + 2);
+    return newline < 0 ? source.length : newline + 1;
+  }
+  if (source.startsWith('/*', index)) {
+    let depth = 1;
+    let cursor = index + 2;
+    while (cursor < source.length && depth > 0) {
+      if (source.startsWith('/*', cursor)) { depth += 1; cursor += 2; continue; }
+      if (source.startsWith('*/', cursor)) { depth -= 1; cursor += 2; continue; }
+      cursor += 1;
+    }
+    return cursor;
+  }
+
+  const raw = /^(?:b|c)?r(#+)?"/u.exec(source.slice(index, index + 16));
+  if (raw !== null) {
+    const hashes = raw[1] ?? '';
+    const start = index + raw[0].length;
+    const close = `"${hashes}`;
+    const end = source.indexOf(close, start);
+    return end < 0 ? source.length : end + close.length;
+  }
+
+  if (source[index] === '"' || (source[index] === 'b' && source[index + 1] === '"')) {
+    let cursor = index + (source[index] === 'b' ? 2 : 1);
+    while (cursor < source.length) {
+      if (source[cursor] === '\\') { cursor += 2; continue; }
+      if (source[cursor] === '"') return cursor + 1;
+      cursor += 1;
+    }
+    return source.length;
+  }
+
+  if (source[index] === "'" && source[index + 1] !== undefined && !/[A-Za-z_]/u.test(source[index + 1])) {
+    let cursor = index + 1;
+    while (cursor < source.length && cursor <= index + 8) {
+      if (source[cursor] === '\\') { cursor += 2; continue; }
+      if (source[cursor] === "'") return cursor + 1;
+      cursor += 1;
     }
   }
+  return index;
+}
+
+function findMatchingDelimiter(source, open, opener, closer) {
+  let depth = 0;
+  for (let index = open; index < source.length; index += 1) {
+    const skipped = skipRustTriviaOrLiteral(source, index);
+    if (skipped !== index) { index = skipped - 1; continue; }
+    const ch = source[index];
+    if (ch === opener) depth += 1;
+    if (ch === closer) {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+  return -1;
+}
+
+function functionBody(name, source = seam) {
+  const re = new RegExp(`\\bfn\\s+${escapeRegExp(name)}\\b`, 'u');
+  const match = re.exec(source);
+  if (match === null) { failures.push(`missing production function ${name}`); return ''; }
+
+  let parenOpen = -1;
+  let angleDepth = 0;
+  for (let index = match.index + match[0].length; index < source.length; index += 1) {
+    const skipped = skipRustTriviaOrLiteral(source, index);
+    if (skipped !== index) { index = skipped - 1; continue; }
+    const ch = source[index];
+    if (ch === '<') { angleDepth += 1; continue; }
+    if (ch === '>' && angleDepth > 0) { angleDepth -= 1; continue; }
+    if (ch === '(' && angleDepth === 0) { parenOpen = index; break; }
+    if (ch === '{' || ch === ';') break;
+  }
+  if (parenOpen < 0) { failures.push(`production function ${name} has no parameter list`); return ''; }
+
+  const parenClose = findMatchingDelimiter(source, parenOpen, '(', ')');
+  if (parenClose < 0) { failures.push(`unclosed parameter list for production function ${name}`); return ''; }
+
+  let open = -1;
+  const delimiterDepth = { paren: 0, bracket: 0, brace: 0, angle: 0 };
+  for (let index = parenClose + 1; index < source.length; index += 1) {
+    const skipped = skipRustTriviaOrLiteral(source, index);
+    if (skipped !== index) { index = skipped - 1; continue; }
+    const ch = source[index];
+    if (ch === '(') delimiterDepth.paren += 1;
+    else if (ch === ')' && delimiterDepth.paren > 0) delimiterDepth.paren -= 1;
+    else if (ch === '[') delimiterDepth.bracket += 1;
+    else if (ch === ']' && delimiterDepth.bracket > 0) delimiterDepth.bracket -= 1;
+    else if (ch === '<') delimiterDepth.angle += 1;
+    else if (ch === '>' && delimiterDepth.angle > 0) delimiterDepth.angle -= 1;
+    else if (ch === '{') {
+      if (delimiterDepth.paren === 0 && delimiterDepth.bracket === 0 && delimiterDepth.brace === 0 && delimiterDepth.angle === 0) { open = index; break; }
+      delimiterDepth.brace += 1;
+    } else if (ch === '}' && delimiterDepth.brace > 0) delimiterDepth.brace -= 1;
+    else if (ch === ';' && delimiterDepth.paren === 0 && delimiterDepth.bracket === 0 && delimiterDepth.brace === 0 && delimiterDepth.angle === 0) break;
+  }
+  if (open < 0) { failures.push(`production function ${name} has no body`); return ''; }
+
+  const close = findMatchingDelimiter(source, open, '{', '}');
+  if (close >= 0) return source.slice(open + 1, close);
   failures.push(`unclosed production function ${name}`);
   return '';
 }

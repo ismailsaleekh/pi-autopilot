@@ -1,4 +1,3 @@
-// @ts-ignore runtime JS is the import-safe resolver authority; this facade supplies its public types.
 import * as runtime from "./resolve-core-runtime.js";
 
 export interface ResolveCoreOptions {

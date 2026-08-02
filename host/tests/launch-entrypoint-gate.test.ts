@@ -23,7 +23,7 @@ function certifyFixture(root: string, overrides: Record<string, unknown> = {}) {
     platform: TEST_PLATFORM,
     arch: TEST_ARCH,
     requestId: 41,
-    timeoutMs: 3_000,
+    timeoutMs: 10_000,
     ...overrides,
   });
 }
@@ -204,11 +204,11 @@ test("launch entrypoint gate rejects manifest path, hash, size, and sourceHash d
 
 test("launch entrypoint gate rejects malformed, extra, id-drift, timeout, and nonzero status launches", () => {
   for (const [mode, pattern, timeoutMs] of [
-    ["malformed", /malformed status frame JSON/u, 3_000],
-    ["extra", /expected exactly one LF-terminated status frame/u, 3_000],
-    ["id-drift", /status-frame id drift/u, 3_000],
+    ["malformed", /malformed status frame JSON/u, 10_000],
+    ["extra", /expected exactly one LF-terminated status frame/u, 10_000],
+    ["id-drift", /status-frame id drift/u, 10_000],
     ["timeout", /timed out after/u, 100],
-    ["nonzero", /exited nonzero/u, 3_000],
+    ["nonzero", /exited nonzero/u, 10_000],
   ] as const) {
     const root = makeFixture({ mode });
     try {

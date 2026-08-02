@@ -44,7 +44,9 @@ function selectedTerminalTool(tools: SubmitTools): SubmitToolDescriptor {
     const quoted = JSON.stringify(profileId);
     throw new Error(`autopilot child terminal profile ${quoted} resolved ${matches.length} descriptors`);
   }
-  return matches[0]!;
+  const match = matches[0];
+  if (match === undefined) throw new Error("autopilot child terminal profile selection disappeared");
+  return match;
 }
 
 function registerTool(pi: ExtensionAPI, tool: SubmitToolDescriptor): void {

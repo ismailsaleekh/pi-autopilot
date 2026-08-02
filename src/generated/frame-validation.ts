@@ -536,14 +536,14 @@ export function validateCoreToHostFrame(value: unknown): CoreToHostFrame {
   return validateCoreToHostFrameWithDescriptors(
     FRAME_VALIDATION_DESCRIPTORS,
     value,
-  ) as unknown as CoreToHostFrame;
+  ) as CoreToHostFrame;
 }
 
 export function validateBackgroundAction(value: unknown): BackgroundAction {
   return validateBackgroundActionWithDescriptors(
     FRAME_VALIDATION_DESCRIPTORS,
     value,
-  ) as unknown as BackgroundAction;
+  ) as BackgroundAction;
 }
 
 export function validateBgRunDescriptorIdentity<T extends BackgroundActionBgRun>(value: T): T {

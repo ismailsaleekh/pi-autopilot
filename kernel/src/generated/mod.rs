@@ -761,7 +761,7 @@ pub struct AgentRunSpec {
     pub action_id: Id,
     #[serde(rename = "assignment_id")]
     pub assignment_id: Id,
-    /// Durable top-level UUIDv7 run identity from .pi/autopilot/<workstream>/run-identity.json; scopes physical child-session identity so a new top-level run can never adopt a prior run's Pi session.
+    /// Durable top-level UUIDv7 run identity from `.pi/autopilot/<workstream>/run-identity.json`; scopes physical child-session identity so a new top-level run can never adopt a prior run's Pi session.
     #[serde(rename = "run_id")]
     pub run_id: Id,
     #[serde(rename = "run_revision")]
@@ -1801,7 +1801,7 @@ pub struct ControlFrameTrigger {
     /// Example from D76: background-completed.
     #[serde(rename = "kind")]
     pub kind: TriggerKind,
-    /// Example from D76: [<action-id>].
+    /// Example from D76: `<action-id>`.
     #[serde(rename = "refs")]
     pub refs: Vec<Ref>,
 }
@@ -1929,6 +1929,9 @@ pub struct DeliveryResultV2 {
     pub spec_path: Path,
     #[serde(rename = "spec_digest")]
     pub spec_digest: Digest,
+    /// Exact UTF-8 agent_run_spec bytes captured by the child before invoking the model; validation hashes these bytes instead of trusting transient runner files.
+    #[serde(rename = "spec_bytes")]
+    pub spec_bytes: Bytes,
     #[serde(rename = "carrier_path")]
     pub carrier_path: Path,
     #[serde(rename = "boundary_id")]
@@ -2718,6 +2721,9 @@ pub struct ValidationResultV2 {
     pub spec_path: Path,
     #[serde(rename = "spec_digest")]
     pub spec_digest: Digest,
+    /// Exact UTF-8 agent_run_spec bytes captured by the child before invoking the model; validation hashes these bytes instead of trusting transient runner files.
+    #[serde(rename = "spec_bytes")]
+    pub spec_bytes: Bytes,
     #[serde(rename = "carrier_path")]
     pub carrier_path: Path,
     #[serde(rename = "boundary_id")]

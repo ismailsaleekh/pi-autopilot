@@ -1,0 +1,1 @@
+/private/tmp/pa-target/release/libcodegen.rlib: /private/tmp/pa-base/codegen/src/contracts.rs /private/tmp/pa-base/codegen/src/emit.rs /private/tmp/pa-base/codegen/src/kdl_read.rs /private/tmp/pa-base/codegen/src/lib.rs /private/tmp/pa-base/codegen/src/output.rs /private/tmp/pa-base/codegen/src/table.rs

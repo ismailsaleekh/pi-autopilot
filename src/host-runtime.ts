@@ -6,8 +6,9 @@ export function parseCommandAdapterPayload(descriptor: AdapterDescriptor, args: 
   if (descriptor.adapter === "raw") return { raw: args };
   if (descriptor.adapter !== "id-json-object") throw new Error(`unknown command adapter ${descriptor.adapter}`);
   const fields = exactFields(descriptor.fields, [["id"], ["object"]], descriptor.adapter);
-  const idField = fields[0]!;
-  const objectField = fields[1]!;
+  const idField = fields[0];
+  const objectField = fields[1];
+  if (idField === undefined || objectField === undefined) throw new Error(`${descriptor.adapter} generated descriptor shape drift`);
   const trimmed = args.trim();
   const separator = trimmed.search(/\s/u);
   if (separator <= 0) throw new Error("id-json-object command requires an id followed by a JSON object");

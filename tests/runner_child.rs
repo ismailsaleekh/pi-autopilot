@@ -279,11 +279,40 @@ fn bootstrap_entry_rejects_duplicates_wrong_types_and_post_bootstrap_appends() {
 
 #[test]
 fn generated_child_addon_persists_only_the_consumed_registration_receipt() {
-    let source = fs::read_to_string(child_addon_path()).expect("generated child add-on");
-    assert_eq!(source.matches("pi.appendEntry(").count(), 1);
-    assert!(source.contains("pi.appendEntry(CHILD_RECEIPT_ENTRY"));
-    assert!(!source.contains("pi-autopilot:planning-carrier"));
-    assert!(!source.contains("CHILD_CARRIER_ENTRY"));
+    // The generated add-on is a thin delegating shim; the append itself lives in
+    // the hand-written runtime it re-exports. Assert the invariant across BOTH
+    // files so the check follows the behavior instead of one file's old shape:
+    // exactly one appendEntry in the whole child surface, keyed by the receipt
+    // entry, and no planning-carrier persistence anywhere.
+    let generated = fs::read_to_string(child_addon_path()).expect("generated child add-on");
+    let runtime = fs::read_to_string(child_addon_runtime_path()).expect("child add-on runtime");
+
+    assert!(
+        generated.contains("CHILD_RECEIPT_ENTRY"),
+        "generated add-on must re-export the receipt entry: {generated}"
+    );
+
+    let appends =
+        generated.matches("pi.appendEntry(").count() + runtime.matches("pi.appendEntry(").count();
+    assert_eq!(
+        appends, 1,
+        "exactly one child appendEntry across the add-on surface"
+    );
+    assert!(
+        runtime.contains("pi.appendEntry(CHILD_RECEIPT_ENTRY"),
+        "the single append must be keyed by CHILD_RECEIPT_ENTRY: {runtime}"
+    );
+
+    for (label, source) in [("generated", &generated), ("runtime", &runtime)] {
+        assert!(
+            !source.contains("pi-autopilot:planning-carrier"),
+            "{label} add-on must not persist a planning carrier"
+        );
+        assert!(
+            !source.contains("CHILD_CARRIER_ENTRY"),
+            "{label} add-on must not reference a carrier entry"
+        );
+    }
 }
 
 #[test]
@@ -410,7 +439,30 @@ fn nonterminating_submit_result_is_never_a_carrier() {
 }
 
 #[test]
-fn duplicate_tool_result_details_must_match_exactly() {
+fn ordinary_tool_results_without_details_before_terminal_submit_succeed() {
+    let root = temp_root("runner-ordinary-tools-before-submit");
+    let accepted = transcript("planning.task-atoms.v1");
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            "",
+            &format!(
+                "send({{type:'agent_start'}}); emitReadTool('read'); emitReadTool('grep'); emitReadTool('read'); emitCarrierResult({accepted:?}); send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}});"
+            ),
+        ),
+    );
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect("ordinary toolResults without details must not block terminal submit");
+    let carrier: Value = serde_json::from_slice(&fs::read(carrier_path(&root)).expect("carrier"))
+        .expect("carrier json");
+    assert_eq!(carrier["raw_output"], accepted);
+}
+
+#[test]
+fn terminal_tool_result_details_drift_still_fails_loudly() {
     let root = temp_root("runner-tool-result-details-drift");
     let accepted = transcript("planning.task-atoms.v1");
     write_fake_pi(
@@ -430,13 +482,13 @@ fn duplicate_tool_result_details_must_match_exactly() {
 }
 
 #[test]
-fn terminal_tool_result_must_correlate_by_opaque_call_id() {
-    let root = temp_root("runner-tool-result-call-id-drift");
+fn duplicate_terminating_submit_results_still_fail_loudly() {
+    let root = temp_root("runner-duplicate-terminal-submit");
     let accepted = transcript("planning.task-atoms.v1");
     write_fake_pi(
         &root,
         &rpc_fake_pi(
-            "const overrideToolResultCallId = 'different-call';",
+            "const emitSecondTerminalExecutionEnd = true;",
             &format!("emitCarrier({accepted:?});"),
         ),
     );
@@ -444,29 +496,39 @@ fn terminal_tool_result_must_correlate_by_opaque_call_id() {
     let error = with_fake_path(&root, || {
         child::main(&["--spec".to_owned(), spec.display().to_string()])
     })
-    .expect_err("uncorrelated toolResult must fail");
-    assert!(error.contains("missing correlated toolResult"), "{error}");
+    .expect_err("duplicate terminal submit must fail");
+    assert!(error.contains("terminating submit results"), "{error}");
+    assert!(!carrier_path(&root).exists());
 }
 
 #[test]
-fn terminal_tool_cannot_share_a_turn_with_another_tool() {
-    let root = temp_root("runner-mixed-terminal-tool-batch");
-    let accepted = transcript("planning.task-atoms.v1");
-    write_fake_pi(
-        &root,
-        &rpc_fake_pi(
-            "",
-            &format!(
-                "send({{type:'agent_start'}}); emitReadTool(); emitCarrierResult({accepted:?}); send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}});"
-            ),
+fn terminal_tool_result_must_have_correlated_details_by_opaque_call_id() {
+    for (label, setup, expected) in [
+        (
+            "missing-details",
+            "const omitToolResultDetails = true;",
+            "missing correlated toolResult details",
         ),
-    );
-    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
-    let error = with_fake_path(&root, || {
-        child::main(&["--spec".to_owned(), spec.display().to_string()])
-    })
-    .expect_err("mixed terminal batch must fail");
-    assert!(error.contains("mixed 2 tool executions"), "{error}");
+        (
+            "uncorrelated-id",
+            "const overrideToolResultCallId = 'different-call';",
+            "missing correlated toolResult details",
+        ),
+    ] {
+        let root = temp_root(&format!("runner-tool-result-{label}"));
+        let accepted = transcript("planning.task-atoms.v1");
+        write_fake_pi(
+            &root,
+            &rpc_fake_pi(setup, &format!("emitCarrier({accepted:?});")),
+        );
+        let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+        let error = with_fake_path(&root, || {
+            child::main(&["--spec".to_owned(), spec.display().to_string()])
+        })
+        .expect_err("terminal toolResult details must correlate");
+        assert!(error.contains(expected), "{label}: {error}");
+        assert!(!carrier_path(&root).exists(), "{label}");
+    }
 }
 
 #[test]
@@ -1442,6 +1504,10 @@ fn child_addon_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/generated/child-extension.ts")
 }
 
+fn child_addon_runtime_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/child-extension-runtime.ts")
+}
+
 fn carrier_path(root: &Path) -> PathBuf {
     planning_paths(
         root,
@@ -1477,6 +1543,7 @@ fn rpc_fake_pi(setup: &str, on_prompt: &str) -> String {
 import {{ createHash }} from 'node:crypto';
 import {{ appendFileSync, readFileSync, writeFileSync }} from 'node:fs';
 let promptCount = 0;
+let readToolCount = 0;
 let contextPercent = 10;
 const sessionId = process.argv[process.argv.indexOf('--session-id') + 1];
 const sessionDirIndex = process.argv.indexOf('--session-dir');
@@ -1530,9 +1597,17 @@ function emitCarrierResult(payload, model='gpt-5.5', overrides={{}}) {{
   const copiedDetails = typeof toolResultSchemaDigest === 'string' ? {{...details,schema_digest:toolResultSchemaDigest}} : details;
   send({{type:'message_start'}});
   const resultCallId = typeof overrideToolResultCallId === 'string' ? overrideToolResultCallId : callId;
-  send({{type:'message_end',message:{{role:'toolResult',toolCallId:resultCallId,toolName:resultTool,content:[{{type:'text',text:'submitted'}}],details:copiedDetails,isError:submitError}}}});
+  const toolResultMessage = {{role:'toolResult',toolCallId:resultCallId,toolName:resultTool,content:[{{type:'text',text:'submitted'}}],isError:submitError}};
+  if (!(typeof omitToolResultDetails === 'boolean' && omitToolResultDetails)) toolResultMessage.details = copiedDetails;
+  send({{type:'message_end',message:toolResultMessage}});
+  if (typeof emitSecondTerminalExecutionEnd === 'boolean' && emitSecondTerminalExecutionEnd) {{
+    const secondCallId = callId + '_second';
+    send({{type:'tool_execution_end',toolCallId:secondCallId,toolName:resultTool,result:{{content:[{{type:'text',text:'submitted-again'}}],details,terminate:submitTerminate}},isError:submitError}});
+    send({{type:'message_start'}});
+    send({{type:'message_end',message:{{role:'toolResult',toolCallId:secondCallId,toolName:resultTool,content:[{{type:'text',text:'submitted-again'}}],details,isError:submitError}}}});
+  }}
 }}
-function emitReadTool() {{ const callId='call_fake_read'; send({{type:'tool_execution_start',toolCallId:callId,toolName:'read',args:{{}}}}); send({{type:'tool_execution_end',toolCallId:callId,toolName:'read',result:{{content:[{{type:'text',text:'ok'}}],details:{{}},terminate:false}},isError:false}}); }}
+function emitReadTool(toolName='read') {{ const callId=`call_fake_${{toolName}}_${{++readToolCount}}`; send({{type:'tool_execution_start',toolCallId:callId,toolName,args:{{path:`TASK-${{readToolCount}}.md`}}}}); send({{type:'tool_execution_end',toolCallId:callId,toolName,result:{{content:[{{type:'text',text:'ok'}}],terminate:false}},isError:false}}); send({{type:'message_start'}}); send({{type:'message_end',message:{{role:'toolResult',timestamp:new Date(0).toISOString(),toolCallId:callId,toolName,content:[{{type:'text',text:'ok'}}],isError:false}}}}); }}
 // Reproduces an upstream capacity refusal exactly as observed in production:
 // a non-stop terminal with a provider errorMessage, no assistant text, and no
 // tokens billed.
@@ -1922,6 +1997,10 @@ fn upstream_capacity_refusal_is_retried_and_then_succeeds() {
         events.iter().any(|e| e == "accepted"),
         "assignment must ultimately be accepted: {events:?}"
     );
+    assert!(
+        events.iter().all(|e| e != "terminal-assistant-hard-fail"),
+        "capacity retry must not blur into the terminal hard-fail path: {events:?}"
+    );
 }
 
 /// A persistent capacity refusal must still fail loudly once the bounded retry
@@ -1947,6 +2026,65 @@ fn persistent_upstream_capacity_refusal_fails_loudly_after_retries() {
         !carrier_path(&root).exists(),
         "no carrier may be written for an upstream refusal"
     );
+}
+
+/// A generic non-stop terminal without the provider refusal evidence remains a
+/// loud terminal hard failure, but now leaves bounded forensic facts explaining
+/// why the strict capacity classifier did not match.
+#[test]
+fn terminal_error_without_provider_error_message_hard_fails_and_persists_forensics() {
+    let root = temp_root("runner-terminal-error-forensics");
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            "",
+            "send({type:'agent_start'}); \
+             send({type:'message_start'}); \
+             send({type:'message_end', message:{role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[], stopReason:'error'}}); \
+             send({type:'agent_end', willRetry:false}); \
+             send({type:'agent_settled'});",
+        ),
+    );
+    let spec = next_scenario_spec(&root);
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("generic terminal error must remain a hard failure");
+    assert!(
+        error.contains("agent-run terminal assistant stopReason was not stop: error"),
+        "operator-visible hard failure must stay unchanged: {error}"
+    );
+    assert!(
+        !error.contains("upstream capacity refusal"),
+        "generic terminal error must not be reclassified as capacity: {error}"
+    );
+    assert!(
+        !carrier_path(&root).exists(),
+        "no carrier may be written for a terminal hard failure"
+    );
+
+    let rows = attempt_event_rows(&root, "planning-main-task-extractor-01");
+    let forensic = rows
+        .iter()
+        .find(|row| row["event"] == "terminal-assistant-hard-fail")
+        .expect("terminal hard-fail event must be persisted");
+    assert_eq!(forensic["schema"], "autopilot.agent_run_attempt_event.v1");
+    assert_eq!(forensic["attempt"], 1);
+    assert_eq!(forensic["rejection"], Value::Null);
+    let terminal = &forensic["terminal_failure"];
+    assert_eq!(terminal["stopReason"], "error");
+    assert_eq!(terminal["provider_errorMessage_present"], false);
+    assert_eq!(terminal["provider_errorMessage"], Value::Null);
+    assert_eq!(terminal["assistant_text_present"], false);
+    assert_eq!(terminal["assistant_text_len"], 0);
+    assert_eq!(terminal["capacity_detector_matched"], false);
+    let miss = terminal["capacity_detector_miss"]
+        .as_array()
+        .expect("capacity miss reasons")
+        .iter()
+        .map(|value| value.as_str().expect("miss reason"))
+        .collect::<Vec<_>>();
+    assert_eq!(miss, ["missing-errorMessage"]);
 }
 
 /// Assistant text cannot be mistaken for a capacity refusal or a planning
@@ -1985,6 +2123,16 @@ fn attempt_events(root: &Path, assignment_id: &str) -> Vec<String> {
     text.lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .filter_map(|row| row["event"].as_str().map(str::to_owned))
+        .collect()
+}
+
+fn attempt_event_rows(root: &Path, assignment_id: &str) -> Vec<Value> {
+    let path = root
+        .join(".pi/autopilot/runner/attempt-events")
+        .join(format!("{assignment_id}.jsonl"));
+    let text = fs::read_to_string(path).expect("attempt event log");
+    text.lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("attempt event row"))
         .collect()
 }
 

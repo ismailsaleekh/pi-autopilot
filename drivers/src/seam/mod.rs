@@ -128,12 +128,15 @@ pub fn handle_line(line: &str, state: &mut CoreState) -> Result<SeamEnvelope, An
 
 fn seam_admission_status(error: SeamAdmissionError) -> String {
     match error {
-        SeamAdmissionError::Unknown(kind) => rejection("unknown-kind", &kind),
-        SeamAdmissionError::Unsupported(row) => {
-            rejection("unsupported-kind", &format!("{}:{}", row.kind, row.adapter))
+        SeamAdmissionError::Unknown(kind) => {
+            rejection(BOUNDARY_ID, &format!("unknown-kind:{kind}"))
         }
+        SeamAdmissionError::Unsupported(row) => rejection(
+            BOUNDARY_ID,
+            &format!("unsupported-kind:{}:{}", row.kind, row.adapter),
+        ),
         SeamAdmissionError::Payload { kind, error } => {
-            rejection("payload-mismatch", &format!("{kind}:{error}"))
+            rejection(BOUNDARY_ID, &format!("payload-mismatch:{kind}:{error}"))
         }
     }
 }

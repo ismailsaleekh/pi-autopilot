@@ -59,7 +59,7 @@ export class PiBackgroundTaskClient {
   }
 
   async capabilities(): Promise<BackgroundCapabilities> { return requireCapabilities(await this.request("capabilities", {})); }
-  async run(descriptor: BackgroundActionBgRun): Promise<BgTaskSnapshot> { validateBgRunDescriptorIdentity(descriptor); return requireTaskSnapshot(await this.request("run", descriptor as unknown as Record<string, unknown>), "run result"); }
+  async run(descriptor: BackgroundActionBgRun): Promise<BgTaskSnapshot> { validateBgRunDescriptorIdentity(descriptor); return requireTaskSnapshot(await this.request("run", descriptor), "run result"); }
   async status(taskId?: string): Promise<BgStatusResult> {
     const result = await this.request("status", taskId === undefined ? {} : { taskId });
     if (!isRecord(result) || !Array.isArray(result.tasks)) throw new PiBackgroundTaskError("pi-background-tasks status returned malformed result");
@@ -98,7 +98,7 @@ export class PiBackgroundTaskClient {
 
   async drainTerminalHandlers(): Promise<void> { await this.terminalDelivery; if (this.protocolError !== undefined) throw this.protocolError; }
 
-  private request(operation: BackgroundOperation, payload: Record<string, unknown>): Promise<unknown> {
+  private request(operation: BackgroundOperation, payload: unknown): Promise<unknown> {
     if (this.closed) return Promise.reject(new PiBackgroundTaskError("pi-background-tasks client is closed"));
     if (this.protocolError !== undefined) return Promise.reject(this.protocolError);
     const requestId = `autopilot-${Date.now().toString(36)}-${this.nextRequest.toString(36)}`;
@@ -164,7 +164,23 @@ function requireCapabilities(value: unknown): BackgroundCapabilities {
   const object = closedRecord(value, keys, "capabilities", PiBackgroundTaskError);
   const apiVersion = nonNegativeInteger(object.api_version, "capabilities.api_version", PiBackgroundTaskError);
   if (apiVersion !== 1) throw new PiBackgroundTaskError(`capabilities.api_version must be 1, got ${String(apiVersion)}`);
-  return Object.fromEntries(keys.map((key) => [key, key === "api_version" ? apiVersion : boolValue(object[key], `capabilities.${key}`, PiBackgroundTaskError)])) as unknown as BackgroundCapabilities;
+  const capabilities: BackgroundCapabilities = {
+    api_version: apiVersion,
+    run: boolValue(object.run, "capabilities.run", PiBackgroundTaskError),
+    run_is_agent: boolValue(object.run_is_agent, "capabilities.run_is_agent", PiBackgroundTaskError),
+    run_completion_trigger: boolValue(object.run_completion_trigger, "capabilities.run_completion_trigger", PiBackgroundTaskError),
+    status: boolValue(object.status, "capabilities.status", PiBackgroundTaskError),
+    logs: boolValue(object.logs, "capabilities.logs", PiBackgroundTaskError),
+    logs_bounded: boolValue(object.logs_bounded, "capabilities.logs_bounded", PiBackgroundTaskError),
+    kill: boolValue(object.kill, "capabilities.kill", PiBackgroundTaskError),
+  };
+  if (typeof object.run_attested_pi === "boolean") capabilities.run_attested_pi = object.run_attested_pi;
+  if (typeof object.attested_idempotency === "boolean") capabilities.attested_idempotency = object.attested_idempotency;
+  if (typeof object.attested_status_by_idempotency_key === "boolean") capabilities.attested_status_by_idempotency_key = object.attested_status_by_idempotency_key;
+  if (typeof object.attested_terminal_artifacts === "boolean") capabilities.attested_terminal_artifacts = object.attested_terminal_artifacts;
+  if (typeof object.report_schema === "string") capabilities.report_schema = object.report_schema;
+  if (typeof object.attestation_schema === "string") capabilities.attestation_schema = object.attestation_schema;
+  return capabilities;
 }
 
 function requireTaskSnapshot(value: unknown, label: string, terminal = false): BgTaskSnapshot {

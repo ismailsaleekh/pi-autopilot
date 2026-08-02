@@ -120,7 +120,7 @@ artifact "control_frame" schema="autopilot.control_frame.v1" producer="Package" 
     field "run_revision" type="u64" required=#true
     group "trigger" required=#true {
         field "kind" type="trigger-kind" required=#true doc="Example from D76: background-completed."
-        list "refs" item="ref" required=#true doc="Example from D76: [<action-id>]."
+        list "refs" item="ref" required=#true doc="Example from D76: `<action-id>`."
     }
     group "counts" required=#true {
         field "implementers" type="u32" required=#true
@@ -433,7 +433,7 @@ artifact "agent_run_spec" schema="autopilot.agent_run_spec.v4" producer="Package
     field "assignment_kind" type="validation_assignment_kind" required=#true doc="Explicit assignment class; no runner infers planning/delivery/validation from result_contract."
     field "action_id" type="id" required=#true
     field "assignment_id" type="id" required=#true
-    field "run_id" type="id" required=#true doc="Durable top-level UUIDv7 run identity from .pi/autopilot/<workstream>/run-identity.json; scopes physical child-session identity so a new top-level run can never adopt a prior run's Pi session."
+    field "run_id" type="id" required=#true doc="Durable top-level UUIDv7 run identity from `.pi/autopilot/<workstream>/run-identity.json`; scopes physical child-session identity so a new top-level run can never adopt a prior run's Pi session."
     field "run_revision" type="u64" required=#true
     field "workstream" type="id" required=#true
     field "role_id" type="id" required=#true
@@ -680,6 +680,7 @@ artifact "delivery_result_v2" schema="autopilot.delivery_result.v2" producer="Pa
     field "prompt_digest" type="digest" required=#true
     field "spec_path" type="path" required=#true
     field "spec_digest" type="digest" required=#true
+    field "spec_bytes" type="bytes" required=#true doc="Exact UTF-8 agent_run_spec bytes captured by the child before invoking the model; validation hashes these bytes instead of trusting transient runner files."
     field "carrier_path" type="path" required=#true
     field "boundary_id" type="contract-id" required=#true
     field "boundary_digest" type="digest" required=#true
@@ -884,6 +885,7 @@ artifact "validation_result_v2" schema="autopilot.validation_result.v2" producer
     field "prompt_digest" type="digest" required=#true
     field "spec_path" type="path" required=#true
     field "spec_digest" type="digest" required=#true
+    field "spec_bytes" type="bytes" required=#true doc="Exact UTF-8 agent_run_spec bytes captured by the child before invoking the model; validation hashes these bytes instead of trusting transient runner files."
     field "carrier_path" type="path" required=#true
     field "boundary_id" type="contract-id" required=#true
     field "boundary_digest" type="digest" required=#true

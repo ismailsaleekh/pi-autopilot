@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -132,7 +132,7 @@ pub fn main(args: &[String]) -> Result<(), String> {
         Err(error) => return Err(error.to_string()),
     }
     let mut runner = RpcAssignment::spawn_and_configure(&spec)?;
-    let result = run_value_attempts(&mut runner, &spec_path, &spec_digest, &spec, prompt);
+    let result = run_value_attempts(&mut runner, &spec_path, &raw, &spec_digest, &spec, prompt);
     let shutdown = runner.shutdown();
     if result.is_ok() {
         shutdown?;
@@ -143,31 +143,47 @@ pub fn main(args: &[String]) -> Result<(), String> {
 fn run_value_attempts(
     runner: &mut RpcAssignment,
     spec_path: &Path,
+    spec_bytes: &str,
     spec_digest: &str,
     spec: &AgentRunSpec,
     prompt: String,
 ) -> Result<(), String> {
     let mut attempt_prompt = prompt;
     for attempt in 1..=MAX_VALUE_ATTEMPTS {
-        append_attempt_event(spec, attempt, "started", None)?;
+        append_attempt_event(spec, attempt, "started", AttemptEventDetail::none())?;
         let source = run_prompt_with_capacity_retry(runner, spec, &attempt_prompt, attempt)?;
-        match write_carrier(spec_path, spec_digest, spec, &source) {
+        match write_carrier(spec_path, spec_bytes, spec_digest, spec, &source) {
             Ok(()) => {
-                append_attempt_event(spec, attempt, "accepted", None)?;
+                append_attempt_event(spec, attempt, "accepted", AttemptEventDetail::none())?;
                 return Ok(());
             }
             Err(CarrierRejection::Identity(detail)) => {
-                append_attempt_event(spec, attempt, "identity-rejected", None)?;
+                append_attempt_event(
+                    spec,
+                    attempt,
+                    "identity-rejected",
+                    AttemptEventDetail::none(),
+                )?;
                 return Err(format!(
                     "agent-run carrier identity rejected before value repair: {detail}"
                 ));
             }
             Err(CarrierRejection::Value(rejection)) if attempt < MAX_VALUE_ATTEMPTS => {
-                append_attempt_event(spec, attempt, "value-rejected", Some(&rejection))?;
+                append_attempt_event(
+                    spec,
+                    attempt,
+                    "value-rejected",
+                    AttemptEventDetail::rejection(&rejection),
+                )?;
                 attempt_prompt = render_repair_prompt(spec, &rejection);
             }
             Err(CarrierRejection::Value(rejection)) => {
-                append_attempt_event(spec, attempt, "paused-after-exhaustion", Some(&rejection))?;
+                append_attempt_event(
+                    spec,
+                    attempt,
+                    "paused-after-exhaustion",
+                    AttemptEventDetail::rejection(&rejection),
+                )?;
                 return Err(paused_after_exhaustion(spec, &rejection));
             }
         }
@@ -194,14 +210,19 @@ fn run_prompt_with_capacity_retry(
     let policy = CapacityRetryPolicy::parse()?;
     let mut last = String::new();
     for retry in 0..=policy.max_retries {
-        match runner.run_normal_prompt(spec, prompt) {
+        match runner.run_normal_prompt(spec, prompt, attempt) {
             Ok(assistant) => return Ok(assistant),
             Err(PromptFailure::UpstreamCapacity(detail)) => {
                 last = detail;
                 if retry == policy.max_retries {
                     break;
                 }
-                append_attempt_event(spec, attempt, "upstream-capacity-retry", None)?;
+                append_attempt_event(
+                    spec,
+                    attempt,
+                    "upstream-capacity-retry",
+                    AttemptEventDetail::none(),
+                )?;
                 std::thread::sleep(policy.backoff(retry, &spec.assignment_id.0));
             }
             Err(other) => return Err(other.into_message()),
@@ -239,6 +260,7 @@ struct CycleTerminal {
 
 struct CycleState {
     purpose: PromptPurpose,
+    attempt: Option<u32>,
     prompt_response_seen: bool,
     pending_stats: BTreeSet<String>,
     final_record: Option<CycleTerminal>,
@@ -246,7 +268,8 @@ struct CycleState {
     tool_terminal: Option<ToolTerminal>,
     tool_terminal_count: usize,
     tool_execution_count: usize,
-    tool_result_details: std::collections::BTreeMap<String, Value>,
+    tool_result_call_ids: BTreeSet<String>,
+    tool_result_details: BTreeMap<String, Value>,
     tool_after_terminal: bool,
     awaiting_handoff: bool,
     steer_response_seen: bool,
@@ -259,9 +282,10 @@ struct CycleState {
 }
 
 impl CycleState {
-    fn new(purpose: PromptPurpose) -> Self {
+    fn new(purpose: PromptPurpose, attempt: Option<u32>) -> Self {
         Self {
             purpose,
+            attempt,
             prompt_response_seen: false,
             pending_stats: BTreeSet::new(),
             final_record: None,
@@ -269,7 +293,8 @@ impl CycleState {
             tool_terminal: None,
             tool_terminal_count: 0,
             tool_execution_count: 0,
-            tool_result_details: std::collections::BTreeMap::new(),
+            tool_result_call_ids: BTreeSet::new(),
+            tool_result_details: BTreeMap::new(),
             tool_after_terminal: false,
             awaiting_handoff: matches!(purpose, PromptPurpose::Handoff),
             steer_response_seen: false,
@@ -278,6 +303,55 @@ impl CycleState {
             handoff: None,
             compacted: false,
             upstream_capacity_failure: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct TerminalFailureDiagnostic {
+    stop_reason: Option<String>,
+    provider_error_message_present: bool,
+    provider_error_message: Option<String>,
+    assistant_text_present: bool,
+    assistant_text_len: usize,
+    capacity_detector_matched: bool,
+    capacity_detector_miss: Vec<String>,
+}
+
+impl TerminalFailureDiagnostic {
+    fn from_message(message: &TerminalMessage) -> Self {
+        let stop_reason = message
+            .stop_reason
+            .as_deref()
+            .map(|value| value.to_ascii_lowercase());
+        let provider_error_message = message
+            .error_message
+            .as_deref()
+            .map(crate::evidence::bound_detail);
+        let assistant_text = message.text.as_deref().unwrap_or("");
+        let assistant_text_present = !assistant_text.is_empty();
+        let mut capacity_detector_miss = Vec::new();
+        match stop_reason.as_deref() {
+            None => capacity_detector_miss.push("missing-stopReason".to_owned()),
+            Some("stop" | "tooluse") => {
+                capacity_detector_miss.push("terminal-stopReason".to_owned())
+            }
+            Some(_) => {}
+        }
+        if provider_error_message.is_none() {
+            capacity_detector_miss.push("missing-errorMessage".to_owned());
+        }
+        if assistant_text_present {
+            capacity_detector_miss.push("assistant-text-present".to_owned());
+        }
+        Self {
+            stop_reason,
+            provider_error_message_present: provider_error_message.is_some(),
+            provider_error_message,
+            assistant_text_present,
+            assistant_text_len: assistant_text.chars().count(),
+            capacity_detector_matched: capacity_detector_miss.is_empty(),
+            capacity_detector_miss,
         }
     }
 }
@@ -410,9 +484,10 @@ impl RpcAssignment {
         &mut self,
         spec: &AgentRunSpec,
         prompt: &str,
+        attempt: u32,
     ) -> Result<CarrierSource, PromptFailure> {
         let capacity_before = self.last_capacity_refusal.take();
-        let result = self.run_prompt(spec, prompt, PromptPurpose::Normal);
+        let result = self.run_prompt(spec, prompt, PromptPurpose::Normal, Some(attempt));
         match result {
             Ok(value) => Ok(value),
             Err(message) => match self.last_capacity_refusal.take().or(capacity_before) {
@@ -427,12 +502,13 @@ impl RpcAssignment {
         spec: &AgentRunSpec,
         prompt: &str,
         purpose: PromptPurpose,
+        attempt: Option<u32>,
     ) -> Result<CarrierSource, String> {
         let prompt_id = self.next_id("prompt");
         self.client
             .send_command(RpcCommand::prompt(prompt_id.clone(), prompt.to_owned()))
             .map_err(|error| error.to_string())?;
-        let mut state = CycleState::new(purpose);
+        let mut state = CycleState::new(purpose, attempt);
         loop {
             let frame = self
                 .client
@@ -591,9 +667,14 @@ impl RpcAssignment {
             let call_id = message
                 .tool_call_id
                 .ok_or_else(|| "agent-run toolResult missing toolCallId".to_owned())?;
-            let details = message
-                .details
-                .ok_or_else(|| "agent-run toolResult missing details".to_owned())?;
+            if !state.tool_result_call_ids.insert(call_id.clone()) {
+                return Err(format!(
+                    "agent-run received duplicate toolResult for {call_id}"
+                ));
+            }
+            let Some(details) = message.details else {
+                return Ok(());
+            };
             if state
                 .tool_result_details
                 .insert(call_id.clone(), details)
@@ -620,11 +701,23 @@ impl RpcAssignment {
         // an earlier refusal in this same cycle. Pi's recovery is authoritative,
         // so the superseded refusal must not outlive it.
         state.upstream_capacity_failure = None;
+        let terminal_failure = TerminalFailureDiagnostic::from_message(&message);
         let record = assistant_from_terminal(message)?;
         if record.stop_reason == "tooluse" {
             validate_assistant_identity(&record, &spec.provider, &spec.model)?;
             self.request_stats(state)?;
             return Ok(());
+        }
+        if record.stop_reason != "stop" {
+            let attempt = state.attempt.ok_or_else(|| {
+                "agent-run terminal assistant hard-fail missing attempt context".to_owned()
+            })?;
+            append_attempt_event(
+                spec,
+                attempt,
+                "terminal-assistant-hard-fail",
+                AttemptEventDetail::terminal_failure(&terminal_failure),
+            )?;
         }
         validate_terminal_assistant(&record, &spec.provider, &spec.model)?;
         if state.awaiting_handoff && state.steer_message_started {
@@ -783,15 +876,15 @@ impl RpcAssignment {
             self.last_capacity_refusal = Some(detail.clone());
             return Err(format!("agent-run upstream capacity refusal: {detail}"));
         }
-        if state.tool_after_terminal {
-            return Err("agent-run Pi JSONL had tool activity after terminal result".to_owned());
-        }
         if state.tool_terminal_count > 0 {
             if state.tool_terminal_count != 1 {
                 return Err(format!(
                     "agent-run Pi JSONL contained {} terminating submit results; expected exactly one",
                     state.tool_terminal_count
                 ));
+            }
+            if state.tool_after_terminal {
+                return Err("agent-run Pi JSONL had tool activity after terminal result".to_owned());
             }
             if state.final_record.is_some() {
                 return Err(
@@ -802,13 +895,6 @@ impl RpcAssignment {
             let terminal = state
                 .tool_terminal
                 .ok_or_else(|| "agent-run terminating tool count without carrier".to_owned())?;
-            if state.tool_execution_count != 1 || state.tool_result_details.len() != 1 {
-                return Err(format!(
-                    "agent-run terminal turn mixed {} tool executions and {} tool results",
-                    state.tool_execution_count,
-                    state.tool_result_details.len()
-                ));
-            }
             let duplicate = state
                 .tool_result_details
                 .get(&terminal.tool_call_id)
@@ -824,7 +910,18 @@ impl RpcAssignment {
                     terminal.tool_call_id
                 ));
             }
+            // Deliberately NOT asserting tool_result_details.len() == 1: ordinary Pi
+            // tools (grep, and others) legitimately attach a `details` payload, so a
+            // worker that greps before submitting has several details-bearing tool
+            // results. The real invariant is that exactly ONE TERMINATING submit
+            // result exists (checked above via tool_terminal_count) and that its
+            // details correlate by tool_call_id and do not drift (both checked
+            // immediately above). Counting unrelated tools' details asserted nothing
+            // about submit correctness and rejected valid runs.
             return Ok(CarrierSource::Tool(terminal));
+        }
+        if state.tool_after_terminal {
+            return Err("agent-run Pi JSONL had tool activity after terminal result".to_owned());
         }
         if let Some(handoff) = state.handoff {
             let checkpoint = self.checkpoint_record(spec, handoff)?;
@@ -832,12 +929,12 @@ impl RpcAssignment {
                 self.compact_checkpoint(&checkpoint)?;
             }
             let resume = self.resume_prompt(&checkpoint.resume_overlay)?;
-            return self.run_prompt(spec, &resume, PromptPurpose::Resume);
+            return self.run_prompt(spec, &resume, PromptPurpose::Resume, state.attempt);
         }
         if state.awaiting_handoff {
             self.abort_stale_queue()?;
             let handoff_prompt = self.handoff_prompt(spec)?;
-            return self.run_prompt(spec, &handoff_prompt, PromptPurpose::Handoff);
+            return self.run_prompt(spec, &handoff_prompt, PromptPurpose::Handoff, state.attempt);
         }
         if state.terminal_count == 0 {
             return Err("agent-run Pi JSONL contained no final carrier result".to_owned());
@@ -2070,11 +2167,40 @@ fn paused_after_exhaustion(spec: &AgentRunSpec, rejection: &ValueRejection) -> S
     )
 }
 
+#[derive(Debug, Clone, Copy)]
+struct AttemptEventDetail<'a> {
+    rejection: Option<&'a ValueRejection>,
+    terminal_failure: Option<&'a TerminalFailureDiagnostic>,
+}
+
+impl<'a> AttemptEventDetail<'a> {
+    fn none() -> Self {
+        Self {
+            rejection: None,
+            terminal_failure: None,
+        }
+    }
+
+    fn rejection(rejection: &'a ValueRejection) -> Self {
+        Self {
+            rejection: Some(rejection),
+            terminal_failure: None,
+        }
+    }
+
+    fn terminal_failure(terminal_failure: &'a TerminalFailureDiagnostic) -> Self {
+        Self {
+            rejection: None,
+            terminal_failure: Some(terminal_failure),
+        }
+    }
+}
+
 fn append_attempt_event(
     spec: &AgentRunSpec,
     attempt: u32,
     event: &str,
-    rejection: Option<&ValueRejection>,
+    detail: AttemptEventDetail<'_>,
 ) -> Result<(), String> {
     let root = Path::new(&spec.cwd.0).join(".pi/autopilot/runner/attempt-events");
     fs::create_dir_all(&root)
@@ -2087,10 +2213,19 @@ fn append_attempt_event(
         "session_id": spec.session_id.0,
         "attempt": attempt,
         "event": event,
-        "rejection": rejection.map(|value| serde_json::json!({
+        "rejection": detail.rejection.map(|value| serde_json::json!({
             "field": value.field.clone(),
             "expected": value.expected.clone(),
             "got": value.got.clone(),
+        })),
+        "terminal_failure": detail.terminal_failure.map(|value| serde_json::json!({
+            "stopReason": value.stop_reason.clone(),
+            "provider_errorMessage_present": value.provider_error_message_present,
+            "provider_errorMessage": value.provider_error_message.clone(),
+            "assistant_text_present": value.assistant_text_present,
+            "assistant_text_len": value.assistant_text_len,
+            "capacity_detector_matched": value.capacity_detector_matched,
+            "capacity_detector_miss": value.capacity_detector_miss.clone(),
         })),
     });
     let mut data = serde_json::to_vec(&row)
@@ -2123,6 +2258,7 @@ fn ensure_carrier_absent(spec: &AgentRunSpec) -> Result<(), String> {
 
 fn write_carrier(
     spec_path: &Path,
+    spec_bytes: &str,
     spec_digest: &str,
     spec: &AgentRunSpec,
     source: &CarrierSource,
@@ -2170,6 +2306,7 @@ fn write_carrier(
         validate_delivery_submission(spec, &submission)?;
         let carrier = package_tool_result(
             spec_path,
+            spec_bytes,
             spec_digest,
             spec,
             terminal,
@@ -2201,6 +2338,7 @@ fn write_carrier(
         validate_validation_submission(spec, &submission)?;
         let carrier = package_tool_result(
             spec_path,
+            spec_bytes,
             spec_digest,
             spec,
             terminal,
@@ -2424,6 +2562,7 @@ fn validate_validation_submission(
 
 fn package_tool_result(
     spec_path: &Path,
+    spec_bytes: &str,
     spec_digest: &str,
     spec: &AgentRunSpec,
     terminal: &ToolTerminal,
@@ -2487,6 +2626,7 @@ fn package_tool_result(
         "prompt_digest": spec.prompt_digest,
         "spec_path": super::path_to_string(spec_path).map_err(|error| value_rejection("spec_path", "UTF-8 path", error.to_string()))?,
         "spec_digest": spec_digest,
+        "spec_bytes": spec_bytes,
         "carrier_path": spec.carrier_path,
         "boundary_id": spec.boundary_id,
         "boundary_digest": spec.boundary_digest,

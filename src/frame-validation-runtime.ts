@@ -1,10 +1,30 @@
-type F = any;
-type D = any;
 type R = Record<string, unknown>;
+type FieldDescriptor = {
+  readonly name?: string;
+  readonly kind?: string;
+  readonly required?: boolean;
+  readonly nullable?: boolean;
+  readonly type?: string;
+  readonly item_kind?: string;
+  readonly item_type?: string;
+  readonly route?: string;
+  readonly field?: string;
+  readonly min?: number;
+  readonly max?: number;
+  readonly unique_fields?: readonly string[];
+};
+type ShapeDescriptor = { readonly fields: readonly FieldDescriptor[] };
+type RouteDescriptor = { readonly payload: string; readonly posture: string };
+type ValidationDescriptors = {
+  readonly routes: Record<string, RouteDescriptor | undefined>;
+  readonly shapes: Record<string, ShapeDescriptor | undefined>;
+  readonly enums: Record<string, readonly string[] | undefined>;
+  readonly list_constraints: readonly FieldDescriptor[];
+};
 export class CoreFrameValidationError extends Error {
   constructor(message: string) { super(message); this.name = "CoreFrameValidationError"; }
 }
-export function validateCoreToHostFrameWithDescriptors(desc: D, value: unknown): R {
+export function validateCoreToHostFrameWithDescriptors(desc: ValidationDescriptors, value: unknown): unknown {
   const frame = closed(value, ["v", "id", "kind", "payload"], "core frame", ["v", "id", "kind", "payload"]);
   if (frame.v !== 1) bad("core frame v must be 1");
   const id = int(frame.id, "core frame id");
@@ -17,23 +37,24 @@ export function validateCoreToHostFrameWithDescriptors(desc: D, value: unknown):
   lists(desc, kind, payload);
   return { v: 1, id, kind, payload };
 }
-export function validateBackgroundActionWithDescriptors(desc: D, value: unknown): R {
+export function validateBackgroundActionWithDescriptors(desc: ValidationDescriptors, value: unknown): unknown {
   return shape(desc, "BackgroundAction", value, "background action");
 }
-export function validateBgRunDescriptorIdentityWithDescriptors(desc: D, value: unknown): void {
+export function validateBgRunDescriptorIdentityWithDescriptors(desc: ValidationDescriptors, value: unknown): void {
   shape(desc, "BackgroundActionBgRun", value, "bg_run");
 }
-function shape(desc: D, name: string, value: unknown, label: string): R {
-  const fields = desc.shapes[name]?.fields as F[] | undefined;
+function shape(desc: ValidationDescriptors, name: string, value: unknown, label: string): R {
+  const fields = desc.shapes[name]?.fields;
   if (fields === undefined) bad(`missing generated shape descriptor ${name}`);
-  const req = fields.filter((field) => field.required).map((field) => field.name);
-  const rec = closed(value, fields.map((field) => field.name), label, req);
+  const req = fields.filter((field) => field.required).map((field) => needName(field));
+  const rec = closed(value, fields.map(needName), label, req);
   for (const field of fields) {
-    if (own(rec, field.name)) fieldValue(desc, field, rec[field.name], fieldLabel(label, field.name));
+    const name = needName(field);
+    if (own(rec, name)) fieldValue(desc, field, rec[name], fieldLabel(label, name));
   }
   return rec;
 }
-function fieldValue(desc: D, field: F, value: unknown, label: string): void {
+function fieldValue(desc: ValidationDescriptors, field: FieldDescriptor, value: unknown, label: string): void {
   if (value === null) {
     if (field.nullable) return;
     if (label === "bg_run.timeoutSeconds") positive(value, label);
@@ -46,14 +67,14 @@ function fieldValue(desc: D, field: F, value: unknown, label: string): void {
     listField(desc, field, value, label);
   } else scalar(desc, need(field, "type"), value, label);
 }
-function listField(desc: D, field: F, value: unknown, label: string): void {
+function listField(desc: ValidationDescriptors, field: FieldDescriptor, value: unknown, label: string): void {
   for (const [index, item] of array(value, label).entries()) {
     const ty = need(field, "item_type"), itemLabel = `${label}[${index}]`;
     if (field.item_kind === "shape") shape(desc, ty, item, itemLabel);
     else scalar(desc, ty, item, itemLabel);
   }
 }
-function scalar(desc: D, type: string, value: unknown, label: string): void {
+function scalar(desc: ValidationDescriptors, type: string, value: unknown, label: string): void {
   const values = desc.enums[type] as readonly string[] | undefined;
   if (values !== undefined) return enumValue(type, values, value, label);
   if (type === "bool") bool(value, label);
@@ -69,12 +90,14 @@ function enumValue(type: string, values: readonly string[], value: unknown, labe
   }
   bad(`${label} must be one of ${values.join(", ")}; got ${got}`);
 }
-function lists(desc: D, route: string, payload: R): void {
-  for (const c of desc.list_constraints.filter((item: F) => item.route === route) as F[]) {
-    const label = `${route}.${c.field}`, values = array(payload[c.field], label);
+function lists(desc: ValidationDescriptors, route: string, payload: R): void {
+  for (const c of desc.list_constraints.filter((item) => item.route === route)) {
+    const constraintField = c.field;
+    if (constraintField === undefined) bad("generated list constraint is missing field");
+    const label = `${route}.${constraintField}`, values = array(payload[constraintField], label);
     if (c.min === 1 && values.length === 0) bad(`${label} must be non-empty`);
     if (c.max !== undefined && values.length > c.max) bad(`${label} exceeds maximum ${c.max}`);
-    for (const field of c.unique_fields as string[]) {
+    for (const field of c.unique_fields ?? []) {
       unique(values.map((value) => text(object(value, label)[field], `${label}.${field}`)), `${route} ${field}`);
     }
   }
@@ -122,9 +145,13 @@ function nested(type: string, fallback: string): string {
   if (type === "BackgroundActionBgRun") return "bg_run";
   return fallback;
 }
-function need(field: F, key: "type" | "item_type"): string {
+function need(field: FieldDescriptor, key: "type" | "item_type"): string {
   if (field[key] !== undefined) return field[key];
-  return bad(`generated descriptor field ${field.name} is missing ${key}`);
+  return bad(`generated descriptor field ${field.name ?? "<unnamed>"} is missing ${key}`);
+}
+function needName(field: FieldDescriptor): string {
+  if (field.name !== undefined) return field.name;
+  return bad("generated descriptor field is missing name");
 }
 function own(record: R, key: string): boolean { return Object.prototype.hasOwnProperty.call(record, key); }
 function bad(message: string): never { throw new CoreFrameValidationError(message); }

@@ -1,4 +1,7 @@
 {
   "extends": "./host/tsconfig.json",
+  "compilerOptions": {
+    "skipLibCheck": false
+  },
   "include": ["src/**/*.ts"]
 }

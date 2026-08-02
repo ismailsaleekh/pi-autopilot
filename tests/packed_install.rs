@@ -7,6 +7,7 @@ use std::{
 };
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -43,11 +44,59 @@ fn packed_install_resolves_installed_core_and_fails_before_spawn_when_missing()
     fs::create_dir_all(staged_wrapper.parent().ok_or("bin parent")?)?;
     fs::copy(package_root.join(&bin_entry), &staged_wrapper)?;
     make_executable(&staged_wrapper)?;
+    // The production resolver (src/resolve-core-runtime.js) requires every package
+    // entry point before it will resolve the core binary: the core wrapper, the
+    // agent-run wrapper, and the child add-on. Staging only the core wrapper made
+    // this test assert against an incomplete package that the resolver correctly
+    // refuses. Stage each real entry point so the packed-consumer path is exercised.
+    for entry in [
+        "bin/autopilot-agent-run.mjs",
+        "src/generated/child-extension.ts",
+    ] {
+        let staged_entry = stage.join(entry);
+        fs::create_dir_all(staged_entry.parent().ok_or("entry parent")?)?;
+        fs::copy(package_root.join(entry), &staged_entry)?;
+        if entry.starts_with("bin/") {
+            make_executable(&staged_entry)?;
+        }
+    }
     let binary_entry = package_platform_binary_entry();
     let staged_binary = stage.join(&binary_entry);
     fs::create_dir_all(staged_binary.parent().ok_or("binary parent")?)?;
     fs::copy(env!("CARGO_BIN_EXE_autopilot-core"), &staged_binary)?;
     make_executable(&staged_binary)?;
+    // The production resolver verifies the staged binary against
+    // binaries/MANIFEST.json (schema, path, sizeBytes, sha256, sourceHash) before
+    // it will resolve. The staged binary is this test's freshly built one, so the
+    // manifest must describe THOSE exact bytes. Deriving it here keeps the digest
+    // verification genuinely exercised rather than bypassed.
+    let staged_bytes = fs::read(&staged_binary)?;
+    let staged_digest = {
+        // Mirrors the package's own sha256_hex helper: sha2 0.11 returns an Array
+        // that does not implement LowerHex, so format each byte explicitly.
+        let digest = Sha256::digest(&staged_bytes);
+        let mut out = String::with_capacity(digest.len() * 2);
+        for byte in digest {
+            out.push_str(&format!("{byte:02x}"));
+        }
+        out
+    };
+    let staged_source_hash = format!("test-source-{staged_digest}");
+    let manifest = serde_json::json!({
+        "schema": 1,
+        "source": { "hash": staged_source_hash },
+        "binaries": {
+            package_platform_key(): {
+                "path": binary_entry.replace('\\', "/"),
+                "sizeBytes": staged_bytes.len(),
+                "sha256": staged_digest,
+                "sourceHash": staged_source_hash,
+            }
+        }
+    });
+    let staged_manifest = stage.join("binaries/MANIFEST.json");
+    fs::create_dir_all(staged_manifest.parent().ok_or("manifest parent")?)?;
+    fs::write(&staged_manifest, serde_json::to_vec_pretty(&manifest)?)?;
 
     let pack = npm_pack(&stage, &pack_dir, &cache)?;
     let metadata: Value = serde_json::from_slice(&pack.stdout)?;
@@ -119,10 +168,15 @@ fn packed_install_resolves_installed_core_and_fails_before_spawn_when_missing()
         evidence.len() < 1200,
         "missing-binary evidence is unbounded"
     );
+    // The resolver's missing-binary diagnostic is
+    // "autopilot-core binary for <platform> is missing: <path>: ENOENT ...".
+    // Assert both halves plus the platform key so this stays a genuine
+    // missing-binary assertion and cannot be satisfied by an unrelated error.
     assert!(
-        evidence.contains("autopilot-core binary missing"),
+        evidence.contains("autopilot-core binary for") && evidence.contains("is missing"),
         "{evidence}"
     );
+    assert!(evidence.contains(&package_platform_key()), "{evidence}");
     assert!(
         evidence.contains(installed_binary.to_string_lossy().as_ref()),
         "{evidence}"
@@ -196,6 +250,20 @@ fn package_bin_entry(package_json: &Path) -> Result<String, Box<dyn std::error::
         .and_then(Value::as_str)
         .ok_or("package.json bin.autopilot-core is absent")?;
     Ok(entry.to_owned())
+}
+
+fn package_platform_key() -> String {
+    let os = match std::env::consts::OS {
+        "macos" => "darwin",
+        "windows" => "win32",
+        other => other,
+    };
+    let arch = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "x64",
+        other => other,
+    };
+    format!("{os}-{arch}")
 }
 
 fn package_platform_binary_entry() -> String {

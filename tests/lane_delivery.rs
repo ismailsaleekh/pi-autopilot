@@ -5,6 +5,7 @@ use std::{
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+    sync::{Mutex, OnceLock},
 };
 
 use drivers::allocation::{
@@ -24,6 +25,26 @@ use kernel::generated::{
 };
 use kernel::schedule::ResourceFacts;
 use sha2::{Digest as ShaDigest, Sha256};
+
+static CWD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+struct CwdGuard {
+    previous: PathBuf,
+}
+
+impl CwdGuard {
+    fn enter(path: &Path) -> Self {
+        let previous = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(path).expect("set current dir");
+        Self { previous }
+    }
+}
+
+impl Drop for CwdGuard {
+    fn drop(&mut self) {
+        std::env::set_current_dir(&self.previous).expect("restore current dir");
+    }
+}
 
 #[test]
 fn lane_delivery_launch_uses_recorded_tip_at_dispatch_and_package_owned_commit_delivers() {
@@ -311,6 +332,8 @@ fn lane_delivery_agent_git_mutation_and_incomplete_delivery_are_refused_without_
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/generated/child-extension.ts"),
         );
     }
+    let _cwd_lock = CWD_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+    let _cwd = CwdGuard::enter(&fixture.root);
     let issue = delivery_issue_with_facts(&runner, &facts).expect("runner issue");
     let action = delivery_bg_action_with_facts(&runner, &facts).expect("runner action");
     assert!(action.bg_run.command.0.contains(" --spec "));

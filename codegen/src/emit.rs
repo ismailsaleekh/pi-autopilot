@@ -169,14 +169,14 @@ export function validateCoreToHostFrame(value: unknown): CoreToHostFrame {
   return validateCoreToHostFrameWithDescriptors(
     FRAME_VALIDATION_DESCRIPTORS,
     value,
-  ) as unknown as CoreToHostFrame;
+  ) as CoreToHostFrame;
 }
 
 export function validateBackgroundAction(value: unknown): BackgroundAction {
   return validateBackgroundActionWithDescriptors(
     FRAME_VALIDATION_DESCRIPTORS,
     value,
-  ) as unknown as BackgroundAction;
+  ) as BackgroundAction;
 }
 
 export function validateBgRunDescriptorIdentity<T extends BackgroundActionBgRun>(value: T): T {
@@ -536,7 +536,7 @@ pub fn emit_tool_schemas(contracts: &Contracts) -> Result<String> {
         let const_name = format!("{}_TOOL_PARAMETERS", screaming_name(&artifact.name));
         let digest_name = format!("{}_TOOL_SCHEMA_DIGEST", screaming_name(&artifact.name));
         out.push_str(&format!(
-            "export const {const_name} = {schema_json} as unknown as TSchema;\n"
+            "export const {const_name} = {schema_json} as TSchema;\n"
         ));
         out.push_str(&format!("export const {digest_name} = \"{digest}\";\n\n"));
         descriptors.push((

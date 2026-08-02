@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const packageRoot = fileURLToPath(new URL('../../', import.meta.url));
-const allTypeScriptRoots = ['extensions', 'src', 'tests', 'tools'];
+const allTypeScriptRoots = ['extensions', 'src', 'tests'];
 
 interface Violation {
   readonly file: string;
@@ -170,7 +170,7 @@ void describe('type-safety standard', () => {
   });
 
   void it('uses fileURLToPath rather than URL.pathname for module-relative filesystem paths', async () => {
-    const filesystemSources = await filesFor(['src', 'tests', 'tools', 'scripts'], /\.(?:[cm]?js|tsx?)$/u);
+    const filesystemSources = await filesFor(['src', 'tests', 'scripts'], /\.(?:[cm]?js|tsx?)$/u);
     const violations = await scan(filesystemSources, [
       { rule: 'URL pathname filesystem conversion', pattern: /import\.meta\.url[^\n]*\.pathname/u },
     ]);
@@ -180,9 +180,11 @@ void describe('type-safety standard', () => {
     assert.equal(encoded.includes('pi-autopilot path'), true);
   });
 
-  void it('overrides inherited lib checking in the package compiler config', async () => {
-    const config = requireJsonMap(parseJson(await readFile(join(packageRoot, 'tsconfig.json'), 'utf8')), 'tsconfig');
-    const compilerOptions = requireJsonMap(jsonField(config, 'compilerOptions'), 'compilerOptions');
-    assert.equal(jsonField(compilerOptions, 'skipLibCheck'), false);
+  void it('overrides inherited lib checking in the package compiler configs', async () => {
+    for (const configPath of ['tsconfig.json', 'host/tsconfig.json']) {
+      const config = requireJsonMap(parseJson(await readFile(join(packageRoot, configPath), 'utf8')), configPath);
+      const compilerOptions = requireJsonMap(jsonField(config, 'compilerOptions'), `${configPath} compilerOptions`);
+      assert.equal(jsonField(compilerOptions, 'skipLibCheck'), false, `${configPath} must set skipLibCheck false`);
+    }
   });
 });

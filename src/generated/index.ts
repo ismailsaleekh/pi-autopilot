@@ -644,6 +644,7 @@ export interface DeliveryResultV2 {
   prompt_digest: Digest;
   spec_path: Path;
   spec_digest: Digest;
+  spec_bytes: Bytes;
   carrier_path: Path;
   boundary_id: ContractId;
   boundary_digest: Digest;
@@ -1034,6 +1035,7 @@ export interface ValidationResultV2 {
   prompt_digest: Digest;
   spec_path: Path;
   spec_digest: Digest;
+  spec_bytes: Bytes;
   carrier_path: Path;
   boundary_id: ContractId;
   boundary_digest: Digest;
