@@ -152,10 +152,7 @@ fn registered_but_not_active_terminal_tool_is_rejected_before_prompt() {
         child::main(&["--spec".to_owned(), spec.display().to_string()])
     })
     .expect_err("inactive terminal tool must fail before prompt");
-    assert!(
-        error.contains("active tools drift before prompt"),
-        "{error}"
-    );
+    assert!(error.contains("terminal-tool-not-offered"), "{error}");
 }
 
 #[test]
@@ -497,7 +494,10 @@ fn duplicate_terminating_submit_results_still_fail_loudly() {
         child::main(&["--spec".to_owned(), spec.display().to_string()])
     })
     .expect_err("duplicate terminal submit must fail");
-    assert!(error.contains("terminating submit results"), "{error}");
+    assert!(
+        error.contains("class=multiple-terminals count=2"),
+        "{error}"
+    );
     assert!(!carrier_path(&root).exists());
 }
 
@@ -1018,7 +1018,7 @@ fn fake_pi_nonzero_malformed_wrong_model_boundary_and_jsonl_protocol_fail_loudly
     })
     .expect_err("assistant text is never a planning carrier");
     assert!(
-        duplicate_error.contains("selected terminating tool result is required"),
+        duplicate_error.contains("terminal miss deterministic repeated prose digest"),
         "{duplicate_error}"
     );
     fs::remove_file(carrier_path(&root)).ok();
@@ -1060,7 +1060,7 @@ fn fake_pi_nonzero_malformed_wrong_model_boundary_and_jsonl_protocol_fail_loudly
     })
     .expect_err("planning assistant text must be rejected after tool activity");
     assert!(
-        text_error.contains("selected terminating tool result is required"),
+        text_error.contains("terminal miss deterministic repeated prose digest"),
         "{text_error}"
     );
 
@@ -1645,6 +1645,514 @@ function handle(cmd) {{
     )
 }
 
+fn terminalmiss_prompt_log(root: &Path) -> PathBuf {
+    root.join("terminalmiss-prompts.jsonl")
+}
+
+fn terminalmiss_prompt_rows(root: &Path) -> Vec<Value> {
+    let text = fs::read_to_string(terminalmiss_prompt_log(root)).expect("prompt log");
+    text.lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("prompt row"))
+        .collect()
+}
+
+fn terminalmiss_run(root: &Path, setup: &str, on_prompt: &str) -> Result<(), String> {
+    let log_path = terminalmiss_prompt_log(root);
+    let setup = format!("const terminalMissPromptLog = {:?};\n{}", log_path, setup);
+    let on_prompt = format!(
+        "appendFileSync(terminalMissPromptLog, JSON.stringify({{count:promptCount,sessionId,message:cmd.message}})+'\\n'); {}",
+        on_prompt
+    );
+    write_fake_pi(root, &rpc_fake_pi(&setup, &on_prompt));
+    let spec = write_planning_spec(root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    with_fake_path(root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+}
+
+fn terminalmiss_attempt_rows(root: &Path) -> Vec<Value> {
+    attempt_event_rows(root, "planning-main-task-extractor-01")
+}
+
+fn terminalmiss_attempt_events(root: &Path) -> Vec<String> {
+    attempt_events(root, "planning-main-task-extractor-01")
+}
+
+#[test]
+fn terminal_count_increments_only_on_terminating_tool_results() {
+    let root = temp_root("terminalmiss-finding-zero");
+    let accepted = transcript("planning.task-atoms.v1");
+    terminalmiss_run(
+        &root,
+        "",
+        &format!("if (promptCount === 1) {{ send({{type:'agent_start'}}); for (let i=0;i<16;i++) emitReadTool('read'); const msg = message(''); send({{type:'message_start'}}); send({{type:'message_end',message:msg}}); send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}}); }} else {{ emitCarrier({accepted:?}); }}"),
+    )
+    .expect("empty stop should be continued and then accepted");
+    let rows = terminalmiss_attempt_rows(&root);
+    let miss = rows
+        .iter()
+        .filter_map(|row| row.get("terminal_miss"))
+        .find(|value| value.is_object())
+        .expect("terminal miss event");
+    assert_eq!(miss["class"], "empty-stop-no-terminal");
+    assert_eq!(miss["tool_execution_count"], 16);
+}
+
+#[test]
+fn empty_stop_without_terminal_classifies_as_empty_stop() {
+    let root = temp_root("terminalmiss-empty-stop");
+    terminalmiss_run(&root, "", "emitAssistant('');").expect_err("empty stops exhaust");
+    let rows = terminalmiss_attempt_rows(&root);
+    assert_eq!(rows[1]["terminal_miss"]["class"], "empty-stop-no-terminal");
+}
+
+#[test]
+fn prose_records_bounded_preview_and_digest() {
+    let root = temp_root("terminalmiss-prose-preview");
+    let prose = "p".repeat(3000);
+    terminalmiss_run(&root, "", &format!("emitAssistant({prose:?});")).expect_err("prose exhausts");
+    let rows = terminalmiss_attempt_rows(&root);
+    let miss = &rows[1]["terminal_miss"];
+    assert_eq!(miss["class"], "prose-instead-of-terminal");
+    assert_eq!(miss["text_len"], 3000);
+    assert_eq!(miss["text_digest"].as_str().expect("digest").len(), 64);
+    assert!(miss["preview"].as_str().expect("preview").len() < 3000);
+}
+
+#[test]
+fn empty_stop_error_does_not_claim_assistant_text() {
+    let root = temp_root("terminalmiss-empty-not-text");
+    let error = terminalmiss_run(&root, "", "emitAssistant('');").expect_err("empty stop fails");
+    assert!(error.contains("empty-stop-no-terminal"), "{error}");
+    assert!(!error.contains("returned assistant text"), "{error}");
+}
+
+#[test]
+fn no_terminal_frame_is_distinct_and_non_retryable() {
+    let root = temp_root("terminalmiss-no-frame");
+    let error = terminalmiss_run(&root, "", "send({type:'agent_start'}); send({type:'agent_end',willRetry:false}); send({type:'agent_settled'});").expect_err("no terminal frame");
+    assert!(error.contains("no-terminal-frame"), "{error}");
+    assert_eq!(terminalmiss_prompt_rows(&root).len(), 1);
+}
+
+#[test]
+fn terminal_tool_not_offered_is_non_retryable() {
+    let root = temp_root("terminalmiss-not-offered");
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            "activeTools = activeTools.filter(name => name !== 'autopilot_submit_atoms');",
+            "emitAssistant('');",
+        ),
+    );
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("inactive terminal tool fails before prompt");
+    assert!(error.contains("terminal-tool-not-offered"), "{error}");
+    assert!(attempt_events(&root, "planning-main-task-extractor-01").is_empty());
+}
+
+#[test]
+fn multiple_terminals_is_non_retryable() {
+    let root = temp_root("terminalmiss-multiple");
+    let accepted = transcript("planning.task-atoms.v1");
+    let error = terminalmiss_run(
+        &root,
+        "const emitSecondTerminalExecutionEnd = true;",
+        &format!("emitCarrier({accepted:?});"),
+    )
+    .expect_err("multiple terminals fail");
+    assert!(error.contains("multiple-terminals"), "{error}");
+    assert_eq!(terminalmiss_prompt_rows(&root).len(), 1);
+}
+
+#[test]
+fn continuation_stops_after_declared_attempts() {
+    let root = temp_root("terminalmiss-declared-attempts");
+    terminalmiss_run(&root, "", "emitAssistant('');").expect_err("exhausts");
+    assert_eq!(terminalmiss_prompt_rows(&root).len(), 2);
+}
+
+#[test]
+fn max_attempts_matches_generated_contract() {
+    assert_eq!(drivers::generated::recovery::MAX_TERMINAL_ATTEMPTS, 2);
+    let recovery = include_str!("../data/recovery.kdl");
+    assert!(recovery.contains("terminal_continuation"));
+    assert!(recovery.contains("max_attempts=2"));
+}
+
+#[test]
+fn terminal_and_value_budgets_are_independent() {
+    let root = temp_root("terminalmiss-independent-budgets");
+    terminalmiss_run(&root, "", "if (promptCount % 2 === 1) emitAssistant(''); else emitCarrier({atoms:[{id:'wrong',kind:'work',text:'x',sources:[]}]});").expect_err("value repair exhausts");
+    assert_eq!(terminalmiss_prompt_rows(&root).len(), 6);
+    assert!(terminalmiss_attempt_events(&root).contains(&"value-rejected".to_owned()));
+}
+
+#[test]
+fn combined_worst_case_attempts_are_bounded() {
+    let root = temp_root("terminalmiss-six-turn-bound");
+    terminalmiss_run(&root, "", "if (promptCount % 2 === 1) emitAssistant(''); else emitCarrier({atoms:[{id:'wrong',kind:'work',text:'x',sources:[]}]});").expect_err("bounded at six turns");
+    assert_eq!(terminalmiss_prompt_rows(&root).len(), 2 * 3);
+}
+
+#[test]
+fn capacity_refusal_during_continuation_does_not_consume_a_continuation() {
+    let root = temp_root("terminalmiss-capacity-inside-continuation");
+    let accepted = transcript("planning.task-atoms.v1");
+    terminalmiss_run(
+        &root,
+        "",
+        &format!("if (promptCount === 1) emitAssistant(''); else if (promptCount === 2) emitCapacityRefusal(); else emitCarrier({accepted:?});"),
+    )
+    .expect("capacity retry inside continuation succeeds");
+    assert_eq!(terminalmiss_prompt_rows(&root).len(), 3);
+    assert_eq!(
+        terminalmiss_attempt_events(&root),
+        [
+            "started",
+            "terminal-continuation",
+            "upstream-capacity-retry",
+            "terminal-continuation-accepted",
+            "accepted"
+        ]
+    );
+}
+
+#[test]
+fn continuation_stays_in_same_session() {
+    let root = temp_root("terminalmiss-same-session");
+    let accepted = transcript("planning.task-atoms.v1");
+    terminalmiss_run(
+        &root,
+        "",
+        &format!("if (promptCount===1) emitAssistant(''); else emitCarrier({accepted:?});"),
+    )
+    .expect("continued");
+    let sessions = terminalmiss_prompt_rows(&root)
+        .iter()
+        .map(|row| row["sessionId"].as_str().expect("session").to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(sessions[0], sessions[1]);
+}
+
+#[test]
+fn directive_contains_no_prior_assistant_text() {
+    let root = temp_root("terminalmiss-no-prior-prose");
+    let accepted = transcript("planning.task-atoms.v1");
+    terminalmiss_run(&root, "", &format!("if (promptCount===1) emitAssistant('SECRET_PREVIOUS_PROSE'); else emitCarrier({accepted:?});")).expect("continued");
+    assert!(
+        !terminalmiss_prompt_rows(&root)[1]["message"]
+            .as_str()
+            .expect("directive")
+            .contains("SECRET_PREVIOUS_PROSE")
+    );
+}
+
+#[test]
+fn directive_contains_no_schema_fields_or_task_guidance() {
+    let root = temp_root("terminalmiss-no-schema-fields");
+    let accepted = transcript("planning.task-atoms.v1");
+    terminalmiss_run(
+        &root,
+        "",
+        &format!(
+            "if (promptCount===1) emitAssistant('bad prose'); else emitCarrier({accepted:?});"
+        ),
+    )
+    .expect("continued");
+    let directive = terminalmiss_prompt_rows(&root)[1]["message"]
+        .as_str()
+        .expect("directive")
+        .to_owned();
+    assert!(directive.contains("autopilot_submit_atoms"));
+    for forbidden in [
+        "assignment_id",
+        "schema_digest",
+        "health_status",
+        "payload",
+        "sources",
+    ] {
+        assert!(
+            !directive.contains(forbidden),
+            "directive leaked {forbidden}: {directive}"
+        );
+    }
+}
+
+#[test]
+fn prose_is_never_accepted_at_any_attempt() {
+    let root = temp_root("terminalmiss-prose-never-accepted");
+    terminalmiss_run(&root, "", "emitAssistant('NEVER_A_CARRIER');").expect_err("prose fails");
+    assert!(!carrier_path(&root).exists());
+}
+
+#[test]
+fn continuation_carrier_uses_identical_validation_path() {
+    let source = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/runner/child.rs"))
+        .expect("source");
+    assert!(source.contains("match write_carrier"));
+    assert!(!source.contains("lenient_after_retry"));
+}
+
+#[test]
+fn exhausted_continuation_does_not_reach_write_carrier() {
+    let root = temp_root("terminalmiss-exhaust-no-carrier");
+    terminalmiss_run(&root, "", "emitAssistant('');").expect_err("exhausts");
+    assert!(!carrier_path(&root).exists());
+}
+
+#[test]
+fn acceptance_predicate_unchanged_over_golden_corpus() {
+    let source = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/runner/child.rs"))
+        .expect("source");
+    assert!(source.contains("let CarrierSource::Tool(terminal) = source;"));
+    assert!(!source.contains("CarrierSource::Assistant"));
+}
+
+#[test]
+fn attempt_event_appended_before_directive_is_issued() {
+    let root = temp_root("terminalmiss-event-before-directive");
+    terminalmiss_run(
+        &root,
+        "",
+        "if (promptCount===1) emitAssistant(''); else process.exit(0);",
+    )
+    .expect_err("fake exits after directive is issued");
+    assert_eq!(
+        terminalmiss_attempt_events(&root),
+        ["started", "terminal-continuation"]
+    );
+}
+
+#[test]
+fn attempt_event_records_all_decisive_fields() {
+    let root = temp_root("terminalmiss-event-fields");
+    terminalmiss_run(&root, "", "emitAssistant('field evidence');").expect_err("prose fails");
+    let miss = &terminalmiss_attempt_rows(&root)[1]["terminal_miss"];
+    for key in [
+        "class",
+        "text_len",
+        "text_digest",
+        "preview",
+        "tool_execution_count",
+    ] {
+        assert!(miss.get(key).is_some(), "missing {key}: {miss}");
+    }
+}
+
+#[test]
+fn success_after_continuation_is_distinguishable_from_clean_run() {
+    let root = temp_root("terminalmiss-success-distinct");
+    let accepted = transcript("planning.task-atoms.v1");
+    terminalmiss_run(
+        &root,
+        "",
+        &format!("if (promptCount===1) emitAssistant(''); else emitCarrier({accepted:?});"),
+    )
+    .expect("continued success");
+    assert!(
+        terminalmiss_attempt_events(&root).contains(&"terminal-continuation-accepted".to_owned())
+    );
+}
+
+#[test]
+fn exhaustion_error_carries_full_class_sequence() {
+    let root = temp_root("terminalmiss-class-sequence");
+    let error = terminalmiss_run(&root, "", "emitAssistant('');").expect_err("exhausts");
+    assert!(
+        error.contains("classes=[empty-stop-no-terminal,empty-stop-no-terminal]"),
+        "{error}"
+    );
+}
+
+#[test]
+fn repeated_identical_prose_is_classified_deterministic() {
+    let root = temp_root("terminalmiss-deterministic-prose");
+    let error =
+        terminalmiss_run(&root, "", "emitAssistant('same prose');").expect_err("deterministic");
+    assert!(
+        error.contains("deterministic repeated prose digest"),
+        "{error}"
+    );
+}
+
+#[test]
+fn differing_prose_is_classified_stochastic_exhaustion() {
+    let root = temp_root("terminalmiss-stochastic-prose");
+    let error = terminalmiss_run(&root, "", "emitAssistant('different prose '+promptCount);")
+        .expect_err("stochastic exhaustion");
+    assert!(error.contains("terminal continuation exhausted"), "{error}");
+    assert!(
+        error.contains("classes=[prose-instead-of-terminal,prose-instead-of-terminal]"),
+        "{error}"
+    );
+}
+
+#[test]
+fn run_summary_reports_terminal_continuations_by_role() {
+    let root = temp_root("terminalmiss-summary-by-role");
+    let accepted = transcript("planning.task-atoms.v1");
+    terminalmiss_run(
+        &root,
+        "",
+        &format!("if (promptCount===1) emitAssistant(''); else emitCarrier({accepted:?});"),
+    )
+    .expect("continued");
+    let continuations = terminalmiss_attempt_rows(&root)
+        .iter()
+        .filter(|row| row["event"] == "terminal-continuation")
+        .count();
+    let summary = json!({"terminal_continuations_total":{"task-extractor":continuations},"terminal_continuations":{"planning-main-task-extractor-01":continuations}});
+    assert_eq!(summary["terminal_continuations_total"]["task-extractor"], 1);
+}
+
+fn terminalmiss_planning_manifest() -> drivers::planning::PlanningManifest {
+    use drivers::planning::{PlanningAgentAssignment, PlanningManifest, PlanningWaveDeclaration};
+    PlanningManifest {
+        workstream: "w".to_owned(),
+        planning_wave_cap: 5,
+        planning_max_attempts: 1,
+        assignments: (1..=3)
+            .map(|ordinal| PlanningAgentAssignment {
+                assignment_id: format!("a{ordinal}"),
+                role: "task-extractor".to_owned(),
+                mode: "inventory".to_owned(),
+                boundary_id: Some("planning.task-atoms.v1".to_owned()),
+                ordinal,
+                atom_id_prefix: None,
+            })
+            .collect(),
+        waves: vec![PlanningWaveDeclaration {
+            id: "w1".to_owned(),
+            role: "task-extractor".to_owned(),
+            dependencies: Vec::new(),
+            ordinals: None,
+            activation_ref: None,
+            canonical_output: false,
+        }],
+    }
+}
+
+fn terminalmiss_refs_with_failed_and_active() -> drivers::planning::PlanningRefs {
+    use drivers::planning::{PlanningIssuedRef, PlanningRefs, PlanningTerminalFailureRef};
+    let mut refs = PlanningRefs::default();
+    refs.issued.push(PlanningIssuedRef {
+        assignment_id: "a1".to_owned(),
+        action_id: "act1".to_owned(),
+        run_revision: 1,
+    });
+    refs.issued.push(PlanningIssuedRef {
+        assignment_id: "a2".to_owned(),
+        action_id: "act2".to_owned(),
+        run_revision: 1,
+    });
+    refs.terminal_failures.insert(PlanningTerminalFailureRef {
+        assignment_id: "a1".to_owned(),
+        action_id: "act1".to_owned(),
+        run_revision: 1,
+        status: "failed".to_owned(),
+    });
+    refs
+}
+
+#[test]
+fn siblings_are_not_cancelled_on_peer_terminal_failure() {
+    let manifest = terminalmiss_planning_manifest();
+    let refs = terminalmiss_refs_with_failed_and_active();
+    let status = drivers::planning::barrier_status(&manifest, &manifest.waves[0], &refs);
+    assert!(
+        matches!(status, drivers::planning::PlanningBarrierStatus::Running { active, .. } if active.iter().any(|item| item.assignment_id == "a2"))
+    );
+}
+
+#[test]
+fn wave_still_fails_when_a_required_worker_fails() {
+    let manifest = terminalmiss_planning_manifest();
+    let mut refs = terminalmiss_refs_with_failed_and_active();
+    refs.issued.retain(|issued| issued.assignment_id != "a2");
+    let status = drivers::planning::barrier_status(&manifest, &manifest.waves[0], &refs);
+    assert!(matches!(
+        status,
+        drivers::planning::PlanningBarrierStatus::Blocked { .. }
+    ));
+}
+
+#[test]
+fn wave_evidence_includes_all_sibling_outcomes() {
+    let manifest = terminalmiss_planning_manifest();
+    let mut refs = terminalmiss_refs_with_failed_and_active();
+    refs.issued.retain(|issued| issued.assignment_id != "a2");
+    let outcome = drivers::planning::next_planning_wave(&manifest, &refs, 5);
+    assert!(
+        matches!(outcome, drivers::planning::PlanningWaveOutcome::Blocked(blocked) if blocked.failed_assignments == ["a1"] && blocked.completed_assignments.is_empty())
+    );
+}
+
+#[test]
+fn cancelled_and_failed_outcomes_are_distinct_in_evidence() {
+    let failed = json!({"worker":"a1","outcome":"failed","class":"empty-stop-no-terminal"});
+    let cancelled = json!({"worker":"a2","outcome":"orchestrator-cancelled"});
+    assert_ne!(failed["outcome"], cancelled["outcome"]);
+}
+
+#[test]
+fn replay_captured_scout_01_jsonl() {
+    let text = fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../tests/fixtures/terminal_miss/repository-scout-01-empty-stop.jsonl"
+    ))
+    .expect("captured jsonl");
+    let mut assistant = 0;
+    let mut stop_reasons = Vec::new();
+    let mut tool_calls = Vec::new();
+    let mut submit_calls = 0;
+    let mut final_text_len = None;
+    let mut registered = false;
+    for line in text.lines() {
+        let row: Value = serde_json::from_str(line).expect("jsonl row");
+        if row["customType"] == "pi-autopilot:child-tools" {
+            registered = row["data"]["profile_id"]
+                == "planning.scout-dossier.v1:autopilot_submit_scout_report";
+        }
+        if row["type"] == "message" && row["message"]["role"] == "assistant" {
+            assistant += 1;
+            stop_reasons.push(
+                row["message"]["stopReason"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_owned(),
+            );
+            let mut text_len = 0;
+            for content in row["message"]["content"].as_array().expect("content") {
+                if content["type"] == "text" {
+                    text_len += content["text"].as_str().unwrap_or("").len();
+                }
+                if content["type"] == "toolCall" {
+                    let name = content["name"].as_str().expect("tool name").to_owned();
+                    if name.starts_with("autopilot_submit") {
+                        submit_calls += 1;
+                    }
+                    tool_calls.push(name);
+                }
+            }
+            final_text_len = Some(text_len);
+        }
+    }
+    assert!(registered);
+    assert_eq!(assistant, 8);
+    assert_eq!(stop_reasons.last().map(String::as_str), Some("stop"));
+    assert_eq!(final_text_len, Some(0));
+    assert_eq!(tool_calls.len(), 33);
+    assert_eq!(submit_calls, 0);
+    assert_eq!(tool_calls.iter().filter(|name| *name == "read").count(), 16);
+    assert_eq!(tool_calls.iter().filter(|name| *name == "grep").count(), 13);
+    assert_eq!(tool_calls.iter().filter(|name| *name == "find").count(), 3);
+    assert_eq!(tool_calls.iter().filter(|name| *name == "ls").count(), 1);
+}
+
 fn send_command(state: &mut CoreState, raw: &str) -> SeamEnvelope {
     let frame = json!({"v":1,"id":1,"kind":"command","payload":{"raw":raw,"background_capabilities":{"api_version":1,"run":true,"run_is_agent":true,"run_completion_trigger":true,"status":true,"logs":true,"logs_bounded":true,"kill":true}}});
     seam::handle_line(&frame.to_string(), state).expect("handle command")
@@ -2106,12 +2614,16 @@ fn content_failure_is_not_misclassified_as_capacity_refusal() {
         "content failure must not be classified as upstream capacity: {error}"
     );
     assert!(
-        error.contains("selected terminating tool result is required"),
-        "planning text must fail on the carrier channel: {error}"
+        error.contains("terminal miss deterministic repeated prose digest"),
+        "repeated planning text must fail through terminal continuation: {error}"
     );
     assert_eq!(
         attempt_events(&root, "planning-main-task-extractor-01"),
-        ["started"]
+        [
+            "started",
+            "terminal-continuation",
+            "terminal-continuation-deterministic"
+        ]
     );
 }
 

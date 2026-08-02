@@ -4,6 +4,7 @@ pub mod kdl_read;
 pub mod output;
 pub mod table;
 
+use std::fs;
 use std::path::Path;
 
 #[derive(Debug)]
@@ -44,9 +45,11 @@ pub fn run(source_path: &Path, check: bool) -> Result<()> {
         &source_path.with_file_name("pi-rpc.kdl"),
         &contracts::PI_RPC_SPEC,
     )?;
+    let recovery = fs::read_to_string(source_path.with_file_name("recovery.kdl"))
+        .map_err(|error| Error::io(format!("read recovery.kdl: {error}")))?;
     contracts.validate_seam(&seam)?;
     contracts.validate_host_runtime(&host, &seam)?;
-    let outputs = emit::emit_all(&contracts, &seam, &host, &pi_rpc)?;
+    let outputs = emit::emit_all(&contracts, &seam, &host, &pi_rpc, &recovery)?;
     if check {
         output::check_outputs(&outputs)
     } else {

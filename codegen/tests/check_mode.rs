@@ -14,6 +14,7 @@ fn fixture() -> TempDir {
         "seam.kdl",
         "host-runtime.kdl",
         "pi-rpc.kdl",
+        "recovery.kdl",
     ] {
         fs::copy(
             Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../data/{name}")),

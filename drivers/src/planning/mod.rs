@@ -595,26 +595,30 @@ pub fn barrier_status(
     if completed == assignments.len() {
         return PlanningBarrierStatus::Complete;
     }
-    let failures = assignments
-        .iter()
-        .flat_map(|assignment| assignment_failures(&assignment.assignment_id, refs))
-        .collect::<Vec<_>>();
-    if !failures.is_empty() {
-        return PlanningBarrierStatus::Blocked { failures };
-    }
     let active = assignments
         .iter()
         .flat_map(|assignment| active_refs_for_assignment(&assignment.assignment_id, refs))
         .collect::<Vec<_>>();
-    let unissued = assignments
+    let failures = assignments
         .iter()
-        .filter(|assignment| {
-            !assignment_is_accepted(&assignment.assignment_id, refs)
-                && !assignment_is_active(&assignment.assignment_id, refs)
-                && assignment_failures(&assignment.assignment_id, refs).is_empty()
-        })
-        .map(|assignment| assignment.assignment_id.clone())
+        .flat_map(|assignment| assignment_failures(&assignment.assignment_id, refs))
         .collect::<Vec<_>>();
+    if !failures.is_empty() && active.is_empty() {
+        return PlanningBarrierStatus::Blocked { failures };
+    }
+    let unissued = if failures.is_empty() {
+        assignments
+            .iter()
+            .filter(|assignment| {
+                !assignment_is_accepted(&assignment.assignment_id, refs)
+                    && !assignment_is_active(&assignment.assignment_id, refs)
+                    && assignment_failures(&assignment.assignment_id, refs).is_empty()
+            })
+            .map(|assignment| assignment.assignment_id.clone())
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     PlanningBarrierStatus::Running { active, unissued }
 }
 

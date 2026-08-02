@@ -16,6 +16,7 @@ pub fn emit_all(
     seam: &TableDoc,
     host: &TableDoc,
     pi_rpc: &TableDoc,
+    recovery: &str,
 ) -> Result<Vec<OutputFile>> {
     let (rust, typescript) = emit_rust_typescript(contracts)?;
     let mut outputs = vec![
@@ -36,9 +37,15 @@ pub fn emit_all(
         file("src/generated/child-extension.ts", emit_child_extension()),
         file(
             "drivers/src/generated/mod.rs",
-            format!("// {GENERATED_MARKER}\n\npub mod pi_rpc;\npub mod tables;\n"),
+            format!(
+                "// {GENERATED_MARKER}\n\npub mod pi_rpc;\npub mod recovery;\npub mod tables;\n"
+            ),
         ),
         file("drivers/src/generated/pi_rpc.rs", emit_pi_rpc(pi_rpc)?),
+        file(
+            "drivers/src/generated/recovery.rs",
+            emit_recovery(recovery)?,
+        ),
         file("drivers/src/generated/tables.rs", emit_seam_tables(seam)?),
     ];
     let mut artifacts = contracts.artifacts.clone();
@@ -53,6 +60,50 @@ pub fn emit_all(
     }
     outputs.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(outputs)
+}
+
+fn emit_recovery(recovery: &str) -> Result<String> {
+    let line = recovery
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("terminal_continuation "))
+        .ok_or_else(|| Error::input("recovery policy missing terminal_continuation"))?;
+    let max_attempts = recovery_u32(line, "max_attempts=")?;
+    require(
+        max_attempts == 2,
+        "terminal_continuation max_attempts drift; expected one nudge (2 attempts)",
+    )?;
+    for required in [
+        "scope=\"agent-run\"",
+        "trigger=\"terminal-miss\"",
+        "retryable_classes=\"prose-instead-of-terminal empty-stop-no-terminal\"",
+        "terminal_classes=\"no-terminal-frame terminal-tool-not-offered multiple-terminals\"",
+        "retry_prompt=\"terminal-directive\"",
+        "session=\"same-session-id\"",
+        "exhaustion=\"fail-loud\"",
+    ] {
+        require(
+            line.contains(required),
+            format!("terminal_continuation missing {required}"),
+        )?;
+    }
+    Ok(format!(
+        "// {GENERATED_MARKER}\n\npub const MAX_TERMINAL_ATTEMPTS: u32 = {max_attempts};\n"
+    ))
+}
+
+fn recovery_u32(line: &str, key: &str) -> Result<u32> {
+    let start = line
+        .find(key)
+        .ok_or_else(|| Error::input(format!("terminal_continuation missing {key}")))?
+        + key.len();
+    let rest = &line[start..];
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    rest[..end]
+        .parse::<u32>()
+        .map_err(|_| Error::input(format!("terminal_continuation {key} is not a number")))
 }
 
 fn emit_pi_rpc(pi: &TableDoc) -> Result<String> {

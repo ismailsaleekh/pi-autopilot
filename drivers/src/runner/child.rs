@@ -86,6 +86,106 @@ enum CarrierRejection {
     Value(ValueRejection),
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) enum TerminalMiss {
+    ProseInsteadOfTerminal {
+        text_len: usize,
+        text_digest: [u8; 32],
+        preview: String,
+        tool_execution_count: u32,
+    },
+    EmptyStopNoTerminal {
+        tool_execution_count: u32,
+        last_tool_name: Option<String>,
+    },
+    NoTerminalFrame {
+        messages_seen: u32,
+        last_stop_reason: Option<String>,
+    },
+    TerminalToolNotOffered {
+        expected_tool: String,
+        offered_tools: Vec<String>,
+    },
+    MultipleTerminals {
+        count: u32,
+    },
+}
+
+impl TerminalMiss {
+    fn class(&self) -> &'static str {
+        match self {
+            Self::ProseInsteadOfTerminal { .. } => "prose-instead-of-terminal",
+            Self::EmptyStopNoTerminal { .. } => "empty-stop-no-terminal",
+            Self::NoTerminalFrame { .. } => "no-terminal-frame",
+            Self::TerminalToolNotOffered { .. } => "terminal-tool-not-offered",
+            Self::MultipleTerminals { .. } => "multiple-terminals",
+        }
+    }
+
+    fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::ProseInsteadOfTerminal { .. } | Self::EmptyStopNoTerminal { .. }
+        )
+    }
+
+    fn prose_digest(&self) -> Option<[u8; 32]> {
+        match self {
+            Self::ProseInsteadOfTerminal { text_digest, .. } => Some(*text_digest),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) enum ChildError {
+    TerminalMiss(TerminalMiss),
+    TerminalMissDeterministic {
+        digest: [u8; 32],
+    },
+    TerminalContinuationExhausted {
+        classes: Vec<&'static str>,
+        attempts_made: u32,
+        max_attempts: u32,
+    },
+    Fatal(String),
+}
+
+impl ChildError {
+    fn into_message(self) -> String {
+        match self {
+            Self::TerminalMiss(miss) => {
+                format!("agent-run terminal miss: {}", terminal_miss_message(&miss))
+            }
+            Self::TerminalMissDeterministic { digest } => format!(
+                "agent-run terminal miss deterministic repeated prose digest={}",
+                hex_digest(&digest)
+            ),
+            Self::TerminalContinuationExhausted {
+                classes,
+                attempts_made,
+                max_attempts,
+            } => format!(
+                "agent-run terminal continuation exhausted attempts={attempts_made} max={max_attempts} classes=[{}]",
+                classes.join(",")
+            ),
+            Self::Fatal(message) => message,
+        }
+    }
+}
+
+impl From<String> for ChildError {
+    fn from(message: String) -> Self {
+        Self::Fatal(message)
+    }
+}
+
+impl From<&str> for ChildError {
+    fn from(message: &str) -> Self {
+        Self::Fatal(message.to_owned())
+    }
+}
+
 impl From<ValueRejection> for CarrierRejection {
     fn from(value: ValueRejection) -> Self {
         Self::Value(value)
@@ -151,7 +251,7 @@ fn run_value_attempts(
     let mut attempt_prompt = prompt;
     for attempt in 1..=MAX_VALUE_ATTEMPTS {
         append_attempt_event(spec, attempt, "started", AttemptEventDetail::none())?;
-        let source = run_prompt_with_capacity_retry(runner, spec, &attempt_prompt, attempt)?;
+        let source = run_prompt_with_terminal_continuation(runner, spec, &attempt_prompt, attempt)?;
         match write_carrier(spec_path, spec_bytes, spec_digest, spec, &source) {
             Ok(()) => {
                 append_attempt_event(spec, attempt, "accepted", AttemptEventDetail::none())?;
@@ -191,6 +291,86 @@ fn run_value_attempts(
     unreachable!("bounded value attempt loop must return")
 }
 
+/// Run one value attempt, adding the bounded terminal-miss continuation layer.
+///
+/// This wraps prompt execution inside value repair: a retryable terminal miss
+/// receives one same-session directive to call the already-declared terminating
+/// tool, while a capacity refusal inside either turn is handled by the inner
+/// capacity retry and does not consume a continuation attempt.
+fn run_prompt_with_terminal_continuation(
+    runner: &mut RpcAssignment,
+    spec: &AgentRunSpec,
+    prompt: &str,
+    value_attempt: u32,
+) -> Result<CarrierSource, String> {
+    let mut next_prompt = prompt.to_owned();
+    let mut classes = Vec::new();
+    let mut previous_prose_digest = None;
+    for terminal_attempt in 1..=drivers_generated_max_terminal_attempts() {
+        match run_prompt_with_capacity_retry(runner, spec, &next_prompt, value_attempt) {
+            Ok(source) => {
+                if terminal_attempt > 1 {
+                    append_attempt_event(
+                        spec,
+                        value_attempt,
+                        "terminal-continuation-accepted",
+                        AttemptEventDetail::none(),
+                    )?;
+                }
+                return Ok(source);
+            }
+            Err(ChildError::TerminalMiss(miss)) => {
+                if let Some(digest) = miss.prose_digest() {
+                    if previous_prose_digest == Some(digest) {
+                        let error = ChildError::TerminalMissDeterministic { digest };
+                        append_attempt_event(
+                            spec,
+                            value_attempt,
+                            "terminal-continuation-deterministic",
+                            AttemptEventDetail::child_error(&error),
+                        )?;
+                        return Err(error.into_message());
+                    }
+                    previous_prose_digest = Some(digest);
+                }
+                classes.push(miss.class());
+                if !miss.is_retryable() {
+                    append_attempt_event(
+                        spec,
+                        value_attempt,
+                        "terminal-miss-non-retryable",
+                        AttemptEventDetail::terminal_miss(&miss),
+                    )?;
+                    return Err(ChildError::TerminalMiss(miss).into_message());
+                }
+                if terminal_attempt == drivers_generated_max_terminal_attempts() {
+                    let error = ChildError::TerminalContinuationExhausted {
+                        classes,
+                        attempts_made: terminal_attempt,
+                        max_attempts: drivers_generated_max_terminal_attempts(),
+                    };
+                    append_attempt_event(
+                        spec,
+                        value_attempt,
+                        "terminal-continuation-exhausted",
+                        AttemptEventDetail::child_error(&error),
+                    )?;
+                    return Err(error.into_message());
+                }
+                append_attempt_event(
+                    spec,
+                    value_attempt,
+                    "terminal-continuation",
+                    AttemptEventDetail::terminal_miss(&miss),
+                )?;
+                next_prompt = render_terminal_directive(spec, &miss)?;
+            }
+            Err(error) => return Err(error.into_message()),
+        }
+    }
+    unreachable!("bounded terminal continuation loop must return")
+}
+
 /// Send one prompt, retrying only launch-side upstream capacity refusals.
 ///
 /// A capacity refusal happens before the model produces anything: no tokens are
@@ -200,13 +380,16 @@ fn run_value_attempts(
 /// contract intact and never re-enters the fresh-session fence.
 ///
 /// Content failures are deliberately not retried here: they fall through to the
-/// value-repair loop, which reformulates the prompt.
+/// terminal-continuation or value-repair loops, which own model output shape and
+/// typed-carrier value repair independently. Worst case is bounded at 2 terminal
+/// attempts inside each of 3 value attempts: 6 model turns, before capacity
+/// retries (which do not consume continuation attempts).
 fn run_prompt_with_capacity_retry(
     runner: &mut RpcAssignment,
     spec: &AgentRunSpec,
     prompt: &str,
     attempt: u32,
-) -> Result<CarrierSource, String> {
+) -> Result<CarrierSource, ChildError> {
     let policy = CapacityRetryPolicy::parse()?;
     let mut last = String::new();
     for retry in 0..=policy.max_retries {
@@ -225,13 +408,13 @@ fn run_prompt_with_capacity_retry(
                 )?;
                 std::thread::sleep(policy.backoff(retry, &spec.assignment_id.0));
             }
-            Err(other) => return Err(other.into_message()),
+            Err(other) => return Err(other.into_child_error()),
         }
     }
-    Err(format!(
+    Err(ChildError::Fatal(format!(
         "agent-run upstream capacity refusal: {last}; exhausted {} upstream capacity retries",
         policy.max_retries
-    ))
+    )))
 }
 
 struct RpcAssignment {
@@ -264,7 +447,12 @@ struct CycleState {
     prompt_response_seen: bool,
     pending_stats: BTreeSet<String>,
     final_record: Option<CycleTerminal>,
+    /// Count of selected terminating submit tool results only.
     terminal_count: usize,
+    assistant_terminal_count: usize,
+    assistant_message_count: usize,
+    last_stop_reason: Option<String>,
+    last_tool_name: Option<String>,
     tool_terminal: Option<ToolTerminal>,
     tool_terminal_count: usize,
     tool_execution_count: usize,
@@ -290,6 +478,10 @@ impl CycleState {
             pending_stats: BTreeSet::new(),
             final_record: None,
             terminal_count: 0,
+            assistant_terminal_count: 0,
+            assistant_message_count: 0,
+            last_stop_reason: None,
+            last_tool_name: None,
             tool_terminal: None,
             tool_terminal_count: 0,
             tool_execution_count: 0,
@@ -490,9 +682,9 @@ impl RpcAssignment {
         let result = self.run_prompt(spec, prompt, PromptPurpose::Normal, Some(attempt));
         match result {
             Ok(value) => Ok(value),
-            Err(message) => match self.last_capacity_refusal.take().or(capacity_before) {
+            Err(error) => match self.last_capacity_refusal.take().or(capacity_before) {
                 Some(detail) => Err(PromptFailure::UpstreamCapacity(detail)),
-                None => Err(PromptFailure::Other(message)),
+                None => Err(PromptFailure::Other(error)),
             },
         }
     }
@@ -503,7 +695,7 @@ impl RpcAssignment {
         prompt: &str,
         purpose: PromptPurpose,
         attempt: Option<u32>,
-    ) -> Result<CarrierSource, String> {
+    ) -> Result<CarrierSource, ChildError> {
         let prompt_id = self.next_id("prompt");
         self.client
             .send_command(RpcCommand::prompt(prompt_id.clone(), prompt.to_owned()))
@@ -521,9 +713,9 @@ impl RpcAssignment {
                 }
                 RpcFrame::Event(RpcEvent::AgentSettled) => {
                     if !state.prompt_response_seen {
-                        return Err(
-                            "agent-run prompt response missing before agent_settled".to_owned()
-                        );
+                        return Err(ChildError::Fatal(
+                            "agent-run prompt response missing before agent_settled".to_owned(),
+                        ));
                     }
                     while !state.pending_stats.is_empty() {
                         let frame = self
@@ -539,9 +731,9 @@ impl RpcAssignment {
                                 self.handle_response(spec, &mut state, &prompt_id, response)?;
                             }
                             RpcFrame::Event(event) => {
-                                return Err(format!(
+                                return Err(ChildError::Fatal(format!(
                                     "agent-run rpc event after agent_settled while awaiting stats: {event:?}"
-                                ));
+                                )));
                             }
                         }
                     }
@@ -613,6 +805,7 @@ impl RpcAssignment {
                 terminate,
             } => {
                 state.tool_execution_count = state.tool_execution_count.saturating_add(1);
+                state.last_tool_name = Some(tool_name.clone());
                 if state.final_record.is_some() || state.tool_terminal.is_some() {
                     state.tool_after_terminal = true;
                 }
@@ -633,6 +826,7 @@ impl RpcAssignment {
                             format!("agent-run submit tool {tool_name} details malformed: {error}")
                         })?;
                     state.tool_terminal_count = state.tool_terminal_count.saturating_add(1);
+                    state.terminal_count = state.terminal_count.saturating_add(1);
                     state.tool_terminal = Some(ToolTerminal {
                         tool_name,
                         tool_call_id,
@@ -689,6 +883,11 @@ impl RpcAssignment {
         if message.role != "assistant" {
             return Ok(());
         }
+        state.assistant_message_count = state.assistant_message_count.saturating_add(1);
+        state.last_stop_reason = message
+            .stop_reason
+            .as_deref()
+            .map(|value| value.to_ascii_lowercase());
         // An upstream capacity refusal arrives as a terminal with no text and a
         // provider errorMessage. Record it and let the cycle drain normally:
         // returning early here would abandon the stream before the prompt
@@ -732,7 +931,7 @@ impl RpcAssignment {
             return Ok(());
         }
         if state.final_record.as_ref().map(|item| &item.record) != Some(&record) {
-            state.terminal_count = state.terminal_count.saturating_add(1);
+            state.assistant_terminal_count = state.assistant_terminal_count.saturating_add(1);
             state.final_record = Some(CycleTerminal {
                 record,
                 delivered_after_steer: state.steer_message_started,
@@ -869,28 +1068,35 @@ impl RpcAssignment {
         &mut self,
         spec: &AgentRunSpec,
         state: CycleState,
-    ) -> Result<CarrierSource, String> {
+    ) -> Result<CarrierSource, ChildError> {
         // Surface a launch-side refusal ahead of output-shape checks: there is
         // no assistant output to judge, and the caller retries on this marker.
         if let Some(detail) = state.upstream_capacity_failure {
             self.last_capacity_refusal = Some(detail.clone());
-            return Err(format!("agent-run upstream capacity refusal: {detail}"));
+            return Err(ChildError::Fatal(format!(
+                "agent-run upstream capacity refusal: {detail}"
+            )));
         }
         if state.tool_terminal_count > 0 {
             if state.tool_terminal_count != 1 {
-                return Err(format!(
-                    "agent-run Pi JSONL contained {} terminating submit results; expected exactly one",
-                    state.tool_terminal_count
-                ));
+                return Err(ChildError::TerminalMiss(TerminalMiss::MultipleTerminals {
+                    count: u32::try_from(state.tool_terminal_count).unwrap_or(u32::MAX),
+                }));
             }
             if state.tool_after_terminal {
-                return Err("agent-run Pi JSONL had tool activity after terminal result".to_owned());
+                return Err(ChildError::Fatal(
+                    "agent-run Pi JSONL had tool activity after terminal result".to_owned(),
+                ));
             }
             if state.final_record.is_some() {
-                return Err(
-                    "agent-run Pi JSONL contained both tool and assistant terminal results"
-                        .to_owned(),
-                );
+                return Err(ChildError::TerminalMiss(TerminalMiss::MultipleTerminals {
+                    count: u32::try_from(
+                        state
+                            .tool_terminal_count
+                            .saturating_add(state.assistant_terminal_count),
+                    )
+                    .unwrap_or(u32::MAX),
+                }));
             }
             let terminal = state
                 .tool_terminal
@@ -905,10 +1111,10 @@ impl RpcAssignment {
                     )
                 })?;
             if duplicate != &terminal.details_value {
-                return Err(format!(
+                return Err(ChildError::Fatal(format!(
                     "agent-run tool details drift between tool_execution_end and toolResult for {}",
                     terminal.tool_call_id
-                ));
+                )));
             }
             // Deliberately NOT asserting tool_result_details.len() == 1: ordinary Pi
             // tools (grep, and others) legitimately attach a `details` payload, so a
@@ -921,7 +1127,9 @@ impl RpcAssignment {
             return Ok(CarrierSource::Tool(terminal));
         }
         if state.tool_after_terminal {
-            return Err("agent-run Pi JSONL had tool activity after terminal result".to_owned());
+            return Err(ChildError::Fatal(
+                "agent-run Pi JSONL had tool activity after terminal result".to_owned(),
+            ));
         }
         if let Some(handoff) = state.handoff {
             let checkpoint = self.checkpoint_record(spec, handoff)?;
@@ -937,12 +1145,14 @@ impl RpcAssignment {
             return self.run_prompt(spec, &handoff_prompt, PromptPurpose::Handoff, state.attempt);
         }
         if state.terminal_count == 0 {
-            return Err("agent-run Pi JSONL contained no final carrier result".to_owned());
+            return Err(ChildError::TerminalMiss(classify_terminal_miss(
+                spec, &state,
+            )?));
         }
-        Err(
-            "agent-run child returned assistant text; the selected terminating tool result is required"
+        Err(ChildError::Fatal(
+            "agent-run Pi JSONL contained no accepted carrier despite terminal result count"
                 .to_owned(),
-        )
+        ))
     }
 
     fn request_stats(&mut self, state: &mut CycleState) -> Result<(), String> {
@@ -1069,15 +1279,18 @@ impl RpcAssignment {
             .map(|tool| tool.0.clone())
             .collect::<Vec<_>>();
         expected.sort();
+        if !active.iter().any(|tool| tool == profile.1) {
+            return Err(format!(
+                "agent-run terminal miss: {}",
+                terminal_miss_message(&TerminalMiss::TerminalToolNotOffered {
+                    expected_tool: profile.1.to_owned(),
+                    offered_tools: active,
+                })
+            ));
+        }
         if active != expected {
             return Err(format!(
                 "agent-run active tools drift before prompt: expected {expected:?}, got {active:?}"
-            ));
-        }
-        if !active.iter().any(|tool| tool == profile.1) {
-            return Err(format!(
-                "agent-run terminal tool {} is not active before prompt",
-                profile.1
             ));
         }
         Ok(())
@@ -1449,25 +1662,133 @@ pub(crate) enum PromptFailure {
     /// Launch-side refusal by the provider: no content was produced and no
     /// tokens were billed, so the identical prompt may be re-sent.
     UpstreamCapacity(String),
-    /// Any other failure, including content failures that value repair owns.
-    Other(String),
+    /// Any other failure, including content failures that terminal continuation
+    /// or value repair owns.
+    Other(ChildError),
 }
 
 impl PromptFailure {
-    fn into_message(self) -> String {
+    fn into_child_error(self) -> ChildError {
         match self {
             Self::UpstreamCapacity(detail) => {
-                format!("agent-run upstream capacity refusal: {detail}")
+                ChildError::Fatal(format!("agent-run upstream capacity refusal: {detail}"))
             }
-            Self::Other(message) => message,
+            Self::Other(error) => error,
         }
     }
 }
 
 impl From<String> for PromptFailure {
     fn from(message: String) -> Self {
-        Self::Other(message)
+        Self::Other(ChildError::Fatal(message))
     }
+}
+
+fn classify_terminal_miss(
+    spec: &AgentRunSpec,
+    state: &CycleState,
+) -> Result<TerminalMiss, ChildError> {
+    let (expected_tool, offered_tools) = expected_terminal_tool_and_offered(spec)?;
+    if !offered_tools.iter().any(|tool| tool == &expected_tool) {
+        return Ok(TerminalMiss::TerminalToolNotOffered {
+            expected_tool,
+            offered_tools,
+        });
+    }
+    let tool_execution_count = u32::try_from(state.tool_execution_count).unwrap_or(u32::MAX);
+    if let Some(final_record) = &state.final_record {
+        let text = &final_record.record.text;
+        if text.is_empty() {
+            return Ok(TerminalMiss::EmptyStopNoTerminal {
+                tool_execution_count,
+                last_tool_name: state.last_tool_name.clone(),
+            });
+        }
+        return Ok(TerminalMiss::ProseInsteadOfTerminal {
+            text_len: text.chars().count(),
+            text_digest: sha256_array(text.as_bytes()),
+            preview: crate::evidence::bound_detail(text),
+            tool_execution_count,
+        });
+    }
+    Ok(TerminalMiss::NoTerminalFrame {
+        messages_seen: u32::try_from(state.assistant_message_count).unwrap_or(u32::MAX),
+        last_stop_reason: state.last_stop_reason.clone(),
+    })
+}
+
+fn expected_terminal_tool_and_offered(
+    spec: &AgentRunSpec,
+) -> Result<(String, Vec<String>), ChildError> {
+    let profile = super::terminal_profile_for(
+        &spec.role_id.0,
+        &spec.boundary_id.0,
+        &spec.result_contract.0,
+    )
+    .map_err(|error| ChildError::Fatal(error.to_string()))?;
+    let mut offered_tools = spec
+        .allowed_tools
+        .iter()
+        .map(|tool| tool.0.clone())
+        .collect::<Vec<_>>();
+    offered_tools.sort();
+    Ok((profile.1.to_owned(), offered_tools))
+}
+
+fn terminal_miss_message(miss: &TerminalMiss) -> String {
+    match miss {
+        TerminalMiss::ProseInsteadOfTerminal {
+            text_len,
+            text_digest,
+            preview,
+            tool_execution_count,
+        } => format!(
+            "class=prose-instead-of-terminal text_len={text_len} text_digest={} preview={:?} tool_execution_count={tool_execution_count}; assistant text discarded; selected terminating tool result is required",
+            hex_digest(text_digest),
+            preview
+        ),
+        TerminalMiss::EmptyStopNoTerminal {
+            tool_execution_count,
+            last_tool_name,
+        } => format!(
+            "class=empty-stop-no-terminal tool_execution_count={tool_execution_count} last_tool_name={}",
+            last_tool_name.as_deref().unwrap_or("<none>")
+        ),
+        TerminalMiss::NoTerminalFrame {
+            messages_seen,
+            last_stop_reason,
+        } => format!(
+            "class=no-terminal-frame messages_seen={messages_seen} last_stop_reason={}",
+            last_stop_reason.as_deref().unwrap_or("<none>")
+        ),
+        TerminalMiss::TerminalToolNotOffered {
+            expected_tool,
+            offered_tools,
+        } => format!(
+            "class=terminal-tool-not-offered expected_tool={expected_tool} offered_tools=[{}]",
+            offered_tools.join(",")
+        ),
+        TerminalMiss::MultipleTerminals { count } => {
+            format!("class=multiple-terminals count={count}")
+        }
+    }
+}
+
+fn render_terminal_directive(spec: &AgentRunSpec, miss: &TerminalMiss) -> Result<String, String> {
+    let (terminal_tool, _) =
+        expected_terminal_tool_and_offered(spec).map_err(ChildError::into_message)?;
+    let prose_discard = if matches!(miss, TerminalMiss::ProseInsteadOfTerminal { .. }) {
+        "\nYour previous assistant message was not a submission and has been discarded.\nAssistant text is never accepted as a result for this role.\n"
+    } else {
+        ""
+    };
+    Ok(format!(
+        "No submission was received. Your previous turn ended without calling the\nrequired terminating tool.\n{prose_discard}\nContext gathering is complete. Call `{terminal_tool}` now with the results of\nthe investigation you have already performed.\nDo not call any other tool. Do not reply with text."
+    ))
+}
+
+fn drivers_generated_max_terminal_attempts() -> u32 {
+    crate::generated::recovery::MAX_TERMINAL_ATTEMPTS
 }
 
 /// Detect a terminal that failed upstream rather than in the model's output.
@@ -2129,6 +2450,21 @@ fn sha_json(value: &impl serde::Serialize) -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
+fn sha256_array(bytes: &[u8]) -> [u8; 32] {
+    let digest = Sha256::digest(bytes);
+    let mut out = [0_u8; 32];
+    out.copy_from_slice(&digest);
+    out
+}
+
+fn hex_digest(bytes: &[u8; 32]) -> String {
+    let mut out = String::with_capacity(64);
+    for byte in bytes {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
 fn value_rejection(
     field: impl Into<String>,
     expected: impl Into<String>,
@@ -2171,6 +2507,8 @@ fn paused_after_exhaustion(spec: &AgentRunSpec, rejection: &ValueRejection) -> S
 struct AttemptEventDetail<'a> {
     rejection: Option<&'a ValueRejection>,
     terminal_failure: Option<&'a TerminalFailureDiagnostic>,
+    terminal_miss: Option<&'a TerminalMiss>,
+    child_error: Option<&'a ChildError>,
 }
 
 impl<'a> AttemptEventDetail<'a> {
@@ -2178,6 +2516,8 @@ impl<'a> AttemptEventDetail<'a> {
         Self {
             rejection: None,
             terminal_failure: None,
+            terminal_miss: None,
+            child_error: None,
         }
     }
 
@@ -2185,6 +2525,8 @@ impl<'a> AttemptEventDetail<'a> {
         Self {
             rejection: Some(rejection),
             terminal_failure: None,
+            terminal_miss: None,
+            child_error: None,
         }
     }
 
@@ -2192,7 +2534,99 @@ impl<'a> AttemptEventDetail<'a> {
         Self {
             rejection: None,
             terminal_failure: Some(terminal_failure),
+            terminal_miss: None,
+            child_error: None,
         }
+    }
+
+    fn terminal_miss(terminal_miss: &'a TerminalMiss) -> Self {
+        Self {
+            rejection: None,
+            terminal_failure: None,
+            terminal_miss: Some(terminal_miss),
+            child_error: None,
+        }
+    }
+
+    fn child_error(child_error: &'a ChildError) -> Self {
+        Self {
+            rejection: None,
+            terminal_failure: None,
+            terminal_miss: None,
+            child_error: Some(child_error),
+        }
+    }
+}
+
+fn terminal_miss_json(value: &TerminalMiss) -> Value {
+    match value {
+        TerminalMiss::ProseInsteadOfTerminal {
+            text_len,
+            text_digest,
+            preview,
+            tool_execution_count,
+        } => serde_json::json!({
+            "class": value.class(),
+            "text_len": text_len,
+            "text_digest": hex_digest(text_digest),
+            "preview": preview,
+            "tool_execution_count": tool_execution_count,
+        }),
+        TerminalMiss::EmptyStopNoTerminal {
+            tool_execution_count,
+            last_tool_name,
+        } => serde_json::json!({
+            "class": value.class(),
+            "tool_execution_count": tool_execution_count,
+            "last_tool_name": last_tool_name,
+        }),
+        TerminalMiss::NoTerminalFrame {
+            messages_seen,
+            last_stop_reason,
+        } => serde_json::json!({
+            "class": value.class(),
+            "messages_seen": messages_seen,
+            "last_stop_reason": last_stop_reason,
+        }),
+        TerminalMiss::TerminalToolNotOffered {
+            expected_tool,
+            offered_tools,
+        } => serde_json::json!({
+            "class": value.class(),
+            "expected_tool": expected_tool,
+            "offered_tools": offered_tools,
+        }),
+        TerminalMiss::MultipleTerminals { count } => serde_json::json!({
+            "class": value.class(),
+            "count": count,
+        }),
+    }
+}
+
+fn child_error_json(value: &ChildError) -> Value {
+    match value {
+        ChildError::TerminalMiss(miss) => serde_json::json!({
+            "kind": "terminal-miss",
+            "terminal_miss": terminal_miss_json(miss),
+        }),
+        ChildError::TerminalMissDeterministic { digest } => serde_json::json!({
+            "kind": "terminal-miss-deterministic",
+            "digest": hex_digest(digest),
+        }),
+        ChildError::TerminalContinuationExhausted {
+            classes,
+            attempts_made,
+            max_attempts,
+        } => serde_json::json!({
+            "kind": "terminal-continuation-exhausted",
+            "classes": classes,
+            "attempts_made": attempts_made,
+            "max_attempts": max_attempts,
+        }),
+        ChildError::Fatal(message) => serde_json::json!({
+            "kind": "fatal",
+            "message": crate::evidence::bound_detail(message),
+        }),
     }
 }
 
@@ -2227,6 +2661,8 @@ fn append_attempt_event(
             "capacity_detector_matched": value.capacity_detector_matched,
             "capacity_detector_miss": value.capacity_detector_miss.clone(),
         })),
+        "terminal_miss": detail.terminal_miss.map(terminal_miss_json),
+        "child_error": detail.child_error.map(child_error_json),
     });
     let mut data = serde_json::to_vec(&row)
         .map_err(|error| format!("agent-run attempt event serialize failed: {error}"))?;
