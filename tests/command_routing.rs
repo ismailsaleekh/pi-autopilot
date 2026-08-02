@@ -11,10 +11,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use drivers::vcs::GitVcs;
+use drivers::{runner, vcs::GitVcs};
 use kernel::generated::{
-    BackgroundAction, CoreToHostDonePayload, CoreToHostSpawnPayload, CoreToHostSpawnWavePayload,
-    CoreToHostUiPayload, EventRow, SeamEnvelope,
+    BackgroundAction, ContractId, CoreToHostDonePayload, CoreToHostSpawnPayload,
+    CoreToHostSpawnWavePayload, CoreToHostUiPayload, EventRow, Id, ModeId, SeamEnvelope, Sha,
 };
 use sha2::{Digest as ShaDigest, Sha256};
 
@@ -134,7 +134,7 @@ fn command_routing_all_public_commands_reach_driver_surfaces() {
     );
     let close_status = done_status(&close);
     assert!(
-        close_status.contains("rejection:lifecycle-close:FinalGateFailed:final-commands-exact-tip"),
+        close_status.contains("rejection:lifecycle-close:CloseNotReady:"),
         "unexpected close status: {close_status}"
     );
     assert!(
@@ -284,6 +284,218 @@ fn unknown_command_lists_valid_commands() {
     assert!(status.contains("unknown-command:not-a-command"));
     assert!(status.contains("/autopilot-plan"));
     assert!(status.contains("/autopilot-abort"));
+}
+
+#[test]
+fn autonomous_two_command_flow_creates_result_ref() {
+    let root = temp_dir("auto-close");
+    let repo = complete_run_repo(&root, "hello-health", 1, &["L1"]);
+    let event_log = root.join("events.jsonl");
+    append_unit_closed(&event_log, &repo, "L1");
+
+    let close = send_with_log("autopilot hello-health", &event_log, Some(&repo));
+    let status = done_status(&close);
+    assert_controller_close_line(&status);
+    let result_ref = status.trim_start_matches("lifecycle:close:result_ref=");
+    assert_ref_at(
+        &repo,
+        result_ref,
+        git_stdout(
+            &repo,
+            &[
+                "rev-parse",
+                "--verify",
+                "refs/heads/autopilot/run/hello-health/main",
+            ],
+        )
+        .trim(),
+    );
+}
+
+#[test]
+fn first_lane_integration_does_not_finalize_multilane_run() {
+    let root = temp_dir("multi-no-first-close");
+    let repo = complete_run_repo(&root, "multi", 2, &["L1"]);
+    let event_log = root.join("events.jsonl");
+    append_unit_closed(&event_log, &repo, "L1");
+
+    let response = send_with_log("autopilot multi", &event_log, Some(&repo));
+    assert_ne!(done_status_or_kind(&response), "lifecycle-close");
+    assert_no_result_refs(&repo);
+}
+
+#[test]
+fn aggregate_completion_finalizes_exactly_once() {
+    let root = temp_dir("aggregate-once");
+    let repo = complete_run_repo(&root, "agg", 2, &["L1", "L2"]);
+    let event_log = root.join("events.jsonl");
+    append_unit_closed(&event_log, &repo, "L1");
+    append_unit_closed(&event_log, &repo, "L2");
+
+    let first = done_status(&send_with_log("autopilot agg", &event_log, Some(&repo)));
+    assert_controller_close_line(&first);
+    let second = done_status(&send_with_log("autopilot agg", &event_log, Some(&repo)));
+    assert_eq!(first, second);
+    let log = fs::read_to_string(&event_log).expect("event log");
+    assert_eq!(log.matches("final:evidence-produced").count(), 1);
+}
+
+#[test]
+fn active_or_unknown_job_blocks_finalization() {
+    let root = temp_dir("active-blocks");
+    let repo = complete_run_repo(&root, "busy", 1, &["L1"]);
+    let event_log = root.join("events.jsonl");
+    append_unit_closed(&event_log, &repo, "L1");
+    append_active_binding(&event_log, &repo, "busy");
+
+    let response = send_with_log("autopilot busy", &event_log, Some(&repo));
+    assert!(!done_status_or_kind(&response).starts_with("lifecycle:close:result_ref="));
+    assert_no_result_refs(&repo);
+}
+
+#[test]
+fn final_evidence_is_bound_to_exact_tip() {
+    let root = temp_dir("tip-bound");
+    let repo = complete_run_repo(&root, "tipbound", 1, &["L1"]);
+    let event_log = root.join("events.jsonl");
+    append_unit_closed(&event_log, &repo, "L1");
+    let old_tip = git_stdout(
+        &repo,
+        &[
+            "rev-parse",
+            "--verify",
+            "refs/heads/autopilot/run/tipbound/main",
+        ],
+    )
+    .trim()
+    .to_owned();
+
+    let status = done_status(&send_with_log(
+        "autopilot tipbound",
+        &event_log,
+        Some(&repo),
+    ));
+    assert_controller_close_line(&status);
+    fs::write(
+        repo.join("src/lib.rs"),
+        "pub fn changed() -> &'static str { \"new\" }\n",
+    )
+    .expect("edit");
+    git_stdout(&repo, &["add", "src/lib.rs"]);
+    git_stdout(&repo, &["commit", "-m", "move final tip"]);
+    let new_tip = git_stdout(&repo, &["rev-parse", "--verify", "HEAD"])
+        .trim()
+        .to_owned();
+    git_stdout(
+        &repo,
+        &[
+            "update-ref",
+            "refs/heads/autopilot/run/tipbound/main",
+            &new_tip,
+        ],
+    );
+    let _ = send_with_log("autopilot tipbound", &event_log, Some(&repo));
+    let log = fs::read_to_string(&event_log).expect("event log");
+    assert!(log.contains(&format!("final-commands-pass:{old_tip}")));
+    assert!(!log.contains(&format!("final-commands-pass:{new_tip}")));
+}
+
+#[test]
+fn manual_and_automatic_modes_share_lifecycle_machine() {
+    let root = temp_dir("manual-mode");
+    let repo = complete_run_repo(&root, "manual", 1, &["L1"]);
+    let event_log = root.join("events.jsonl");
+    append_unit_closed(&event_log, &repo, "L1");
+
+    let awaiting = send_frame_env(
+        frame_json(1, "autopilot manual"),
+        &event_log,
+        Some(&repo),
+        &[("AUTOPILOT_CLOSURE_MODE", "operator_ratified")],
+    );
+    let awaiting_status = done_status(&awaiting);
+    assert!(awaiting_status.starts_with("lifecycle:awaiting-close:workstream=manual;"));
+    assert_no_result_refs(&repo);
+
+    let args = close_command_for_state(&repo, &event_log, "manual", "run-manual");
+    let closed = send_frame_env(
+        frame_json(2, &args),
+        &event_log,
+        Some(&repo),
+        &[("AUTOPILOT_CLOSURE_MODE", "operator_ratified")],
+    );
+    assert_controller_close_line(&done_status(&closed));
+}
+
+#[test]
+fn publication_crash_recovers_only_with_matching_prepared_intent() {
+    let root = temp_dir("prepared-recovery");
+    let repo = complete_run_repo(&root, "recover", 1, &["L1"]);
+    let event_log = root.join("events.jsonl");
+    append_unit_closed(&event_log, &repo, "L1");
+    let tip = git_stdout(
+        &repo,
+        &[
+            "rev-parse",
+            "--verify",
+            "refs/heads/autopilot/run/recover/main",
+        ],
+    )
+    .trim()
+    .to_owned();
+    let prepared = serde_json::json!({
+        "schema":"PublicationPrepared",
+        "run_id":"run-recover",
+        "tip":tip,
+        "result_ref":"refs/autopilot/results/recover/run-recover",
+        "gate_digest":"digest-for-test"
+    });
+    let path = repo.join(".pi/autopilot/recover/close/publication-prepared.json");
+    fs::create_dir_all(path.parent().expect("prepared parent")).expect("prepared dir");
+    fs::write(
+        &path,
+        serde_json::to_vec_pretty(&prepared).expect("prepared json"),
+    )
+    .expect("prepared");
+
+    let status = done_status(&send_with_log("autopilot recover", &event_log, Some(&repo)));
+    assert_eq!(
+        status,
+        "lifecycle:close:result_ref=refs/autopilot/results/recover/run-recover"
+    );
+    assert_ref_at(
+        &repo,
+        "refs/autopilot/results/recover/run-recover",
+        prepared["tip"].as_str().expect("tip"),
+    );
+}
+
+#[test]
+fn close_signal_is_exact_whole_line() {
+    let root = temp_dir("exact-line");
+    let repo = complete_run_repo(&root, "exact", 1, &["L1"]);
+    let event_log = root.join("events.jsonl");
+    append_unit_closed(&event_log, &repo, "L1");
+    let status = done_status(&send_with_log("autopilot exact", &event_log, Some(&repo)));
+    assert_controller_close_line(&status);
+    assert!(!status.contains(";archive="));
+    assert!(!status.contains(";sequence="));
+}
+
+#[test]
+fn forward_integrated_is_progress_not_final() {
+    let root = temp_dir("forward-progress");
+    let repo = complete_run_repo(&root, "progress", 1, &[]);
+    let event_log = root.join("events.jsonl");
+    let response = send_with_log(
+        "append:integration:integration:forward-integrated",
+        &event_log,
+        Some(&repo),
+    );
+    assert!(done_status(&response).contains("state:sequence="));
+    let response = send_with_log("autopilot progress", &event_log, Some(&repo));
+    assert!(!done_status_or_kind(&response).starts_with("lifecycle:close:result_ref="));
+    assert_no_result_refs(&repo);
 }
 
 #[test]
@@ -581,7 +793,16 @@ fn sha256_hex(data: &[u8]) -> String {
 }
 
 fn send_frame(frame: serde_json::Value, event_log: &Path, cwd: Option<&Path>) -> SeamEnvelope {
-    let mut child = spawn_core(event_log, cwd);
+    send_frame_env(frame, event_log, cwd, &[])
+}
+
+fn send_frame_env(
+    frame: serde_json::Value,
+    event_log: &Path,
+    cwd: Option<&Path>,
+    envs: &[(&str, &str)],
+) -> SeamEnvelope {
+    let mut child = spawn_core_env(event_log, cwd, envs);
     writeln!(child.stdin.as_mut().expect("stdin"), "{}", frame).expect("write frame");
     drop(child.stdin.take());
     let mut stdout = BufReader::new(child.stdout.take().expect("stdout"));
@@ -605,6 +826,10 @@ fn send_frame(frame: serde_json::Value, event_log: &Path, cwd: Option<&Path>) ->
 }
 
 fn spawn_core(event_log: &Path, cwd: Option<&Path>) -> Child {
+    spawn_core_env(event_log, cwd, &[])
+}
+
+fn spawn_core_env(event_log: &Path, cwd: Option<&Path>, envs: &[(&str, &str)]) -> Child {
     let mut command = Command::new(env!("CARGO_BIN_EXE_autopilot-core"));
     let exe = std::env::current_exe().expect("current exe");
     command
@@ -618,6 +843,9 @@ fn spawn_core(event_log: &Path, cwd: Option<&Path>) -> Child {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    for (name, value) in envs {
+        command.env(name, value);
+    }
     if let Some(path) = cwd {
         command.current_dir(path);
     }
@@ -665,8 +893,194 @@ fn git_stdout(repo: &Path, args: &[&str]) -> String {
         .args(args)
         .output()
         .expect("git command");
-    assert!(output.status.success(), "git {:?} failed", args);
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
     String::from_utf8(output.stdout).expect("git stdout")
+}
+
+fn complete_run_repo(root: &Path, workstream: &str, units: usize, _closed: &[&str]) -> PathBuf {
+    let repo = root.join("repo");
+    let vcs = GitVcs::new(root);
+    vcs.init_fixture(&repo).expect("fixture repo");
+    fs::create_dir_all(repo.join("src")).expect("src dir");
+    fs::write(
+        repo.join("src/lib.rs"),
+        "pub fn health_status() -> &'static str { \"ok\" }\n",
+    )
+    .expect("lib");
+    git_stdout(&repo, &["add", "src/lib.rs"]);
+    git_stdout(&repo, &["commit", "-m", "fixture implementation"]);
+    fs::create_dir_all(repo.join(".pi/autopilot").join(workstream)).expect("autopilot dir");
+    let approved_units = (1..=units)
+        .map(|index| {
+            serde_json::json!({
+                "id": format!("U{index}"),
+                "operator_order": index,
+                "decisions": [],
+                "criteria": [format!("AC-U{index}-1")],
+                "dependencies": [],
+                "predecessor_forward_criteria": [],
+                "downstream_release_edges": [format!("EDGE{index}")]
+            })
+        })
+        .collect::<Vec<_>>();
+    fs::write(
+        repo.join(".pi/autopilot")
+            .join(workstream)
+            .join("approved-plan.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({"units": approved_units}))
+            .expect("approved json"),
+    )
+    .expect("approved plan");
+    let head = git_stdout(&repo, &["rev-parse", "--verify", "HEAD"]);
+    git_stdout(
+        &repo,
+        &[
+            "update-ref",
+            &format!("refs/heads/autopilot/run/{workstream}/main"),
+            head.trim(),
+        ],
+    );
+    repo
+}
+
+fn append_unit_closed(event_log: &Path, repo: &Path, lane: &str) {
+    let status = done_status(&send_with_log(
+        &format!("append:final-precondition:unit-closed:{lane}"),
+        event_log,
+        Some(repo),
+    ));
+    assert!(status.contains("state:sequence="));
+}
+
+fn append_active_binding(event_log: &Path, repo: &Path, workstream: &str) {
+    let binding = runner::IssuedRunnerBinding {
+        action_id: Id("action-active".to_owned()),
+        assignment_id: Id("assignment-active".to_owned()),
+        run_revision: 1,
+        workstream: Id(workstream.to_owned()),
+        role_id: Id("implementer".to_owned()),
+        mode: ModeId("lane-delivery".to_owned()),
+        boundary_id: ContractId("delivery".to_owned()),
+        result_contract: ContractId("autopilot.delivery_result.v2".to_owned()),
+        prompt_path: "prompt".to_owned(),
+        prompt_digest: "digest".to_owned(),
+        spec_path: "spec".to_owned(),
+        spec_digest: "digest".to_owned(),
+        carrier_path: "carrier".to_owned(),
+        session_id: Id("session".to_owned()),
+        boundary_digest: "digest".to_owned(),
+        result_contract_digest: "digest".to_owned(),
+        settings_digest: "digest".to_owned(),
+        context_digest: "digest".to_owned(),
+        skills_digest: "digest".to_owned(),
+        subscription_digest: "digest".to_owned(),
+        mode_parameter: None,
+        lane_id: Some(Id("L1".to_owned())),
+        attempt: Some(1),
+        base_commit: Some(Sha(git_stdout(repo, &["rev-parse", "--verify", "HEAD"])
+            .trim()
+            .to_owned())),
+        worktree: None,
+        required_focused_evidence: 0,
+    };
+    let reference = runner::binding_ref(&binding).expect("binding ref");
+    let status = done_status(&send_with_log(
+        &format!("append:test:{}", reference.0),
+        event_log,
+        Some(repo),
+    ));
+    assert!(status.contains("state:sequence="));
+}
+
+fn done_status_or_kind(envelope: &SeamEnvelope) -> String {
+    if envelope.kind == "done" {
+        done_status(envelope)
+    } else {
+        envelope.kind.clone()
+    }
+}
+
+fn assert_controller_close_line(status: &str) {
+    let Some(result_ref) = status.strip_prefix("lifecycle:close:result_ref=") else {
+        panic!("not a close line: {status}");
+    };
+    assert!(!result_ref.is_empty(), "missing result ref");
+    assert!(
+        !result_ref.contains(';'),
+        "result ref line has suffix: {status}"
+    );
+    let parts = result_ref.split('/').collect::<Vec<_>>();
+    assert_eq!(parts.first(), Some(&"refs"), "{status}");
+    assert_eq!(parts.get(1), Some(&"autopilot"), "{status}");
+    assert_eq!(parts.get(2), Some(&"results"), "{status}");
+    assert_eq!(parts.len(), 5, "{status}");
+    for component in &parts[3..] {
+        assert!(
+            component
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-')),
+            "{status}"
+        );
+    }
+}
+
+fn assert_ref_at(repo: &Path, reference: &str, expected: &str) {
+    let actual = git_stdout(repo, &["rev-parse", "--verify", reference]);
+    assert_eq!(actual.trim(), expected);
+}
+
+fn assert_no_result_refs(repo: &Path) {
+    let output = Command::new("git")
+        .current_dir(repo)
+        .args([
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/autopilot/results",
+        ])
+        .output()
+        .expect("git for-each-ref");
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8(output.stdout)
+            .expect("utf8")
+            .trim()
+            .is_empty()
+    );
+}
+
+fn close_command_for_state(
+    repo: &Path,
+    event_log: &Path,
+    workstream: &str,
+    run_id: &str,
+) -> String {
+    let state = done_status(&send_with_log("state", event_log, Some(repo)));
+    let revision = state
+        .split("revision=")
+        .nth(1)
+        .and_then(|rest| rest.split(';').next())
+        .expect("revision");
+    let hash = state.split("hash=").nth(1).expect("hash");
+    let tip = git_stdout(
+        repo,
+        &[
+            "rev-parse",
+            "--verify",
+            &format!("refs/heads/autopilot/run/{workstream}/main"),
+        ],
+    );
+    let tip = tip.trim();
+    let tree = git_stdout(repo, &["rev-parse", "--verify", &format!("{tip}^{{tree}}")]);
+    format!(
+        "autopilot-close {workstream} --run {run_id} --expected-revision {revision} --expected-event-tip sha256:{hash} --expected-tip {tip} --expected-tree {} --expected-final-digest sha256:{}",
+        tree.trim(),
+        "1".repeat(64)
+    )
 }
 
 fn temp_dir(name: &str) -> PathBuf {

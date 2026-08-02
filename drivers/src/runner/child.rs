@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::fs;
 use std::io::{Read, Write};
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -15,7 +17,7 @@ use crate::runner::rpc::{
 
 use kernel::failure::{Failure, OperatorDecision, RetryPolicy};
 use kernel::generated::{AgentRunSpec, SessionContinuity, TaskDocument};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest as ShaDigest, Sha256};
 
@@ -47,6 +49,7 @@ struct ToolTerminal {
     tool_call_id: String,
     details: ToolCarrierDetails,
     details_value: Value,
+    continuation_provenance: Option<ContinuationProvenance>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -80,13 +83,228 @@ enum CarrierSource {
     Tool(ToolTerminal),
 }
 
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+struct ContinuationProvenance {
+    attempts_made: u32,
+    classes: Vec<TerminalMissClass>,
+    directive_digests: Vec<String>,
+    session_digest: String,
+    dispatch_receipts: Vec<DirectiveReceipt>,
+    terminal_call_id: String,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 enum CarrierRejection {
     Identity(String),
     Value(ValueRejection),
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) enum TerminalMissClass {
+    ProseInsteadOfTerminal,
+    EmptyStopNoTerminal,
+    NoTerminalFrame,
+    TerminalToolNotOffered,
+    MultipleTerminals,
+}
+
+impl TerminalMissClass {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ProseInsteadOfTerminal => "prose-instead-of-terminal",
+            Self::EmptyStopNoTerminal => "empty-stop-no-terminal",
+            Self::NoTerminalFrame => "no-terminal-frame",
+            Self::TerminalToolNotOffered => "terminal-tool-not-offered",
+            Self::MultipleTerminals => "multiple-terminals",
+        }
+    }
+
+    fn is_retryable(self) -> bool {
+        matches!(
+            self,
+            Self::ProseInsteadOfTerminal | Self::EmptyStopNoTerminal
+        )
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+struct DirectiveReceipt {
+    template_id: String,
+    template_version: u32,
+    byte_len: usize,
+    sha256: String,
+    attempt_index: u32,
+    session_digest: String,
+    prior_prose_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+struct StopFacts {
+    non_retryable: Option<TerminalMissClass>,
+    deterministic_repeat: Option<[u8; 32]>,
+    budget_exhausted: bool,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+struct TerminalTrace {
+    attempts_made: u32,
+    continuations_prepared: u32,
+    continuations_dispatched: u32,
+    classes: Vec<TerminalMissClass>,
+    directives: Vec<DirectiveReceipt>,
+    stop: StopFacts,
+}
+
+impl TerminalTrace {
+    fn new() -> Self {
+        Self {
+            attempts_made: 0,
+            continuations_prepared: 0,
+            continuations_dispatched: 0,
+            classes: Vec::new(),
+            directives: Vec::new(),
+            stop: StopFacts {
+                non_retryable: None,
+                deterministic_repeat: None,
+                budget_exhausted: false,
+            },
+        }
+    }
+
+    fn class_names(&self) -> Vec<&'static str> {
+        self.classes.iter().map(|class| class.as_str()).collect()
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+struct SessionId(String);
+
+impl fmt::Display for SessionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) struct EvidenceError {
+    stage: String,
+    message: String,
+}
+
+impl EvidenceError {
+    fn new(stage: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            stage: stage.into(),
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for EvidenceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.stage, self.message)
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+enum TerminalContinuationError {
+    InvalidPolicy {
+        value: u64,
+    },
+    Prompt {
+        source: Box<ChildError>,
+        trace: Box<TerminalTrace>,
+    },
+    Terminal {
+        miss: Box<TerminalMiss>,
+        trace: Box<TerminalTrace>,
+    },
+    EvidenceWrite {
+        primary: Box<TerminalContinuationError>,
+        evidence: EvidenceError,
+    },
+    SessionContinuityLost {
+        expected: SessionId,
+        actual: SessionId,
+    },
+}
+
+impl TerminalContinuationError {
+    fn into_message(self) -> String {
+        self.to_string()
+    }
+}
+
+impl fmt::Display for TerminalContinuationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidPolicy { value } => write!(
+                f,
+                "agent-run terminal continuation policy invalid max_attempts={value}; expected positive u32 total prompt attempts"
+            ),
+            Self::Prompt { source, trace } => write!(
+                f,
+                "agent-run prompt failed after terminal trace attempts={} classes=[{}]: {}",
+                trace.attempts_made,
+                trace.class_names().join(","),
+                source.as_ref().clone().into_message()
+            ),
+            Self::Terminal { miss, trace } => {
+                if let Some(digest) = trace.stop.deterministic_repeat {
+                    write!(
+                        f,
+                        "agent-run terminal miss deterministic repeated prose digest={} attempts={} classes=[{}]",
+                        hex_digest(&digest),
+                        trace.attempts_made,
+                        trace.class_names().join(",")
+                    )
+                } else if trace.stop.budget_exhausted {
+                    write!(
+                        f,
+                        "agent-run terminal continuation exhausted attempts={} max={} classes=[{}]",
+                        trace.attempts_made,
+                        trace.attempts_made,
+                        trace.class_names().join(",")
+                    )
+                } else {
+                    write!(
+                        f,
+                        "agent-run terminal miss: {} attempts={} classes=[{}]",
+                        terminal_miss_message(miss),
+                        trace.attempts_made,
+                        trace.class_names().join(",")
+                    )
+                }
+            }
+            Self::EvidenceWrite { primary, evidence } => {
+                write!(f, "{primary}; evidence write failed: {evidence}")
+            }
+            Self::SessionContinuityLost { expected, actual } => write!(
+                f,
+                "agent-run session continuity lost: expected {expected}, got {actual}"
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) enum TerminalToolNotOfferedSource {
+    PrePromptActiveTools,
+    OfferedTerminalToolGuard,
+    TerminalCycleOfferedTools,
+}
+
+impl TerminalToolNotOfferedSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::PrePromptActiveTools => "pre-prompt-active-tools",
+            Self::OfferedTerminalToolGuard => "offered-terminal-tool-guard",
+            Self::TerminalCycleOfferedTools => "terminal-cycle-offered-tools",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) enum TerminalMiss {
     ProseInsteadOfTerminal {
         text_len: usize,
@@ -103,6 +321,7 @@ pub(crate) enum TerminalMiss {
         last_stop_reason: Option<String>,
     },
     TerminalToolNotOffered {
+        source: TerminalToolNotOfferedSource,
         expected_tool: String,
         offered_tools: Vec<String>,
     },
@@ -112,41 +331,50 @@ pub(crate) enum TerminalMiss {
 }
 
 impl TerminalMiss {
-    fn class(&self) -> &'static str {
+    fn class_enum(&self) -> TerminalMissClass {
         match self {
-            Self::ProseInsteadOfTerminal { .. } => "prose-instead-of-terminal",
-            Self::EmptyStopNoTerminal { .. } => "empty-stop-no-terminal",
-            Self::NoTerminalFrame { .. } => "no-terminal-frame",
-            Self::TerminalToolNotOffered { .. } => "terminal-tool-not-offered",
-            Self::MultipleTerminals { .. } => "multiple-terminals",
+            Self::ProseInsteadOfTerminal { .. } => TerminalMissClass::ProseInsteadOfTerminal,
+            Self::EmptyStopNoTerminal { .. } => TerminalMissClass::EmptyStopNoTerminal,
+            Self::NoTerminalFrame { .. } => TerminalMissClass::NoTerminalFrame,
+            Self::TerminalToolNotOffered { .. } => TerminalMissClass::TerminalToolNotOffered,
+            Self::MultipleTerminals { .. } => TerminalMissClass::MultipleTerminals,
         }
     }
 
+    fn class(&self) -> &'static str {
+        self.class_enum().as_str()
+    }
+
     fn is_retryable(&self) -> bool {
-        matches!(
-            self,
-            Self::ProseInsteadOfTerminal { .. } | Self::EmptyStopNoTerminal { .. }
-        )
+        self.class_enum().is_retryable()
     }
 
     fn prose_digest(&self) -> Option<[u8; 32]> {
         match self {
             Self::ProseInsteadOfTerminal { text_digest, .. } => Some(*text_digest),
-            _ => None,
+            Self::EmptyStopNoTerminal { .. }
+            | Self::NoTerminalFrame { .. }
+            | Self::TerminalToolNotOffered { .. }
+            | Self::MultipleTerminals { .. } => None,
         }
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub(crate) enum ChildError {
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+enum ChildError {
     TerminalMiss(TerminalMiss),
     TerminalMissDeterministic {
         digest: [u8; 32],
     },
     TerminalContinuationExhausted {
-        classes: Vec<&'static str>,
+        classes: Vec<String>,
         attempts_made: u32,
         max_attempts: u32,
+    },
+    EvidenceWrite(EvidenceError),
+    SessionContinuityLost {
+        expected: String,
+        actual: String,
     },
     Fatal(String),
 }
@@ -169,6 +397,10 @@ impl ChildError {
                 "agent-run terminal continuation exhausted attempts={attempts_made} max={max_attempts} classes=[{}]",
                 classes.join(",")
             ),
+            Self::EvidenceWrite(error) => format!("agent-run evidence write failed: {error}"),
+            Self::SessionContinuityLost { expected, actual } => {
+                format!("agent-run session continuity lost: expected {expected}, got {actual}")
+            }
             Self::Fatal(message) => message,
         }
     }
@@ -250,11 +482,14 @@ fn run_value_attempts(
 ) -> Result<(), String> {
     let mut attempt_prompt = prompt;
     for attempt in 1..=MAX_VALUE_ATTEMPTS {
-        append_attempt_event(spec, attempt, "started", AttemptEventDetail::none())?;
-        let source = run_prompt_with_terminal_continuation(runner, spec, &attempt_prompt, attempt)?;
+        append_attempt_event(spec, attempt, "started", AttemptEventDetail::none())
+            .map_err(|error| error.to_string())?;
+        let source = run_prompt_with_terminal_continuation(runner, spec, &attempt_prompt, attempt)
+            .map_err(TerminalContinuationError::into_message)?;
         match write_carrier(spec_path, spec_bytes, spec_digest, spec, &source) {
             Ok(()) => {
-                append_attempt_event(spec, attempt, "accepted", AttemptEventDetail::none())?;
+                append_attempt_event(spec, attempt, "accepted", AttemptEventDetail::none())
+                    .map_err(|error| error.to_string())?;
                 return Ok(());
             }
             Err(CarrierRejection::Identity(detail)) => {
@@ -263,7 +498,8 @@ fn run_value_attempts(
                     attempt,
                     "identity-rejected",
                     AttemptEventDetail::none(),
-                )?;
+                )
+                .map_err(|error| error.to_string())?;
                 return Err(format!(
                     "agent-run carrier identity rejected before value repair: {detail}"
                 ));
@@ -274,7 +510,8 @@ fn run_value_attempts(
                     attempt,
                     "value-rejected",
                     AttemptEventDetail::rejection(&rejection),
-                )?;
+                )
+                .map_err(|error| error.to_string())?;
                 attempt_prompt = render_repair_prompt(spec, &rejection);
             }
             Err(CarrierRejection::Value(rejection)) => {
@@ -283,7 +520,8 @@ fn run_value_attempts(
                     attempt,
                     "paused-after-exhaustion",
                     AttemptEventDetail::rejection(&rejection),
-                )?;
+                )
+                .map_err(|error| error.to_string())?;
                 return Err(paused_after_exhaustion(spec, &rejection));
             }
         }
@@ -302,73 +540,190 @@ fn run_prompt_with_terminal_continuation(
     spec: &AgentRunSpec,
     prompt: &str,
     value_attempt: u32,
-) -> Result<CarrierSource, String> {
+) -> Result<CarrierSource, TerminalContinuationError> {
+    let max_attempts_value = drivers_generated_max_terminal_attempts_raw();
+    let max_attempts = u32::try_from(max_attempts_value)
+        .ok()
+        .and_then(NonZeroU32::new)
+        .ok_or(TerminalContinuationError::InvalidPolicy {
+            value: max_attempts_value,
+        })?;
+    let offered_tool = OfferedTerminalTool::new(spec).map_err(|miss| {
+        let mut trace = TerminalTrace::new();
+        trace.stop.non_retryable = Some(miss.class_enum());
+        terminal_continuation_terminal_error(miss, trace)
+    })?;
+    let mut session = PromptSession::new(spec);
     let mut next_prompt = prompt.to_owned();
-    let mut classes = Vec::new();
+    let mut trace = TerminalTrace::new();
     let mut previous_prose_digest = None;
-    for terminal_attempt in 1..=drivers_generated_max_terminal_attempts() {
-        match run_prompt_with_capacity_retry(runner, spec, &next_prompt, value_attempt) {
-            Ok(source) => {
-                if terminal_attempt > 1 {
-                    append_attempt_event(
+    for terminal_attempt in 1..=max_attempts.get() {
+        let directive = trace.directives.last().cloned();
+        match run_prompt_with_capacity_retry(
+            runner,
+            spec,
+            &mut session,
+            &next_prompt,
+            value_attempt,
+            directive.as_ref(),
+        ) {
+            Ok(mut source) => {
+                if directive.is_some() {
+                    trace.continuations_dispatched =
+                        trace.continuations_dispatched.saturating_add(1);
+                }
+                if trace.continuations_dispatched > 0 {
+                    attach_continuation_provenance(&mut source, &trace);
+                    append_terminal_event_or_error(
                         spec,
                         value_attempt,
-                        "terminal-continuation-accepted",
+                        "terminal-continuation-carrier-produced",
                         AttemptEventDetail::none(),
+                        terminal_continuation_prompt_error(
+                            ChildError::Fatal(
+                                "agent-run continuation carrier-produced event failed".to_owned(),
+                            ),
+                            trace.clone(),
+                        ),
                     )?;
                 }
                 return Ok(source);
             }
             Err(ChildError::TerminalMiss(miss)) => {
-                if let Some(digest) = miss.prose_digest() {
-                    if previous_prose_digest == Some(digest) {
-                        let error = ChildError::TerminalMissDeterministic { digest };
-                        append_attempt_event(
-                            spec,
-                            value_attempt,
-                            "terminal-continuation-deterministic",
-                            AttemptEventDetail::child_error(&error),
-                        )?;
-                        return Err(error.into_message());
-                    }
-                    previous_prose_digest = Some(digest);
+                if directive.is_some() {
+                    trace.continuations_dispatched =
+                        trace.continuations_dispatched.saturating_add(1);
                 }
-                classes.push(miss.class());
-                if !miss.is_retryable() {
-                    append_attempt_event(
+                trace.attempts_made = terminal_attempt;
+                trace.classes.push(miss.class_enum());
+                let deterministic = miss.prose_digest().and_then(|digest| {
+                    if previous_prose_digest == Some(digest) {
+                        Some(digest)
+                    } else {
+                        previous_prose_digest = Some(digest);
+                        None
+                    }
+                });
+                let retryable = miss.is_retryable();
+                let final_attempt = terminal_attempt == max_attempts.get();
+                if let Some(digest) = deterministic {
+                    trace.stop.deterministic_repeat = Some(digest);
+                }
+                if final_attempt {
+                    trace.stop.budget_exhausted = true;
+                }
+                if !retryable {
+                    trace.stop.non_retryable = Some(miss.class_enum());
+                    let primary = terminal_continuation_terminal_error(miss.clone(), trace.clone());
+                    append_terminal_event_or_error(
                         spec,
                         value_attempt,
                         "terminal-miss-non-retryable",
                         AttemptEventDetail::terminal_miss(&miss),
+                        primary.clone(),
                     )?;
-                    return Err(ChildError::TerminalMiss(miss).into_message());
+                    return Err(primary);
                 }
-                if terminal_attempt == drivers_generated_max_terminal_attempts() {
-                    let error = ChildError::TerminalContinuationExhausted {
-                        classes,
-                        attempts_made: terminal_attempt,
-                        max_attempts: drivers_generated_max_terminal_attempts(),
+                if deterministic.is_some() || final_attempt {
+                    let primary = terminal_continuation_terminal_error(miss.clone(), trace.clone());
+                    let event = if deterministic.is_some() {
+                        "terminal-continuation-deterministic"
+                    } else {
+                        "terminal-continuation-exhausted"
                     };
-                    append_attempt_event(
+                    append_terminal_event_or_error(
                         spec,
                         value_attempt,
-                        "terminal-continuation-exhausted",
-                        AttemptEventDetail::child_error(&error),
+                        event,
+                        AttemptEventDetail::terminal_trace(&trace),
+                        primary.clone(),
                     )?;
-                    return Err(error.into_message());
+                    return Err(primary);
                 }
-                append_attempt_event(
+                append_terminal_event_or_error(
                     spec,
                     value_attempt,
                     "terminal-continuation",
                     AttemptEventDetail::terminal_miss(&miss),
+                    terminal_continuation_terminal_error(miss.clone(), trace.clone()),
                 )?;
-                next_prompt = render_terminal_directive(spec, &miss)?;
+                let directive_text = render_terminal_directive(&offered_tool, &miss);
+                let receipt = directive_receipt(
+                    &directive_text,
+                    terminal_attempt + 1,
+                    &session,
+                    miss.prose_digest(),
+                );
+                append_terminal_event_or_error(
+                    spec,
+                    value_attempt,
+                    "continuation-prepared",
+                    AttemptEventDetail::directive(&receipt),
+                    terminal_continuation_terminal_error(miss.clone(), trace.clone()),
+                )?;
+                trace.continuations_prepared = trace.continuations_prepared.saturating_add(1);
+                trace.directives.push(receipt);
+                next_prompt = directive_text;
             }
-            Err(error) => return Err(error.into_message()),
+            Err(ChildError::SessionContinuityLost { expected, actual }) => {
+                return Err(TerminalContinuationError::SessionContinuityLost {
+                    expected: SessionId(expected),
+                    actual: SessionId(actual),
+                });
+            }
+            Err(ChildError::TerminalMissDeterministic { digest }) => {
+                trace.stop.deterministic_repeat = Some(digest);
+                return Err(terminal_continuation_prompt_error(
+                    ChildError::TerminalMissDeterministic { digest },
+                    trace,
+                ));
+            }
+            Err(ChildError::TerminalContinuationExhausted {
+                classes,
+                attempts_made,
+                max_attempts,
+            }) => {
+                return Err(terminal_continuation_prompt_error(
+                    ChildError::TerminalContinuationExhausted {
+                        classes,
+                        attempts_made,
+                        max_attempts,
+                    },
+                    trace,
+                ));
+            }
+            Err(ChildError::EvidenceWrite(evidence)) => {
+                return Err(TerminalContinuationError::EvidenceWrite {
+                    primary: Box::new(terminal_continuation_prompt_error(
+                        ChildError::Fatal("agent-run prompt evidence write failed".to_owned()),
+                        trace,
+                    )),
+                    evidence,
+                });
+            }
+            Err(ChildError::Fatal(message)) => {
+                if let Some((expected, actual)) = parse_session_continuity_lost(&message) {
+                    return Err(TerminalContinuationError::SessionContinuityLost {
+                        expected: SessionId(expected),
+                        actual: SessionId(actual),
+                    });
+                }
+                return Err(terminal_continuation_prompt_error(
+                    ChildError::Fatal(message),
+                    trace,
+                ));
+            }
         }
     }
-    unreachable!("bounded terminal continuation loop must return")
+    let mut trace = TerminalTrace::new();
+    trace.stop.budget_exhausted = true;
+    Err(terminal_continuation_terminal_error(
+        TerminalMiss::NoTerminalFrame {
+            messages_seen: 0,
+            last_stop_reason: None,
+        },
+        trace,
+    ))
 }
 
 /// Send one prompt, retrying only launch-side upstream capacity refusals.
@@ -387,13 +742,15 @@ fn run_prompt_with_terminal_continuation(
 fn run_prompt_with_capacity_retry(
     runner: &mut RpcAssignment,
     spec: &AgentRunSpec,
+    session: &mut PromptSession,
     prompt: &str,
     attempt: u32,
+    directive: Option<&DirectiveReceipt>,
 ) -> Result<CarrierSource, ChildError> {
     let policy = CapacityRetryPolicy::parse()?;
     let mut last = String::new();
     for retry in 0..=policy.max_retries {
-        match runner.run_normal_prompt(spec, prompt, attempt) {
+        match runner.run_normal_prompt(spec, session, prompt, attempt, directive) {
             Ok(assistant) => return Ok(assistant),
             Err(PromptFailure::UpstreamCapacity(detail)) => {
                 last = detail;
@@ -405,7 +762,8 @@ fn run_prompt_with_capacity_retry(
                     attempt,
                     "upstream-capacity-retry",
                     AttemptEventDetail::none(),
-                )?;
+                )
+                .map_err(ChildError::EvidenceWrite)?;
                 std::thread::sleep(policy.backoff(retry, &spec.assignment_id.0));
             }
             Err(other) => return Err(other.into_child_error()),
@@ -675,11 +1033,20 @@ impl RpcAssignment {
     fn run_normal_prompt(
         &mut self,
         spec: &AgentRunSpec,
+        session: &mut PromptSession,
         prompt: &str,
         attempt: u32,
+        directive: Option<&DirectiveReceipt>,
     ) -> Result<CarrierSource, PromptFailure> {
         let capacity_before = self.last_capacity_refusal.take();
-        let result = self.run_prompt(spec, prompt, PromptPurpose::Normal, Some(attempt));
+        let result = self.run_prompt(
+            spec,
+            session,
+            prompt,
+            PromptPurpose::Normal,
+            Some(attempt),
+            directive,
+        );
         match result {
             Ok(value) => Ok(value),
             Err(error) => match self.last_capacity_refusal.take().or(capacity_before) {
@@ -692,14 +1059,26 @@ impl RpcAssignment {
     fn run_prompt(
         &mut self,
         spec: &AgentRunSpec,
+        session: &mut PromptSession,
         prompt: &str,
         purpose: PromptPurpose,
         attempt: Option<u32>,
+        directive: Option<&DirectiveReceipt>,
     ) -> Result<CarrierSource, ChildError> {
         let prompt_id = self.next_id("prompt");
         self.client
             .send_command(RpcCommand::prompt(prompt_id.clone(), prompt.to_owned()))
             .map_err(|error| error.to_string())?;
+        session.turns_sent = session.turns_sent.saturating_add(1);
+        if let (Some(attempt), Some(receipt)) = (attempt, directive) {
+            append_attempt_event(
+                spec,
+                attempt,
+                "continuation-dispatched",
+                AttemptEventDetail::directive(receipt),
+            )
+            .map_err(ChildError::EvidenceWrite)?;
+        }
         let mut state = CycleState::new(purpose, attempt);
         loop {
             let frame = self
@@ -832,6 +1211,7 @@ impl RpcAssignment {
                         tool_call_id,
                         details: parsed,
                         details_value,
+                        continuation_provenance: None,
                     });
                 }
                 self.request_stats(state)
@@ -916,7 +1296,8 @@ impl RpcAssignment {
                 attempt,
                 "terminal-assistant-hard-fail",
                 AttemptEventDetail::terminal_failure(&terminal_failure),
-            )?;
+            )
+            .map_err(|error| error.to_string())?;
         }
         validate_terminal_assistant(&record, &spec.provider, &spec.model)?;
         if state.awaiting_handoff && state.steer_message_started {
@@ -946,7 +1327,17 @@ impl RpcAssignment {
         state: &mut CycleState,
         response: &RpcResponse,
     ) -> Result<(), String> {
-        let budget = context_budget_from_stats(response)?;
+        let (actual_session, budget) = context_budget_from_stats(response)?;
+        if actual_session
+            .as_deref()
+            .is_some_and(|actual| actual != spec.session_id.0.as_str())
+        {
+            return Err(format!(
+                "agent-run session continuity lost: expected {}, got {}",
+                spec.session_id.0,
+                actual_session.expect("checked present")
+            ));
+        }
         match budget {
             ContextBudget::Unknown => {
                 let decision = checkpoint::observe_context(
@@ -1137,12 +1528,28 @@ impl RpcAssignment {
                 self.compact_checkpoint(&checkpoint)?;
             }
             let resume = self.resume_prompt(&checkpoint.resume_overlay)?;
-            return self.run_prompt(spec, &resume, PromptPurpose::Resume, state.attempt);
+            let mut session = PromptSession::new(spec);
+            return self.run_prompt(
+                spec,
+                &mut session,
+                &resume,
+                PromptPurpose::Resume,
+                state.attempt,
+                None,
+            );
         }
         if state.awaiting_handoff {
             self.abort_stale_queue()?;
             let handoff_prompt = self.handoff_prompt(spec)?;
-            return self.run_prompt(spec, &handoff_prompt, PromptPurpose::Handoff, state.attempt);
+            let mut session = PromptSession::new(spec);
+            return self.run_prompt(
+                spec,
+                &mut session,
+                &handoff_prompt,
+                PromptPurpose::Handoff,
+                state.attempt,
+                None,
+            );
         }
         if state.terminal_count == 0 {
             return Err(ChildError::TerminalMiss(classify_terminal_miss(
@@ -1283,6 +1690,7 @@ impl RpcAssignment {
             return Err(format!(
                 "agent-run terminal miss: {}",
                 terminal_miss_message(&TerminalMiss::TerminalToolNotOffered {
+                    source: TerminalToolNotOfferedSource::PrePromptActiveTools,
                     expected_tool: profile.1.to_owned(),
                     offered_tools: active,
                 })
@@ -1559,17 +1967,23 @@ impl RpcAssignment {
     }
 }
 
-fn context_budget_from_stats(response: &RpcResponse) -> Result<ContextBudget, String> {
+fn context_budget_from_stats(
+    response: &RpcResponse,
+) -> Result<(Option<String>, ContextBudget), String> {
     let data = response
         .data
         .as_ref()
         .ok_or_else(|| "agent-run get_session_stats missing data".to_owned())?;
     let value: Value = serde_json::from_str(data)
         .map_err(|error| format!("agent-run get_session_stats malformed data: {error}"))?;
+    let session = value
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let Some(context) = value.get("contextUsage") else {
-        return Ok(ContextBudget::Unknown);
+        return Ok((session, ContextBudget::Unknown));
     };
-    match context.get("percent") {
+    let budget = match context.get("percent") {
         Some(Value::Null) | None => Ok(ContextBudget::Unknown),
         Some(Value::Number(number)) => checkpoint::ContextBudget::known(
             number
@@ -1578,7 +1992,8 @@ fn context_budget_from_stats(response: &RpcResponse) -> Result<ContextBudget, St
         )
         .map_err(|error| format!("agent-run context percent invalid: {error:?}")),
         _ => Err("agent-run context percent has wrong type".to_owned()),
-    }
+    }?;
+    Ok((session, budget))
 }
 
 /// Bounded retry policy for launch-side upstream capacity refusals.
@@ -1658,7 +2073,7 @@ impl CapacityRetryPolicy {
 /// Typed rather than a string marker so the retry decision is made on a
 /// variant, never by inspecting message text.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub(crate) enum PromptFailure {
+enum PromptFailure {
     /// Launch-side refusal by the provider: no content was produced and no
     /// tokens were billed, so the identical prompt may be re-sent.
     UpstreamCapacity(String),
@@ -1691,6 +2106,7 @@ fn classify_terminal_miss(
     let (expected_tool, offered_tools) = expected_terminal_tool_and_offered(spec)?;
     if !offered_tools.iter().any(|tool| tool == &expected_tool) {
         return Ok(TerminalMiss::TerminalToolNotOffered {
+            source: TerminalToolNotOfferedSource::TerminalCycleOfferedTools,
             expected_tool,
             offered_tools,
         });
@@ -1715,6 +2131,117 @@ fn classify_terminal_miss(
         messages_seen: u32::try_from(state.assistant_message_count).unwrap_or(u32::MAX),
         last_stop_reason: state.last_stop_reason.clone(),
     })
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct OfferedTerminalTool {
+    name: String,
+    offered_tools: Vec<String>,
+}
+
+impl OfferedTerminalTool {
+    fn new(spec: &AgentRunSpec) -> Result<Self, TerminalMiss> {
+        let (expected_tool, offered_tools) =
+            expected_terminal_tool_and_offered(spec).map_err(|error| {
+                TerminalMiss::NoTerminalFrame {
+                    messages_seen: 0,
+                    last_stop_reason: Some(error.into_message()),
+                }
+            })?;
+        if !offered_tools.iter().any(|tool| tool == &expected_tool) {
+            return Err(TerminalMiss::TerminalToolNotOffered {
+                source: TerminalToolNotOfferedSource::OfferedTerminalToolGuard,
+                expected_tool,
+                offered_tools,
+            });
+        }
+        Ok(Self {
+            name: expected_tool,
+            offered_tools,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct PromptSession {
+    expected: SessionId,
+    session_digest: String,
+    turns_sent: u32,
+}
+
+impl PromptSession {
+    fn new(spec: &AgentRunSpec) -> Self {
+        Self {
+            expected: SessionId(spec.session_id.0.clone()),
+            session_digest: sha256_hex(spec.session_id.0.as_bytes()),
+            turns_sent: 0,
+        }
+    }
+}
+
+fn terminal_continuation_prompt_error(
+    source: ChildError,
+    trace: TerminalTrace,
+) -> TerminalContinuationError {
+    TerminalContinuationError::Prompt {
+        source: Box::new(source),
+        trace: Box::new(trace),
+    }
+}
+
+fn terminal_continuation_terminal_error(
+    miss: TerminalMiss,
+    trace: TerminalTrace,
+) -> TerminalContinuationError {
+    TerminalContinuationError::Terminal {
+        miss: Box::new(miss),
+        trace: Box::new(trace),
+    }
+}
+
+fn append_terminal_event_or_error(
+    spec: &AgentRunSpec,
+    attempt: u32,
+    event: &str,
+    detail: AttemptEventDetail<'_>,
+    primary: TerminalContinuationError,
+) -> Result<(), TerminalContinuationError> {
+    append_attempt_event(spec, attempt, event, detail).map_err(|evidence| {
+        TerminalContinuationError::EvidenceWrite {
+            primary: Box::new(primary),
+            evidence,
+        }
+    })
+}
+
+fn parse_session_continuity_lost(message: &str) -> Option<(String, String)> {
+    let rest = message.strip_prefix("agent-run session continuity lost: expected ")?;
+    let (expected, actual) = rest.split_once(", got ")?;
+    Some((expected.to_owned(), actual.to_owned()))
+}
+
+fn attach_continuation_provenance(source: &mut CarrierSource, trace: &TerminalTrace) {
+    let CarrierSource::Tool(terminal) = source;
+    if terminal.continuation_provenance.is_some() {
+        return;
+    }
+    let session_digest = trace
+        .directives
+        .last()
+        .map(|directive| directive.session_digest.clone())
+        .unwrap_or_default();
+    terminal.continuation_provenance = Some(ContinuationProvenance {
+        attempts_made: trace.attempts_made.saturating_add(1),
+        classes: trace.classes.clone(),
+        directive_digests: trace
+            .directives
+            .iter()
+            .map(|directive| directive.sha256.clone())
+            .collect(),
+        session_digest,
+        dispatch_receipts: trace.directives.clone(),
+        terminal_call_id: terminal.tool_call_id.clone(),
+    });
 }
 
 fn expected_terminal_tool_and_offered(
@@ -1762,10 +2289,12 @@ fn terminal_miss_message(miss: &TerminalMiss) -> String {
             last_stop_reason.as_deref().unwrap_or("<none>")
         ),
         TerminalMiss::TerminalToolNotOffered {
+            source,
             expected_tool,
             offered_tools,
         } => format!(
-            "class=terminal-tool-not-offered expected_tool={expected_tool} offered_tools=[{}]",
+            "class=terminal-tool-not-offered source={} expected_tool={expected_tool} offered_tools=[{}]",
+            source.as_str(),
             offered_tools.join(",")
         ),
         TerminalMiss::MultipleTerminals { count } => {
@@ -1774,21 +2303,40 @@ fn terminal_miss_message(miss: &TerminalMiss) -> String {
     }
 }
 
-fn render_terminal_directive(spec: &AgentRunSpec, miss: &TerminalMiss) -> Result<String, String> {
-    let (terminal_tool, _) =
-        expected_terminal_tool_and_offered(spec).map_err(ChildError::into_message)?;
-    let prose_discard = if matches!(miss, TerminalMiss::ProseInsteadOfTerminal { .. }) {
-        "\nYour previous assistant message was not a submission and has been discarded.\nAssistant text is never accepted as a result for this role.\n"
+const TERMINAL_DIRECTIVE_TEMPLATE_ID: &str = "terminal-continuation-directive";
+const TERMINAL_DIRECTIVE_TEMPLATE_VERSION: u32 = 1;
+
+fn render_terminal_directive(tool: &OfferedTerminalTool, miss: &TerminalMiss) -> String {
+    let prose_note = if matches!(miss, TerminalMiss::ProseInsteadOfTerminal { .. }) {
+        "\nAssistant prose is not accepted as a result for this role.\n"
     } else {
         ""
     };
-    Ok(format!(
-        "No submission was received. Your previous turn ended without calling the\nrequired terminating tool.\n{prose_discard}\nContext gathering is complete. Call `{terminal_tool}` now with the results of\nthe investigation you have already performed.\nDo not call any other tool. Do not reply with text."
-    ))
+    format!(
+        "# {TERMINAL_DIRECTIVE_TEMPLATE_ID} v{TERMINAL_DIRECTIVE_TEMPLATE_VERSION}\nThe prior turn did not produce a terminating tool call.\n{prose_note}If more evidence is needed, use available tools to gather it.\nWhen the result is truthful and complete, call `{}`.\nDo not invent findings. Do not answer with prose; prose is not accepted here.",
+        tool.name
+    )
 }
 
-fn drivers_generated_max_terminal_attempts() -> u32 {
-    crate::generated::recovery::MAX_TERMINAL_ATTEMPTS
+fn directive_receipt(
+    directive: &str,
+    attempt_index: u32,
+    session: &PromptSession,
+    prior_prose_digest: Option<[u8; 32]>,
+) -> DirectiveReceipt {
+    DirectiveReceipt {
+        template_id: TERMINAL_DIRECTIVE_TEMPLATE_ID.to_owned(),
+        template_version: TERMINAL_DIRECTIVE_TEMPLATE_VERSION,
+        byte_len: directive.len(),
+        sha256: sha256_hex(directive.as_bytes()),
+        attempt_index,
+        session_digest: session.session_digest.clone(),
+        prior_prose_digest: prior_prose_digest.map(|digest| hex_digest(&digest)),
+    }
+}
+
+fn drivers_generated_max_terminal_attempts_raw() -> u64 {
+    u64::from(crate::generated::recovery::MAX_TERMINAL_ATTEMPTS)
 }
 
 /// Detect a terminal that failed upstream rather than in the model's output.
@@ -2509,6 +3057,8 @@ struct AttemptEventDetail<'a> {
     terminal_failure: Option<&'a TerminalFailureDiagnostic>,
     terminal_miss: Option<&'a TerminalMiss>,
     child_error: Option<&'a ChildError>,
+    terminal_trace: Option<&'a TerminalTrace>,
+    directive: Option<&'a DirectiveReceipt>,
 }
 
 impl<'a> AttemptEventDetail<'a> {
@@ -2518,6 +3068,8 @@ impl<'a> AttemptEventDetail<'a> {
             terminal_failure: None,
             terminal_miss: None,
             child_error: None,
+            terminal_trace: None,
+            directive: None,
         }
     }
 
@@ -2527,6 +3079,8 @@ impl<'a> AttemptEventDetail<'a> {
             terminal_failure: None,
             terminal_miss: None,
             child_error: None,
+            terminal_trace: None,
+            directive: None,
         }
     }
 
@@ -2536,6 +3090,8 @@ impl<'a> AttemptEventDetail<'a> {
             terminal_failure: Some(terminal_failure),
             terminal_miss: None,
             child_error: None,
+            terminal_trace: None,
+            directive: None,
         }
     }
 
@@ -2545,15 +3101,30 @@ impl<'a> AttemptEventDetail<'a> {
             terminal_failure: None,
             terminal_miss: Some(terminal_miss),
             child_error: None,
+            terminal_trace: None,
+            directive: None,
         }
     }
 
-    fn child_error(child_error: &'a ChildError) -> Self {
+    fn terminal_trace(terminal_trace: &'a TerminalTrace) -> Self {
         Self {
             rejection: None,
             terminal_failure: None,
             terminal_miss: None,
-            child_error: Some(child_error),
+            child_error: None,
+            terminal_trace: Some(terminal_trace),
+            directive: None,
+        }
+    }
+
+    fn directive(directive: &'a DirectiveReceipt) -> Self {
+        Self {
+            rejection: None,
+            terminal_failure: None,
+            terminal_miss: None,
+            child_error: None,
+            terminal_trace: None,
+            directive: Some(directive),
         }
     }
 }
@@ -2589,10 +3160,12 @@ fn terminal_miss_json(value: &TerminalMiss) -> Value {
             "last_stop_reason": last_stop_reason,
         }),
         TerminalMiss::TerminalToolNotOffered {
+            source,
             expected_tool,
             offered_tools,
         } => serde_json::json!({
             "class": value.class(),
+            "source": source.as_str(),
             "expected_tool": expected_tool,
             "offered_tools": offered_tools,
         }),
@@ -2623,6 +3196,16 @@ fn child_error_json(value: &ChildError) -> Value {
             "attempts_made": attempts_made,
             "max_attempts": max_attempts,
         }),
+        ChildError::EvidenceWrite(error) => serde_json::json!({
+            "kind": "evidence-write",
+            "stage": &error.stage,
+            "message": crate::evidence::bound_detail(&error.message),
+        }),
+        ChildError::SessionContinuityLost { expected, actual } => serde_json::json!({
+            "kind": "session-continuity-lost",
+            "expected": expected,
+            "actual": actual,
+        }),
         ChildError::Fatal(message) => serde_json::json!({
             "kind": "fatal",
             "message": crate::evidence::bound_detail(message),
@@ -2635,12 +3218,17 @@ fn append_attempt_event(
     attempt: u32,
     event: &str,
     detail: AttemptEventDetail<'_>,
-) -> Result<(), String> {
+) -> Result<(), EvidenceError> {
     let root = Path::new(&spec.cwd.0).join(".pi/autopilot/runner/attempt-events");
-    fs::create_dir_all(&root)
-        .map_err(|error| format!("agent-run attempt event mkdir failed {:?}: {error}", root))?;
+    fs::create_dir_all(&root).map_err(|error| {
+        EvidenceError::new(
+            "attempt-event-mkdir",
+            format!("agent-run attempt event mkdir failed {:?}: {error}", root),
+        )
+    })?;
     let path = root.join(format!("{}.jsonl", spec.assignment_id.0));
-    super::reject_link_components_for_path(&path).map_err(|error| error.to_string())?;
+    super::reject_link_components_for_path(&path)
+        .map_err(|error| EvidenceError::new("attempt-event-path", error.to_string()))?;
     let row = serde_json::json!({
         "schema": "autopilot.agent_run_attempt_event.v1",
         "assignment_id": spec.assignment_id.0,
@@ -2663,19 +3251,45 @@ fn append_attempt_event(
         })),
         "terminal_miss": detail.terminal_miss.map(terminal_miss_json),
         "child_error": detail.child_error.map(child_error_json),
+        "terminal_trace": detail.terminal_trace.map(|trace| serde_json::json!({
+            "attempts_made": trace.attempts_made,
+            "continuations_prepared": trace.continuations_prepared,
+            "continuations_dispatched": trace.continuations_dispatched,
+            "classes": trace.class_names(),
+            "directives": &trace.directives,
+            "stop": &trace.stop,
+        })),
+        "directive": detail.directive,
     });
-    let mut data = serde_json::to_vec(&row)
-        .map_err(|error| format!("agent-run attempt event serialize failed: {error}"))?;
+    let mut data = serde_json::to_vec(&row).map_err(|error| {
+        EvidenceError::new(
+            "attempt-event-serialize",
+            format!("agent-run attempt event serialize failed: {error}"),
+        )
+    })?;
     data.push(b'\n');
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
-        .map_err(|error| format!("agent-run attempt event open failed {:?}: {error}", path))?;
-    file.write_all(&data)
-        .map_err(|error| format!("agent-run attempt event write failed {:?}: {error}", path))?;
-    file.sync_all()
-        .map_err(|error| format!("agent-run attempt event fsync failed {:?}: {error}", path))?;
+        .map_err(|error| {
+            EvidenceError::new(
+                "attempt-event-open",
+                format!("agent-run attempt event open failed {:?}: {error}", path),
+            )
+        })?;
+    file.write_all(&data).map_err(|error| {
+        EvidenceError::new(
+            "attempt-event-write",
+            format!("agent-run attempt event write failed {:?}: {error}", path),
+        )
+    })?;
+    file.sync_all().map_err(|error| {
+        EvidenceError::new(
+            "attempt-event-fsync",
+            format!("agent-run attempt event fsync failed {:?}: {error}", path),
+        )
+    })?;
     Ok(())
 }
 
@@ -2828,6 +3442,22 @@ fn write_carrier(
         "carrier_binding": terminal.details.binding,
         "raw_output": raw_output,
     });
+    let mut carrier = carrier;
+    if let Some(provenance) = &terminal.continuation_provenance {
+        let object = carrier
+            .as_object_mut()
+            .expect("planning carrier is an object");
+        object.insert(
+            "continuation_provenance".to_owned(),
+            serde_json::to_value(provenance).expect("provenance serializes"),
+        );
+        object.insert(
+            "continuation_provenance_digest".to_owned(),
+            serde_json::json!(sha256_hex(
+                &serde_json::to_vec(provenance).expect("provenance serializes")
+            )),
+        );
+    }
     write_json_new(&spec.carrier_path.0, &carrier)
         .map_err(|error| {
             value_rejection("carrier_path", "create-once writable carrier path", error)
@@ -3082,6 +3712,21 @@ fn package_tool_result(
         "submission_digest": submission_digest,
         "submission": submission,
     });
+    if let Some(provenance) = &terminal.continuation_provenance {
+        let object = carrier
+            .as_object_mut()
+            .expect("package tool result is an object");
+        object.insert(
+            "continuation_provenance".to_owned(),
+            serde_json::to_value(provenance).expect("provenance serializes"),
+        );
+        object.insert(
+            "continuation_provenance_digest".to_owned(),
+            serde_json::json!(sha256_hex(
+                &serde_json::to_vec(provenance).expect("provenance serializes")
+            )),
+        );
+    }
     let object = carrier
         .as_object_mut()
         .expect("package tool result is an object");
@@ -3247,4 +3892,64 @@ fn sha256_hex(data: &[u8]) -> String {
         out.push_str(&format!("{byte:02x}"));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn offered_terminal_tool_new_rejects_unoffered_expected_tool() {
+        let spec = agent_run_spec_with_tools(["bash", "read"]);
+
+        let miss = OfferedTerminalTool::new(&spec).expect_err("missing terminal tool must fail");
+
+        assert_eq!(
+            miss,
+            TerminalMiss::TerminalToolNotOffered {
+                source: TerminalToolNotOfferedSource::OfferedTerminalToolGuard,
+                expected_tool: "autopilot_submit_atoms".to_owned(),
+                offered_tools: vec!["bash".to_owned(), "read".to_owned()],
+            }
+        );
+    }
+
+    fn agent_run_spec_with_tools(tools: impl IntoIterator<Item = &'static str>) -> AgentRunSpec {
+        let allowed_tools = tools.into_iter().collect::<Vec<_>>();
+        serde_json::from_value(serde_json::json!({
+            "schema": "autopilot.agent_run_spec.v4",
+            "assignment_kind": "planning-review",
+            "action_id": "action-planning-main-task-extractor-01",
+            "assignment_id": "planning-main-task-extractor-01",
+            "run_id": "run-01",
+            "run_revision": 1,
+            "workstream": "main",
+            "role_id": "task-extractor",
+            "mode": "inventory",
+            "provider": "openai-codex",
+            "model": "gpt-5.5",
+            "thinking": "high",
+            "route": "subscription",
+            "cwd": "/tmp/pi-autopilot-test",
+            "allowed_tools": allowed_tools,
+            "spec_path": "/tmp/pi-autopilot-test/spec.json",
+            "prompt_path": "/tmp/pi-autopilot-test/prompt.md",
+            "prompt_digest": "prompt-digest",
+            "boundary_id": "planning.task-atoms.v1",
+            "boundary_digest": "boundary-digest",
+            "result_contract": "planning.task-atoms.v1",
+            "result_contract_digest": "result-contract-digest",
+            "carrier_path": "/tmp/pi-autopilot-test/carrier.json",
+            "session_id": "session-01",
+            "session_dir": "/tmp/pi-autopilot-test/session",
+            "session_continuity": "fresh",
+            "settings_digest": "settings-digest",
+            "context_digest": "context-digest",
+            "skills_digest": "skills-digest",
+            "subscription_digest": "subscription-digest",
+            "terminal_profile_id": "planning.task-atoms.v1:autopilot_submit_atoms",
+            "unavailable_tools": []
+        }))
+        .expect("valid agent run spec")
+    }
 }

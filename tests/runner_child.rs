@@ -153,6 +153,7 @@ fn registered_but_not_active_terminal_tool_is_rejected_before_prompt() {
     })
     .expect_err("inactive terminal tool must fail before prompt");
     assert!(error.contains("terminal-tool-not-offered"), "{error}");
+    assert!(error.contains("source=pre-prompt-active-tools"), "{error}");
 }
 
 #[test]
@@ -1751,6 +1752,7 @@ fn terminal_tool_not_offered_is_non_retryable() {
     })
     .expect_err("inactive terminal tool fails before prompt");
     assert!(error.contains("terminal-tool-not-offered"), "{error}");
+    assert!(error.contains("source=pre-prompt-active-tools"), "{error}");
     assert!(attempt_events(&root, "planning-main-task-extractor-01").is_empty());
 }
 
@@ -1814,8 +1816,11 @@ fn capacity_refusal_during_continuation_does_not_consume_a_continuation() {
         [
             "started",
             "terminal-continuation",
+            "continuation-prepared",
+            "continuation-dispatched",
             "upstream-capacity-retry",
-            "terminal-continuation-accepted",
+            "continuation-dispatched",
+            "terminal-continuation-carrier-produced",
             "accepted"
         ]
     );
@@ -1923,7 +1928,12 @@ fn attempt_event_appended_before_directive_is_issued() {
     .expect_err("fake exits after directive is issued");
     assert_eq!(
         terminalmiss_attempt_events(&root),
-        ["started", "terminal-continuation"]
+        [
+            "started",
+            "terminal-continuation",
+            "continuation-prepared",
+            "continuation-dispatched",
+        ]
     );
 }
 
@@ -1954,7 +1964,8 @@ fn success_after_continuation_is_distinguishable_from_clean_run() {
     )
     .expect("continued success");
     assert!(
-        terminalmiss_attempt_events(&root).contains(&"terminal-continuation-accepted".to_owned())
+        terminalmiss_attempt_events(&root)
+            .contains(&"terminal-continuation-carrier-produced".to_owned())
     );
 }
 
@@ -2622,6 +2633,8 @@ fn content_failure_is_not_misclassified_as_capacity_refusal() {
         [
             "started",
             "terminal-continuation",
+            "continuation-prepared",
+            "continuation-dispatched",
             "terminal-continuation-deterministic"
         ]
     );

@@ -13,6 +13,7 @@ recovery version="v1" {
   // unjittered backoff would re-synchronise them into a second burst.
   upstream_capacity_retry scope="agent-run" max_retries=4 base_delay_ms=2000 max_delay_ms=30000 jitter="deterministic-per-assignment" session="same-session-id"
 
+  // max_attempts is the total prompt attempts budget, including the initial prompt.
   terminal_continuation scope="agent-run" max_attempts=2 trigger="terminal-miss" retryable_classes="prose-instead-of-terminal empty-stop-no-terminal" terminal_classes="no-terminal-frame terminal-tool-not-offered multiple-terminals" retry_prompt="terminal-directive" session="same-session-id" exhaustion="fail-loud"
 
   r13 number=1 name="planning" status="live"

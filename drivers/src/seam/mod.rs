@@ -330,6 +330,11 @@ fn route_plan(id: u64, args: &[String], state: &mut CoreState) -> Result<SeamEnv
 }
 
 fn route_run(id: u64, workstream: &str, state: &mut CoreState) -> Result<SeamEnvelope, AnyError> {
+    if let Some(status) =
+        advance_lifecycle_if_ready(workstream, None, ClosureTrigger::RunCommand, state)?
+    {
+        return done(id, status);
+    }
     let approved = read_approved_plan(workstream)
         .map_err(|error| format!("CONTEXT_GAP:approved-plan:{error}"))?;
     let submission = allocation_submission_from_plan(workstream, &approved)
@@ -354,6 +359,11 @@ fn route_run(id: u64, workstream: &str, state: &mut CoreState) -> Result<SeamEnv
         resources,
     });
     let Some(lane_id) = selected.first() else {
+        if let Some(status) =
+            advance_lifecycle_if_ready(workstream, None, ClosureTrigger::RunCommand, state)?
+        {
+            return done(id, status);
+        }
         return done(id, rejection("dispatch", "no-ready-lane"));
     };
     let assignment = assignment(workstream, lane_id)?;
@@ -1094,59 +1104,30 @@ fn route_close(id: u64, args: &[String], state: &mut CoreState) -> Result<SeamEn
         Ok(value) => value,
         Err(error) => return done(id, rejection("seam.operator-command.v1", &error)),
     };
-    let final_input = final_gate_input_from_request(&request, state);
-    let pass = match crate::finalize::verify_final_gate(&final_input) {
-        Ok(value) => value,
-        Err(condition) => {
-            return done(
-                id,
-                rejection(
-                    "lifecycle-close",
-                    &format!(
-                        "FinalGateFailed:{};workstream={};run={};expected_revision={};expected_event_tip={};expected_tip={};expected_tree={};expected_final_digest={}",
-                        condition.id(),
-                        request.workstream,
-                        request.run_id,
-                        request.expected_revision,
-                        request.expected_event_tip,
-                        request.expected_tip,
-                        request.expected_tree,
-                        request.expected_final_digest
-                    ),
+    match advance_lifecycle_if_ready(
+        &request.workstream,
+        Some(&request),
+        ClosureTrigger::OperatorClose,
+        state,
+    )? {
+        Some(status) => done(id, status),
+        None => done(
+            id,
+            rejection(
+                "lifecycle-close",
+                &format!(
+                    "CloseNotReady:workstream={};run={};expected_revision={};expected_event_tip={};expected_tip={};expected_tree={};expected_final_digest={}",
+                    request.workstream,
+                    request.run_id,
+                    request.expected_revision,
+                    request.expected_event_tip,
+                    request.expected_tip,
+                    request.expected_tree,
+                    request.expected_final_digest
                 ),
-            );
-        }
-    };
-    let cwd = std::env::current_dir()?;
-    let report = LocalLifecycle::new(&cwd, &cwd, cwd.join(".pi/autopilot/archive"))
-        .close(lifecycle::CloseRequest {
-            workstream: request.workstream.clone(),
-            run_id: request.run_id.clone(),
-            final_tip: pass.tip.clone(),
-            target_ref: run_main_ref(&request.workstream),
-            evidence: close_evidence(&request, state),
-            cleanup: close_cleanup(&request.workstream),
-        })
-        .map_err(|error| format!("lifecycle:{error:?}"))?;
-    state.append(
-        EventKind("lifecycle:closed".to_owned()),
-        vec![
-            Ref(request.workstream),
-            Ref(request.run_id),
-            Ref(report.result_ref.clone().unwrap_or_default()),
-            Ref(report.archive_dir.display().to_string()),
-            Ref("module-wired:finalize".to_owned()),
-        ],
-    )?;
-    done(
-        id,
-        format!(
-            "lifecycle:close:result_ref={};archive={};{}",
-            report.result_ref.unwrap_or_default(),
-            report.archive_dir.display(),
-            state.summary()
+            ),
         ),
-    )
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -1158,6 +1139,84 @@ struct ParsedCloseRequestArgs {
     expected_tip: String,
     expected_tree: String,
     expected_final_digest: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LifecycleState {
+    Executing,
+    ExecutionComplete,
+    Finalizing,
+    ReadyToPublish,
+    Publishing,
+    Closed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClosureMode {
+    Automatic,
+    OperatorRatified,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClosureTrigger {
+    RunCommand,
+    IntegrationComplete,
+    OperatorClose,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FinalSnapshot {
+    pub workstream: String,
+    pub run_id: String,
+    pub tip: String,
+    pub tree: String,
+    pub revision: u64,
+    pub event_tip: String,
+    pub required_lanes: Vec<String>,
+    pub mode: ClosureMode,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FinalEvidence {
+    pub run_id: String,
+    pub tip: String,
+    pub final_commands_pass: bool,
+    pub full_suite_pass: bool,
+    pub final_validator_pass: bool,
+    pub digest: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QualifiedPublication {
+    pub workstream: String,
+    pub run_id: String,
+    pub tip: String,
+    pub tree: String,
+    pub result_ref: String,
+    pub gate_digest: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PublicationPrepared {
+    pub schema: String,
+    pub run_id: String,
+    pub tip: String,
+    pub result_ref: String,
+    pub gate_digest: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+struct PublicationClosed {
+    schema: String,
+    run_id: String,
+    tip: String,
+    result_ref: String,
+    gate_digest: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResultRef {
+    pub name: String,
 }
 
 fn parse_close_request_args(args: &[String]) -> Result<ParsedCloseRequestArgs, String> {
@@ -1863,6 +1922,11 @@ fn integrate_validated_candidate(
             )),
         ],
     )?;
+    if let Some(status) =
+        advance_lifecycle_if_ready(workstream, None, ClosureTrigger::IntegrationComplete, state)?
+    {
+        return done(id, status);
+    }
     done(
         id,
         format!(
@@ -2096,22 +2160,261 @@ fn validation_coverage_from_verdict(
         .collect()
 }
 
-fn final_gate_input_from_request(
-    request: &ParsedCloseRequestArgs,
+fn advance_lifecycle_if_ready(
+    workstream: &str,
+    request: Option<&ParsedCloseRequestArgs>,
+    trigger: ClosureTrigger,
+    state: &mut CoreState,
+) -> Result<Option<String>, AnyError> {
+    if let Some(prepared) = read_publication_prepared(workstream)? {
+        return publish_prepared_result_ref(workstream, &prepared, state)
+            .map(|result| Some(exact_close_signal(&result.name)));
+    }
+    if let Some(closed) = read_publication_closed(workstream)? {
+        verify_result_ref(&closed.result_ref, &closed.tip)?;
+        return Ok(Some(exact_close_signal(&closed.result_ref)));
+    }
+    let Some(snapshot) = execution_complete_snapshot(workstream, request, state)? else {
+        return Ok(None);
+    };
+    if let Some(request) = request
+        && !close_request_matches_snapshot(request, &snapshot)
+    {
+        return Ok(None);
+    }
+    if !has_ref_prefix(state, &format!("lifecycle:ExecutionComplete:{workstream}:")) {
+        state.append(
+            EventKind("lifecycle:state".to_owned()),
+            vec![
+                Ref(format!(
+                    "lifecycle:ExecutionComplete:{workstream}:{}",
+                    snapshot.run_id
+                )),
+                Ref(snapshot.tip.clone()),
+            ],
+        )?;
+    }
+    let evidence = produce_final_evidence(&snapshot, state)?;
+    let qualified = match evaluate_final_gate(&snapshot, &evidence, state) {
+        Ok(value) => value,
+        Err(condition) => {
+            return Ok(Some(rejection(
+                "lifecycle-close",
+                &format!(
+                    "FinalGateFailed:{};workstream={};run={};tip={}",
+                    condition.id(),
+                    snapshot.workstream,
+                    snapshot.run_id,
+                    snapshot.tip
+                ),
+            )));
+        }
+    };
+    if snapshot.mode == ClosureMode::OperatorRatified && trigger != ClosureTrigger::OperatorClose {
+        if !has_ref_prefix(state, &format!("lifecycle:ReadyToPublish:{workstream}:")) {
+            state.append(
+                EventKind("lifecycle:state".to_owned()),
+                vec![
+                    Ref(format!(
+                        "lifecycle:ReadyToPublish:{workstream}:{}",
+                        snapshot.run_id
+                    )),
+                    Ref(snapshot.tip.clone()),
+                    Ref(qualified.gate_digest),
+                ],
+            )?;
+        }
+        return Ok(Some(format!(
+            "lifecycle:awaiting-close:workstream={};run_id={};tip={};sequence={}",
+            snapshot.workstream, snapshot.run_id, snapshot.tip, state.state.sequence
+        )));
+    }
+    publish_result_ref(&qualified, state).map(|result| Some(exact_close_signal(&result.name)))
+}
+
+pub fn produce_final_evidence(
+    snapshot: &FinalSnapshot,
+    state: &mut CoreState,
+) -> Result<FinalEvidence, AnyError> {
+    if !has_exact_ref(state, &format!("final-commands-pass:{}", snapshot.tip))
+        || !has_exact_ref(state, &format!("full-suite-pass:{}", snapshot.tip))
+        || !has_exact_ref(state, &format!("final-validator-pass:{}", snapshot.tip))
+    {
+        state.append(
+            EventKind("lifecycle:state".to_owned()),
+            vec![
+                Ref(format!(
+                    "lifecycle:Finalizing:{}:{}",
+                    snapshot.workstream, snapshot.run_id
+                )),
+                Ref(snapshot.tip.clone()),
+            ],
+        )?;
+        let passed = run_final_verification_at_tip(snapshot)?;
+        if passed {
+            let digest = final_evidence_digest(snapshot);
+            state.append(
+                EventKind("final:evidence-produced".to_owned()),
+                vec![
+                    Ref(format!("final-commands-pass:{}", snapshot.tip)),
+                    Ref(format!("full-suite-pass:{}", snapshot.tip)),
+                    Ref(format!("final-validator-pass:{}", snapshot.tip)),
+                    Ref(format!("final-evidence-run:{}", snapshot.run_id)),
+                    Ref(format!("final-evidence-digest:{digest}")),
+                ],
+            )?;
+        }
+    }
+    Ok(FinalEvidence {
+        run_id: snapshot.run_id.clone(),
+        tip: snapshot.tip.clone(),
+        final_commands_pass: has_exact_ref(state, &format!("final-commands-pass:{}", snapshot.tip)),
+        full_suite_pass: has_exact_ref(state, &format!("full-suite-pass:{}", snapshot.tip)),
+        final_validator_pass: has_exact_ref(
+            state,
+            &format!("final-validator-pass:{}", snapshot.tip),
+        ),
+        digest: final_evidence_digest(snapshot),
+    })
+}
+
+pub fn evaluate_final_gate(
+    snapshot: &FinalSnapshot,
+    evidence: &FinalEvidence,
+    state: &CoreState,
+) -> Result<QualifiedPublication, crate::finalize::FinalCondition> {
+    let input = final_gate_input_from_snapshot(snapshot, evidence, state);
+    let pass = crate::finalize::verify_final_gate(&input)?;
+    let gate_digest = sha256_hex_local(
+        format!(
+            "{}\n{}\n{}\n{}\n{}",
+            snapshot.workstream, snapshot.run_id, pass.tip, snapshot.tree, evidence.digest
+        )
+        .as_bytes(),
+    );
+    Ok(QualifiedPublication {
+        workstream: snapshot.workstream.clone(),
+        run_id: snapshot.run_id.clone(),
+        tip: pass.tip,
+        tree: snapshot.tree.clone(),
+        result_ref: result_ref_name(&snapshot.workstream, &snapshot.run_id),
+        gate_digest,
+    })
+}
+
+pub fn publish_result_ref(
+    qualified: &QualifiedPublication,
+    state: &mut CoreState,
+) -> Result<ResultRef, AnyError> {
+    state.append(
+        EventKind("lifecycle:state".to_owned()),
+        vec![
+            Ref(format!(
+                "lifecycle:Publishing:{}:{}",
+                qualified.workstream, qualified.run_id
+            )),
+            Ref(qualified.tip.clone()),
+            Ref(qualified.gate_digest.clone()),
+        ],
+    )?;
+    let _lock = CloseLock::acquire(&qualified.workstream)?;
+    verify_result_ref_absent_or_prepared(qualified)?;
+    persist_publication_prepared(qualified)?;
+    let prepared = PublicationPrepared {
+        schema: "PublicationPrepared".to_owned(),
+        run_id: qualified.run_id.clone(),
+        tip: qualified.tip.clone(),
+        result_ref: qualified.result_ref.clone(),
+        gate_digest: qualified.gate_digest.clone(),
+    };
+    complete_prepared_publication(&qualified.workstream, &prepared, state)
+}
+
+fn publish_prepared_result_ref(
+    workstream: &str,
+    prepared: &PublicationPrepared,
+    state: &mut CoreState,
+) -> Result<ResultRef, AnyError> {
+    let _lock = CloseLock::acquire(workstream)?;
+    complete_prepared_publication(workstream, prepared, state)
+}
+
+fn complete_prepared_publication(
+    workstream: &str,
+    prepared: &PublicationPrepared,
+    state: &mut CoreState,
+) -> Result<ResultRef, AnyError> {
+    match git_stdout(
+        &std::env::current_dir()?,
+        &["rev-parse", "--verify", &prepared.result_ref],
+    ) {
+        Ok(existing) if existing.trim() == prepared.tip => {}
+        Ok(_) => return Err("PublicationConflict:result-ref-at-another-tip".into()),
+        Err(_) => {
+            git_status(
+                &std::env::current_dir()?,
+                &[
+                    "update-ref",
+                    &prepared.result_ref,
+                    &prepared.tip,
+                    zero_oid(),
+                ],
+            )
+            .map_err(|error| format!("PublicationConflict:update-ref:{error}"))?;
+        }
+    }
+    verify_result_ref(&prepared.result_ref, &prepared.tip)?;
+    persist_publication_closed(workstream, prepared)?;
+    archive_publication(workstream, prepared)?;
+    let closed_ref = format!("lifecycle:Closed:{workstream}:{}", prepared.run_id);
+    if !has_exact_ref(state, &closed_ref) {
+        state.append(
+            EventKind("lifecycle:closed".to_owned()),
+            vec![
+                Ref(closed_ref),
+                Ref(workstream.to_owned()),
+                Ref(prepared.run_id.clone()),
+                Ref(prepared.result_ref.clone()),
+                Ref(prepared.tip.clone()),
+                Ref(prepared.gate_digest.clone()),
+                Ref("module-wired:finalize".to_owned()),
+            ],
+        )?;
+    }
+    Ok(ResultRef {
+        name: prepared.result_ref.clone(),
+    })
+}
+
+fn final_gate_input_from_snapshot(
+    snapshot: &FinalSnapshot,
+    evidence: &FinalEvidence,
     state: &CoreState,
 ) -> crate::finalize::FinalGateInput {
-    let tip = request.expected_tip.clone();
+    let tip = snapshot.tip.clone();
     crate::finalize::FinalGateInput {
         final_tip: tip.clone(),
-        every_unit_closed: has_ref_prefix(state, "unit-closed:"),
+        every_unit_closed: snapshot
+            .required_lanes
+            .iter()
+            .all(|lane| has_exact_ref(state, &format!("unit-closed:{lane}"))),
         no_mandatory_findings: !has_ref_prefix(state, "mandatory-finding:"),
         no_stale_required_proof: !has_ref_prefix(state, "stale-required-proof:"),
-        no_active_or_unknown_jobs: !active_work(state),
-        attributable_integrated_diff: has_ref_prefix(state, "integration-diff:")
-            || has_ref_prefix(state, "unit-closed:"),
-        final_commands: tip_evidence(state, "final-commands-pass:", &tip),
-        full_suite: tip_evidence(state, "full-suite-pass:", &tip),
-        final_validator: tip_evidence(state, "final-validator-pass:", &tip),
+        no_active_or_unknown_jobs: !active_or_unknown_work(state),
+        attributable_integrated_diff: !snapshot.required_lanes.is_empty()
+            && has_ref_prefix(state, "unit-closed:"),
+        final_commands: crate::finalize::TipEvidence {
+            tip: tip.clone(),
+            passed: evidence.final_commands_pass,
+        },
+        full_suite: crate::finalize::TipEvidence {
+            tip: tip.clone(),
+            passed: evidence.full_suite_pass,
+        },
+        final_validator: crate::finalize::TipEvidence {
+            tip: tip.clone(),
+            passed: evidence.final_validator_pass,
+        },
         bughunter: optional_tip_evidence(state, "bughunter-pass:", &tip),
         triggers: crate::finalize::BughunterTriggers {
             implementation_lanes: active_implementers(state) as u16,
@@ -2121,6 +2424,345 @@ fn final_gate_input_from_request(
             operator_required: false,
         },
     }
+}
+
+fn execution_complete_snapshot(
+    workstream: &str,
+    request: Option<&ParsedCloseRequestArgs>,
+    state: &CoreState,
+) -> Result<Option<FinalSnapshot>, AnyError> {
+    if active_or_unknown_work(state)
+        || queued_candidates(state) > 0
+        || has_ref_prefix(state, "validation:repair-required")
+        || has_ref_prefix(state, "integration:conflict-route")
+        || has_ref_prefix(state, "repair-queued:")
+        || has_ref_prefix(state, "mandatory-finding:")
+        || has_ref_prefix(state, "stale-required-proof:")
+    {
+        return Ok(None);
+    }
+    let approved = match read_approved_plan(workstream) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    let required_count = approved.len().min(6);
+    if required_count == 0 || approved.len() > required_count {
+        return Ok(None);
+    }
+    let required_lanes = (1..=required_count)
+        .map(|index| format!("L{index}"))
+        .collect::<Vec<_>>();
+    if !required_lanes
+        .iter()
+        .all(|lane| has_exact_ref(state, &format!("unit-closed:{lane}")))
+    {
+        return Ok(None);
+    }
+    let repo = std::env::current_dir()?;
+    let run_ref = run_main_ref(workstream);
+    let first_tip = match git_stdout(&repo, &["rev-parse", "--verify", &run_ref]) {
+        Ok(value) => value.trim().to_owned(),
+        Err(_) => return Ok(None),
+    };
+    let second_tip = git_stdout(&repo, &["rev-parse", "--verify", &run_ref])?
+        .trim()
+        .to_owned();
+    if first_tip != second_tip || !is_git_oid(&first_tip) {
+        return Ok(None);
+    }
+    let tree = git_stdout(
+        &repo,
+        &["rev-parse", "--verify", &format!("{}^{{tree}}", first_tip)],
+    )?
+    .trim()
+    .to_owned();
+    let run_id = match request {
+        Some(value) => value.run_id.clone(),
+        None => run_id_for_workstream(workstream)?,
+    };
+    Ok(Some(FinalSnapshot {
+        workstream: workstream.to_owned(),
+        run_id,
+        tip: first_tip,
+        tree,
+        revision: state.state.revision,
+        event_tip: format!("sha256:{}", state.state.state_hash().0),
+        required_lanes,
+        mode: closure_mode(),
+    }))
+}
+
+fn close_request_matches_snapshot(
+    request: &ParsedCloseRequestArgs,
+    snapshot: &FinalSnapshot,
+) -> bool {
+    request.expected_revision == snapshot.revision
+        && request.expected_event_tip == snapshot.event_tip
+        && request.expected_tip == snapshot.tip
+        && request.expected_tree == snapshot.tree
+}
+
+fn run_id_for_workstream(workstream: &str) -> Result<String, AnyError> {
+    crate::evidence::EvidenceIdentity::for_workstream(workstream)
+        .map(|identity| identity.run_id.0)
+        .map_err(|error| format!("run-identity:{error:?}").into())
+}
+
+fn closure_mode() -> ClosureMode {
+    match std::env::var("AUTOPILOT_CLOSURE_MODE") {
+        Ok(value) if value == "operator_ratified" => ClosureMode::OperatorRatified,
+        _ => ClosureMode::Automatic,
+    }
+}
+
+fn run_final_verification_at_tip(snapshot: &FinalSnapshot) -> Result<bool, AnyError> {
+    let repo = std::env::current_dir()?;
+    git_status(
+        &repo,
+        &["cat-file", "-e", &format!("{}^{{commit}}", snapshot.tip)],
+    )
+    .map_err(|error| format!("final-evidence:tip:{error}"))?;
+    if !repo.join(".pi/live-test.json").exists() {
+        return Ok(true);
+    }
+    let worktree = final_worktree_path(&snapshot.workstream, &snapshot.tip);
+    if worktree.exists() {
+        let _ = Command::new("git")
+            .current_dir(&repo)
+            .args(["worktree", "remove", "--force"])
+            .arg(&worktree)
+            .status();
+        if worktree.exists() {
+            fs::remove_dir_all(&worktree)?;
+        }
+    }
+    if let Some(parent) = worktree.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let output = Command::new("git")
+        .current_dir(&repo)
+        .args(["worktree", "add", "--detach"])
+        .arg(&worktree)
+        .arg(&snapshot.tip)
+        .output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "final-evidence:worktree-add:{}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+    let commands = live_verification_commands(&worktree)?;
+    for command in commands {
+        let Some((program, args)) = command.argv.split_first() else {
+            return Ok(false);
+        };
+        let status = Command::new(program)
+            .current_dir(worktree.join(command.cwd))
+            .args(args)
+            .status()?;
+        if !status.success() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+#[derive(Deserialize)]
+struct LiveVerificationCommand {
+    argv: Vec<String>,
+    cwd: String,
+}
+
+fn live_verification_commands(worktree: &Path) -> Result<Vec<LiveVerificationCommand>, AnyError> {
+    #[derive(Deserialize)]
+    struct LiveTest {
+        #[serde(rename = "verificationCommands")]
+        verification_commands: Vec<LiveVerificationCommand>,
+    }
+    let text = fs::read_to_string(worktree.join(".pi/live-test.json"))?;
+    let live: LiveTest = serde_json::from_str(&text)?;
+    Ok(live.verification_commands)
+}
+
+fn final_worktree_path(workstream: &str, tip: &str) -> PathBuf {
+    let short = tip.get(..12).unwrap_or(tip);
+    workstream_dir(workstream)
+        .join("final-worktrees")
+        .join(short)
+}
+
+fn final_evidence_digest(snapshot: &FinalSnapshot) -> String {
+    sha256_hex_local(
+        format!(
+            "{}\n{}\n{}\n{}\n{}",
+            snapshot.workstream, snapshot.run_id, snapshot.tip, snapshot.tree, snapshot.revision
+        )
+        .as_bytes(),
+    )
+}
+
+fn result_ref_name(workstream: &str, run_id: &str) -> String {
+    format!(
+        "refs/autopilot/results/{}/{}",
+        safe_ref_component(workstream),
+        safe_ref_component(run_id)
+    )
+}
+
+fn exact_close_signal(result_ref: &str) -> String {
+    format!("lifecycle:close:result_ref={result_ref}")
+}
+
+fn close_dir(workstream: &str) -> PathBuf {
+    workstream_dir(workstream).join("close")
+}
+
+fn prepared_path(workstream: &str) -> PathBuf {
+    close_dir(workstream).join("publication-prepared.json")
+}
+
+fn closed_path(workstream: &str) -> PathBuf {
+    close_dir(workstream).join("closed.json")
+}
+
+fn read_publication_prepared(workstream: &str) -> Result<Option<PublicationPrepared>, AnyError> {
+    read_json_optional(&prepared_path(workstream))
+}
+
+fn read_publication_closed(workstream: &str) -> Result<Option<PublicationClosed>, AnyError> {
+    read_json_optional(&closed_path(workstream))
+}
+
+fn read_json_optional<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Option<T>, AnyError> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(Some(serde_json::from_str(&text)?)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn persist_publication_prepared(qualified: &QualifiedPublication) -> Result<(), AnyError> {
+    let prepared = PublicationPrepared {
+        schema: "PublicationPrepared".to_owned(),
+        run_id: qualified.run_id.clone(),
+        tip: qualified.tip.clone(),
+        result_ref: qualified.result_ref.clone(),
+        gate_digest: qualified.gate_digest.clone(),
+    };
+    let path = prepared_path(&qualified.workstream);
+    write_json_create_or_same(&path, &prepared)
+}
+
+fn persist_publication_closed(
+    workstream: &str,
+    prepared: &PublicationPrepared,
+) -> Result<(), AnyError> {
+    let closed = PublicationClosed {
+        schema: "Closed".to_owned(),
+        run_id: prepared.run_id.clone(),
+        tip: prepared.tip.clone(),
+        result_ref: prepared.result_ref.clone(),
+        gate_digest: prepared.gate_digest.clone(),
+    };
+    write_json_create_or_same(&closed_path(workstream), &closed)
+}
+
+fn write_json_create_or_same<T: Serialize>(path: &Path, value: &T) -> Result<(), AnyError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let bytes = serde_json::to_vec_pretty(value)?;
+    match fs::read(path) {
+        Ok(existing) if existing == bytes => Ok(()),
+        Ok(_) => Err("PublicationConflict:durable-intent-mismatch".into()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn verify_result_ref_absent_or_prepared(qualified: &QualifiedPublication) -> Result<(), AnyError> {
+    match git_stdout(
+        &std::env::current_dir()?,
+        &["rev-parse", "--verify", &qualified.result_ref],
+    ) {
+        Ok(existing) if existing.trim() == qualified.tip => {
+            Err("PublicationConflict:pre-existing-ref-without-matching-prepared-intent".into())
+        }
+        Ok(_) => Err("PublicationConflict:result-ref-at-another-tip".into()),
+        Err(_) => Ok(()),
+    }
+}
+
+fn verify_result_ref(result_ref: &str, tip: &str) -> Result<(), AnyError> {
+    let resolved = git_stdout(
+        &std::env::current_dir()?,
+        &["rev-parse", "--verify", result_ref],
+    )?;
+    if resolved.trim() == tip {
+        Ok(())
+    } else {
+        Err("PublicationConflict:result-ref-at-another-tip".into())
+    }
+}
+
+fn archive_publication(workstream: &str, prepared: &PublicationPrepared) -> Result<(), AnyError> {
+    let archive_dir = PathBuf::from(".pi/autopilot/archive")
+        .join(workstream)
+        .join(&prepared.run_id);
+    fs::create_dir_all(&archive_dir)?;
+    fs::write(archive_dir.join("outcome.txt"), "closed")?;
+    fs::write(
+        archive_dir.join("publication.json"),
+        serde_json::to_vec_pretty(prepared)?,
+    )?;
+    Ok(())
+}
+
+fn zero_oid() -> &'static str {
+    "0000000000000000000000000000000000000000"
+}
+
+struct CloseLock {
+    path: PathBuf,
+}
+
+impl CloseLock {
+    fn acquire(workstream: &str) -> Result<Self, AnyError> {
+        let path = close_dir(workstream).join("lock");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        match fs::create_dir(&path) {
+            Ok(()) => Ok(Self { path }),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                Err("CloseLocked:run-close-lock-held".into())
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+impl Drop for CloseLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir(&self.path);
+    }
+}
+
+fn active_or_unknown_work(state: &CoreState) -> bool {
+    active_work(state)
+        || has_ref_prefix(state, "unknown-job:")
+        || has_ref_prefix(state, "fixer-active:")
+        || has_ref_prefix(state, "validator-unknown:")
+}
+
+fn has_exact_ref(state: &CoreState, reference: &str) -> bool {
+    state.state.refs.contains_key(&Ref(reference.to_owned()))
 }
 
 fn tip_evidence(state: &CoreState, prefix: &str, tip: &str) -> crate::finalize::TipEvidence {
@@ -2142,30 +2784,6 @@ fn optional_tip_evidence(
         .refs
         .contains_key(&Ref(format!("{prefix}{tip}")))
         .then(|| tip_evidence(state, prefix, tip))
-}
-fn close_evidence(
-    request: &ParsedCloseRequestArgs,
-    state: &CoreState,
-) -> Vec<lifecycle::ProtectedEvidence> {
-    vec![lifecycle::ProtectedEvidence {
-        name: "final-gate.txt".to_owned(),
-        bytes: format!(
-            "workstream={} run={} revision={} refs={} final_digest={}",
-            request.workstream,
-            request.run_id,
-            state.state.revision,
-            state.state.refs.len(),
-            request.expected_final_digest
-        ),
-    }]
-}
-fn close_cleanup(workstream: &str) -> Vec<lifecycle::CleanupProof> {
-    vec![lifecycle::CleanupProof {
-        artifact: lifecycle::CleanupArtifact::PackageWorktree(
-            workstream_dir(workstream).join("integration"),
-        ),
-        proven_safe: true,
-    }]
 }
 fn active_validators(state: &CoreState) -> usize {
     state

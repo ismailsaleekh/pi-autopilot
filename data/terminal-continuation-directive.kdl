@@ -1,0 +1,6 @@
+terminal_continuation_directive id="terminal-continuation-directive" version=1 {
+  text "The prior turn did not produce a terminating tool call."
+  text "If more evidence is needed, use available tools to gather it."
+  text "When the result is truthful and complete, call the offered terminating tool."
+  text "Do not invent findings. Do not answer with prose; prose is not accepted here."
+}
