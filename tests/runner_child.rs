@@ -834,6 +834,63 @@ fn runner_rpc_checkpoint_steer_compact_resume_same_session() {
 }
 
 #[test]
+fn resume_continuation_preserves_session_turn_accounting() {
+    let root = temp_root("runner-resume-session-turns");
+    let commands = root.join("commands.jsonl");
+    let handoff = valid_handoff().to_string();
+    let accepted = transcript("planning.task-atoms.v1");
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            &format!(
+                "contextPercent = 86; const commandLog = {:?}; function log(cmd) {{ appendFileSync(commandLog, JSON.stringify({{type:cmd.type,message:cmd.message}})+'\\n'); }} function afterSteer(cmd) {{ log(cmd); const h = message({handoff:?}); send({{type:'message_start'}}); send({{type:'message_end',message:h}}); }} function afterCompact(cmd) {{ log(cmd); send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}}); }}",
+                commands
+            ),
+            &format!(
+                "log(cmd); if (promptCount === 1) {{ const thinking = message('tool phase','gpt-5.5','toolUse'); send({{type:'agent_start'}}); send({{type:'message_start'}}); send({{type:'message_end',message:thinking}}); emitReadTool(); }} else {{ contextPercent = 10; emitCarrier({accepted:?}); }}"
+            ),
+        ),
+    );
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect("resume continuation must reuse the startup PromptSession");
+    let log = fs::read_to_string(commands).expect("command log");
+    assert!(log.contains("compact"), "{log}");
+    assert_eq!(log.matches("\"type\":\"prompt\"").count(), 2, "{log}");
+}
+
+#[test]
+fn handoff_continuation_preserves_session_turn_accounting() {
+    let root = temp_root("runner-handoff-session-turns");
+    let commands = root.join("commands.jsonl");
+    let handoff = valid_handoff().to_string();
+    let accepted = transcript("planning.task-atoms.v1");
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            &format!(
+                "contextPercent = 86; const suppressSteerQueue = true; const commandLog = {:?}; function log(cmd) {{ appendFileSync(commandLog, JSON.stringify({{type:cmd.type,message:cmd.message}})+'\\n'); }} function afterSteer(cmd) {{ log(cmd); }} function afterCompact(cmd) {{ log(cmd); send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}}); }}",
+                commands
+            ),
+            &format!(
+                "log(cmd); if (promptCount === 1) {{ send({{type:'agent_start'}}); emitReadTool(); send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}}); }} else if (promptCount === 2) {{ send({{type:'agent_start'}}); const h = message({handoff:?}); send({{type:'message_start'}}); send({{type:'message_end',message:h}}); }} else {{ contextPercent = 10; emitCarrier({accepted:?}); }}"
+            ),
+        ),
+    );
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect("handoff continuation must reuse the startup PromptSession");
+    let log = fs::read_to_string(commands).expect("command log");
+    assert!(log.contains("steer"), "{log}");
+    assert!(log.contains("compact"), "{log}");
+    assert_eq!(log.matches("\"type\":\"prompt\"").count(), 3, "{log}");
+}
+
+#[test]
 fn runner_rpc_checkpoint_resume_rejects_unknown_after_valid_resume_response() {
     let root = temp_root("runner-checkpoint-null-after-resume");
     let commands = root.join("commands.jsonl");
@@ -1572,7 +1629,7 @@ const sessionPath = `${{sessionDir}}/${{sessionId}}.jsonl`;
 let storedMessages = [];
 try {{ storedMessages = readFileSync(sessionPath, 'utf8').split('\n').filter(line => line.trim()); }} catch {{ storedMessages = []; }}
 function persist(entry) {{ storedMessages.push(JSON.stringify(entry)); appendFileSync(sessionPath, JSON.stringify(entry) + '\n'); }}
-function send(value) {{ process.stdout.write(JSON.stringify(value) + '\n'); }}
+function send(value) {{ if (value.type === 'message_end' && value.message) persist(value.message); process.stdout.write(JSON.stringify(value) + '\n'); }}
 function message(text, model='gpt-5.5', stopReason='stop') {{ return {{ role:'assistant', provider:'openai-codex', model, content:[{{type:'text', text}}], stopReason }}; }}
 function emitAssistant(text, model='gpt-5.5', stopReason='stop') {{ const msg = message(text, model, stopReason); send({{type:'agent_start'}}); send({{type:'message_start'}}); send({{type:'message_end', message: msg}}); send({{type:'agent_end', willRetry:false}}); send({{type:'agent_settled'}}); }}
 function emitCarrier(payload, model='gpt-5.5', overrides={{}}) {{
@@ -1638,7 +1695,7 @@ function handle(cmd) {{
   }}
   if (cmd.type === 'abort') return send({{id:cmd.id,type:'response',command:'abort',success:true}});
   if (cmd.type === 'compact') {{ send({{type:'compaction_start',reason:'manual'}}); send({{type:'compaction_end',reason:'manual',aborted:false,willRetry:false}}); send({{id:cmd.id,type:'response',command:'compact',success:true,data:{{summary:'ok'}}}}); if (typeof afterCompact === 'function') afterCompact(cmd); return; }}
-  if (cmd.type === 'steer') {{ send({{id:cmd.id,type:'response',command:'steer',success:true}}); send({{type:'queue_update',steering:[cmd.message],followUp:[]}}); if (typeof afterSteer === 'function') afterSteer(cmd); return; }}
+  if (cmd.type === 'steer') {{ send({{id:cmd.id,type:'response',command:'steer',success:true}}); if (!(typeof suppressSteerQueue !== 'undefined' && suppressSteerQueue)) send({{type:'queue_update',steering:[cmd.message],followUp:[]}}); if (typeof afterSteer === 'function') afterSteer(cmd); return; }}
   if (cmd.type === 'prompt') {{ promptCount++; persist({{role:'user', content:cmd.message}}); send({{id:cmd.id,type:'response',command:'prompt',success:true}}); {on_prompt}; return; }}
   send({{id:cmd.id,type:'response',command:cmd.type,success:false,error:'unexpected command'}});
 }}
@@ -2410,6 +2467,73 @@ fn distinct_top_level_runs_do_not_share_child_pi_sessions() {
 
 /// A child declared `fresh` that finds retained conversation must fail loudly
 /// rather than silently inheriting it.
+#[test]
+fn fresh_assignment_still_rejects_prepopulated_session() {
+    let root = temp_root("runner-fresh-guard-regression");
+    let accepted = transcript("planning.task-atoms.v1");
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi("", &format!("emitCarrier({accepted:?});")),
+    );
+    let spec = write_planning_spec_for_run(
+        &root,
+        "019fa883-1eaf-75f9-99af-6aa246736f73",
+        "planning.task-atoms.v1",
+    );
+    let session_dir = spec_session_dir(&spec);
+    fs::create_dir_all(&session_dir).expect("session dir");
+    fs::write(
+        session_dir.join(format!("{}.jsonl", spec_session_id(&spec))),
+        "{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"stale\"}]}\n",
+    )
+    .expect("seed stale session");
+
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("genuine fresh startup must refuse inherited history");
+    assert!(error.contains("stale child session"), "{error}");
+}
+
+#[test]
+fn continuation_after_tool_use_does_not_trip_stale_session() {
+    let root = temp_root("runner-tooluse-restart-continuation");
+    let accepted = transcript("planning.task-atoms.v1");
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            "",
+            "if (promptCount === 1) { send({type:'agent_start'}); for (let i = 0; i < 15; i++) { const msg = message('investigating '+i, 'gpt-5.5', 'toolUse'); send({type:'message_start'}); send({type:'message_end', message: msg}); } for (let i = 0; i < 43; i++) emitReadTool(); send({type:'agent_end', willRetry:false}); send({type:'agent_settled'}); process.exit(42); }",
+        ),
+    );
+    let spec = write_planning_spec_for_run(
+        &root,
+        "019fa883-1eaf-75f9-99af-6aa246736f74",
+        "planning.task-atoms.v1",
+    );
+    let first = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("first child stops mid-investigation without a submit");
+    assert!(!first.contains("stale child session"), "{first}");
+    let session_text = fs::read_to_string(
+        spec_session_dir(&spec).join(format!("{}.jsonl", spec_session_id(&spec))),
+    )
+    .expect("session jsonl");
+    assert_eq!(session_text.matches("\"role\":\"assistant\"").count(), 15);
+    assert_eq!(session_text.matches("\"role\":\"toolResult\"").count(), 43);
+    assert!(!session_text.contains("autopilot_submit"));
+
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi("", &format!("emitCarrier({accepted:?});")),
+    );
+    with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect("restart of the same already-validated session must continue, not reassert fresh");
+}
+
 #[test]
 fn fresh_assignment_rejects_inherited_child_session_history() {
     let root = temp_root("runner-stale-session-rejected");

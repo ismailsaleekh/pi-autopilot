@@ -464,7 +464,16 @@ pub fn main(args: &[String]) -> Result<(), String> {
         Err(error) => return Err(error.to_string()),
     }
     let mut runner = RpcAssignment::spawn_and_configure(&spec)?;
-    let result = run_value_attempts(&mut runner, &spec_path, &raw, &spec_digest, &spec, prompt);
+    let mut session = PromptSession::new(&spec);
+    let result = run_value_attempts(
+        &mut runner,
+        &mut session,
+        &spec_path,
+        &raw,
+        &spec_digest,
+        &spec,
+        prompt,
+    );
     let shutdown = runner.shutdown();
     if result.is_ok() {
         shutdown?;
@@ -474,6 +483,7 @@ pub fn main(args: &[String]) -> Result<(), String> {
 
 fn run_value_attempts(
     runner: &mut RpcAssignment,
+    session: &mut PromptSession,
     spec_path: &Path,
     spec_bytes: &str,
     spec_digest: &str,
@@ -484,8 +494,9 @@ fn run_value_attempts(
     for attempt in 1..=MAX_VALUE_ATTEMPTS {
         append_attempt_event(spec, attempt, "started", AttemptEventDetail::none())
             .map_err(|error| error.to_string())?;
-        let source = run_prompt_with_terminal_continuation(runner, spec, &attempt_prompt, attempt)
-            .map_err(TerminalContinuationError::into_message)?;
+        let source =
+            run_prompt_with_terminal_continuation(runner, spec, session, &attempt_prompt, attempt)
+                .map_err(TerminalContinuationError::into_message)?;
         match write_carrier(spec_path, spec_bytes, spec_digest, spec, &source) {
             Ok(()) => {
                 append_attempt_event(spec, attempt, "accepted", AttemptEventDetail::none())
@@ -538,6 +549,7 @@ fn run_value_attempts(
 fn run_prompt_with_terminal_continuation(
     runner: &mut RpcAssignment,
     spec: &AgentRunSpec,
+    session: &mut PromptSession,
     prompt: &str,
     value_attempt: u32,
 ) -> Result<CarrierSource, TerminalContinuationError> {
@@ -553,7 +565,6 @@ fn run_prompt_with_terminal_continuation(
         trace.stop.non_retryable = Some(miss.class_enum());
         terminal_continuation_terminal_error(miss, trace)
     })?;
-    let mut session = PromptSession::new(spec);
     let mut next_prompt = prompt.to_owned();
     let mut trace = TerminalTrace::new();
     let mut previous_prose_digest = None;
@@ -562,7 +573,7 @@ fn run_prompt_with_terminal_continuation(
         match run_prompt_with_capacity_retry(
             runner,
             spec,
-            &mut session,
+            session,
             &next_prompt,
             value_attempt,
             directive.as_ref(),
@@ -651,7 +662,7 @@ fn run_prompt_with_terminal_continuation(
                 let receipt = directive_receipt(
                     &directive_text,
                     terminal_attempt + 1,
-                    &session,
+                    session,
                     miss.prose_digest(),
                 );
                 append_terminal_event_or_error(
@@ -1066,6 +1077,7 @@ impl RpcAssignment {
         directive: Option<&DirectiveReceipt>,
     ) -> Result<CarrierSource, ChildError> {
         let prompt_id = self.next_id("prompt");
+        session.validate_prompt_purpose(purpose)?;
         self.client
             .send_command(RpcCommand::prompt(prompt_id.clone(), prompt.to_owned()))
             .map_err(|error| error.to_string())?;
@@ -1116,7 +1128,7 @@ impl RpcAssignment {
                             }
                         }
                     }
-                    return self.finish_cycle(spec, state);
+                    return self.finish_cycle(spec, session, state);
                 }
                 RpcFrame::Event(event) => self.handle_event(spec, &mut state, event)?,
             }
@@ -1458,6 +1470,7 @@ impl RpcAssignment {
     fn finish_cycle(
         &mut self,
         spec: &AgentRunSpec,
+        session: &mut PromptSession,
         state: CycleState,
     ) -> Result<CarrierSource, ChildError> {
         // Surface a launch-side refusal ahead of output-shape checks: there is
@@ -1528,10 +1541,9 @@ impl RpcAssignment {
                 self.compact_checkpoint(&checkpoint)?;
             }
             let resume = self.resume_prompt(&checkpoint.resume_overlay)?;
-            let mut session = PromptSession::new(spec);
             return self.run_prompt(
                 spec,
-                &mut session,
+                session,
                 &resume,
                 PromptPurpose::Resume,
                 state.attempt,
@@ -1541,10 +1553,9 @@ impl RpcAssignment {
         if state.awaiting_handoff {
             self.abort_stale_queue()?;
             let handoff_prompt = self.handoff_prompt(spec)?;
-            let mut session = PromptSession::new(spec);
             return self.run_prompt(
                 spec,
-                &mut session,
+                session,
                 &handoff_prompt,
                 PromptPurpose::Handoff,
                 state.attempt,
@@ -1711,7 +1722,7 @@ impl RpcAssignment {
             .ok_or_else(|| "agent-run get_state missing data".to_owned())?;
         let value: Value = serde_json::from_str(data)
             .map_err(|error| format!("agent-run get_state malformed data: {error}"))?;
-        Self::validate_session_history(spec, &value)?;
+        let startup_already_validated = Self::validate_startup_session_history(spec, &value)?;
         let session = value.get("sessionId").and_then(Value::as_str);
         let thinking = value.get("thinkingLevel").and_then(Value::as_str);
         let auto = value.get("autoCompactionEnabled").and_then(Value::as_bool);
@@ -1731,7 +1742,23 @@ impl RpcAssignment {
                 "agent-run get_state drift: session={session:?} provider={provider:?} model={model_id:?} thinking={thinking:?} autoCompaction={auto:?}"
             ));
         }
+        if !startup_already_validated {
+            Self::write_startup_validation_marker(spec)?;
+        }
         Ok(())
+    }
+
+    fn validate_startup_session_history(
+        spec: &AgentRunSpec,
+        state: &Value,
+    ) -> Result<bool, String> {
+        if Self::startup_validation_marker_matches(spec)? {
+            Self::validate_restart_session_history(spec, state)?;
+            Ok(true)
+        } else {
+            Self::validate_session_history(spec, state)?;
+            Ok(false)
+        }
     }
 
     /// Fence the child's inherited conversation length against the assignment's
@@ -1757,6 +1784,97 @@ impl RpcAssignment {
                 spec.assignment_id.0, spec.session_id.0
             )),
             SessionContinuity::Resume => Ok(()),
+        }
+    }
+
+    fn validate_restart_session_history(spec: &AgentRunSpec, state: &Value) -> Result<(), String> {
+        let message_count = state
+            .get("messageCount")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "agent-run get_state missing messageCount".to_owned())?;
+        match spec.session_continuity {
+            SessionContinuity::Fresh => Ok(()),
+            SessionContinuity::Resume if message_count == 0 => Err(format!(
+                "agent-run resume without history: assignment {} authorizes resume but session {} is empty",
+                spec.assignment_id.0, spec.session_id.0
+            )),
+            SessionContinuity::Resume => Ok(()),
+        }
+    }
+
+    fn startup_validation_marker_matches(spec: &AgentRunSpec) -> Result<bool, String> {
+        let path = startup_validation_marker_path(spec)?;
+        match fs::read(&path) {
+            Ok(bytes) => {
+                let marker: StartupValidationMarker =
+                    serde_json::from_slice(&bytes).map_err(|error| {
+                        format!(
+                            "agent-run startup validation marker malformed {}: {error}",
+                            path.display()
+                        )
+                    })?;
+                Ok(marker == StartupValidationMarker::new(spec))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(format!(
+                "agent-run startup validation marker read failed {}: {error}",
+                path.display()
+            )),
+        }
+    }
+
+    fn write_startup_validation_marker(spec: &AgentRunSpec) -> Result<(), String> {
+        let path = startup_validation_marker_path(spec)?;
+        let parent = path.parent().ok_or_else(|| {
+            format!(
+                "agent-run startup validation marker path has no parent: {:?}",
+                path
+            )
+        })?;
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "agent-run startup validation marker mkdir failed {}: {error}",
+                parent.display()
+            )
+        })?;
+        let marker = StartupValidationMarker::new(spec);
+        let data = serde_json::to_vec_pretty(&marker).map_err(|error| {
+            format!("agent-run startup validation marker serialize failed: {error}")
+        })?;
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                file.write_all(&data).map_err(|error| {
+                    format!(
+                        "agent-run startup validation marker write failed {}: {error}",
+                        path.display()
+                    )
+                })?;
+                file.sync_all().map_err(|error| {
+                    format!(
+                        "agent-run startup validation marker fsync failed {}: {error}",
+                        path.display()
+                    )
+                })?;
+                Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if Self::startup_validation_marker_matches(spec)? {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "agent-run startup validation marker drift at {}",
+                        path.display()
+                    ))
+                }
+            }
+            Err(error) => Err(format!(
+                "agent-run startup validation marker create failed {}: {error}",
+                path.display()
+            )),
         }
     }
 
@@ -1854,6 +1972,9 @@ impl RpcAssignment {
             if let RpcFrame::Response(response) = frame {
                 if response.id == id {
                     return Ok(());
+                }
+                if response.command == RpcCommandKind::Steer {
+                    continue;
                 }
                 return Err(format!(
                     "agent-run unexpected response while aborting stale queue: {}",
@@ -2162,6 +2283,39 @@ impl OfferedTerminalTool {
     }
 }
 
+const STARTUP_VALIDATION_MARKER_SCHEMA: &str = "pa.child-startup-session-validation.v1";
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+struct StartupValidationMarker {
+    schema: String,
+    assignment_id: String,
+    run_id: String,
+    session_id: String,
+    session_dir: String,
+    session_continuity: SessionContinuity,
+}
+
+impl StartupValidationMarker {
+    fn new(spec: &AgentRunSpec) -> Self {
+        Self {
+            schema: STARTUP_VALIDATION_MARKER_SCHEMA.to_owned(),
+            assignment_id: spec.assignment_id.0.clone(),
+            run_id: spec.run_id.0.clone(),
+            session_id: spec.session_id.0.clone(),
+            session_dir: spec.session_dir.0.clone(),
+            session_continuity: spec.session_continuity.clone(),
+        }
+    }
+}
+
+fn startup_validation_marker_path(spec: &AgentRunSpec) -> Result<PathBuf, String> {
+    let carrier = PathBuf::from(&spec.carrier_path.0);
+    let file_name = format!("{}.session-start.json", spec.session_id.0);
+    let path = carrier.with_file_name(file_name);
+    super::reject_link_components_for_path(&path).map_err(|error| error.to_string())?;
+    Ok(path)
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 struct PromptSession {
     expected: SessionId,
@@ -2176,6 +2330,17 @@ impl PromptSession {
             session_digest: sha256_hex(spec.session_id.0.as_bytes()),
             turns_sent: 0,
         }
+    }
+
+    fn validate_prompt_purpose(&self, purpose: PromptPurpose) -> Result<(), ChildError> {
+        if matches!(purpose, PromptPurpose::Handoff | PromptPurpose::Resume) && self.turns_sent == 0
+        {
+            return Err(ChildError::Fatal(format!(
+                "agent-run prompt session reset before {purpose:?} continuation for session {}",
+                self.expected.0
+            )));
+        }
+        Ok(())
     }
 }
 
