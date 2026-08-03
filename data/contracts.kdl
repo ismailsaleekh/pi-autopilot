@@ -524,15 +524,15 @@ artifact "agent_handoff" schema="autopilot.agent-handoff.v1" producer="Model" mo
 }
 
 artifact "task_atoms" schema="planning.task-atoms.v1" producer="Model" model_produced=#true {
-    doc "Model-facing task atom submission. Shape is deliberately small: structure is enforced by the submit tool; source values are checked against task authority anchors by the planning driver."
-    admits "Task extractor output must use the exact runner-issued atom id prefix for every atoms[].id, name operator-task atoms with source anchors, and include no repository findings. Call autopilot_submit_atoms as the final action with atoms containing id, kind, text, and sources."
+    doc "Model-facing task atom submission. Shape is deliberately small: structure is enforced by the submit tool; source values are checked against runtime-supplied task source anchors by the planning driver."
+    admits "Task extractor output must use the exact runner-issued atom id prefix for every atoms[].id. New model submissions must name operator-task atoms with sources copied as exact decoded JSON sources[].source strings from the runtime-supplied package-authoritative task:// source manifest, and include no repository findings. Package-derived legacy aliases remain accepted only for compatibility; arbitrary values and prefix matches are never accepted. Call autopilot_submit_atoms as the final action with atoms containing id, kind, text, and sources."
     submit_tool "autopilot_submit_atoms" label="Submit task atoms"
     list "atoms" item="task_atom" required=#true doc="Task atoms; may be empty only when no task authority text exists."
     record "task_atom" {
         field "id" type="id" required=#true
         field "kind" type="planning_atom_kind" required=#true
         field "text" type="string" required=#true
-        list "sources" item="ref" required=#true doc="Task-document anchors supplied by the package."
+        list "sources" item="ref" required=#true doc="Task-document anchors copied exactly from the decoded JSON sources[].source string values in the package-authoritative source manifest rendered at runtime; do not copy serialized JSON escape syntax literally."
     }
 }
 

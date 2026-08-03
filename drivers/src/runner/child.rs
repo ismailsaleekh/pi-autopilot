@@ -523,7 +523,12 @@ fn run_value_attempts(
                     AttemptEventDetail::rejection(&rejection),
                 )
                 .map_err(|error| error.to_string())?;
-                attempt_prompt = render_repair_prompt(spec, &rejection);
+                attempt_prompt = render_repair_prompt(spec, &rejection).map_err(|manifest_rejection| {
+                    format!(
+                        "agent-run value repair manifest reconstruction failed field={} expected={} got={}",
+                        manifest_rejection.field, manifest_rejection.expected, manifest_rejection.got
+                    )
+                })?;
             }
             Err(CarrierRejection::Value(rejection)) => {
                 append_attempt_event(
@@ -3200,16 +3205,101 @@ fn value_rejection(
     }
 }
 
-fn render_repair_prompt(spec: &AgentRunSpec, rejection: &ValueRejection) -> String {
+fn render_repair_prompt(
+    spec: &AgentRunSpec,
+    rejection: &ValueRejection,
+) -> Result<String, ValueRejection> {
     let action = if runtime_addon(spec).is_some() {
         "The prior submission is not accepted. Call the declared terminating submit tool again with corrected values."
     } else {
         "Re-emit with corrected values."
     };
-    format!(
+    let mut prompt = format!(
         "Your {} submission was rejected.\n  field:    {}\n  expected: {}\n  got:      {}\n{action}",
         spec.boundary_id.0, rejection.field, rejection.expected, rejection.got
-    )
+    );
+    if spec.boundary_id.0 == "planning.task-atoms.v1" {
+        prompt.push_str("\n\n");
+        prompt.push_str(&planning_task_source_manifest_for_spec(spec)?);
+    }
+    Ok(prompt)
+}
+
+fn planning_task_source_manifest_for_spec(spec: &AgentRunSpec) -> Result<String, ValueRejection> {
+    let input_set = planning_task_input_set_from_spec(spec)?;
+    let registry =
+        crate::planning::TaskAnchorRegistry::from_input_set(&input_set).map_err(|error| {
+            value_rejection(
+                "task_source_manifest",
+                "reconstructable exact task source manifest from runner spec",
+                format!("{error:?}"),
+            )
+        })?;
+    Ok(registry.canonical_source_manifest().to_owned())
+}
+
+fn planning_task_input_set_from_spec(
+    spec: &AgentRunSpec,
+) -> Result<crate::planning::TaskInputSet, ValueRejection> {
+    let authority_set_id = spec.authority_set_id.as_ref().ok_or_else(|| {
+        value_rejection(
+            "authority_set_id",
+            "runner-bound task authority for repair manifest",
+            "missing",
+        )
+    })?;
+    let authority_documents = spec.authority_documents.as_ref().ok_or_else(|| {
+        value_rejection(
+            "authority_documents",
+            "runner-bound authority documents for repair manifest",
+            "missing",
+        )
+    })?;
+    let context_documents = spec.context_documents.as_ref().ok_or_else(|| {
+        value_rejection(
+            "context_documents",
+            "runner-bound context documents for repair manifest",
+            "missing",
+        )
+    })?;
+    Ok(crate::planning::TaskInputSet {
+        authority_set_id: authority_set_id.clone(),
+        authority_documents: authority_documents
+            .iter()
+            .map(|document| {
+                planning_task_document_from_contract(
+                    document,
+                    crate::planning::TaskDocumentClass::Authority,
+                    authority_set_id,
+                )
+            })
+            .collect(),
+        context_documents: context_documents
+            .iter()
+            .map(|document| {
+                planning_task_document_from_contract(
+                    document,
+                    crate::planning::TaskDocumentClass::ContextNonAuthority,
+                    authority_set_id,
+                )
+            })
+            .collect(),
+    })
+}
+
+fn planning_task_document_from_contract(
+    document: &TaskDocument,
+    class: crate::planning::TaskDocumentClass,
+    authority_set_id: &str,
+) -> crate::planning::TaskDocument {
+    crate::planning::TaskDocument {
+        id: document.path.0.clone(),
+        path: document.path.0.clone(),
+        class,
+        authority_set_id: authority_set_id.to_owned(),
+        body: document.body.clone(),
+        digest: document.digest.0.clone(),
+    }
 }
 
 fn paused_after_exhaustion(spec: &AgentRunSpec, rejection: &ValueRejection) -> String {

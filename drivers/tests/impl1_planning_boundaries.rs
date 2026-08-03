@@ -17,6 +17,13 @@ static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static FIXTURE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[test]
+fn registered_task_atoms_boundary_admits_matches_generated_contract() {
+    let descriptor = kernel::boundary::boundary_by_id("planning.task-atoms.v1").unwrap();
+
+    assert_eq!(descriptor.admits(), kernel::generated::TASK_ATOMS_ADMITS);
+}
+
+#[test]
 fn runner_child_rejects_atom_outside_runner_namespace() {
     let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
     let fixture = Fixture::new("namespace");
@@ -251,7 +258,8 @@ fn task_anchor_registry_accepts_real_section_and_rejects_unverified_sources() {
             TaskDocumentClass::ContextNonAuthority,
             "# Context\n\nRepository facts.\n",
         ),
-    ]));
+    ]))
+    .expect("valid task anchor input");
 
     planning::validate_task_atoms_for_assignment(
         &atoms_with_source("task://TASK.md#3-work-breakdown"),
@@ -291,8 +299,357 @@ fn task_anchor_registry_accepts_real_section_and_rejects_unverified_sources() {
             TaskDocumentClass::ContextNonAuthority,
             "# Context\n\nRepository facts.\n",
         ),
-    ]));
+    ]))
+    .expect("valid ambiguous-basename input");
     assert_source_rejected(&ambiguous, "task://TASK.md#3-work-breakdown");
+}
+
+#[test]
+fn task_anchor_registry_renders_canonical_manifest_for_all_docs_deterministically() {
+    let docs = [
+        planning_doc(
+            "z-context.md",
+            TaskDocumentClass::ContextNonAuthority,
+            "CTX-Z",
+        ),
+        planning_doc("b-task.md", TaskDocumentClass::Authority, "AUTH-B"),
+        planning_doc("a-task.md", TaskDocumentClass::Authority, "AUTH-A"),
+    ];
+    let input = task_input_set(&docs);
+    let registry = TaskAnchorRegistry::from_input_set(&input).expect("valid task source input");
+    let manifest = registry.canonical_source_manifest();
+    assert!(
+        manifest.contains("Package-authoritative source manifest for planning.task-atoms.v1"),
+        "canonical manifest heading missing: {manifest}"
+    );
+    assert!(
+        manifest.contains("decoded JSON `sources[].source` string exactly"),
+        "decoded JSON copy instruction missing: {manifest}"
+    );
+    assert!(
+        manifest.contains("json://...#/body` Context Manifest addresses are context-read addresses, not legal atoms[].sources"),
+        "json address warning missing: {manifest}"
+    );
+    let manifest_json = extract_task_source_manifest_json(manifest);
+    assert_eq!(
+        manifest_json.as_bytes(),
+        registry.canonical_source_manifest_json_bytes(),
+        "rendered manifest must reuse registry-owned serialized JSON bytes"
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&manifest_json).expect("manifest json");
+    let expected_sources = input
+        .authority_documents
+        .iter()
+        .chain(input.context_documents.iter())
+        .map(|document| format!("task://{}/{}#whole-file", document.digest, document.path))
+        .collect::<Vec<_>>();
+    let parsed_sources = parsed["sources"].as_array().expect("sources array");
+    for source in &expected_sources {
+        assert!(
+            registry.has(&Ref(source.clone())),
+            "canonical source not admitted: {source}"
+        );
+        assert!(
+            parsed_sources
+                .iter()
+                .any(|row| row["source"].as_str() == Some(source)),
+            "manifest JSON missing {source}: {manifest_json}"
+        );
+    }
+    assert_eq!(registry.canonical_sources().len(), expected_sources.len());
+    let reordered = task_input_set(&[docs[2].clone(), docs[1].clone(), docs[0].clone()]);
+    assert_eq!(
+        manifest,
+        TaskAnchorRegistry::from_input_set(&reordered)
+            .expect("valid reordered task source input")
+            .canonical_source_manifest(),
+        "input order must not change canonical source manifest bytes"
+    );
+    assert!(
+        manifest_json.find("a-task.md").unwrap() < manifest_json.find("b-task.md").unwrap(),
+        "manifest order should be deterministic by class/path/digest JSON: {manifest_json}"
+    );
+}
+
+#[test]
+fn task_anchor_registry_json_round_trips_adversarial_legal_paths() {
+    let adversarial_path = format!(
+        "dir with spaces/line\nbreak/quote\" equals= source= ticks ``` and ```` marker {}.md",
+        planning::CANONICAL_TASK_SOURCE_MANIFEST_JSON_END
+    );
+    let doc = planning_doc(
+        &adversarial_path,
+        TaskDocumentClass::Authority,
+        "adversarial body",
+    );
+    let input = task_input_set(std::slice::from_ref(&doc));
+    let registry = TaskAnchorRegistry::from_input_set(&input).expect("legal UTF-8 path accepted");
+    let manifest_json = extract_task_source_manifest_json(registry.canonical_source_manifest());
+    let parsed: serde_json::Value = serde_json::from_str(&manifest_json).expect("manifest json");
+    assert_eq!(
+        parsed["sources"][0]["path"].as_str(),
+        Some(adversarial_path.as_str()),
+        "JSON round-trip must preserve legal path data exactly"
+    );
+    let expected_source = format!("task://{}/{adversarial_path}#whole-file", doc.digest);
+    assert_eq!(
+        parsed["sources"][0]["source"].as_str(),
+        Some(expected_source.as_str()),
+        "JSON round-trip must preserve decoded source exactly"
+    );
+    assert!(
+        registry.has(&Ref(expected_source)),
+        "canonical adversarial source remains accepted"
+    );
+}
+
+#[test]
+fn task_anchor_registry_accepts_same_digest_at_distinct_paths_and_rejects_duplicate_identities() {
+    let first = planning_doc("same-a.md", TaskDocumentClass::Authority, "same body");
+    let mut second = first.clone();
+    second.id = "same-b.md".to_owned();
+    second.path = "same-b.md".to_owned();
+    let registry = TaskAnchorRegistry::from_input_set(&TaskInputSet {
+        authority_set_id: "auth".to_owned(),
+        authority_documents: vec![first.clone(), second.clone()],
+        context_documents: Vec::new(),
+    })
+    .expect("same content digest at two distinct paths is unambiguous");
+    assert!(registry.has(&Ref(format!(
+        "task://{}/{}#whole-file",
+        first.digest, first.path
+    ))));
+    assert!(registry.has(&Ref(format!(
+        "task://{}/{}#whole-file",
+        second.digest, second.path
+    ))));
+    assert_eq!(registry.canonical_sources().len(), 2);
+
+    let duplicate = TaskAnchorRegistry::from_input_set(&TaskInputSet {
+        authority_set_id: "auth".to_owned(),
+        authority_documents: vec![first.clone(), first],
+        context_documents: Vec::new(),
+    })
+    .expect_err("exact duplicate identity must fail loudly");
+    assert!(
+        matches!(&duplicate, planning::PlanningError::TaskInputInvariant(message) if message.contains("duplicate task document identity")),
+        "unexpected duplicate error: {duplicate:?}"
+    );
+}
+
+#[test]
+fn task_anchor_registry_rejects_illegal_source_suffixes_and_conflicting_identities() {
+    let document = planning_doc("TASK.md", TaskDocumentClass::Authority, "# Task\n\nBody\n");
+    let context = planning_doc(
+        "context.md",
+        TaskDocumentClass::ContextNonAuthority,
+        "Context\n",
+    );
+    let registry =
+        TaskAnchorRegistry::from_input_set(&task_input_set(&[document.clone(), context]))
+            .expect("valid task source input");
+    let canonical = format!("task://{}/{}#whole-file", document.digest, document.path);
+    for bad in [
+        format!("task://{}/{}#/body", document.digest, document.path),
+        format!("task://{}/{}#L5-L6", document.digest, document.path),
+        format!("task://{}/{}:5-6", document.digest, document.path),
+        format!(
+            "task://{}/{}#does-not-exist",
+            document.digest, document.path
+        ),
+        format!("{canonical}-suffix"),
+    ] {
+        assert_source_rejected(&registry, &bad);
+    }
+
+    let mut duplicate_class = document.clone();
+    duplicate_class.class = TaskDocumentClass::ContextNonAuthority;
+    let class_error = TaskAnchorRegistry::from_input_set(&TaskInputSet {
+        authority_set_id: "auth".to_owned(),
+        authority_documents: vec![document.clone()],
+        context_documents: vec![duplicate_class],
+    })
+    .expect_err("same path/digest with conflicting class must fail loudly");
+    assert!(
+        matches!(&class_error, planning::PlanningError::TaskInputInvariant(message) if message.contains("conflicting task document path identity")),
+        "unexpected class conflict error: {class_error:?}"
+    );
+
+    let mut duplicate_path = document.clone();
+    duplicate_path.digest = "different-digest".to_owned();
+    let error = TaskAnchorRegistry::from_input_set(&TaskInputSet {
+        authority_set_id: "auth".to_owned(),
+        authority_documents: vec![document, duplicate_path],
+        context_documents: Vec::new(),
+    })
+    .expect_err("conflicting path/digest must fail loudly");
+    assert!(
+        matches!(&error, planning::PlanningError::TaskInputInvariant(message) if message.contains("conflicting task document path identity")),
+        "unexpected error: {error:?}"
+    );
+}
+
+#[test]
+fn task_extractor_prompt_contains_manifest_and_non_task_roles_do_not() {
+    let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+    let fixture = Fixture::new("task-source-manifest");
+    fixture.install_transport();
+    let issue = fixture.issue_planning(
+        "task-extractor",
+        "inventory",
+        "planning.task-atoms.v1",
+        Some("TE01-"),
+        None,
+    );
+    let prompt = fs::read_to_string(&issue.binding.prompt_path).expect("task prompt");
+    assert!(
+        prompt.contains("Package-authoritative source manifest for planning.task-atoms.v1"),
+        "task extractor prompt lost canonical source manifest: {prompt}"
+    );
+    assert!(
+        prompt.contains("json://...#/body` Context Manifest addresses are context-read addresses, not legal atoms[].sources"),
+        "task extractor prompt lost JSON-address warning: {prompt}"
+    );
+    assert!(
+        prompt.contains(&anchor("task.md", "authority", "auth", "Do the work")),
+        "task extractor prompt missing canonical authority source: {prompt}"
+    );
+    assert!(
+        prompt.contains(&anchor(
+            "context.md",
+            "context/non-authority",
+            "auth",
+            "Repo context"
+        )),
+        "task extractor prompt missing canonical context source: {prompt}"
+    );
+
+    let atom_registry =
+        fixture.write_atom_registry(&[("TE01-W-001", "planning-ws-task-extractor-01")]);
+    let compiler = fixture.issue_planning(
+        "plan-compiler",
+        "initial-plan",
+        "planning.work-map.v1",
+        None,
+        Some(atom_registry),
+    );
+    let compiler_prompt =
+        fs::read_to_string(&compiler.binding.prompt_path).expect("compiler prompt");
+    assert!(
+        !compiler_prompt
+            .contains("Package-authoritative source manifest for planning.task-atoms.v1"),
+        "non-task planning role received task-atom-only source instructions: {compiler_prompt}"
+    );
+}
+
+#[test]
+fn rendered_planning_prompt_embeds_complete_prompt_budget_estimate() {
+    let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+    let fixture = Fixture::new("prompt-budget-equality");
+    fixture.install_transport();
+    let issue = fixture.issue_planning(
+        "task-extractor",
+        "inventory",
+        "planning.task-atoms.v1",
+        Some("TE01-"),
+        None,
+    );
+    let prompt = fs::read_to_string(&issue.binding.prompt_path).expect("rendered prompt");
+    let context_manifest_text = extract_data_layer(&prompt, 5, "canonical Context Manifest");
+    let context_manifest: serde_json::Value =
+        serde_json::from_str(&context_manifest_text).expect("context manifest json");
+    let independent_tokens = drivers::context::estimate_tokens(prompt.as_bytes(), 512);
+    let independent_budget = drivers::context::route_budget(
+        independent_tokens,
+        200_000,
+        drivers::context::estimate_tokens(prompt.as_bytes(), 0),
+    );
+    assert_eq!(
+        context_manifest["budget"]["estimated_initial_tokens"].as_u64(),
+        Some(u64::from(independent_budget.estimated_tokens)),
+        "embedded budget must estimate the exact final rendered prompt"
+    );
+    assert_eq!(
+        context_manifest["budget"]["estimated_percent"].as_u64(),
+        Some(u64::from(independent_budget.estimated_percent)),
+        "embedded budget percent must match independent final prompt route estimate"
+    );
+}
+
+#[test]
+fn oversized_planning_prompt_refuses_before_prompt_spec_or_carrier_write() {
+    let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+    let fixture = Fixture::new("oversized-pre-spawn");
+    fixture.install_transport();
+    let assignment_id = Id("planning-ws-task-extractor-oversized".to_owned());
+    let huge_path = format!("context-{}.md", "x".repeat(900_000));
+    let context_document = runner_doc(&huge_path, "context/non-authority", "auth", "huge context");
+    let request = PlanningRunnerRequest {
+        workstream: "ws".to_owned(),
+        action_id: Id("action-planning-ws-task-extractor-oversized".to_owned()),
+        assignment_id: assignment_id.clone(),
+        role_id: Id("task-extractor".to_owned()),
+        mode: ModeId("inventory".to_owned()),
+        boundary_id: ContractId("planning.task-atoms.v1".to_owned()),
+        run_revision: 1,
+        authority_set_id: "auth".to_owned(),
+        authority_documents: vec![runner_doc("task.md", "authority", "auth", "Do the work")],
+        context_document: context_document.clone(),
+        context_documents: vec![context_document],
+        mode_parameter: first_mode_parameter_for("task-extractor"),
+        atom_id_prefix: Some("TE01-".to_owned()),
+        atom_registry_path: None,
+        atom_registry_digest: None,
+        accepted_planning_artifacts: Vec::new(),
+    };
+    let paths = runner::planning_paths(&fixture.root, "ws", &assignment_id);
+    let error = runner::planning_issue(&request).expect_err("oversized prompt must refuse");
+    assert!(
+        matches!(&error, runner::RunnerError::InvalidSpec(message) if message.contains("rendered planning prompt requires")),
+        "unexpected oversized refusal: {error:?}"
+    );
+    assert!(!paths.prompt_path.exists(), "oversized prompt was written");
+    assert!(!paths.spec_path.exists(), "oversized spec was written");
+    assert!(
+        !paths.carrier_path.exists(),
+        "oversized carrier was written"
+    );
+}
+
+#[test]
+fn real_initial_and_repair_prompts_reuse_identical_manifest_json_bytes() {
+    let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+    let fixture = Fixture::new("real-prompt-manifest-equality");
+    fixture.install_transport();
+    let bad = json!({"atoms":[{"id":"TE01-BAD","kind":"work","text":"bad source","sources":[anchor("task.md", "authority", "auth", "Do the work").replace("#whole-file", "#/body")]}]}).to_string();
+    let accepted = task_atoms("TE01-OK");
+    fixture.install_fake_pi(&[bad, accepted]);
+    let issue = fixture.issue_planning(
+        "task-extractor",
+        "inventory",
+        "planning.task-atoms.v1",
+        Some("TE01-"),
+        None,
+    );
+    let initial_rendered_prompt =
+        fs::read_to_string(&issue.binding.prompt_path).expect("initial rendered prompt");
+
+    drivers::runner::child::main(&["--spec".to_owned(), issue.binding.spec_path.clone()])
+        .expect("repair recovers with canonical source");
+
+    let prompts = user_prompts_from_spec_session(&issue.binding.spec_path);
+    assert_eq!(prompts.len(), 2, "expected initial plus repair prompts");
+    assert_eq!(
+        prompts[0], initial_rendered_prompt,
+        "first child prompt must be the real initially rendered prompt"
+    );
+    let initial_json = extract_task_source_manifest_json(&prompts[0]);
+    let repair_json = extract_task_source_manifest_json(&prompts[1]);
+    assert_eq!(
+        initial_json.as_bytes(),
+        repair_json.as_bytes(),
+        "real initial rendered prompt and real repair prompt canonical manifest JSON bytes must be identical"
+    );
 }
 
 struct PlanningIssueSpec<'a> {
@@ -930,6 +1287,63 @@ fn atoms_with_source(source: &str) -> TaskAtoms {
             sources: vec![Ref(source.to_owned())],
         }],
     }
+}
+
+fn extract_data_layer(prompt: &str, number: u8, name: &str) -> String {
+    let heading = format!("## Layer {number} — {name}");
+    let after_heading = prompt
+        .split_once(&heading)
+        .unwrap_or_else(|| panic!("missing {heading}"))
+        .1;
+    let fence_line = after_heading
+        .lines()
+        .find(|line| line.starts_with("```") && line.ends_with("text"))
+        .expect("opening data fence");
+    let fence = fence_line.trim_end_matches("text");
+    let body_start = after_heading.find(fence_line).expect("fence line") + fence_line.len() + 1;
+    let after_open = &after_heading[body_start..];
+    let close = after_open
+        .find(&format!("\n{fence}\n"))
+        .expect("closing data fence");
+    after_open[..close].to_owned()
+}
+
+fn user_prompts_from_spec_session(spec_path: &str) -> Vec<String> {
+    let spec: serde_json::Value =
+        serde_json::from_slice(&fs::read(spec_path).expect("runner spec")).expect("spec json");
+    let session_dir = spec["session_dir"].as_str().expect("session_dir");
+    let session_id = spec["session_id"].as_str().expect("session_id");
+    let session_path = Path::new(session_dir).join(format!("{session_id}.jsonl"));
+    fs::read_to_string(session_path)
+        .expect("fake pi session log")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("session line json"))
+        .filter(|entry| entry["role"].as_str() == Some("user"))
+        .map(|entry| {
+            entry["content"]
+                .as_str()
+                .expect("prompt content")
+                .to_owned()
+        })
+        .collect()
+}
+
+fn extract_task_source_manifest_json(text: &str) -> String {
+    let begin = planning::CANONICAL_TASK_SOURCE_MANIFEST_JSON_BEGIN;
+    let end = planning::CANONICAL_TASK_SOURCE_MANIFEST_JSON_END;
+    let begin_line = format!("\n{begin}\n");
+    let start = text
+        .find(&begin_line)
+        .map(|index| index + begin_line.len())
+        .or_else(|| {
+            text.starts_with(&format!("{begin}\n"))
+                .then(|| begin.len() + 1)
+        })
+        .expect("manifest JSON begin marker line");
+    let rest = &text[start..];
+    let end_line = format!("\n{end}\n");
+    let stop = rest.find(&end_line).expect("manifest JSON end marker line");
+    rest[..stop].to_owned()
 }
 
 fn assert_source_rejected(registry: &TaskAnchorRegistry, source: &str) {

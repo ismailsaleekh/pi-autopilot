@@ -1299,7 +1299,7 @@ pub fn boundary_runtime(id: &'static str) -> BoundaryRuntime {
     runtime_by_id(id)
 }
 
-#[acceptance_boundary(id = "planning.task-atoms.v1", producer = Producer::Model, visible = true, admits = "Task extractor output must use the exact runner-issued atom id prefix for every atoms[].id, name operator-task atoms with source anchors, and include no repository findings. Call autopilot_submit_atoms as the final action with atoms containing id, kind, text, and sources.", mode = BoundaryMode::Enforce)]
+#[acceptance_boundary(id = "planning.task-atoms.v1", producer = Producer::Model, visible = true, admits = "Task extractor output must use the exact runner-issued atom id prefix for every atoms[].id. New model submissions must name operator-task atoms with sources copied as exact decoded JSON sources[].source strings from the runtime-supplied package-authoritative task:// source manifest, and include no repository findings. Package-derived legacy aliases remain accepted only for compatibility; arbitrary values and prefix matches are never accepted. Call autopilot_submit_atoms as the final action with atoms containing id, kind, text, and sources.", mode = BoundaryMode::Enforce)]
 pub fn accept_task_atoms(raw: &str, runtime: &BoundaryRuntime) -> Result<String, Rejection> {
     let atoms = parse_model_payload::<TaskAtoms>(raw, runtime, "planning.task-atoms.v1")?;
     validate_task_atoms_shape(&atoms, runtime)?;
@@ -1375,21 +1375,49 @@ pub fn accept_plan_review_payload(review: PlanReview) -> Result<PlanReview, Reje
     Ok(review)
 }
 
+pub const CANONICAL_TASK_SOURCE_MANIFEST_JSON_BEGIN: &str =
+    "BEGIN_CANONICAL_TASK_SOURCE_MANIFEST_JSON";
+pub const CANONICAL_TASK_SOURCE_MANIFEST_JSON_END: &str = "END_CANONICAL_TASK_SOURCE_MANIFEST_JSON";
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskAnchorRegistry {
     anchors: BTreeSet<String>,
+    canonical_sources: Vec<CanonicalTaskSource>,
+    canonical_source_manifest_json: Vec<u8>,
+    canonical_source_manifest: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+pub struct CanonicalTaskSource {
+    pub class: String,
+    pub path: String,
+    pub digest: String,
+    pub source: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+struct CanonicalTaskSourceManifest {
+    schema: String,
+    boundary_id: String,
+    source_semantics: String,
+    compatibility: String,
+    sources: Vec<CanonicalTaskSource>,
 }
 
 impl TaskAnchorRegistry {
-    pub fn from_input_set(input_set: &TaskInputSet) -> Self {
+    pub fn from_input_set(input_set: &TaskInputSet) -> Result<Self, PlanningError> {
         let documents = input_set
             .authority_documents
             .iter()
             .chain(input_set.context_documents.iter())
             .collect::<Vec<_>>();
+        reject_conflicting_task_document_identities(&documents)?;
         let basename_counts = task_document_basename_counts(&documents);
         let mut anchors = BTreeSet::new();
+        let mut canonical_sources = BTreeSet::new();
         for document in documents {
+            let canonical_source = canonical_task_source(document);
+            canonical_sources.insert(canonical_source.clone());
             let section_anchors = task_document_section_anchors(&document.body);
             let mut selectors = BTreeSet::from([
                 format!("{}/{}", document.digest, document.path),
@@ -1408,12 +1436,35 @@ impl TaskAnchorRegistry {
                 );
                 insert_task_document_anchor_forms(&mut anchors, &selector, &section_anchors);
             }
+            anchors.insert(canonical_source.source.clone());
         }
-        Self { anchors }
+        let canonical_sources = canonical_sources.into_iter().collect::<Vec<_>>();
+        let canonical_source_manifest_json =
+            canonical_task_source_manifest_json(&canonical_sources)?;
+        let canonical_source_manifest =
+            render_canonical_task_source_manifest(&canonical_source_manifest_json)?;
+        Ok(Self {
+            anchors,
+            canonical_sources,
+            canonical_source_manifest_json,
+            canonical_source_manifest,
+        })
     }
 
     pub fn has(&self, source: &Ref) -> bool {
         self.anchors.contains(&source.0)
+    }
+
+    pub fn canonical_sources(&self) -> &[CanonicalTaskSource] {
+        &self.canonical_sources
+    }
+
+    pub fn canonical_source_manifest_json_bytes(&self) -> &[u8] {
+        &self.canonical_source_manifest_json
+    }
+
+    pub fn canonical_source_manifest(&self) -> &str {
+        &self.canonical_source_manifest
     }
 }
 
@@ -1421,6 +1472,78 @@ impl TaskAnchorRegistry {
 struct TaskSectionAnchor {
     anchor: String,
     section_number: Option<String>,
+}
+
+fn reject_conflicting_task_document_identities(
+    documents: &[&TaskDocument],
+) -> Result<(), PlanningError> {
+    let mut identities = BTreeSet::new();
+    let mut by_path = BTreeMap::new();
+    for document in documents {
+        let class = task_document_class_name(document.class);
+        let identity = (document.path.as_str(), document.digest.as_str(), class);
+        if !identities.insert(identity) {
+            return Err(PlanningError::TaskInputInvariant(format!(
+                "duplicate task document identity: class={class} path={} digest={}",
+                document.path, document.digest
+            )));
+        }
+        if let Some((seen_digest, seen_class)) =
+            by_path.insert(document.path.as_str(), (document.digest.as_str(), class))
+            && (seen_digest, seen_class) != (document.digest.as_str(), class)
+        {
+            return Err(PlanningError::TaskInputInvariant(format!(
+                "conflicting task document path identity: path={} first_class={seen_class} first_digest={seen_digest} second_class={class} second_digest={}",
+                document.path, document.digest
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn task_document_class_name(class: TaskDocumentClass) -> &'static str {
+    match class {
+        TaskDocumentClass::Authority => "authority",
+        TaskDocumentClass::ContextNonAuthority => "context/non-authority",
+        TaskDocumentClass::HistoricalNonAuthority => "historical/non-authority",
+        TaskDocumentClass::IndexNonAuthority => "index/non-authority",
+        TaskDocumentClass::InlineTask => "inline-task",
+    }
+}
+
+fn canonical_task_source(document: &TaskDocument) -> CanonicalTaskSource {
+    let source = format!("task://{}/{}#whole-file", document.digest, document.path);
+    CanonicalTaskSource {
+        class: task_document_class_name(document.class).to_owned(),
+        path: document.path.clone(),
+        digest: document.digest.clone(),
+        source,
+    }
+}
+
+fn canonical_task_source_manifest_json(
+    sources: &[CanonicalTaskSource],
+) -> Result<Vec<u8>, PlanningError> {
+    serde_json::to_vec_pretty(&CanonicalTaskSourceManifest {
+        schema: "autopilot.task_source_manifest.v1".to_owned(),
+        boundary_id: "planning.task-atoms.v1".to_owned(),
+        source_semantics: "New model submissions must copy the decoded JSON sources[].source string exactly into atoms[].sources; do not copy JSON escape syntax literally.".to_owned(),
+        compatibility: "Package-derived legacy aliases may be accepted by the validator for compatibility only; arbitrary values and prefix matches are never accepted.".to_owned(),
+        sources: sources.to_vec(),
+    })
+    .map_err(|error| PlanningError::TaskInputInvariant(format!("task source manifest json: {error}")))
+}
+
+fn render_canonical_task_source_manifest(json_bytes: &[u8]) -> Result<String, PlanningError> {
+    let json = std::str::from_utf8(json_bytes).map_err(|error| {
+        PlanningError::TaskInputInvariant(format!("task source manifest utf8: {error}"))
+    })?;
+    Ok(format!(
+        "## Package-authoritative source manifest for planning.task-atoms.v1\n\n\
+New model submissions must copy the decoded JSON `sources[].source` string exactly into `atoms[].sources`; do not copy JSON escape syntax literally. These are the only canonical task:// source atoms for the bound package documents.\n\
+Layer-5 `json://...#/body` Context Manifest addresses are context-read addresses, not legal atoms[].sources values. Do not use json:// values, path:line values, task://...#L line fragments, or task://...#/body as atoms[].sources.\n\n\
+{CANONICAL_TASK_SOURCE_MANIFEST_JSON_BEGIN}\n{json}\n{CANONICAL_TASK_SOURCE_MANIFEST_JSON_END}\n"
+    ))
 }
 
 fn task_document_basename_counts(documents: &[&TaskDocument]) -> BTreeMap<String, usize> {

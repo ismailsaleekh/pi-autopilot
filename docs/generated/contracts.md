@@ -34,7 +34,7 @@ Sources: `data/contracts.kdl`.
 | event_row | autopilot.event_row.v1 | Package | false | Append-only event row; events.jsonl is the sole state authority (D76 §5.4 + D77 Closure B). |
 | state_cache | autopilot.state_cache.v1 | Package | false | Disposable cache only, never an authority. State is fold(events); this cache may be deleted at any instant with zero semantic loss and any mismatch forces full replay (D77 Closure B). |
 | agent_handoff | autopilot.agent-handoff.v1 | Model | true | Model-facing checkpoint handoff. The package preserves unknown top-level properties and validates role-required critical_state slots from data/checkpoint-policy.kdl before compaction/resume. |
-| task_atoms | planning.task-atoms.v1 | Model | true | Model-facing task atom submission. Shape is deliberately small: structure is enforced by the submit tool; source values are checked against task authority anchors by the planning driver. |
+| task_atoms | planning.task-atoms.v1 | Model | true | Model-facing task atom submission. Shape is deliberately small: structure is enforced by the submit tool; source values are checked against runtime-supplied task source anchors by the planning driver. |
 | planning_atom_registry | autopilot.planning_atom_registry.v1 | Package | false | Create-once accepted task atom registry materialized by the seam after task extractors are accepted. |
 | scout_dossier | planning.scout-dossier.v1 | Model | true | Model-facing repository scout dossier. Shape is small; path values are checked against the pinned repository commit by the planning driver. |
 | questions | planning.questions.v1 | Model | true | Model-facing contradiction/question nominations. Empty questions are valid when no material unresolved issue remains. |
@@ -438,7 +438,7 @@ Sources: `data/contracts.kdl`.
 | task_atoms | field | task_atom.id | id | true |  |  |
 | task_atoms | field | task_atom.kind | planning_atom_kind | true |  |  |
 | task_atoms | field | task_atom.text | string | true |  |  |
-| task_atoms | list | task_atom.sources | ref | true |  | Task-document anchors supplied by the package. |
+| task_atoms | list | task_atom.sources | ref | true |  | Task-document anchors copied exactly from the decoded JSON sources[].source string values in the package-authoritative source manifest rendered at runtime; do not copy serialized JSON escape syntax literally. |
 | planning_atom_registry | field | schema | schema-id | true |  |  |
 | planning_atom_registry | field | workstream | id | true |  |  |
 | planning_atom_registry | field | authority_set_id | string | true |  |  |

@@ -8,9 +8,9 @@ use kdl::{KdlDocument, KdlEntry};
 use kernel::failure::{Failure, HardBoundary};
 use kernel::generated::{
     ActionKind, AgentRunSpec, AuthorityClass, BackgroundAction, BackgroundActionBgRun, Bytes,
-    ContextAnchor, ContextAnchorForm, ContextGap, ContextItem, ContractId, DeliveryResult, Digest,
-    Id, ModeId, Path as ContractPath, RedactionState, Ref, Sha, SupersessionState,
-    TaskDocument as ContractTaskDocument, TaskDocumentClass, ToolName, Uri,
+    ContextAnchor, ContextAnchorForm, ContextGap, ContextItem, ContextManifest, ContractId,
+    DeliveryResult, Digest, Id, ModeId, Path as ContractPath, RedactionState, Ref, Sha,
+    SupersessionState, TaskDocument as ContractTaskDocument, TaskDocumentClass, ToolName, Uri,
     ValidationAssignmentKind,
 };
 use serde::{Deserialize, Serialize};
@@ -28,6 +28,7 @@ const ROLES_KDL: &str = include_str!("../../../data/roles.kdl");
 const KNOWN_INCOMPLETE_TOOLS_KDL: &str = include_str!("../../../data/known-incomplete-tools.kdl");
 const DEFAULT_BG_TIMEOUT_SECONDS: u32 = 3600;
 const DEFAULT_REQUIRED_FOCUSED_EVIDENCE: u32 = 2;
+const PLANNING_CONTEXT_WINDOW_TOKENS: u32 = 200_000;
 const SKILLS_IDENTITY: &str = "agent-run-skills:disabled:v1";
 const TASK_ATOMS_ADMITS: &str = kernel::generated::TASK_ATOMS_ADMITS;
 const SCOUT_DOSSIER_ADMITS: &str = kernel::generated::SCOUT_DOSSIER_ADMITS;
@@ -1679,29 +1680,55 @@ fn render_planning_prompt(
             request.role_id.0, request.mode.0
         )));
     }
-    let context_manifest = planning_context_manifest_text(request, role, cwd)?;
+    let mut context_manifest = planning_context_manifest(request, role, cwd)?;
     let assignment = planning_assignment_text(request, role, route)?;
-    let input = crate::prompt::PromptInput {
-        role_id: request.role_id.0.clone(),
-        mode_id: request.mode.0.clone(),
-        mode_parameter: request.mode_parameter.clone(),
-        assignment_revision: request.run_revision.to_string(),
-        plan_revision: planning_assignment_digest(request)?,
-        runtime_revision: request.run_revision,
-        context_manifest_id: context_manifest.id,
-        git_identity: format!("cwd={}", cwd.display()),
-        assignment,
-        context_manifest: context_manifest.text,
-        contract: request.boundary_id.0.clone(),
-        runtime_overlay: None,
-    };
-    crate::prompt::render(&input)
-        .map_err(|error| RunnerError::InvalidSpec(format!("prompt render: {error:?}")))
+    let plan_revision = planning_assignment_digest(request)?;
+    for _ in 0..8 {
+        let context_manifest_text = serde_json::to_string_pretty(&context_manifest.manifest)
+            .map_err(|error| RunnerError::InvalidSpec(format!("context manifest json: {error}")))?;
+        let input = crate::prompt::PromptInput {
+            role_id: request.role_id.0.clone(),
+            mode_id: request.mode.0.clone(),
+            mode_parameter: request.mode_parameter.clone(),
+            assignment_revision: request.run_revision.to_string(),
+            plan_revision: plan_revision.clone(),
+            runtime_revision: request.run_revision,
+            context_manifest_id: context_manifest.id.clone(),
+            git_identity: format!("cwd={}", cwd.display()),
+            assignment: assignment.clone(),
+            context_manifest: context_manifest_text,
+            contract: request.boundary_id.0.clone(),
+            runtime_overlay: None,
+        };
+        let rendered = crate::prompt::render(&input)
+            .map_err(|error| RunnerError::InvalidSpec(format!("prompt render: {error:?}")))?;
+        let budget = rendered_prompt_budget(&rendered.text)?;
+        let next_tuple = (
+            PLANNING_CONTEXT_WINDOW_TOKENS,
+            budget.estimated_tokens,
+            budget.estimated_percent,
+        );
+        let current_tuple = (
+            context_manifest.manifest.budget.context_window,
+            context_manifest.manifest.budget.estimated_initial_tokens,
+            context_manifest.manifest.budget.estimated_percent,
+        );
+        if current_tuple == next_tuple {
+            return Ok(rendered);
+        }
+        context_manifest.manifest.budget.context_window = PLANNING_CONTEXT_WINDOW_TOKENS;
+        context_manifest.manifest.budget.estimated_initial_tokens = budget.estimated_tokens;
+        context_manifest.manifest.budget.estimated_percent = budget.estimated_percent;
+    }
+    Err(RunnerError::InvalidSpec(format!(
+        "rendered planning prompt budget did not converge for {}",
+        request.assignment_id.0
+    )))
 }
 
-struct PlanningContextManifestText {
+struct PlanningContextManifest {
     id: String,
-    text: String,
+    manifest: ContextManifest,
 }
 
 fn planning_assignment_digest(request: &PlanningRunnerRequest) -> Result<String, RunnerError> {
@@ -1728,7 +1755,7 @@ fn planning_assignment_text(
     role: &crate::roles::Role,
     route: &roster::Route,
 ) -> Result<String, RunnerError> {
-    serde_json::to_string_pretty(&serde_json::json!({
+    let assignment_json = serde_json::to_string_pretty(&serde_json::json!({
         "assignment_id": request.assignment_id.0,
         "action_id": request.action_id.0,
         "workstream": request.workstream,
@@ -1748,7 +1775,13 @@ fn planning_assignment_text(
         "bound_authority_documents": request.authority_documents.iter().map(document_binding_summary).collect::<Vec<_>>(),
         "bound_context_documents": request.context_documents.iter().map(document_binding_summary).collect::<Vec<_>>(),
     }))
-    .map_err(|error| RunnerError::InvalidSpec(format!("planning assignment json: {error}")))
+    .map_err(|error| RunnerError::InvalidSpec(format!("planning assignment json: {error}")))?;
+    if request.boundary_id.0 == "planning.task-atoms.v1" {
+        let manifest = planning_task_source_manifest_for_request(request)?;
+        Ok(format!("{assignment_json}\n\n{manifest}"))
+    } else {
+        Ok(assignment_json)
+    }
 }
 
 fn document_binding_summary(document: &RunnerTaskDocument) -> serde_json::Value {
@@ -1771,11 +1804,86 @@ fn artifact_binding_summary(artifact: &AcceptedPlanningArtifactBinding) -> serde
     })
 }
 
-fn planning_context_manifest_text(
+fn planning_task_source_manifest_for_request(
+    request: &PlanningRunnerRequest,
+) -> Result<String, RunnerError> {
+    let input_set = planning_task_input_set_from_runner_request(request);
+    let registry = crate::planning::TaskAnchorRegistry::from_input_set(&input_set)
+        .map_err(|error| RunnerError::InvalidSpec(format!("task source manifest: {error:?}")))?;
+    Ok(registry.canonical_source_manifest().to_owned())
+}
+
+fn planning_task_input_set_from_runner_request(
+    request: &PlanningRunnerRequest,
+) -> crate::planning::TaskInputSet {
+    crate::planning::TaskInputSet {
+        authority_set_id: request.authority_set_id.clone(),
+        authority_documents: request
+            .authority_documents
+            .iter()
+            .map(|document| {
+                planning_task_document_from_runner(
+                    document,
+                    crate::planning::TaskDocumentClass::Authority,
+                    &request.authority_set_id,
+                )
+            })
+            .collect(),
+        context_documents: request
+            .context_documents
+            .iter()
+            .map(|document| {
+                planning_task_document_from_runner(
+                    document,
+                    crate::planning::TaskDocumentClass::ContextNonAuthority,
+                    &request.authority_set_id,
+                )
+            })
+            .collect(),
+    }
+}
+
+fn planning_task_document_from_runner(
+    document: &RunnerTaskDocument,
+    class: crate::planning::TaskDocumentClass,
+    authority_set_id: &str,
+) -> crate::planning::TaskDocument {
+    crate::planning::TaskDocument {
+        id: document.path.clone(),
+        path: document.path.clone(),
+        class,
+        authority_set_id: authority_set_id.to_owned(),
+        body: document.body.clone(),
+        digest: document.digest.clone(),
+    }
+}
+
+fn rendered_prompt_budget(text: &str) -> Result<crate::context::BudgetDecision, RunnerError> {
+    let estimated_tokens = crate::context::estimate_tokens(text.as_bytes(), 512);
+    let post_pass_tokens = crate::context::estimate_tokens(text.as_bytes(), 0);
+    let budget = crate::context::route_budget(
+        estimated_tokens,
+        PLANNING_CONTEXT_WINDOW_TOKENS,
+        post_pass_tokens,
+    );
+    match budget.route {
+        crate::context::BudgetRoute::NormalLaunch => Ok(budget),
+        crate::context::BudgetRoute::ReprioritizeOnce => Err(RunnerError::InvalidSpec(format!(
+            "rendered planning prompt requires ReprioritizeOnce, but planning issuance does not perform reprioritization: estimated_initial_tokens={} estimated_percent={} context_window={}",
+            budget.estimated_tokens, budget.estimated_percent, PLANNING_CONTEXT_WINDOW_TOKENS
+        ))),
+        crate::context::BudgetRoute::SplitAssignment => Err(RunnerError::InvalidSpec(format!(
+            "rendered planning prompt requires SplitAssignment: estimated_initial_tokens={} estimated_percent={} context_window={}",
+            budget.estimated_tokens, budget.estimated_percent, PLANNING_CONTEXT_WINDOW_TOKENS
+        ))),
+    }
+}
+
+fn planning_context_manifest(
     request: &PlanningRunnerRequest,
     role: &crate::roles::Role,
     cwd: &Path,
-) -> Result<PlanningContextManifestText, RunnerError> {
+) -> Result<PlanningContextManifest, RunnerError> {
     let policies = crate::context::policy::ContextPolicyRegistry::package()
         .map_err(|error| RunnerError::InvalidSpec(format!("context policy registry: {error:?}")))?;
     let policy = policies
@@ -1791,36 +1899,12 @@ fn planning_context_manifest_text(
         "context-manifest-{}-{}-{}",
         request.workstream, request.assignment_id.0, request.run_revision
     );
-    let manifest_seed = serde_json::json!({
-        "assignment": request.assignment_id.0,
-        "policy": policy.id,
-        "mode": mode.id,
-        "authority": request.authority_documents.iter().map(document_binding_summary).collect::<Vec<_>>(),
-        "context_documents": request.context_documents.iter().map(document_binding_summary).collect::<Vec<_>>(),
-        "atom_registry_path": request.atom_registry_path,
-        "atom_registry_digest": request.atom_registry_digest,
-        "accepted_planning_artifacts": request.accepted_planning_artifacts.iter().map(artifact_binding_summary).collect::<Vec<_>>(),
-    });
-    let estimate_bytes = serde_json::to_vec(&manifest_seed).map_err(|error| {
-        RunnerError::InvalidSpec(format!("context manifest seed json: {error}"))
-    })?;
-    let budget = crate::context::route_budget(
-        crate::context::estimate_tokens(&estimate_bytes, 512),
-        200_000,
-        crate::context::estimate_tokens(&estimate_bytes, 128),
-    );
-    if budget.route == crate::context::BudgetRoute::SplitAssignment {
-        return Err(RunnerError::InvalidSpec(format!(
-            "context manifest over budget for {}",
-            request.assignment_id.0
-        )));
-    }
     let mut manifest = crate::context::manifest_shell(
         kernel::generated::Uuidv7(manifest_id.clone()),
         kernel::generated::Uuidv7(format!("run-{}", request.run_revision)),
         request.assignment_id.clone(),
         request.role_id.clone(),
-        budget,
+        crate::context::route_budget(0, PLANNING_CONTEXT_WINDOW_TOKENS, 0),
     );
     manifest.role.mode = request.mode.clone();
     manifest.freshness.task_revision = Digest(planning_assignment_digest(request)?);
@@ -1862,11 +1946,9 @@ fn planning_context_manifest_text(
         &mut manifest.gaps,
     )?;
 
-    let text = serde_json::to_string_pretty(&manifest)
-        .map_err(|error| RunnerError::InvalidSpec(format!("context manifest json: {error}")))?;
-    Ok(PlanningContextManifestText {
+    Ok(PlanningContextManifest {
         id: manifest_id,
-        text,
+        manifest,
     })
 }
 
@@ -2794,13 +2876,20 @@ pub(crate) fn task_anchor_registry_from_spec(
             )
         })
         .collect::<Vec<_>>();
-    Ok(crate::planning::TaskAnchorRegistry::from_input_set(
-        &crate::planning::TaskInputSet {
-            authority_set_id: authority_set_id.clone(),
-            authority_documents,
-            context_documents,
-        },
-    ))
+    let input_set = crate::planning::TaskInputSet {
+        authority_set_id: authority_set_id.clone(),
+        authority_documents,
+        context_documents,
+    };
+    match crate::planning::TaskAnchorRegistry::from_input_set(&input_set) {
+        Ok(registry) => Ok(registry),
+        Err(error) => {
+            runtime.reject(format!(
+                "boundary_id=planning.task-atoms.v1; field=task_source_manifest; expected=non-conflicting task document identities; got={error:?}; hint=repair package task bindings before accepting task atoms"
+            ))?;
+            unreachable!("runtime.reject returns Err in enforce mode")
+        }
+    }
 }
 
 fn planning_task_document_from_contract(

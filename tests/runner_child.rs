@@ -7,6 +7,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use drivers::planning;
 use drivers::runner::{
     child, planning_context_digest, planning_paths, role_tool_names, session_id_for,
     settings_digest,
@@ -728,6 +729,81 @@ fn fake_pi_boundary_retry_reuses_session_and_succeeds() {
     .expect("attempt events");
     assert!(attempts.contains("value-rejected"), "{attempts}");
     assert!(attempts.contains("accepted"), "{attempts}");
+}
+
+#[test]
+fn task_atom_value_repair_repeats_manifest_and_recovers_from_json_body_anchor() {
+    let root = temp_root("runner-task-source-repair");
+    let prompt_log = terminalmiss_prompt_log(&root);
+    let bad_source = format!(
+        "task://{}/TASK-A.md#/body",
+        task_document_digest("authority", "set-a", "AUTHORITY-A-SENTINEL")
+    );
+    let bad = json!({
+        "atoms":[{
+            "id":"planning-main-task-extractor-01-atom-bad",
+            "kind":"work",
+            "text":"bad source",
+            "sources":[bad_source]
+        }]
+    })
+    .to_string();
+    let accepted = transcript("planning.task-atoms.v1");
+    let expected_manifest = runner_child_expected_task_manifest();
+    let initial_prompt = format!(
+        "runner prompt with AUTHORITY-A-SENTINEL AUTHORITY-B-SENTINEL AUTHORITY-C-SENTINEL CONTEXT-SENTINEL-UNIQUE\n\n{expected_manifest}"
+    );
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            &format!("const repairPromptLog = {:?};", prompt_log),
+            &format!(
+                "appendFileSync(repairPromptLog, JSON.stringify({{count:promptCount,message:cmd.message}})+'\\n'); emitCarrier(promptCount === 1 ? {bad:?} : {accepted:?});"
+            ),
+        ),
+    );
+    let spec = write_planning_spec_with_prompt(
+        &root,
+        |value| value,
+        "planning.task-atoms.v1",
+        "gpt-5.5",
+        &initial_prompt,
+    );
+    with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect("repair should recover after exact run-19 #/body-style source");
+
+    let rows = terminalmiss_prompt_rows(&root);
+    assert_eq!(
+        rows.len(),
+        2,
+        "expected initial plus repair prompts: {rows:?}"
+    );
+    let initial = rows[0]["message"].as_str().expect("initial prompt");
+    let repair = rows[1]["message"].as_str().expect("repair prompt");
+    assert!(
+        repair.contains("Package-authoritative source manifest for planning.task-atoms.v1"),
+        "repair prompt lost canonical source manifest: {repair}"
+    );
+    assert!(
+        repair.contains("json://...#/body` Context Manifest addresses are context-read addresses, not legal atoms[].sources"),
+        "repair prompt lost JSON-address warning: {repair}"
+    );
+    assert!(
+        repair.contains(&expected_manifest),
+        "repair prompt does not repeat exact registry-owned canonical manifest bytes: {repair}"
+    );
+    let initial_json = extract_task_source_manifest_json(initial);
+    let repair_json = extract_task_source_manifest_json(repair);
+    assert_eq!(
+        initial_json.as_bytes(),
+        repair_json.as_bytes(),
+        "real initial rendered prompt and real repair prompt must carry identical canonical manifest JSON bytes"
+    );
+    let carrier: Value = serde_json::from_slice(&fs::read(carrier_path(&root)).expect("carrier"))
+        .expect("carrier json");
+    assert_eq!(carrier["raw_output"], accepted);
 }
 
 #[test]
@@ -2353,9 +2429,7 @@ const SKILLS_IDENTITY: &str = "agent-run-skills:disabled:v1";
 
 fn contract_digest(contract_id: &str) -> String {
     let admits = match contract_id {
-        "planning.task-atoms.v1" => {
-            "Task extractor output must use the exact runner-issued atom id prefix for every atoms[].id, name operator-task atoms with source anchors, and include no repository findings. Call autopilot_submit_atoms as the final action with atoms containing id, kind, text, and sources."
-        }
+        "planning.task-atoms.v1" => kernel::generated::TASK_ATOMS_ADMITS,
         other => panic!("test fixture missing contract digest for {other}"),
     };
     sha256_hex(format!("{contract_id}\0{admits}").as_bytes())
@@ -2390,6 +2464,80 @@ fn planning_context_digest_for_spec(
             .expect("context documents match agent-run spec schema");
     planning_context_digest(authority_set_id, &authority_documents, &context_documents)
         .expect("planning context digest")
+}
+
+fn extract_task_source_manifest_json(text: &str) -> String {
+    let begin = drivers::planning::CANONICAL_TASK_SOURCE_MANIFEST_JSON_BEGIN;
+    let end = drivers::planning::CANONICAL_TASK_SOURCE_MANIFEST_JSON_END;
+    let begin_line = format!("\n{begin}\n");
+    let start = text
+        .find(&begin_line)
+        .map(|index| index + begin_line.len())
+        .or_else(|| {
+            text.starts_with(&format!("{begin}\n"))
+                .then(|| begin.len() + 1)
+        })
+        .expect("manifest JSON begin marker line");
+    let rest = &text[start..];
+    let end_line = format!("\n{end}\n");
+    let stop = rest.find(&end_line).expect("manifest JSON end marker line");
+    rest[..stop].to_owned()
+}
+
+fn runner_child_expected_task_manifest() -> String {
+    let authority_documents = [
+        planning_task_doc(
+            "TASK-A.md",
+            planning::TaskDocumentClass::Authority,
+            "AUTHORITY-A-SENTINEL",
+        ),
+        planning_task_doc(
+            "TASK-B.md",
+            planning::TaskDocumentClass::Authority,
+            "AUTHORITY-B-SENTINEL",
+        ),
+        planning_task_doc(
+            "TASK-C.md",
+            planning::TaskDocumentClass::Authority,
+            "AUTHORITY-C-SENTINEL",
+        ),
+    ];
+    let context_documents = [planning_task_doc(
+        "CONTEXT.md",
+        planning::TaskDocumentClass::ContextNonAuthority,
+        "CONTEXT-SENTINEL-UNIQUE",
+    )];
+    let input = planning::TaskInputSet {
+        authority_set_id: "set-a".to_owned(),
+        authority_documents: authority_documents.to_vec(),
+        context_documents: context_documents.to_vec(),
+    };
+    planning::TaskAnchorRegistry::from_input_set(&input)
+        .expect("valid runner child task manifest input")
+        .canonical_source_manifest()
+        .to_owned()
+}
+
+fn planning_task_doc(
+    path: &str,
+    class: planning::TaskDocumentClass,
+    body: &str,
+) -> planning::TaskDocument {
+    let class_name = match class {
+        planning::TaskDocumentClass::Authority => "authority",
+        planning::TaskDocumentClass::ContextNonAuthority => "context/non-authority",
+        planning::TaskDocumentClass::HistoricalNonAuthority => "historical/non-authority",
+        planning::TaskDocumentClass::IndexNonAuthority => "index/non-authority",
+        planning::TaskDocumentClass::InlineTask => "inline-task",
+    };
+    planning::TaskDocument {
+        id: path.to_owned(),
+        path: path.to_owned(),
+        class,
+        authority_set_id: "set-a".to_owned(),
+        body: body.to_owned(),
+        digest: task_document_digest(class_name, "set-a", body),
+    }
 }
 
 fn task_atoms_output(path: &str, body: &str) -> String {
