@@ -987,10 +987,6 @@ impl RpcAssignment {
             "AUTOPILOT_AGENT_RUN_MAX_STDERR_BYTES",
             DEFAULT_MAX_PI_STDERR_BYTES,
         );
-        let stdout_limit = env_usize(
-            "AUTOPILOT_AGENT_RUN_MAX_STDOUT_BYTES",
-            DEFAULT_MAX_PI_STDOUT_BYTES,
-        );
         let policy = CheckpointPolicy::parse()?;
         let mut config = RpcSpawnConfig::new(
             PathBuf::from(&spec.cwd.0),
@@ -1002,7 +998,21 @@ impl RpcAssignment {
             tools,
         );
         config.stderr_tail_bytes = stderr_limit;
-        config.max_terminal_bytes = stdout_limit.max(DEFAULT_MAX_PI_STDOUT_BYTES);
+        // The terminal payload budget bounds the child's structured WORK PRODUCT (a
+        // `message_end` / `tool_execution_end` frame), which is a different concept from
+        // the raw-stdout ceiling. Deriving it from AUTOPILOT_AGENT_RUN_MAX_STDOUT_BYTES
+        // silently discarded the declared 2 MiB terminal budget and pinned the effective
+        // limit at the 1 MiB stdout default, so a legitimate 1,062,182-byte plan review
+        // hard-failed an entire LIVE run 1.3% over a limit that was never intended to
+        // apply. The terminal budget now has its own knob and its own default; the
+        // stdout knob no longer influences it at all: verified that the three tests
+        // setting AUTOPILOT_AGENT_RUN_MAX_STDOUT_BYTES to 1024/4096 were ALREADY no-ops
+        // at HEAD, because the old `.max(DEFAULT_MAX_PI_STDOUT_BYTES)` floor swallowed
+        // any value below 1 MiB. Keeping a floor here would only re-couple the budgets.
+        config.max_terminal_bytes = env_usize(
+            "AUTOPILOT_AGENT_RUN_MAX_TERMINAL_BYTES",
+            crate::generated::pi_rpc::DEFAULT_MAX_TERMINAL_BYTES,
+        );
         if let Some((path, _)) = runtime_addon(spec) {
             config.runtime_addon = Some(PathBuf::from(&path.0));
             config.terminal_profile = spec.terminal_profile_id.clone();

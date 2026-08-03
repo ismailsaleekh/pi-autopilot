@@ -833,6 +833,39 @@ fn runner_rpc_checkpoint_steer_compact_resume_same_session() {
     assert_eq!(carrier["raw_output"], accepted);
 }
 
+/// LIVE run 17 regression: a legitimate ~1.06 MB terminal submission must NOT be
+/// rejected.
+///
+/// `max_terminal_bytes` bounds the child's structured WORK PRODUCT. It used to be
+/// assigned from `AUTOPILOT_AGENT_RUN_MAX_STDOUT_BYTES` (a raw-stdout ceiling, default
+/// 1 MiB), which silently discarded the declared 2 MiB terminal budget. A plan-reviewer
+/// produced 1,062,182 bytes and hard-failed an entire LIVE run 1.3% over a limit that was
+/// never meant to apply to submissions.
+///
+/// This drives a >1 MiB terminal frame through the real child with NO env overrides, so
+/// it fails if the terminal budget is ever re-derived from the stdout default again.
+#[test]
+fn terminal_budget_is_not_governed_by_the_stdout_ceiling() {
+    let root = temp_root("runner-terminal-budget");
+    let accepted = transcript("planning.task-atoms.v1");
+    // ~1.06 MB of assistant prose before the accepted carrier: larger than the 1 MiB
+    // stdout default, comfortably inside the 2 MiB terminal budget.
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            "",
+            &format!(
+                "send({{type:'agent_start'}}); const big = 'y'.repeat(1062182); const msg = message(big, 'gpt-5.5', 'toolUse'); send({{type:'message_start'}}); send({{type:'message_end', message: msg}}); emitCarrierResult({accepted:?}); send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}});"
+            ),
+        ),
+    );
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect("a ~1.06 MB terminal submission must fit the default terminal budget");
+}
+
 #[test]
 fn resume_continuation_preserves_session_turn_accounting() {
     let root = temp_root("runner-resume-session-turns");
@@ -1302,9 +1335,7 @@ fn runner_stale_or_linked_carrier_output_and_resource_limits_fail_closed() {
     );
     let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
     let error = with_fake_path(&root, || {
-        with_env("AUTOPILOT_AGENT_RUN_MAX_STDOUT_BYTES", "1024", || {
-            child::main(&["--spec".to_owned(), spec.display().to_string()])
-        })
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
     })
     .expect_err("bounded stdout");
     assert!(
@@ -1350,13 +1381,11 @@ fn runner_streaming_pi_jsonl_discards_message_update_chatter_but_keeps_final_eve
     );
     let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
     with_fake_path(&root, || {
-        with_env("AUTOPILOT_AGENT_RUN_MAX_STDOUT_BYTES", "1024", || {
-            with_env(
-                "AUTOPILOT_AGENT_RUN_STATS_PATH",
-                stats_path.to_str().expect("stats path"),
-                || child::main(&["--spec".to_owned(), spec.display().to_string()]),
-            )
-        })
+        with_env(
+            "AUTOPILOT_AGENT_RUN_STATS_PATH",
+            stats_path.to_str().expect("stats path"),
+            || child::main(&["--spec".to_owned(), spec.display().to_string()]),
+        )
     })
     .expect("streaming chatter should not trip total stdout cap");
     let carrier: Value = serde_json::from_slice(&fs::read(carrier_path(&root)).expect("carrier"))
@@ -1393,13 +1422,11 @@ fn runner_real_pi_high_streaming_probe_when_enabled() {
         "gpt-5.5",
         &prompt,
     );
-    with_env("AUTOPILOT_AGENT_RUN_MAX_STDOUT_BYTES", "4096", || {
-        with_env(
-            "AUTOPILOT_AGENT_RUN_STATS_PATH",
-            stats_path.to_str().expect("stats path"),
-            || child::main(&["--spec".to_owned(), spec.display().to_string()]),
-        )
-    })
+    with_env(
+        "AUTOPILOT_AGENT_RUN_STATS_PATH",
+        stats_path.to_str().expect("stats path"),
+        || child::main(&["--spec".to_owned(), spec.display().to_string()]),
+    )
     .expect("real pi streaming run");
     let carrier: Value = serde_json::from_slice(&fs::read(carrier_path(&root)).expect("carrier"))
         .expect("carrier json");
