@@ -426,6 +426,53 @@ fn lane_has_live_delivery(state: &CoreState, lane_id: &Id) -> bool {
         })
 }
 
+/// Forward-criterion gates satisfied by the lane that just closed.
+///
+/// `predecessor_forward_criteria` is synthesized by the package itself: the unit at
+/// operator order N carries `FC{N-1}`, meaning "the unit at operator order N-1 has
+/// delivered" (see `approved_units_from_work_map` in data/seam_real_producers.rs).
+/// Readiness reads those as `gate:<criterion>` refs, but NOTHING EVER APPENDED THEM, so
+/// `predecessor_gates_met` was permanently false and no unit after the first could ever
+/// become dispatchable. LIVE run 18 closed L1 and then deadlocked on exactly that.
+///
+/// A closing lane therefore satisfies the gate its successors wait on. The mapping is
+/// derived from the approved plan, never invented: we look up the closing lane's unit,
+/// take its operator order N, and emit `gate:FC{N}` only when some other unit actually
+/// declares it. A criterion nobody declares is not emitted, and a lane we cannot resolve
+/// is a loud error rather than a silently ungated close.
+fn satisfied_forward_gate_refs(
+    workstream: &str,
+    lane_id: Option<&Id>,
+) -> Result<Vec<Ref>, AnyError> {
+    let Some(lane_id) = lane_id else {
+        return Ok(Vec::new());
+    };
+    let approved = read_approved_plan(workstream)
+        .map_err(|error| format!("CONTEXT_GAP:approved-plan:{error}"))?;
+    let submission = allocation_submission_from_plan(workstream, &approved)
+        .map_err(|error| format!("CONTEXT_GAP:allocation:{error}"))?;
+    let lane = submission
+        .lanes
+        .iter()
+        .find(|lane| lane.lane_id == *lane_id)
+        .ok_or_else(|| format!("forward-gate:unknown-lane:{}", lane_id.0))?;
+    let mut refs = Vec::new();
+    for unit_id in &lane.ordered_unit_ids {
+        let unit = approved
+            .iter()
+            .find(|unit| unit.id == *unit_id)
+            .ok_or_else(|| format!("forward-gate:unknown-unit:{}", unit_id.0))?;
+        let criterion = Id(format!("FC{}", unit.operator_order));
+        if approved
+            .iter()
+            .any(|other| other.predecessor_forward_criteria.contains(&criterion))
+        {
+            refs.push(Ref(format!("gate:{}", criterion.0)));
+        }
+    }
+    Ok(refs)
+}
+
 fn lane_closed(state: &CoreState, lane_id: &Id) -> bool {
     has_exact_ref(state, &format!("unit-closed:{}", lane_id.0))
 }
@@ -2090,7 +2137,13 @@ fn integrate_validated_candidate(
                     .map(|id| id.0.as_str())
                     .unwrap_or("unknown")
             )),
-        ],
+        ]
+        .into_iter()
+        .chain(satisfied_forward_gate_refs(
+            workstream,
+            binding.lane_id.as_ref(),
+        )?)
+        .collect::<Vec<_>>(),
     )?;
     if let Some(status) =
         advance_lifecycle_if_ready(workstream, None, ClosureTrigger::IntegrationComplete, state)?

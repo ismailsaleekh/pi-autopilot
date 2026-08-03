@@ -130,6 +130,40 @@ fn integration_replay_does_not_double_dispatch() {
     assert_eq!(fixture.count_agent_spawns("assignment-main-L2"), 1);
 }
 
+/// LIVE run 18 regression: a unit gated on a predecessor's forward criterion must
+/// become dispatchable once that predecessor CLOSES.
+///
+/// `predecessor_forward_criteria` is synthesized by the package: the unit at operator
+/// order N carries `FC{N-1}`. Readiness required a `gate:FC{N-1}` ref, but nothing ever
+/// appended one and the fallback was a stub that always returned false, so
+/// `predecessor_gates_met` was permanently false. LIVE run 18 closed L1 and then
+/// deadlocked with `dispatch-stuck ... blocked=[L2:unmet_dependency_gate:FC1]`.
+///
+/// This drives the exact shape: 2 units where U2 declares FC1.
+#[test]
+fn forward_criteria_gate_opens_when_the_predecessor_closes() {
+    let _guard = CWD_LOCK.lock().expect("cwd lock");
+    // block_after_first = true => U2 declares predecessor_forward_criteria ["FC1"].
+    let fixture = AdvanceFixture::new("forward-gate", 2, true);
+    let mut state = fixture.state();
+
+    let first = spawn_payload(send_command(&mut state, "autopilot main"));
+    assert_eq!(first.action.assignment_id.0, "assignment-main-L1");
+
+    // Closing L1 must satisfy FC1 and therefore make L2 dispatchable.
+    let after_l1 = fixture.complete_lane(&mut state, &first, "l1");
+    assert_eq!(
+        after_l1.kind, "spawn",
+        "closing L1 must satisfy FC1 and dispatch L2, not deadlock: {after_l1:?}"
+    );
+    let next = spawn_payload(after_l1);
+    assert_eq!(next.action.assignment_id.0, "assignment-main-L2");
+
+    // The gate must be recorded as real evidence in the event log.
+    let events = fs::read_to_string(&fixture.event_path).expect("events");
+    assert!(events.contains("gate:FC1"), "events: {events}");
+}
+
 /// A lane with a LIVE implementer binding must never be dispatched twice.
 ///
 /// The exclusion that must do this work is `lane_has_live_delivery`, which is derived
