@@ -1,19 +1,27 @@
 use std::{
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use drivers::planning::{
-    MODEL_BOUNDARIES, accept_plan_review, accept_questions, accept_scout_dossier,
-    accept_task_atoms, accept_work_map, boundary_runtime,
+    ATOM_REGISTRY_MAX_BYTES, MODEL_BOUNDARIES, accept_plan_review, accept_questions,
+    accept_scout_dossier, accept_task_atoms, accept_work_map, accept_work_map_for_atoms,
+    boundary_runtime,
 };
 use drivers::transcript::{
     BoundaryModeTable, TranscriptProvenance, TranscriptRecord, TranscriptStore,
 };
-use kernel::boundary::{
-    BOUNDARIES, BoundaryDescriptor, BoundaryMode, BoundaryRuntime, Producer, Rejection,
+use kernel::{
+    boundary::{
+        BOUNDARIES, BoundaryDescriptor, BoundaryMode, BoundaryRuntime, Producer, Rejection,
+    },
+    generated::Id,
 };
 use sha2::{Digest as ShaDigest, Sha256};
+
+static BOUNDARY_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 fn model_boundaries_are_enforced_or_loudly_reported_in_record_phase() {
@@ -226,6 +234,100 @@ fn work_map_boundary_rejects_non_delivery_kinds_and_empty_scope_or_commands() {
         assert!(
             accept_work_map(&raw, &runtime).is_err(),
             "{label} work-map mutation was admitted"
+        );
+    }
+}
+
+#[test]
+fn work_map_atom_registry_links_admit_only_exact_ids_without_expansion() {
+    let runtime = boundary_runtime("planning.work-map.v1");
+    let atom_ids = ["TE01-001", "TE01-002", "TE01-003"]
+        .into_iter()
+        .map(|id| Id(id.to_owned()))
+        .collect::<BTreeSet<_>>();
+    let valid = serde_json::json!({"units":[{"id":"U1","kind":"implementation","objective":"impl","criteria":["c"],"depends_on":[],"files":["src/lib.rs"],"commands":[command_authority("no-effect", vec![], "none", "No final Git-visible state remains outside approved files.")],"links":["TE01-001","TE01-003"]}]}).to_string();
+    accept_work_map_for_atoms(&valid, &runtime, &atom_ids, "registry-digest")
+        .expect("exact atom ids are admitted");
+
+    for (label, links) in [
+        ("unknown", vec!["TE01-999"]),
+        ("prefixed", vec!["atoms:TE01-001"]),
+        ("ranged", vec!["TE01-001..TE01-003"]),
+        ("comma-group", vec!["TE01-001,TE01-002"]),
+        ("source-style", vec!["task://task/TASK-A.md#whole-file"]),
+        ("scout-ref", vec!["scout:repository-scout-01"]),
+        ("context-ref", vec!["context:repo-facts"]),
+        ("artifact-ref", vec!["artifact://work-map"]),
+        ("empty-artifact", vec![""]),
+    ] {
+        let raw = serde_json::json!({"units":[{"id":"U1","kind":"implementation","objective":"impl","criteria":["c"],"depends_on":[],"files":["src/lib.rs"],"commands":[command_authority("no-effect", vec![], "none", "No final Git-visible state remains outside approved files.")],"links":links}]}).to_string();
+        assert!(
+            accept_work_map_for_atoms(&raw, &runtime, &atom_ids, "registry-digest").is_err(),
+            "{label} pseudo-link was rewritten or admitted"
+        );
+    }
+}
+
+#[test]
+fn atom_link_manifest_registry_authority_fails_closed_on_bad_bindings() {
+    let root = boundary_temp_dir("atom-link-manifest");
+    fs::create_dir_all(&root).expect("temp root");
+    let valid_path = root.join("registry.json");
+    let valid_bytes = atom_registry_bytes(&["TE01-002", "TE01-001"]);
+    let valid_digest = sha256_hex(&valid_bytes);
+    fs::write(&valid_path, &valid_bytes).expect("valid registry");
+    let manifest = drivers::planning::atom_link_manifest_for_registry(&valid_path, &valid_digest)
+        .expect("valid manifest renders");
+    assert!(manifest.contains("allowed_ids_sorted: [TE01-001, TE01-002]"));
+
+    let missing = root.join("missing.json");
+    assert!(
+        drivers::planning::atom_link_manifest_for_registry(&missing, &valid_digest).is_err(),
+        "missing registry rendered"
+    );
+    assert!(
+        drivers::planning::atom_link_manifest_for_registry(&valid_path, &"0".repeat(64)).is_err(),
+        "digest drift rendered"
+    );
+
+    let malformed_path = root.join("malformed.json");
+    let malformed = b"{not-json";
+    let malformed_digest = sha256_hex(malformed);
+    fs::write(&malformed_path, malformed).expect("malformed registry");
+    assert!(
+        drivers::planning::atom_link_manifest_for_registry(&malformed_path, &malformed_digest)
+            .is_err(),
+        "malformed registry rendered"
+    );
+
+    let duplicate_path = root.join("duplicate.json");
+    let duplicate = atom_registry_bytes(&["TE01-001", "TE01-001"]);
+    let duplicate_digest = sha256_hex(&duplicate);
+    fs::write(&duplicate_path, duplicate).expect("duplicate registry");
+    assert!(
+        drivers::planning::atom_link_manifest_for_registry(&duplicate_path, &duplicate_digest)
+            .is_err(),
+        "duplicate registry rendered"
+    );
+
+    let over_budget_path = root.join("over-budget.json");
+    let over_budget = vec![b'x'; ATOM_REGISTRY_MAX_BYTES + 1];
+    let over_budget_digest = sha256_hex(&over_budget);
+    fs::write(&over_budget_path, over_budget).expect("over-budget registry");
+    assert!(
+        drivers::planning::atom_link_manifest_for_registry(&over_budget_path, &over_budget_digest)
+            .is_err(),
+        "over-budget registry rendered"
+    );
+
+    #[cfg(unix)]
+    {
+        let symlink_path = root.join("registry-link.json");
+        std::os::unix::fs::symlink(&valid_path, &symlink_path).expect("registry symlink");
+        assert!(
+            drivers::planning::atom_link_manifest_for_registry(&symlink_path, &valid_digest)
+                .is_err(),
+            "symlink registry rendered"
         );
     }
 }
@@ -694,6 +796,46 @@ fn replay_gate_rejects_malformed_plan_review() {
         Err(value) => value,
     };
     assert_eq!(rejection.boundary_id(), "planning.plan-review.v1");
+}
+
+fn atom_registry_bytes(ids: &[&str]) -> Vec<u8> {
+    let atoms = ids
+        .iter()
+        .map(|id| {
+            serde_json::json!({
+                "id": id,
+                "producer_assignment_id": "planning-main-task-extractor-01",
+                "kind": "work",
+                "text": format!("task atom {id}"),
+                "sources": ["task://task/TASK-A.md#whole-file"]
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_vec_pretty(&serde_json::json!({
+        "schema":"autopilot.planning_atom_registry.v1",
+        "workstream":"main",
+        "authority_set_id":"set-a",
+        "producer_assignment_ids":["planning-main-task-extractor-01"],
+        "atoms":atoms
+    }))
+    .expect("registry json")
+}
+
+fn boundary_temp_dir(label: &str) -> PathBuf {
+    let unique = BOUNDARY_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!(
+        "pi-autopilot-boundary-{label}-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&root).expect("temp root");
+    fs::canonicalize(root).expect("canonical temp root")
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn validate_transcript_root(root: &Path) -> Result<(), String> {

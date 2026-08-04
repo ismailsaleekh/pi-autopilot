@@ -20,8 +20,12 @@ declare module "@earendil-works/pi-coding-agent" {
     readonly promptSnippet?: string;
     readonly promptGuidelines?: readonly string[];
     readonly parameters?: unknown;
-    execute(toolCallId: string, params: Record<string, unknown>): Promise<unknown> | unknown;
+    execute(toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal, onUpdate?: unknown, ctx?: unknown): Promise<unknown> | unknown;
   }
+
+  export type BashOperations = { exec(command: string, cwd: string, options: { onData(data: Buffer): void; signal?: AbortSignal; timeout?: number; env?: NodeJS.ProcessEnv }): Promise<{ exitCode: number | null }> };
+  export type EditOperations = { readFile(path: string): Promise<Buffer>; writeFile(path: string, content: string): Promise<void>; access(path: string): Promise<void> };
+  export type WriteOperations = { writeFile(path: string, content: string): Promise<void>; mkdir(path: string): Promise<void> };
 
   export interface ExtensionAPI {
     readonly events: EventBus;
@@ -34,4 +38,8 @@ declare module "@earendil-works/pi-coding-agent" {
   }
 
   export function defineTool<T extends ToolDefinition>(definition: T): T;
+  export function createBashTool(cwd: string, options?: { operations?: BashOperations }): ToolDefinition;
+  export function createEditTool(cwd: string, options?: { operations?: EditOperations }): ToolDefinition;
+  export function createWriteTool(cwd: string, options?: { operations?: WriteOperations }): ToolDefinition;
+  export function createLocalBashOperations(): BashOperations;
 }

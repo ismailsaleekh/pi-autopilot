@@ -7,6 +7,8 @@ import { fileURLToPath } from 'node:url';
 
 const PACKAGE_ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const MANIFEST = 'retain-port-delete.yaml';
+// Kept byte-identical with codegen's CHILD_RUNTIME_ENTRY (codegen/src/emit.rs).
+const CHILD_RUNTIME_ENTRY = 'child-runtime/child-extension-runtime.ts';
 const DISPOSITIONS = new Set(['retain', 'port', 'rewrite', 'delete']);
 const TOP_KEYS = new Set(['schema', 'baseline', 'generated_at_wave', 'dispositions']);
 const BASELINE_KEYS = new Set(['commit', 'tree', 'tracked_paths', 'total_loc']);
@@ -175,6 +177,9 @@ function allowedRuntimePath(path, binEntries) {
   if (path === 'src/resolve-runner.ts' || path === 'src/resolve-core-runtime.d.ts') return false;
   if (path === 'src/resolve-core-runtime.js') return true;
   if (path.startsWith('src/') && path.endsWith('.ts')) return true;
+  // The child delivery runtime, loaded inside spawned `--no-extensions -e <addon>`
+  // children. Exactly one file, named exactly — not a directory wildcard.
+  if (path === CHILD_RUNTIME_ENTRY) return true;
   if (path.startsWith('docs/generated/') && path.endsWith('.md')) return true;
   if (path === 'binaries/MANIFEST.json') return true;
   if (/^binaries\/(darwin-arm64|darwin-x64|linux-arm64|linux-x64)\/autopilot-core$/u.test(path)) return true;
@@ -209,6 +214,7 @@ function main() {
     { path: runnerBinEntry, reason: 'package.json bin.autopilot-agent-run' },
     { path: 'src/generated/index.ts', reason: 'generated seam types' },
     { path: 'src/generated/child-extension.ts', reason: 'generated child submit tools' },
+    { path: CHILD_RUNTIME_ENTRY, reason: 'child delivery runtime imported by the generated wrapper' },
     ...hostRuntimeSources.map((path) => ({ path, reason: 'Host runtime source' })),
     ...hostRuntimeSources.flatMap(runtimeInputsFromSource),
   ];

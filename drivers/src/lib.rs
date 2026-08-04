@@ -10,6 +10,7 @@ pub mod clock;
 pub mod closure;
 pub mod conflict;
 pub mod context;
+pub mod contract_authority;
 pub mod control;
 pub mod dispatch;
 pub mod entropy;

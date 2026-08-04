@@ -1,6 +1,7 @@
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 #![recursion_limit = "256"]
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -8,14 +9,16 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use drivers::allocation::{ApprovedCriterion, ApprovedUnit};
 use drivers::planning;
 use drivers::runner::{
-    child, planning_context_digest, planning_paths, repository_authority_binding, role_tool_names,
-    session_id_for, settings_digest,
+    RunnerAssignment, RunnerTransportFacts, child, delivery_issue_with_facts,
+    planning_context_digest, planning_paths, repository_authority_binding, role_runtime,
+    role_tool_names, session_id_for, settings_digest,
 };
 use drivers::seam::{self, CoreState};
 use drivers::vcs::GitVcs;
-use kernel::generated::{ContractId, Id, ModeId, SeamEnvelope, TaskDocument};
+use kernel::generated::{ContractId, Id, ModeId, SeamEnvelope, Sha, TaskDocument};
 use serde_json::{Value, json};
 use sha2::{Digest as ShaDigest, Sha256};
 
@@ -520,6 +523,177 @@ fn ordinary_tool_results_without_details_before_terminal_submit_succeed() {
 }
 
 #[test]
+fn delivery_child_first_terminal_blocked_attempt_writes_blocked_carrier_without_mutation() {
+    let root = temp_root("runner-delivery-blocked-first");
+    let worktree = delivery_worktree(&root, "first");
+    let prompt_count_path = root.join("prompt-count.txt");
+    let blocked = delivery_blocked_payload();
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            &format!("const promptCountPath = {:?};", prompt_count_path),
+            &format!(
+                "writeFileSync(promptCountPath, String(promptCount)); if (promptCount !== 1) process.exit(45); emitCarrier({blocked:?});"
+            ),
+        ),
+    );
+    let spec = write_delivery_spec(&root, &worktree, |value| value);
+    let before_head = git_stdout(&worktree, &["rev-parse", "--verify", "HEAD^{commit}"]);
+    let before_readme = fs::read_to_string(worktree.join("README.md")).expect("readme before");
+
+    with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect("blocked delivery is a valid terminal carrier");
+
+    assert_eq!(
+        fs::read_to_string(&prompt_count_path).expect("prompt count"),
+        "1"
+    );
+    assert_eq!(
+        attempt_events(&worktree, "assignment-main-L1"),
+        ["started", "accepted"]
+    );
+    let carrier: Value =
+        serde_json::from_slice(&fs::read(delivery_carrier_path(&worktree)).expect("carrier"))
+            .expect("carrier json");
+    assert_eq!(carrier["schema"], "autopilot.delivery_result.v2");
+    assert_eq!(carrier["tool_name"], "autopilot_emit_status");
+    assert_eq!(carrier["submission"]["terminal_status"], "blocked");
+    assert_eq!(carrier["submission"]["actual_changed_paths"], json!([]));
+    assert_eq!(
+        carrier["submission"]["focused_evidence_refs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        carrier["submission"]["hard_boundary_violations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(carrier["tool_call_id"], "call_fake_submit_1");
+    let audit_path = PathBuf::from(carrier["tool_audit_ref"].as_str().expect("tool audit ref"));
+    let audit_bytes = fs::read(&audit_path).expect("tool audit");
+    assert_eq!(carrier["tool_audit_digest"], sha256_hex(&audit_bytes));
+    let audit: Value = serde_json::from_slice(&audit_bytes).expect("tool audit json");
+    let spec_json: Value =
+        serde_json::from_slice(&fs::read(&spec).expect("spec json")).expect("spec json");
+    assert_eq!(
+        audit["delivery_policy"]["assignment_path"],
+        spec_json["assignment_path"]
+    );
+    assert_eq!(
+        audit["delivery_policy"]["assignment_digest"],
+        spec_json["assignment_digest"]
+    );
+    assert_eq!(audit["delivery_policy"]["worktree"], spec_json["worktree"]);
+    assert_eq!(audit["delivery_policy"]["cwd"], spec_json["cwd"]);
+    assert_eq!(
+        audit["delivery_policy"]["active_overrides"],
+        json!(["bash", "edit", "write"])
+    );
+    assert!(
+        !attempt_events(&worktree, "assignment-main-L1").contains(&"value-rejected".to_owned())
+    );
+    assert_eq!(
+        git_stdout(&worktree, &["rev-parse", "--verify", "HEAD^{commit}"]),
+        before_head
+    );
+    assert_eq!(
+        fs::read_to_string(worktree.join("README.md")).expect("readme after"),
+        before_readme
+    );
+    assert_eq!(git_stdout(&worktree, &["status", "--porcelain=v1"]), "");
+}
+
+#[test]
+fn delivery_blocked_value_repair_repeats_no_mutation_authority_and_preserves_blocked() {
+    let root = temp_root("runner-delivery-blocked-repair");
+    let worktree = delivery_worktree(&root, "repair");
+    let prompt_log = root.join("delivery-repair-prompts.jsonl");
+    let bad = json!({
+        "actual_changed_paths": [],
+        "execution_audit_ref": "audit:delivery-blocked",
+        "focused_evidence_refs": ["evidence:0", "evidence:1"],
+        "terminal_status": "blocked",
+        "hard_boundary_violations": []
+    })
+    .to_string();
+    let blocked = delivery_blocked_payload();
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            &format!("const repairPromptLog = {:?};", prompt_log),
+            &format!(
+                "appendFileSync(repairPromptLog, JSON.stringify({{count:promptCount,message:cmd.message}})+'\\n'); emitCarrier(promptCount === 1 ? {bad:?} : {blocked:?});"
+            ),
+        ),
+    );
+    let spec = write_delivery_spec(&root, &worktree, |value| value);
+    let before_head = git_stdout(&worktree, &["rev-parse", "--verify", "HEAD^{commit}"]);
+    let before_readme = fs::read_to_string(worktree.join("README.md")).expect("readme before");
+
+    with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect("blocked metadata repair should recover");
+
+    let rows = fs::read_to_string(&prompt_log)
+        .expect("prompt log")
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("prompt row"))
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 2, "initial plus repair prompts: {rows:?}");
+    let initial = rows[0]["message"].as_str().expect("initial prompt");
+    let repair = rows[1]["message"].as_str().expect("repair prompt");
+    for required in [
+        "Package delivery admission authority",
+        "Closed outcome admission:",
+        "No-mutation blocked posture",
+        "blocked: empty actual_changed_paths",
+        "Value repair may correct carrier metadata only; it must not mutate files, seek another checkout, or manufacture success.",
+    ] {
+        assert!(
+            initial.contains(required),
+            "initial prompt lost {required}: {initial}"
+        );
+        assert!(
+            repair.contains(required),
+            "repair prompt lost {required}: {repair}"
+        );
+    }
+    assert_eq!(
+        attempt_events(&worktree, "assignment-main-L1"),
+        ["started", "value-rejected", "started", "accepted"]
+    );
+    let carrier: Value =
+        serde_json::from_slice(&fs::read(delivery_carrier_path(&worktree)).expect("carrier"))
+            .expect("carrier json");
+    assert_eq!(carrier["submission"]["terminal_status"], "blocked");
+    assert_eq!(carrier["submission"]["actual_changed_paths"], json!([]));
+    assert_eq!(
+        carrier["submission"]["hard_boundary_violations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        git_stdout(&worktree, &["rev-parse", "--verify", "HEAD^{commit}"]),
+        before_head
+    );
+    assert_eq!(
+        fs::read_to_string(worktree.join("README.md")).expect("readme after"),
+        before_readme
+    );
+    assert_eq!(git_stdout(&worktree, &["status", "--porcelain=v1"]), "");
+}
+
+#[test]
 fn terminal_tool_result_details_drift_still_fails_loudly() {
     let root = temp_root("runner-tool-result-details-drift");
     let accepted = transcript("planning.task-atoms.v1");
@@ -889,6 +1063,176 @@ fn task_atom_value_repair_repeats_manifest_and_recovers_from_json_body_anchor() 
     let carrier: Value = serde_json::from_slice(&fs::read(carrier_path(&root)).expect("carrier"))
         .expect("carrier json");
     assert_eq!(carrier["raw_output"], accepted);
+}
+
+#[test]
+fn work_map_value_repair_repeats_authority_and_atom_manifest_for_non_link_error() {
+    let root = temp_root("runner-workmap-repair-authority");
+    let prompt_log = terminalmiss_prompt_log(&root);
+    let (registry_path, registry_digest) =
+        write_work_map_atom_registry(&root, &["TE01-001", "TE01-002"]);
+    let authority = drivers::contract_authority::render_contract_authority("planning.work-map.v1")
+        .expect("work-map authority");
+    let manifest = planning::atom_link_manifest_for_registry(&registry_path, &registry_digest)
+        .expect("atom manifest");
+    let initial_prompt = format!("runner work-map prompt\n\n{authority}\n\n{manifest}");
+    let bad = work_map_payload(
+        "declared-predictable",
+        vec!["/tmp/autopilot-workmap-red"],
+        "run-isolated",
+        vec!["TE01-001"],
+    );
+    let accepted = work_map_payload("no-effect", vec![], "none", vec!["TE01-001"]);
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            &format!("const repairPromptLog = {:?};", prompt_log),
+            &format!(
+                "appendFileSync(repairPromptLog, JSON.stringify({{count:promptCount,message:cmd.message}})+'\\n'); emitCarrier(promptCount === 1 ? {bad:?} : {accepted:?});"
+            ),
+        ),
+    );
+    let spec = write_work_map_spec_with_prompt(
+        &root,
+        |value| value,
+        &initial_prompt,
+        &registry_path,
+        &registry_digest,
+    );
+    with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect("work-map repair should recover after non-link command authority error");
+
+    let rows = terminalmiss_prompt_rows(&root);
+    assert_eq!(
+        rows.len(),
+        2,
+        "expected initial plus repair prompts: {rows:?}"
+    );
+    let initial = rows[0]["message"].as_str().expect("initial prompt");
+    let repair = rows[1]["message"].as_str().expect("repair prompt");
+    assert!(
+        repair.contains("field=units.commands"),
+        "repair should be caused by a non-link work-map rejection: {repair}"
+    );
+    assert!(
+        repair.contains(&authority),
+        "repair lost WorkMap authority: {repair}"
+    );
+    assert!(
+        repair.contains(&manifest),
+        "repair lost atom-link manifest: {repair}"
+    );
+    assert_eq!(
+        extract_work_map_authority_and_manifest(initial),
+        extract_work_map_authority_and_manifest(repair),
+        "initial and repair prompts must carry byte-identical work-map authority and atom-link manifest"
+    );
+    assert_eq!(
+        terminalmiss_prompt_rows(&root).len(),
+        2,
+        "no retry budget increase"
+    );
+    let carrier: Value =
+        serde_json::from_slice(&fs::read(work_map_carrier_path(&root)).expect("carrier"))
+            .expect("carrier json");
+    assert_eq!(carrier["raw_output"], accepted);
+}
+
+#[test]
+fn work_map_registry_drift_blocks_repair_prompt_reconstruction() {
+    let root = temp_root("runner-workmap-repair-registry-drift");
+    let prompt_log = terminalmiss_prompt_log(&root);
+    let (registry_path, registry_digest) = write_work_map_atom_registry(&root, &["TE01-001"]);
+    let initial_prompt = format!(
+        "runner work-map prompt\n\n{}\n\n{}",
+        drivers::contract_authority::render_contract_authority("planning.work-map.v1")
+            .expect("work-map authority"),
+        planning::atom_link_manifest_for_registry(&registry_path, &registry_digest)
+            .expect("atom manifest")
+    );
+    let bad = work_map_payload(
+        "declared-predictable",
+        vec!["/tmp/autopilot-workmap-red"],
+        "run-isolated",
+        vec!["TE01-001"],
+    );
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            &format!(
+                "const repairPromptLog = {:?}; const registryPath = {:?};",
+                prompt_log, registry_path
+            ),
+            &format!(
+                "appendFileSync(repairPromptLog, JSON.stringify({{count:promptCount,message:cmd.message}})+'\\n'); if (promptCount === 1) {{ appendFileSync(registryPath, '\\n'); emitCarrier({bad:?}); }} else {{ process.exit(55); }}"
+            ),
+        ),
+    );
+    let spec = write_work_map_spec_with_prompt(
+        &root,
+        |value| value,
+        &initial_prompt,
+        &registry_path,
+        &registry_digest,
+    );
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("stale registry must block repair authority reconstruction");
+    assert!(
+        error.contains("value repair manifest reconstruction failed field=atom_registry"),
+        "{error}"
+    );
+    assert_eq!(terminalmiss_prompt_rows(&root).len(), 1);
+}
+
+#[test]
+fn work_map_registry_missing_or_drift_blocks_before_initial_prompt() {
+    for (label, mutate) in [
+        (
+            "missing-path",
+            Box::new(|mut value: Value| {
+                value.as_object_mut().unwrap().remove("atom_registry_path");
+                value
+            }) as Box<dyn Fn(Value) -> Value>,
+        ),
+        (
+            "digest-drift",
+            Box::new(|mut value: Value| {
+                value["atom_registry_digest"] = json!("0".repeat(64));
+                value
+            }) as Box<dyn Fn(Value) -> Value>,
+        ),
+    ] {
+        let root = temp_root(&format!("runner-workmap-registry-{label}"));
+        let prompt_log = terminalmiss_prompt_log(&root);
+        let (registry_path, registry_digest) = write_work_map_atom_registry(&root, &["TE01-001"]);
+        write_fake_pi(
+            &root,
+            &rpc_fake_pi(
+                &format!("const repairPromptLog = {:?};", prompt_log),
+                "appendFileSync(repairPromptLog, JSON.stringify({count:promptCount,message:cmd.message})+'\\n'); process.exit(66);",
+            ),
+        );
+        let spec = write_work_map_spec_with_prompt(
+            &root,
+            mutate,
+            "prompt should not be sent",
+            &registry_path,
+            &registry_digest,
+        );
+        let error = with_fake_path(&root, || {
+            child::main(&["--spec".to_owned(), spec.display().to_string()])
+        })
+        .expect_err("invalid registry binding must fail before prompt");
+        assert!(
+            error.contains("atom registry") || error.contains("atom_registry"),
+            "{error}"
+        );
+        assert_eq!(terminalmiss_prompt_rows(&root).len(), 0);
+    }
 }
 
 #[test]
@@ -1611,6 +1955,129 @@ fn runner_real_pi_high_streaming_probe_when_enabled() {
     );
 }
 
+fn delivery_worktree(root: &Path, label: &str) -> PathBuf {
+    fs::write(root.join("README.md"), "delivery child fixture\n").expect("readme");
+    git(root, &["add", "README.md"]);
+    git(root, &["commit", "-m", "delivery fixture"]);
+    let worktree = root.join("delivery-worktrees").join(label);
+    fs::create_dir_all(worktree.parent().expect("worktree parent")).expect("worktree parent");
+    git(
+        root,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            worktree.to_str().expect("worktree utf8"),
+            "HEAD",
+        ],
+    );
+    fs::canonicalize(worktree).expect("canonical delivery worktree")
+}
+
+fn write_delivery_spec(root: &Path, worktree: &Path, mutate: impl Fn(Value) -> Value) -> PathBuf {
+    let base_commit = Sha(
+        git_stdout(worktree, &["rev-parse", "--verify", "HEAD^{commit}"])
+            .trim()
+            .to_owned(),
+    );
+    let assignment = RunnerAssignment {
+        workstream: Id("main".to_owned()),
+        action_id: Id("action-main-L1".to_owned()),
+        assignment_id: Id("assignment-main-L1".to_owned()),
+        role_id: Id("implementer".to_owned()),
+        mode: ModeId("lane-delivery".to_owned()),
+        run_revision: 1,
+        lane_id: Id("L1".to_owned()),
+        attempt: 1,
+        base_commit,
+        worktree: worktree.to_path_buf(),
+        session_file: root.join("session.json"),
+        roster_assignment: "openai-codex/gpt-subscription".to_owned(),
+        approved_units: vec![delivery_approved_unit(
+            "U1",
+            &["README.md"],
+            &["printf approved"],
+        )],
+    };
+    let facts = RunnerTransportFacts::new(
+        std::env::current_exe().expect("current exe"),
+        std::env::current_exe().expect("current exe"),
+    )
+    .expect("transport facts");
+    let _guard = CWD_LOCK.lock().expect("cwd lock");
+    let previous = std::env::current_dir().expect("current dir");
+    std::env::set_current_dir(root).expect("delivery cwd");
+    let issue = with_env(
+        "AUTOPILOT_CHILD_ADDON_PATH",
+        child_addon_path().to_str().expect("addon utf8"),
+        || delivery_issue_with_facts(&assignment, &facts),
+    )
+    .expect("delivery issue");
+    std::env::set_current_dir(previous).expect("restore cwd");
+    let spec_path = PathBuf::from(issue.binding.spec_path);
+    let spec_value: Value = serde_json::from_slice(&fs::read(&spec_path).expect("delivery spec"))
+        .expect("delivery spec json");
+    let spec_value = mutate(spec_value);
+    fs::write(
+        &spec_path,
+        serde_json::to_vec_pretty(&spec_value).expect("mutated spec"),
+    )
+    .expect("rewrite delivery spec");
+    spec_path
+}
+
+fn delivery_approved_unit(id: &str, files: &[&str], commands: &[&str]) -> ApprovedUnit {
+    let criterion = Id(format!("criterion-{id}"));
+    ApprovedUnit {
+        id: Id(id.to_owned()),
+        kind: kernel::generated::PlanUnitKind::Implementation,
+        objective: format!("deliver {id}"),
+        operator_order: 1,
+        decisions: Vec::new(),
+        criteria: vec![criterion.clone()],
+        criterion_text: vec![ApprovedCriterion {
+            id: criterion,
+            text: format!("criterion text for {id}"),
+        }],
+        dependencies: Vec::new(),
+        predecessor_forward_criteria: Vec::new(),
+        downstream_release_edges: vec![Id(format!("edge-{id}"))],
+        files: files
+            .iter()
+            .map(|path| kernel::generated::Path((*path).to_owned()))
+            .collect(),
+        commands:
+            commands
+                .iter()
+                .map(|command| kernel::generated::PlanUnitCommand {
+                    command: (*command).to_owned(),
+                    expected: "pass".to_owned(),
+                    effect: kernel::generated::CommandEffect::NoEffect,
+                    generated_paths: Vec::new(),
+                    handling: kernel::generated::CommandEffectHandling::None,
+                    scope_preservation:
+                        "Final Git-visible state remains limited to the approved unit files."
+                            .to_owned(),
+                })
+                .collect(),
+    }
+}
+
+fn delivery_blocked_payload() -> String {
+    json!({
+        "actual_changed_paths": [],
+        "execution_audit_ref": "audit:delivery-blocked",
+        "focused_evidence_refs": ["evidence:0", "evidence:1"],
+        "terminal_status": "blocked",
+        "hard_boundary_violations": ["approved command expected a different checkout root; no mutation performed"]
+    })
+    .to_string()
+}
+
+fn delivery_carrier_path(worktree: &Path) -> PathBuf {
+    drivers::runner::delivery_paths(worktree, &Id("assignment-main-L1".to_owned())).carrier_path
+}
+
 fn write_planning_spec(
     root: &Path,
     mutate: impl Fn(Value) -> Value,
@@ -1734,7 +2201,7 @@ fn write_planning_spec_inner(
         "repository_head_commit":repo_binding.manifest.head_commit,
         "repository_head_tree":repo_binding.manifest.head_tree,
         "runtime_extension_path":child_addon_path(),
-        "runtime_extension_digest":sha256_hex(&fs::read(child_addon_path()).expect("child addon")),
+        "runtime_extension_digest":child_addon_digest(),
         "terminal_profile_id":"planning.task-atoms.v1:autopilot_submit_atoms",
         "unavailable_tools":[]
     });
@@ -1748,6 +2215,160 @@ fn write_planning_spec_inner(
     paths.spec_path
 }
 
+fn write_work_map_spec_with_prompt(
+    root: &Path,
+    mutate: impl Fn(Value) -> Value,
+    prompt: &str,
+    registry_path: &Path,
+    registry_digest: &str,
+) -> PathBuf {
+    let run_id = "019fa883-1eaf-75f9-99af-6aa246736f72";
+    let assignment_id = Id("planning-main-plan-compiler-01".to_owned());
+    let role_id = Id("plan-compiler".to_owned());
+    let mode = ModeId("initial-plan".to_owned());
+    let boundary = ContractId("planning.work-map.v1".to_owned());
+    let session_dir = root.join("run-sessions").join(run_id);
+    fs::create_dir_all(&session_dir).expect("session dir");
+    let paths = planning_paths(root, "main", &assignment_id);
+    fs::create_dir_all(paths.prompt_path.parent().expect("prompt parent")).expect("prompt dir");
+    fs::write(&paths.prompt_path, prompt).expect("prompt");
+    let tools = role_tool_names(&role_id.0).expect("tools");
+    let runtime = role_runtime(&role_id.0).expect("role runtime");
+    let authority_documents = vec![
+        doc("TASK-A.md", "authority", "AUTHORITY-A-SENTINEL"),
+        doc("TASK-B.md", "authority", "AUTHORITY-B-SENTINEL"),
+        doc("TASK-C.md", "authority", "AUTHORITY-C-SENTINEL"),
+    ];
+    let context_document = doc(
+        "CONTEXT.md",
+        "context/non-authority",
+        "CONTEXT-SENTINEL-UNIQUE",
+    );
+    let context_documents = vec![context_document.clone()];
+    let repo_binding =
+        repository_authority_binding(root, "main").expect("repository authority binding");
+    let context_digest =
+        planning_context_digest_for_spec(root, "set-a", &authority_documents, &context_documents);
+    let session_id = session_id_for(
+        &Id(run_id.to_owned()),
+        &Id("main".to_owned()),
+        &assignment_id,
+        &role_id,
+        &mode,
+        &boundary,
+    );
+    let subscription = subscription_digest(&runtime.provider, &runtime.model, &runtime.thinking);
+    let spec = json!({
+        "schema":"autopilot.agent_run_spec.v4",
+        "assignment_kind":"planning-review",
+        "action_id":"action-planning-main-plan-compiler-01",
+        "assignment_id":assignment_id.0,
+        "run_id":run_id,
+        "run_revision":1,
+        "workstream":"main",
+        "role_id":role_id.0,
+        "mode":mode.0,
+        "provider":runtime.provider.clone(),
+        "model":runtime.model.clone(),
+        "thinking":runtime.thinking.clone(),
+        "route":"subscription",
+        "cwd":root,
+        "allowed_tools":tools,
+        "spec_path":paths.spec_path,
+        "prompt_path":paths.prompt_path,
+        "prompt_digest":sha256_hex(prompt.as_bytes()),
+        "session_dir":session_dir.display().to_string(),
+        "session_continuity":"fresh",
+        "boundary_id":boundary.0,
+        "boundary_digest":contract_digest("planning.work-map.v1"),
+        "result_contract":"planning.work-map.v1",
+        "result_contract_digest":contract_digest("planning.work-map.v1"),
+        "carrier_path":paths.carrier_path,
+        "session_id":session_id.0,
+        "settings_digest":settings_digest(true),
+        "context_digest":context_digest,
+        "skills_digest":sha256_hex(SKILLS_IDENTITY.as_bytes()),
+        "subscription_digest":subscription,
+        "atom_registry_path":registry_path.display().to_string(),
+        "atom_registry_digest":registry_digest,
+        "authority_set_id":"set-a",
+        "authority_documents":authority_documents,
+        "context_document":context_document,
+        "context_documents":context_documents,
+        "repository_manifest_path":repo_binding.path,
+        "repository_manifest_digest":repo_binding.digest,
+        "repository_head_commit":repo_binding.manifest.head_commit,
+        "repository_head_tree":repo_binding.manifest.head_tree,
+        "runtime_extension_path":child_addon_path(),
+        "runtime_extension_digest":child_addon_digest(),
+        "terminal_profile_id":"planning.work-map.v1:autopilot_submit_plan_cluster",
+        "unavailable_tools":[]
+    });
+    let spec = mutate(spec);
+    fs::create_dir_all(paths.spec_path.parent().expect("spec parent")).expect("spec dir");
+    fs::write(
+        &paths.spec_path,
+        serde_json::to_vec_pretty(&spec).expect("spec json"),
+    )
+    .expect("spec");
+    paths.spec_path
+}
+
+fn write_work_map_atom_registry(root: &Path, ids: &[&str]) -> (PathBuf, String) {
+    let path = root.join(".pi/autopilot/main/planning/atom-registry.json");
+    fs::create_dir_all(path.parent().expect("registry parent")).expect("registry dir");
+    let atoms = ids
+        .iter()
+        .map(|id| {
+            json!({
+                "id": id,
+                "producer_assignment_id": "planning-main-task-extractor-01",
+                "kind": "work",
+                "text": format!("task atom {id}"),
+                "sources": ["task://task/TASK-A.md#whole-file"]
+            })
+        })
+        .collect::<Vec<_>>();
+    let registry = json!({
+        "schema":"autopilot.planning_atom_registry.v1",
+        "workstream":"main",
+        "authority_set_id":"set-a",
+        "producer_assignment_ids":["planning-main-task-extractor-01"],
+        "atoms":atoms
+    });
+    let bytes = serde_json::to_vec_pretty(&registry).expect("registry json");
+    let digest = sha256_hex(&bytes);
+    fs::write(&path, bytes).expect("registry");
+    (path, digest)
+}
+
+fn work_map_carrier_path(root: &Path) -> PathBuf {
+    planning_paths(
+        root,
+        "main",
+        &Id("planning-main-plan-compiler-01".to_owned()),
+    )
+    .carrier_path
+}
+
+fn work_map_payload(
+    effect: &str,
+    generated_paths: Vec<&str>,
+    handling: &str,
+    links: Vec<&str>,
+) -> String {
+    json!({"units":[{"id":"U1","kind":"implementation","objective":"Deliver the accepted work unit.","criteria":["The focused acceptance path passes."],"depends_on":[],"files":["src/lib.rs"],"commands":[{"command":"cargo test -q","expected":"pass","effect":effect,"generated_paths":generated_paths,"handling":handling,"scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"links":links}]}).to_string()
+}
+
+fn extract_work_map_authority_and_manifest(prompt: &str) -> String {
+    let start = prompt
+        .find("Package-generated admission authority for planning.work-map.v1")
+        .expect("work-map authority start");
+    let tail = &prompt[start..];
+    let end = tail.find("\n\n## ").unwrap_or(tail.len());
+    tail[..end].to_owned()
+}
+
 fn doc(path: &str, class: &str, body: &str) -> Value {
     json!({"path":path,"class":class,"digest":task_document_digest(class, "set-a", body),"body_digest":sha256_hex(body.as_bytes()),"body":body})
 }
@@ -1757,7 +2378,55 @@ fn child_addon_path() -> PathBuf {
 }
 
 fn child_addon_runtime_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/child-extension-runtime.ts")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../child-runtime/child-extension-runtime.ts")
+}
+
+fn child_addon_digest() -> String {
+    let mut bytes = fs::read(child_addon_path()).expect("child addon");
+    bytes.push(0);
+    bytes.extend(fs::read(child_addon_runtime_path()).expect("child addon runtime"));
+    sha256_hex(&bytes)
+}
+
+/// Install-time path drift must fail RED here, not mid-LIVE-run.
+///
+/// `child_addon_digest_for_path` re-derives the runtime's location from the
+/// wrapper path on the installed filesystem. It compiles fine even when that
+/// traversal is wrong, and only explodes when a child is spawned. This test
+/// walks the same production traversal over the real package tree and pins it
+/// against `CHILD_ADDON_DIGEST`, which codegen computed from the
+/// `include_str!`-captured runtime bytes. If the relative location of the
+/// runtime and the Rust traversal ever disagree, this goes red at unit-test
+/// time.
+#[test]
+fn child_addon_digest_for_path_reads_the_runtime_at_the_generated_entry() {
+    let wrapper = child_addon_path();
+    let package_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("package root");
+
+    // The generated entry is the single authority for the runtime's location.
+    let runtime_path = package_root.join(kernel::generated::CHILD_RUNTIME_ENTRY);
+    assert!(
+        runtime_path.is_file(),
+        "CHILD_RUNTIME_ENTRY does not name a file: {}",
+        runtime_path.display()
+    );
+    assert_eq!(
+        fs::read(&runtime_path).expect("runtime at generated entry"),
+        fs::read(child_addon_runtime_path()).expect("runtime at test path"),
+        "CHILD_RUNTIME_ENTRY and the test's runtime path disagree"
+    );
+
+    // The production derivation, run over the real package tree.
+    let derived =
+        drivers::runner::child_addon_digest_for_path(&wrapper).expect("production digest");
+    assert_eq!(
+        derived,
+        kernel::generated::CHILD_ADDON_DIGEST,
+        "production runtime-path traversal disagrees with the codegen-captured source"
+    );
+    assert_eq!(derived, child_addon_digest());
 }
 
 fn carrier_path(root: &Path) -> PathBuf {
@@ -1790,10 +2459,12 @@ fn success_fake_pi(output: &str) -> String {
 }
 
 fn rpc_fake_pi(setup: &str, on_prompt: &str) -> String {
+    let submit_bindings = submit_bindings_js();
     format!(
         r#"#!/usr/bin/env node
 import {{ createHash }} from 'node:crypto';
 import {{ appendFileSync, readFileSync, writeFileSync }} from 'node:fs';
+import {{ dirname, resolve }} from 'node:path';
 let promptCount = 0;
 let readToolCount = 0;
 let contextPercent = 10;
@@ -1803,20 +2474,16 @@ if (sessionDirIndex === -1) {{ process.stderr.write('fake pi: --session-dir is r
 const sessionDir = process.argv[sessionDirIndex + 1];
 const addonIndex = process.argv.indexOf('-e');
 const addonPath = addonIndex === -1 ? undefined : process.argv[addonIndex + 1];
+function argValue(name, fallback) {{ const index = process.argv.indexOf(name); return index === -1 ? fallback : process.argv[index + 1]; }}
+const observedProvider = argValue('--provider', 'openai-codex');
+const observedModel = argValue('--model', 'gpt-5.5');
+const observedThinking = argValue('--thinking', 'high');
 const toolsIndex = process.argv.indexOf('--tools');
 if (toolsIndex === -1) {{ process.stderr.write('fake pi: --tools is required\n'); process.exit(64); }}
 const requestedTools = process.argv[toolsIndex + 1].split(',').filter(Boolean);
-const submitBindings = {{
-  autopilot_submit_atoms: ['planning.task-atoms.v1', '77d000b816b3c14dcdefeba0c23d4f4f9f8bedaf5b281081f1cea138e525e091'],
-  autopilot_submit_context: ['planning.scout-dossier.v1', '30f69b47c83079ce00ea22cab308e9a26eb7b24cae045aa1dd008221b45da618'],
-  autopilot_submit_plan_cluster: ['planning.work-map.v1', '237b2e049edc93e6b87d8319b621ba9746e52ed2ee8dfa99b8a53b6ef6695c5e'],
-  autopilot_submit_resolution: ['planning.questions.v1', 'a716699618f28675f8872ff8d039c40e8443c07cd6a94f907921ee2b9dd88abc'],
-  autopilot_submit_review: ['planning.plan-review.v1', '073f22c10d42166d5ec5d0a6465a1fa8f0df8fc1af2ce6a0702bed9b955786d8'],
-  autopilot_submit_scout_report: ['planning.scout-dossier.v1', '30f69b47c83079ce00ea22cab308e9a26eb7b24cae045aa1dd008221b45da618'],
-  autopilot_submit_synthesis: ['planning.work-map.v1', '237b2e049edc93e6b87d8319b621ba9746e52ed2ee8dfa99b8a53b6ef6695c5e'],
-}};
+const submitBindings = {submit_bindings};
 let activeTools = requestedTools.filter(name => !name.startsWith('autopilot_submit_') || (addonPath !== undefined && submitBindings[name]));
-const terminalTool = activeTools.find(name => name.startsWith('autopilot_submit_'));
+const terminalTool = activeTools.find(name => submitBindings[name]);
 // Model real Pi's session store: a session file keyed by (sessionDir, sessionId)
 // is reopened when it already exists, and its retained messages become context.
 const sessionPath = `${{sessionDir}}/${{sessionId}}.jsonl`;
@@ -1824,19 +2491,19 @@ let storedMessages = [];
 try {{ storedMessages = readFileSync(sessionPath, 'utf8').split('\n').filter(line => line.trim()); }} catch {{ storedMessages = []; }}
 function persist(entry) {{ storedMessages.push(JSON.stringify(entry)); appendFileSync(sessionPath, JSON.stringify(entry) + '\n'); }}
 function send(value) {{ if (value.type === 'message_end' && value.message) persist(value.message); process.stdout.write(JSON.stringify(value) + '\n'); }}
-function message(text, model='gpt-5.5', stopReason='stop') {{ return {{ role:'assistant', provider:'openai-codex', model, content:[{{type:'text', text}}], stopReason }}; }}
-function emitAssistant(text, model='gpt-5.5', stopReason='stop') {{ const msg = message(text, model, stopReason); send({{type:'agent_start'}}); send({{type:'message_start'}}); send({{type:'message_end', message: msg}}); send({{type:'agent_end', willRetry:false}}); send({{type:'agent_settled'}}); }}
-function emitCarrier(payload, model='gpt-5.5', overrides={{}}) {{
+function message(text, model=observedModel, stopReason='stop') {{ return {{ role:'assistant', provider:observedProvider, model, content:[{{type:'text', text}}], stopReason }}; }}
+function emitAssistant(text, model=observedModel, stopReason='stop') {{ const msg = message(text, model, stopReason); send({{type:'agent_start'}}); send({{type:'message_start'}}); send({{type:'message_end', message: msg}}); send({{type:'agent_end', willRetry:false}}); send({{type:'agent_settled'}}); }}
+function emitCarrier(payload, model=observedModel, overrides={{}}) {{
   if (!terminalTool) return emitAssistant('declared terminal tool is unavailable', model);
   send({{type:'agent_start'}});
   emitCarrierResult(payload, model, overrides);
   send({{type:'agent_end',willRetry:false}});
   send({{type:'agent_settled'}});
 }}
-function emitCarrierResult(payload, model='gpt-5.5', overrides={{}}) {{
-  const [boundary_id, schema_digest] = submitBindings[terminalTool];
+function emitCarrierResult(payload, model=observedModel, overrides={{}}) {{
+  const [boundary_id, result_contract, schema_digest] = submitBindings[terminalTool];
   const profile_id = process.env.AUTOPILOT_TERMINAL_PROFILE ?? `${{boundary_id}}:${{terminalTool}}`;
-  const details = {{profile_id,tool_name:terminalTool,boundary_id,result_contract:boundary_id,schema_digest,binding:process.env.AUTOPILOT_CARRIER_BINDING ?? '',payload:typeof payload === 'string' ? JSON.parse(payload) : payload,...overrides}};
+  const details = {{profile_id,tool_name:terminalTool,boundary_id,result_contract,schema_digest,binding:process.env.AUTOPILOT_CARRIER_BINDING ?? '',payload:typeof payload === 'string' ? JSON.parse(payload) : payload,...overrides}};
   const resultTool = typeof overrideToolName === 'string' ? overrideToolName : terminalTool;
   const callId = 'call_fake_submit_' + promptCount;
   send({{type:'message_start'}});
@@ -1867,9 +2534,34 @@ function emitCapacityRefusal() {{ send({{type:'agent_start'}}); send({{type:'mes
 function statsData() {{ return {{ sessionId, contextUsage: {{ tokens: Math.round(contextPercent * 1000), contextWindow: 100000, percent: contextPercent }} }}; }}
 {setup}
 const receiptBoundary = submitBindings[terminalTool]?.[0] ?? '';
-const receiptSchema = submitBindings[terminalTool]?.[1] ?? '';
+const receiptResultContract = submitBindings[terminalTool]?.[1] ?? '';
+const receiptSchema = submitBindings[terminalTool]?.[2] ?? '';
 const receiptProfile = process.env.AUTOPILOT_TERMINAL_PROFILE ?? `${{receiptBoundary}}:${{terminalTool}}`;
-const receiptData = {{self_digest:addonPath === undefined ? '' : createHash('sha256').update(readFileSync(addonPath)).digest('hex'),profile_id:receiptProfile,tool_name:terminalTool,boundary_id:receiptBoundary,result_contract:receiptBoundary,schema_digest:receiptSchema,binding:process.env.AUTOPILOT_CARRIER_BINDING ?? '',active_tools:[...activeTools].sort()}};
+function addonDigest() {{ if (addonPath === undefined) return ''; const runtimePath = resolve(dirname(addonPath), '../../child-runtime/child-extension-runtime.ts'); return createHash('sha256').update(Buffer.concat([readFileSync(addonPath), Buffer.from([0]), readFileSync(runtimePath)])).digest('hex'); }}
+function sha256HexBytes(bytes) {{ return createHash('sha256').update(bytes).digest('hex'); }}
+function deliveryPolicyReceipt() {{
+  if (receiptProfile !== 'delivery-status.v2') return undefined;
+  const assignmentPath = process.env.AUTOPILOT_DELIVERY_ASSIGNMENT_PATH ?? '';
+  const assignmentDigest = process.env.AUTOPILOT_DELIVERY_ASSIGNMENT_DIGEST ?? '';
+  const worktree = process.env.AUTOPILOT_DELIVERY_WORKTREE ?? '';
+  const cwd = process.env.AUTOPILOT_DELIVERY_CWD ?? '';
+  const bytes = readFileSync(assignmentPath);
+  const artifact = JSON.parse(bytes.toString('utf8'));
+  return {{
+    version:'autopilot.delivery_tool_policy.v1',
+    assignment_path:assignmentPath,
+    assignment_digest:assignmentDigest,
+    worktree,
+    cwd,
+    policy_digest:sha256HexBytes(Buffer.from(`autopilot.delivery_tool_policy.v1\0${{assignmentPath}}\0${{assignmentDigest}}\0${{worktree}}\0${{cwd}}`, 'utf8')),
+    allowed_unit_file_count:new Set(artifact.ordered_units.flatMap(unit => unit.files)).size,
+    approved_command_count:new Set(artifact.ordered_units.flatMap(unit => unit.commands.map(command => command.command))).size,
+    active_overrides:['bash','edit','write'],
+  }};
+}}
+const receiptData = {{self_digest:addonDigest(),profile_id:receiptProfile,tool_name:terminalTool,boundary_id:receiptBoundary,result_contract:receiptResultContract,schema_digest:receiptSchema,binding:process.env.AUTOPILOT_CARRIER_BINDING ?? '',active_tools:[...activeTools].sort()}};
+const deliveryReceipt = deliveryPolicyReceipt();
+if (deliveryReceipt !== undefined) receiptData.delivery_policy = deliveryReceipt;
 const durableReceipt = {{type:'custom',customType:'pi-autopilot:child-tools',data:receiptData,id:'receipt-1',parentId:null,timestamp:new Date(0).toISOString()}};
 if (addonPath !== undefined && !(typeof suppressReceipt !== 'undefined' && suppressReceipt) && !(typeof suppressStreamedReceipt !== 'undefined' && suppressStreamedReceipt)) {{
   const streamed = {{...durableReceipt,customType:typeof streamedReceiptCustomType === 'string' ? streamedReceiptCustomType : durableReceipt.customType,data:{{...receiptData,binding:typeof streamedReceiptBinding === 'string' ? streamedReceiptBinding : receiptData.binding}}}};
@@ -1881,7 +2573,7 @@ process.stdin.on('data', chunk => {{ buffer += chunk; let lines = buffer.split('
 process.stdin.on('end', () => process.exit(0));
 function handle(cmd) {{
   if (cmd.type === 'set_auto_compaction') return send({{id:cmd.id,type:'response',command:'set_auto_compaction',success:true}});
-  if (cmd.type === 'get_state') return send({{id:cmd.id,type:'response',command:'get_state',success:true,data:{{model:{{id:'gpt-5.5',provider:'openai-codex'}},thinkingLevel:'high',sessionId,autoCompactionEnabled:false,messageCount:storedMessages.length,pendingMessageCount:0}}}});
+  if (cmd.type === 'get_state') return send({{id:cmd.id,type:'response',command:'get_state',success:true,data:{{model:{{id:observedModel,provider:observedProvider}},thinkingLevel:observedThinking,sessionId,autoCompactionEnabled:false,messageCount:storedMessages.length,pendingMessageCount:0}}}});
   if (cmd.type === 'get_session_stats') return send({{id:cmd.id,type:'response',command:'get_session_stats',success:true,data:statsData()}});
   if (cmd.type === 'get_entries') {{
     const entries = addonPath === undefined || (typeof suppressReceipt !== 'undefined' && suppressReceipt) || (typeof suppressDurableReceipt !== 'undefined' && suppressDurableReceipt) ? [] : [durableReceipt];
@@ -1897,12 +2589,36 @@ function handle(cmd) {{
     )
 }
 
+fn submit_bindings_js() -> String {
+    let mut bindings = BTreeMap::<String, [String; 3]>::new();
+    for (profile_id, tool_name, boundary_id, result_contract, digest) in
+        kernel::generated::TERMINAL_PROFILES
+    {
+        if boundary_id.starts_with("planning.") || profile_id == "delivery-status.v2" {
+            bindings.insert(
+                tool_name.to_owned(),
+                [
+                    boundary_id.to_owned(),
+                    result_contract.to_owned(),
+                    digest.to_owned(),
+                ],
+            );
+        }
+    }
+    serde_json::to_string_pretty(&bindings).expect("submit bindings json")
+}
+
 fn terminalmiss_prompt_log(root: &Path) -> PathBuf {
     root.join("terminalmiss-prompts.jsonl")
 }
 
 fn terminalmiss_prompt_rows(root: &Path) -> Vec<Value> {
-    let text = fs::read_to_string(terminalmiss_prompt_log(root)).expect("prompt log");
+    let path = terminalmiss_prompt_log(root);
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => panic!("prompt log {}: {error}", path.display()),
+    };
     text.lines()
         .map(|line| serde_json::from_str::<Value>(line).expect("prompt row"))
         .collect()
@@ -2454,6 +3170,22 @@ fn git(root: &Path, args: &[&str]) {
     );
 }
 
+fn git_stdout(root: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .expect("git");
+    assert!(
+        output.status.success(),
+        "git {:?} failed stdout={} stderr={}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("git stdout UTF-8")
+}
+
 fn write_fake_pi(root: &Path, body: &str) {
     let path = root.join("pi");
     fs::write(&path, body).expect("fake pi");
@@ -2530,11 +3262,7 @@ fn temp_root(name: &str) -> PathBuf {
 const SKILLS_IDENTITY: &str = "agent-run-skills:disabled:v1";
 
 fn contract_digest(contract_id: &str) -> String {
-    let admits = match contract_id {
-        "planning.task-atoms.v1" => kernel::generated::TASK_ATOMS_ADMITS,
-        other => panic!("test fixture missing contract digest for {other}"),
-    };
-    sha256_hex(format!("{contract_id}\0{admits}").as_bytes())
+    drivers::contract_authority::contract_digest(contract_id).expect("test fixture contract digest")
 }
 
 fn subscription_digest(provider: &str, model: &str, thinking: &str) -> String {

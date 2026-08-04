@@ -8,7 +8,7 @@
     "moduleResolution": "NodeNext",
     "baseUrl": "..",
     "paths": {
-      "@earendil-works/pi-coding-agent": ["host/src/pi-coding-agent-shim.d.ts"]
+      "@earendil-works/pi-coding-agent": ["src/pi-coding-agent-shim.d.ts"]
     },
     "noEmit": true,
     "noFallthroughCasesInSwitch": true,
@@ -20,6 +20,6 @@
     "target": "ES2024",
     "types": ["node"]
   },
-  "include": ["src/**/*.ts"]
+  "include": ["../src/**/*.ts", "../child-runtime/**/*.ts"]
 }
 

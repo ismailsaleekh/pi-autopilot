@@ -1,7 +1,4 @@
-use drivers::{
-    prompt::{PromptInput, Renderer, render},
-    roles::RoleRegistry,
-};
+use drivers::prompt::{PromptInput, render};
 use std::{
     fs,
     io::ErrorKind,
@@ -60,19 +57,12 @@ fn parity_check_fails_when_generated_prompt_drifts_from_contract_source() {
     generated.push_str("\nDRIFT: prompt-only instruction not present in data/contracts.kdl.\n");
     fs::write(&prompt_path, generated).expect("temp generated prompt is mutated");
 
-    let renderer = Renderer::new(
-        temp_root.clone(),
-        RoleRegistry::package().expect("package roles parse"),
-    );
-    let rendered = renderer
-        .render(&prompt_input())
-        .expect("rendering uses the mutated temp generated prompt");
-    let parity = prompt_matches_contract_admits(&temp_root, &rendered.text);
+    let parity = generated_prompt_matches_contract_source(&temp_root, BOUNDARY_PROMPT);
     assert!(
         matches!(
             parity,
             Err(ref message) if message.contains(
-                "validation_verdict rendered prompt block does not match data/contracts.kdl admits"
+                "validation_verdict generated prompt file does not match data/contracts.kdl admits"
             )
         ),
         "mutated generated prompt unexpectedly matched contract source: {parity:?}"
@@ -98,7 +88,8 @@ fn prompt_input() -> PromptInput {
 }
 
 fn assert_prompt_matches_contract_admits(root: &Path, rendered: &str) -> Result<(), String> {
-    prompt_matches_contract_admits(root, rendered)
+    prompt_matches_contract_admits(root, rendered)?;
+    generated_prompt_matches_contract_source(root, BOUNDARY_PROMPT)
 }
 
 fn prompt_matches_contract_admits(root: &Path, rendered: &str) -> Result<(), String> {
@@ -114,6 +105,20 @@ fn prompt_matches_contract_admits(root: &Path, rendered: &str) -> Result<(), Str
     } else {
         Err(format!(
             "{BOUNDARY_PROMPT} rendered prompt block does not match data/contracts.kdl admits"
+        ))
+    }
+}
+
+fn generated_prompt_matches_contract_source(root: &Path, name: &str) -> Result<(), String> {
+    let contract_prompt = contract_prompt_from_source(root, name)?;
+    let path = root.join("generated/prompts").join(format!("{name}.md"));
+    let generated = fs::read_to_string(&path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    if generated == contract_prompt.markdown {
+        Ok(())
+    } else {
+        Err(format!(
+            "{name} generated prompt file does not match data/contracts.kdl admits"
         ))
     }
 }

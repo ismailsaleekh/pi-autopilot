@@ -12,6 +12,7 @@ export const TASK_ATOMS_TOOL_PARAMETERS = {
   "additionalProperties": true,
   "properties": {
     "atoms": {
+      "description": "Task atoms; may be empty only when no task authority text exists.",
       "items": {
         "additionalProperties": true,
         "properties": {
@@ -31,6 +32,7 @@ export const TASK_ATOMS_TOOL_PARAMETERS = {
             "type": "string"
           },
           "sources": {
+            "description": "Task-document anchors copied exactly from the decoded JSON sources[].source string values in the package-authoritative source manifest rendered at runtime; do not copy serialized JSON escape syntax literally.",
             "items": {
               "type": "string"
             },
@@ -56,12 +58,13 @@ export const TASK_ATOMS_TOOL_PARAMETERS = {
   ],
   "type": "object"
 } as TSchema;
-export const TASK_ATOMS_TOOL_SCHEMA_DIGEST = "77d000b816b3c14dcdefeba0c23d4f4f9f8bedaf5b281081f1cea138e525e091";
+export const TASK_ATOMS_TOOL_SCHEMA_DIGEST = "afea4f1dae10430432387da2f42545976e435850d19dd2026667d139b5950e37";
 
 export const SCOUT_DOSSIER_TOOL_PARAMETERS = {
   "additionalProperties": true,
   "properties": {
     "findings": {
+      "description": "Repository findings grounded in current evidence.",
       "items": {
         "additionalProperties": true,
         "properties": {
@@ -90,12 +93,13 @@ export const SCOUT_DOSSIER_TOOL_PARAMETERS = {
   ],
   "type": "object"
 } as TSchema;
-export const SCOUT_DOSSIER_TOOL_SCHEMA_DIGEST = "30f69b47c83079ce00ea22cab308e9a26eb7b24cae045aa1dd008221b45da618";
+export const SCOUT_DOSSIER_TOOL_SCHEMA_DIGEST = "2ee4052fac867c671c6c972066aad7bfa8ab3fee07292de62c09c4bc0c4d41e2";
 
 export const QUESTIONS_TOOL_PARAMETERS = {
   "additionalProperties": true,
   "properties": {
     "questions": {
+      "description": "Material operator questions; [] is an accepted empty set.",
       "items": {
         "additionalProperties": true,
         "properties": {
@@ -131,16 +135,18 @@ export const QUESTIONS_TOOL_PARAMETERS = {
   ],
   "type": "object"
 } as TSchema;
-export const QUESTIONS_TOOL_SCHEMA_DIGEST = "a716699618f28675f8872ff8d039c40e8443c07cd6a94f907921ee2b9dd88abc";
+export const QUESTIONS_TOOL_SCHEMA_DIGEST = "d1e73a08666c761604e71b81b58116ba057b0e3fe3103c3080b2b2a78a4b71dd";
 
 export const WORK_MAP_TOOL_PARAMETERS = {
   "additionalProperties": true,
   "properties": {
     "units": {
+      "description": "Executable implementation units only.",
       "items": {
         "additionalProperties": true,
         "properties": {
           "commands": {
+            "description": "Nonempty focused verification commands/tests tied to this unit.",
             "items": {
               "additionalProperties": true,
               "properties": {
@@ -148,6 +154,7 @@ export const WORK_MAP_TOOL_PARAMETERS = {
                   "type": "string"
                 },
                 "effect": {
+                  "description": "Closed Git-visible persistent repository effect classification; no-effect means the final command leaves no persistent Git-visible repo state.",
                   "enum": [
                     "no-effect",
                     "declared-predictable",
@@ -159,12 +166,14 @@ export const WORK_MAP_TOOL_PARAMETERS = {
                   "type": "string"
                 },
                 "generated_paths": {
+                  "description": "Exact normalized repo-relative Git-visible persistent generated artifact paths only, empty unless effect is declared-predictable; external temporary paths are not generated_paths.",
                   "items": {
                     "type": "string"
                   },
                   "type": "array"
                 },
                 "handling": {
+                  "description": "Closed handling authority for Git-visible generated artifacts; no-effect requires none, unknown-generated requires run-isolated.",
                   "enum": [
                     "none",
                     "run-isolated",
@@ -174,6 +183,7 @@ export const WORK_MAP_TOOL_PARAMETERS = {
                   "type": "string"
                 },
                 "scope_preservation": {
+                  "description": "Nonempty final-scope-check statement proving verification leaves final Git-visible state inside approved unit files.",
                   "type": "string"
                 }
               },
@@ -196,12 +206,14 @@ export const WORK_MAP_TOOL_PARAMETERS = {
             "type": "array"
           },
           "depends_on": {
+            "description": "Exact declared predecessor unit ids; package must never invent positional dependencies.",
             "items": {
               "type": "string"
             },
             "type": "array"
           },
           "files": {
+            "description": "Nonempty declared relevant path scope for this executable delivery unit.",
             "items": {
               "type": "string"
             },
@@ -211,12 +223,14 @@ export const WORK_MAP_TOOL_PARAMETERS = {
             "type": "string"
           },
           "kind": {
+            "description": "Closed delivery disposition: the only legal value is implementation. Context gates belong in non-pass plan review evidence; verification belongs in criteria and commands.",
             "enum": [
               "implementation"
             ],
             "type": "string"
           },
           "links": {
+            "description": "Each item must equal exactly one bound atom registry atoms[].id byte-for-byte; no `atoms:` prefix, range, comma group, task/source/scout/context/artifact ref, placeholder, or inferred expansion.",
             "items": {
               "type": "string"
             },
@@ -246,12 +260,13 @@ export const WORK_MAP_TOOL_PARAMETERS = {
   ],
   "type": "object"
 } as TSchema;
-export const WORK_MAP_TOOL_SCHEMA_DIGEST = "237b2e049edc93e6b87d8319b621ba9746e52ed2ee8dfa99b8a53b6ef6695c5e";
+export const WORK_MAP_TOOL_SCHEMA_DIGEST = "9e34cb4e10cb2ef7061fe8d43973c849b0ec81b041d693506462ced5b4fa379e";
 
 export const PLAN_REVIEW_TOOL_PARAMETERS = {
   "additionalProperties": true,
   "properties": {
     "verdicts": {
+      "description": "Criterion verdicts.",
       "items": {
         "additionalProperties": true,
         "properties": {
@@ -287,7 +302,7 @@ export const PLAN_REVIEW_TOOL_PARAMETERS = {
   ],
   "type": "object"
 } as TSchema;
-export const PLAN_REVIEW_TOOL_SCHEMA_DIGEST = "073f22c10d42166d5ec5d0a6465a1fa8f0df8fc1af2ce6a0702bed9b955786d8";
+export const PLAN_REVIEW_TOOL_SCHEMA_DIGEST = "60409306bbe13fcc510a6fb00450a50f71dbae44f4924dbfc5bd2eddf96810ed";
 
 export const DELIVERY_SUBMISSION_V2_TOOL_PARAMETERS = {
   "additionalProperties": false,
@@ -314,6 +329,10 @@ export const DELIVERY_SUBMISSION_V2_TOOL_PARAMETERS = {
       "type": "array"
     },
     "terminal_status": {
+      "enum": [
+        "succeeded",
+        "blocked"
+      ],
       "type": "string"
     }
   },
@@ -326,7 +345,7 @@ export const DELIVERY_SUBMISSION_V2_TOOL_PARAMETERS = {
   ],
   "type": "object"
 } as TSchema;
-export const DELIVERY_SUBMISSION_V2_TOOL_SCHEMA_DIGEST = "dc3894c6b09e07ffb83c1719b19caf501257c60d5b1c847917068ab75643d55d";
+export const DELIVERY_SUBMISSION_V2_TOOL_SCHEMA_DIGEST = "e96282e3b70e4bde7deb2a122a505337052de8c3f187d164eb5cba430c7812dc";
 
 export const VALIDATION_SUBMISSION_V2_TOOL_PARAMETERS = {
   "additionalProperties": false,

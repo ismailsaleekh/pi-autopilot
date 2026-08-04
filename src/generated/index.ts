@@ -46,6 +46,7 @@ export type CommandEffectHandling = "none" | "run-isolated" | "exact-cleanup-bef
 export type CommandReceiptKind = "final-command" | "full-suite" | "focused";
 export type ContextAnchorForm = "task" | "plan" | "dossier" | "run" | "version-control-lines" | "version-control-whole-file" | "json";
 export type CriterionVerdict = "PASS" | "FAIL" | "BLOCKED";
+export type DeliveryOutcome = "succeeded" | "blocked";
 export type EvidenceContentKind = "prompt" | "assignment" | "action" | "producer-binding" | "report" | "producer-sidecar" | "acceptance-receipt" | "failure-receipt" | "supersession-receipt" | "transcript" | "envelope-manifest";
 export type EvidenceErrorCode = "EVIDENCE_PRODUCER_UNAVAILABLE" | "EVIDENCE_ASSIGNMENT_CONFLICT" | "EVIDENCE_ACTION_NOT_ISSUED" | "EVIDENCE_ACTION_EXPIRED" | "EVIDENCE_ACTION_SUPERSEDED" | "EVIDENCE_TASK_BINDING_CONFLICT" | "EVIDENCE_TERMINAL_NOT_COMPLETED" | "EVIDENCE_SOURCE_PATH_INVALID" | "EVIDENCE_SOURCE_MISSING" | "EVIDENCE_SOURCE_NOT_REGULAR" | "EVIDENCE_SOURCE_SYMLINK" | "EVIDENCE_SCHEMA_UNSUPPORTED" | "EVIDENCE_PROSE_NOT_CONTRACT" | "EVIDENCE_HASH_MISMATCH" | "EVIDENCE_PRODUCER_REQUEST_MISMATCH" | "EVIDENCE_PROVIDER_MISMATCH" | "EVIDENCE_MODEL_MISMATCH" | "EVIDENCE_CHANNEL_FORBIDDEN" | "EVIDENCE_METERED_USAGE_OBSERVED" | "EVIDENCE_SESSION_CONFLICT" | "EVIDENCE_IDEMPOTENCY_CONFLICT" | "EVIDENCE_SUBJECT_STALE" | "EVIDENCE_BOUNDARY_REJECTED" | "EVIDENCE_SUPERSESSION_INVALID" | "EVIDENCE_EVENT_LOG_CORRUPT" | "EVIDENCE_STORE_IO" | "EVIDENCE_ENVELOPE_OPEN" | "EVIDENCE_ENVELOPE_MEMBER_MISMATCH" | "EVIDENCE_UNDECLARED_INPUT";
 export type EvidenceOrigin = "package" | "ordinary-bg-run" | "external-attested-advisory";
@@ -677,7 +678,7 @@ export interface DeliverySubmissionV2 {
   actual_changed_paths: Path[];
   execution_audit_ref: Ref;
   focused_evidence_refs: Ref[];
-  terminal_status: DeliveryTerminalStatus;
+  terminal_status: DeliveryOutcome;
   hard_boundary_violations: string[];
 }
 

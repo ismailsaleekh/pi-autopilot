@@ -434,7 +434,7 @@ pub fn json_schema_for_items(
     let mut properties = JsonMap::new();
     let mut required = Vec::new();
     for item in items {
-        let value = match item.kind {
+        let mut value = match item.kind {
             ItemKind::Field => {
                 json_schema_for_type(&item.type_id, records, enums, item.nullable, closed)?
             }
@@ -442,6 +442,9 @@ pub fn json_schema_for_items(
             ItemKind::Group => json_schema_for_items(&item.items, records, enums, closed)?,
             ItemKind::Record => continue,
         };
+        if let Some(doc) = &item.doc {
+            add_schema_description(&mut value, doc)?;
+        }
         properties.insert(item.name.clone(), value);
         if item.required {
             required.push(JsonValue::String(item.name.clone()));
@@ -451,6 +454,16 @@ pub fn json_schema_for_items(
         json!({ "type": "object", "additionalProperties": !closed, "properties": properties, "required": required }),
     )
 }
+fn add_schema_description(schema: &mut JsonValue, doc: &str) -> Result<()> {
+    let Some(object) = schema.as_object_mut() else {
+        return Err(Error::input(
+            "json schema description target was not an object",
+        ));
+    };
+    object.insert("description".to_owned(), JsonValue::String(doc.to_owned()));
+    Ok(())
+}
+
 fn list_schema(
     item: &Item,
     records: &BTreeMap<String, Vec<Item>>,

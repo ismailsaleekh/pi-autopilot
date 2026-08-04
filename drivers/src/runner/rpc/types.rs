@@ -20,9 +20,24 @@ pub struct RpcSpawnConfig {
     pub runtime_addon: Option<PathBuf>,
     pub terminal_profile: Option<String>,
     pub carrier_binding: Option<String>,
+    pub delivery_policy: Option<DeliveryPolicyLaunchConfig>,
     pub pi_executable: OsString,
     pub stderr_tail_bytes: usize,
     pub max_terminal_bytes: usize,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct DeliveryPolicyLaunchConfig {
+    pub assignment_path: String,
+    pub assignment_digest: String,
+    pub worktree: String,
+    pub cwd: String,
+    pub assignment_id: String,
+    pub workstream: String,
+    pub lane_id: String,
+    pub attempt: u32,
+    pub base_commit: String,
+    pub policy_digest: String,
 }
 impl RpcSpawnConfig {
     #[must_use]
@@ -46,6 +61,7 @@ impl RpcSpawnConfig {
             runtime_addon: None,
             terminal_profile: None,
             carrier_binding: None,
+            delivery_policy: None,
             pi_executable: OsString::from("pi"),
             stderr_tail_bytes: DEFAULT_STDERR_TAIL_BYTES,
             max_terminal_bytes: super::DEFAULT_MAX_TERMINAL_BYTES,

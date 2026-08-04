@@ -83,6 +83,10 @@ const FRAME_VALIDATION_DESCRIPTORS = {
       "FAIL",
       "BLOCKED"
     ],
+    "delivery-outcome": [
+      "succeeded",
+      "blocked"
+    ],
     "evidence_content_kind": [
       "prompt",
       "assignment",

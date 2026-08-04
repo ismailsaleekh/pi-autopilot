@@ -361,6 +361,76 @@ fn plan_review_refuses_tampered_repository_authority_manifest() {
 }
 
 #[test]
+fn real_plan_compiler_prompt_renders_full_work_map_authority_and_atom_manifest() {
+    let root = temp_dir("plan-compiler-prompt-authority");
+    let repo = root.join("repo");
+    let vcs = GitVcs::new(&root);
+    vcs.init_fixture(&repo).expect("fixture repo");
+    let task_paths = write_task_pack(&repo, "set-prompt-authority");
+    vcs.stage_all(&repo).expect("stage task");
+    vcs.snapshot(&repo, "task commit").expect("task commit");
+    let event_log = root.join("events.jsonl");
+
+    let plan_raw = format!("autopilot-plan main {}", task_paths.join(" "));
+    let plan = send_with_log(&plan_raw, &event_log, Some(&repo));
+    let action = complete_planning_until_assignment(
+        planning_wave_payload(plan),
+        &event_log,
+        &repo,
+        "planning-main-plan-compiler-01",
+    );
+    assert_eq!(action.assignment_id.0, "planning-main-plan-compiler-01");
+    let spec_path = repo
+        .join(".pi/autopilot/main/planning/specs")
+        .join("planning-main-plan-compiler-01.json");
+    let spec: serde_json::Value =
+        serde_json::from_slice(&fs::read(&spec_path).expect("compiler spec"))
+            .expect("compiler spec json");
+    let prompt_path = PathBuf::from(spec["prompt_path"].as_str().expect("prompt path"));
+    let prompt = fs::read_to_string(&prompt_path).expect("compiler prompt");
+    assert_eq!(sha256_hex(prompt.as_bytes()), spec["prompt_digest"]);
+    assert!(
+        prompt.contains("Package-generated admission authority for planning.work-map.v1"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains(kernel::generated::WORK_MAP_ADMITS),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("Package-authoritative atom-link manifest for planning.work-map.v1"),
+        "{prompt}"
+    );
+    let registry_digest = spec["atom_registry_digest"]
+        .as_str()
+        .expect("registry digest");
+    assert!(prompt.contains(registry_digest), "{prompt}");
+    let registry_path = spec["atom_registry_path"].as_str().expect("registry path");
+    let registry: serde_json::Value =
+        serde_json::from_slice(&fs::read(registry_path).expect("bound atom registry"))
+            .expect("registry json");
+    for atom in registry["atoms"].as_array().expect("registry atoms") {
+        let id = atom["id"].as_str().expect("atom id");
+        assert!(prompt.contains(id), "prompt missing atom id {id}: {prompt}");
+    }
+    for required in [
+        "Each units[].links array item MUST equal exactly one atoms[].id",
+        "Do not use an `atoms:` prefix",
+        "Do not use ranges",
+        "Do not use comma groups",
+        "task/source/scout/context/artifact references",
+        "placeholders, empty artifact refs, or inferred expansion",
+        "External temporary paths are not generated_paths",
+        "use no-effect + [] + none even if they temporarily write outside the repo and clean up",
+    ] {
+        assert!(
+            prompt.contains(required),
+            "prompt missing {required}: {prompt}"
+        );
+    }
+}
+
+#[test]
 fn one_unit_work_map_reaches_ready_and_dispatches_one_lane() {
     let root = temp_dir("one-unit-plan");
     let repo = root.join("repo");

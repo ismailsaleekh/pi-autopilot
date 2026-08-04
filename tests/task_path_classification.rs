@@ -1025,7 +1025,12 @@ fn task_path_classification_delivery_terminal_carrier_is_core_accepted_and_incom
         serde_json::json!({"v":1,"id":20,"kind":"task-completed","payload":{"task_id":"task-delivery-1","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}),
     );
     assert_eq!(rejected.kind, "done");
-    assert!(done_status(&rejected).contains("delivery-rejected"));
+    let rejected_status = done_status(&rejected);
+    assert!(
+        rejected_status
+            .contains("delivery submission requires at least 2 nonempty focused evidence refs"),
+        "unexpected delivery rejection status: {rejected_status}"
+    );
     assert_eq!(
         state_status(&mut state),
         before,
@@ -1076,13 +1081,13 @@ fn delivery_carrier_without_package(
         "actual_changed_paths":["README.md"],
         "execution_audit_ref":"audit:delivery",
         "focused_evidence_refs":(0..evidence_count).map(|index| serde_json::json!(format!("evidence:{index}"))).collect::<Vec<_>>(),
-        "terminal_status":"done",
+        "terminal_status":"succeeded",
         "hard_boundary_violations":[]
     });
     let submission_digest = sha256_hex(&serde_json::to_vec(&submission).expect("submission"));
     let binding = drivers::runner::child::carrier_binding(&typed);
     let tool_call_id = "delivery-tool-call-1";
-    let audit = serde_json::json!({"schema":"autopilot.tool_audit.v1","tool_call_id":tool_call_id,"profile_id":profile.0,"tool_name":profile.1,"boundary_id":profile.2,"result_contract":profile.3,"schema_digest":profile.4,"binding":binding,"submission_digest":submission_digest});
+    let audit = serde_json::json!({"schema":"autopilot.tool_audit.v1","tool_call_id":tool_call_id,"profile_id":profile.0,"tool_name":profile.1,"boundary_id":profile.2,"result_contract":profile.3,"schema_digest":profile.4,"binding":binding,"submission_digest":submission_digest,"delivery_policy":{"version":drivers::runner::DELIVERY_POLICY_VERSION,"assignment_path":typed.assignment_path.as_ref().expect("assignment path").0.clone(),"assignment_digest":typed.assignment_digest.as_ref().expect("assignment digest").0.clone(),"worktree":typed.worktree.as_ref().expect("worktree").0.clone(),"cwd":typed.cwd.0.clone(),"policy_digest":drivers::runner::delivery_policy_digest(&typed.assignment_path.as_ref().expect("assignment path").0,&typed.assignment_digest.as_ref().expect("assignment digest").0,&typed.worktree.as_ref().expect("worktree").0,&typed.cwd.0),"active_overrides":["bash","edit","write"]}});
     let audit_bytes = serde_json::to_vec_pretty(&audit).expect("audit");
     let audit_path = PathBuf::from(spec["carrier_path"].as_str().expect("carrier"))
         .with_extension("tool-audit.json");

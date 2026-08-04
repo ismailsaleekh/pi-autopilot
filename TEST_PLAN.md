@@ -26,6 +26,14 @@ The paired background candidate must pass its default suite and prove the public
 - exactly-once terminal publication after output/metadata durability;
 - exact command preservation for package-contained runner commands.
 
+## Focused mutation-kill suggestions
+
+- Drop the initial planning.work-map.v1 atom-link manifest render: `real_plan_compiler_prompt_renders_full_work_map_authority_and_atom_manifest` should fail.
+- Drop the WorkMap repair atom-link manifest append: `work_map_value_repair_repeats_authority_and_atom_manifest_for_non_link_error` should fail.
+- Render only the Layer 6 boundary id instead of package-generated admission authority: prompt authority tests should fail on missing WorkMap admits text.
+- Remove exact one-ID/no `atoms:`/range/comma/source wording: prompt and boundary coverage assertions should fail.
+- Remove external-temp/no-effect wording: prompt guidance assertions should fail.
+
 ## Zero skip/todo policy
 
 Required package-local and paired certification lanes must report zero skipped and zero todo tests. A missing test file, skipped runtime integration, or fake-green package proof is a certification failure.

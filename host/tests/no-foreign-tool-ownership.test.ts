@@ -21,7 +21,7 @@ const packageRoot = resolve(fileURLToPath(new URL("../../", import.meta.url)));
  */
 
 function sourceFiles(): string[] {
-  const roots = ["src", "extensions", "bin"];
+  const roots = ["src", "child-runtime", "extensions", "bin"];
   const out: string[] = [];
   const walk = (dir: string): void => {
     for (const name of readdirSync(dir).sort()) {

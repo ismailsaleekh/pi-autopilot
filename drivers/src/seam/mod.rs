@@ -874,6 +874,25 @@ fn route_task_completed(
             Ok(value) => value,
             Err(error) => return done(id, rejection("delivery-binding", &error)),
         };
+        if runner::delivery_submission_outcome(&result_v2.submission)
+            == runner::DeliverySubmissionOutcome::Blocked
+        {
+            append_terminal_event(state, &payload, &binding)?;
+            state.append(
+                EventKind("agent:delivery-blocked".to_owned()),
+                vec![
+                    Ref(binding.assignment_id.0.clone()),
+                    Ref(binding.action_id.0.clone()),
+                    result.execution_audit_ref.clone(),
+                    Ref(format!(
+                        "hard-boundary-violations:{}",
+                        result.hard_boundary_violations.len()
+                    )),
+                ],
+            )?;
+            record_delivery_transcript(&binding, &carrier_text, state)?;
+            return done(id, rejection("delivery-blocked", &binding.assignment_id.0));
+        }
         let package = match runner::establish_delivery_package(&result, &expected) {
             Ok(value) => value,
             Err(error) => {
@@ -1290,19 +1309,11 @@ fn validate_delivery_result_v2(
     let spec: kernel::generated::AgentRunSpec =
         serde_json::from_slice(spec_bytes).map_err(|error| error.to_string())?;
     let assignment = validate_delivery_assignment_binding(&spec, binding)?;
-    let allowed_paths = assignment
-        .ordered_units
-        .iter()
-        .flat_map(|unit| unit.files.iter().map(|path| path.0.as_str()))
-        .collect::<BTreeSet<_>>();
-    for changed_path in &result.submission.actual_changed_paths {
-        if !allowed_paths.contains(changed_path.0.as_str()) {
-            return Err(format!(
-                "delivery changed path is outside approved unit scope: {}",
-                changed_path.0
-            ));
-        }
-    }
+    runner::admit_delivery_submission_with_assignment(
+        &result.submission,
+        &assignment,
+        binding.required_focused_evidence as usize,
+    )?;
     let profile = runner::terminal_profile_for(
         &binding.role_id.0,
         &binding.boundary_id.0,
@@ -1326,12 +1337,55 @@ fn validate_delivery_result_v2(
     if sha256_hex_local(&audit) != result.tool_audit_digest.0 {
         return Err("delivery tool audit digest drift".to_owned());
     }
+    validate_delivery_tool_audit_policy(&audit, &spec)?;
     let submission = serde_json::to_vec(
         &serde_json::to_value(&result.submission).map_err(|error| error.to_string())?,
     )
     .map_err(|error| error.to_string())?;
     if sha256_hex_local(&submission) != result.submission_digest.0 {
         return Err("delivery submission digest drift".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_delivery_tool_audit_policy(
+    audit: &[u8],
+    spec: &kernel::generated::AgentRunSpec,
+) -> Result<(), String> {
+    let value: serde_json::Value = serde_json::from_slice(audit)
+        .map_err(|error| format!("delivery tool audit json:{error}"))?;
+    let policy = value
+        .get("delivery_policy")
+        .ok_or_else(|| "delivery tool audit missing policy authority".to_owned())?;
+    let assignment_path = spec
+        .assignment_path
+        .as_ref()
+        .ok_or_else(|| "delivery audit spec missing assignment_path".to_owned())?;
+    let assignment_digest = spec
+        .assignment_digest
+        .as_ref()
+        .ok_or_else(|| "delivery audit spec missing assignment_digest".to_owned())?;
+    let worktree = spec
+        .worktree
+        .as_ref()
+        .ok_or_else(|| "delivery audit spec missing worktree".to_owned())?;
+    let expected_policy_digest = runner::delivery_policy_digest(
+        &assignment_path.0,
+        &assignment_digest.0,
+        &worktree.0,
+        &spec.cwd.0,
+    );
+    let expected = serde_json::json!({
+        "version": runner::DELIVERY_POLICY_VERSION,
+        "assignment_path": assignment_path.0,
+        "assignment_digest": assignment_digest.0,
+        "worktree": worktree.0,
+        "cwd": spec.cwd.0,
+        "policy_digest": expected_policy_digest,
+        "active_overrides": ["bash", "edit", "write"],
+    });
+    if policy != &expected {
+        return Err("delivery tool audit policy authority drift".to_owned());
     }
     Ok(())
 }
@@ -1363,7 +1417,14 @@ fn delivery_v1_projection(result: &kernel::generated::DeliveryResultV2) -> Deliv
         actual_changed_paths: result.submission.actual_changed_paths.clone(),
         execution_audit_ref: result.submission.execution_audit_ref.clone(),
         focused_evidence_refs: result.submission.focused_evidence_refs.clone(),
-        terminal_status: result.submission.terminal_status.clone(),
+        terminal_status: match &result.submission.terminal_status {
+            kernel::generated::DeliveryOutcome::Succeeded => {
+                kernel::generated::DeliveryTerminalStatus("succeeded".to_owned())
+            }
+            kernel::generated::DeliveryOutcome::Blocked => {
+                kernel::generated::DeliveryTerminalStatus("blocked".to_owned())
+            }
+        },
         hard_boundary_violations: result.submission.hard_boundary_violations.clone(),
     }
 }

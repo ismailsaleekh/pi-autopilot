@@ -469,12 +469,12 @@ Sources: `data/contracts.kdl`.
 | work_map | list | plan_unit.depends_on | id | true |  | Exact declared predecessor unit ids; package must never invent positional dependencies. |
 | work_map | list | plan_unit.files | path | true |  | Nonempty declared relevant path scope for this executable delivery unit. |
 | work_map | list | plan_unit.commands | plan_unit_command | true |  | Nonempty focused verification commands/tests tied to this unit. |
-| work_map | list | plan_unit.links | id | true |  | Atom ids accepted from task_atoms. |
+| work_map | list | plan_unit.links | id | true |  | Each item must equal exactly one bound atom registry atoms[].id byte-for-byte; no `atoms:` prefix, range, comma group, task/source/scout/context/artifact ref, placeholder, or inferred expansion. |
 | work_map | field | plan_unit_command.command | string | true |  |  |
 | work_map | field | plan_unit_command.expected | string | true |  |  |
-| work_map | field | plan_unit_command.effect | command_effect | true |  | Closed Git-visible persistent repository effect classification. |
-| work_map | list | plan_unit_command.generated_paths | path | true |  | Exact normalized repo-relative Git-visible generated artifact paths, empty unless effect is declared-predictable. |
-| work_map | field | plan_unit_command.handling | command_effect_handling | true |  | Closed handling authority for Git-visible generated artifacts. |
+| work_map | field | plan_unit_command.effect | command_effect | true |  | Closed Git-visible persistent repository effect classification; no-effect means the final command leaves no persistent Git-visible repo state. |
+| work_map | list | plan_unit_command.generated_paths | path | true |  | Exact normalized repo-relative Git-visible persistent generated artifact paths only, empty unless effect is declared-predictable; external temporary paths are not generated_paths. |
+| work_map | field | plan_unit_command.handling | command_effect_handling | true |  | Closed handling authority for Git-visible generated artifacts; no-effect requires none, unknown-generated requires run-isolated. |
 | work_map | field | plan_unit_command.scope_preservation | string | true |  | Nonempty final-scope-check statement proving verification leaves final Git-visible state inside approved unit files. |
 | plan_review | list | verdicts | plan_review_verdict | true |  | Criterion verdicts. |
 | plan_review | field | plan_review_verdict.criterion_id | id | true |  |  |
@@ -522,7 +522,7 @@ Sources: `data/contracts.kdl`.
 | delivery_submission_v2 | list | actual_changed_paths | path | true |  |  |
 | delivery_submission_v2 | field | execution_audit_ref | ref | true |  |  |
 | delivery_submission_v2 | list | focused_evidence_refs | ref | true |  |  |
-| delivery_submission_v2 | field | terminal_status | delivery-terminal-status | true |  |  |
+| delivery_submission_v2 | field | terminal_status | delivery-outcome | true |  |  |
 | delivery_submission_v2 | list | hard_boundary_violations | string | true |  |  |
 | delivery_result_v2 | field | schema | schema-id | true |  |  |
 | delivery_result_v2 | field | action_id | id | true |  |  |
@@ -914,6 +914,7 @@ Sources: `data/contracts.kdl`.
 | planning_review_verdict | pass, blocker, advisory, fail, blocked, needs-fix |
 | plan_unit_kind | implementation |
 | command_effect | no-effect, declared-predictable, unknown-generated |
+| delivery-outcome | succeeded, blocked |
 | command_effect_handling | none, run-isolated, exact-cleanup-before-scope-gate, block-if-created |
 | run_phase | planning, ready-to-execute, allocating, executing, final-verification, ready-to-close, terminal |
 | run_health | healthy, degraded, paused, unsafe-halt |

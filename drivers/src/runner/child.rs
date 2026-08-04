@@ -11,8 +11,9 @@ use crate::checkpoint::{
     ContextBudget,
 };
 use crate::runner::rpc::{
-    AppendedEntry, CompactionReason, RpcClient, RpcCommand, RpcCommandKind, RpcDiagnostics,
-    RpcEvent, RpcFrame, RpcResponse, RpcSpawnConfig, TerminalMessage, ToolCarrierDetails,
+    AppendedEntry, CompactionReason, DeliveryPolicyLaunchConfig, RpcClient, RpcCommand,
+    RpcCommandKind, RpcDiagnostics, RpcEvent, RpcFrame, RpcResponse, RpcSpawnConfig,
+    TerminalMessage, ToolCarrierDetails,
 };
 
 use kernel::failure::{Failure, OperatorDecision, RetryPolicy};
@@ -67,6 +68,7 @@ struct ChildToolReceipt {
     schema_digest: String,
     binding: String,
     active_tools: Vec<String>,
+    delivery_policy: Option<ChildDeliveryPolicyReceipt>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
@@ -80,6 +82,22 @@ struct ChildToolReceiptData {
     schema_digest: String,
     binding: String,
     active_tools: Vec<String>,
+    #[serde(default)]
+    delivery_policy: Option<ChildDeliveryPolicyReceipt>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChildDeliveryPolicyReceipt {
+    version: String,
+    assignment_path: String,
+    assignment_digest: String,
+    worktree: String,
+    cwd: String,
+    policy_digest: String,
+    allowed_unit_file_count: usize,
+    approved_command_count: usize,
+    active_overrides: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -945,6 +963,81 @@ fn normalize_child_tool_receipt(entry: &Value) -> Result<ChildToolReceipt, Strin
     normalize_child_tool_receipt_data(entry_id, data)
 }
 
+fn validate_delivery_policy_receipt(
+    spec: &AgentRunSpec,
+    receipt: Option<&ChildDeliveryPolicyReceipt>,
+) -> Result<(), String> {
+    if !matches!(
+        spec.assignment_kind,
+        kernel::generated::ValidationAssignmentKind::Delivery
+    ) {
+        if receipt.is_some() {
+            return Err("agent-run delivery policy receipt on non-delivery profile".to_owned());
+        }
+        return Ok(());
+    }
+    let receipt = receipt.ok_or_else(|| "agent-run missing delivery policy receipt".to_owned())?;
+    let assignment_path = spec
+        .assignment_path
+        .as_ref()
+        .ok_or_else(|| "agent-run delivery missing assignment_path".to_owned())?;
+    let assignment_digest = spec
+        .assignment_digest
+        .as_ref()
+        .ok_or_else(|| "agent-run delivery missing assignment_digest".to_owned())?;
+    let worktree = spec
+        .worktree
+        .as_ref()
+        .ok_or_else(|| "agent-run delivery missing worktree".to_owned())?;
+    let expected_policy_digest = super::delivery_policy_digest(
+        &assignment_path.0,
+        &assignment_digest.0,
+        &worktree.0,
+        &spec.cwd.0,
+    );
+    if receipt.version != super::DELIVERY_POLICY_VERSION
+        || receipt.assignment_path != assignment_path.0
+        || receipt.assignment_digest != assignment_digest.0
+        || receipt.worktree != worktree.0
+        || receipt.cwd != spec.cwd.0
+        || receipt.policy_digest != expected_policy_digest
+        || receipt.active_overrides
+            != vec!["bash".to_owned(), "edit".to_owned(), "write".to_owned()]
+    {
+        return Err("agent-run delivery policy receipt drift".to_owned());
+    }
+    let bytes = super::read_bounded_file(
+        Path::new(&assignment_path.0),
+        super::DELIVERY_ASSIGNMENT_MAX_BYTES,
+    )
+    .map_err(|error| format!("agent-run delivery policy assignment read: {error}"))?;
+    if sha256_hex(&bytes) != assignment_digest.0 {
+        return Err("agent-run delivery policy assignment digest drift".to_owned());
+    }
+    let artifact: super::DeliveryAssignmentArtifact = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("agent-run delivery policy assignment json: {error}"))?;
+    let allowed_unit_file_count = artifact
+        .ordered_units
+        .iter()
+        .flat_map(|unit| unit.files.iter().map(|path| path.0.as_str()))
+        .collect::<BTreeSet<_>>()
+        .len();
+    let approved_command_count = artifact
+        .ordered_units
+        .iter()
+        .flat_map(|unit| unit.commands.iter().map(|command| command.command.as_str()))
+        .collect::<BTreeSet<_>>()
+        .len();
+    if receipt.allowed_unit_file_count != allowed_unit_file_count
+        || receipt.approved_command_count != approved_command_count
+        || allowed_unit_file_count == 0
+        || approved_command_count == 0
+    {
+        return Err("agent-run delivery policy receipt authority count drift".to_owned());
+    }
+    Ok(())
+}
+
 fn normalize_streamed_child_tool_receipt(
     entry: &AppendedEntry,
 ) -> Result<ChildToolReceipt, String> {
@@ -970,6 +1063,7 @@ fn normalize_child_tool_receipt_data(
         schema_digest,
         binding,
         mut active_tools,
+        delivery_policy,
     } = serde_json::from_value(data)
         .map_err(|error| format!("agent-run child add-on receipt data malformed: {error}"))?;
     active_tools.sort();
@@ -983,6 +1077,7 @@ fn normalize_child_tool_receipt_data(
         schema_digest,
         binding,
         active_tools,
+        delivery_policy,
     })
 }
 
@@ -1027,6 +1122,51 @@ impl RpcAssignment {
             config.runtime_addon = Some(PathBuf::from(&path.0));
             config.terminal_profile = spec.terminal_profile_id.clone();
             config.carrier_binding = Some(carrier_binding(spec));
+            if matches!(
+                spec.assignment_kind,
+                kernel::generated::ValidationAssignmentKind::Delivery
+            ) {
+                let assignment_path = spec
+                    .assignment_path
+                    .as_ref()
+                    .ok_or_else(|| "agent-run delivery missing assignment_path".to_owned())?;
+                let assignment_digest = spec
+                    .assignment_digest
+                    .as_ref()
+                    .ok_or_else(|| "agent-run delivery missing assignment_digest".to_owned())?;
+                let worktree = spec
+                    .worktree
+                    .as_ref()
+                    .ok_or_else(|| "agent-run delivery missing worktree".to_owned())?;
+                let lane_id = spec
+                    .lane_id
+                    .as_ref()
+                    .ok_or_else(|| "agent-run delivery missing lane_id".to_owned())?;
+                let attempt = spec
+                    .attempt
+                    .ok_or_else(|| "agent-run delivery missing attempt".to_owned())?;
+                let base_commit = spec
+                    .base_commit
+                    .as_ref()
+                    .ok_or_else(|| "agent-run delivery missing base_commit".to_owned())?;
+                config.delivery_policy = Some(DeliveryPolicyLaunchConfig {
+                    assignment_path: assignment_path.0.clone(),
+                    assignment_digest: assignment_digest.0.clone(),
+                    worktree: worktree.0.clone(),
+                    cwd: spec.cwd.0.clone(),
+                    assignment_id: spec.assignment_id.0.clone(),
+                    workstream: spec.workstream.0.clone(),
+                    lane_id: lane_id.0.clone(),
+                    attempt,
+                    base_commit: base_commit.0.clone(),
+                    policy_digest: super::delivery_policy_digest(
+                        &assignment_path.0,
+                        &assignment_digest.0,
+                        &worktree.0,
+                        &spec.cwd.0,
+                    ),
+                });
+            }
         }
         let client = RpcClient::spawn(config).map_err(|error| error.to_string())?;
         let mut runner = Self {
@@ -1732,6 +1872,7 @@ impl RpcAssignment {
                 "agent-run active tools drift before prompt: expected {expected:?}, got {active:?}"
             ));
         }
+        validate_delivery_policy_receipt(spec, durable.delivery_policy.as_ref())?;
         Ok(())
     }
 
@@ -2634,6 +2775,7 @@ fn validate_spec(strict: &AgentRunSpec, spec_path: &Path) -> Result<(), String> 
     validate_session_identity(strict)?;
     validate_delivery_identity(strict)?;
     validate_planning_documents(strict)?;
+    validate_planning_atom_bindings(strict)?;
     Ok(())
 }
 
@@ -2779,9 +2921,8 @@ fn validate_runtime_addon(strict: &AgentRunSpec) -> Result<(), String> {
     match runtime_addon(strict) {
         Some((path, expected)) => {
             let path = path_value("runtime_addon_path", &path.0)?;
-            let bytes = super::read_bounded_file(&path, super::CHILD_ADDON_MAX_BYTES)
+            let actual = super::child_addon_digest_for_path(&path)
                 .map_err(|error| format!("agent-run child add-on read failed: {error}"))?;
-            let actual = sha256_hex(&bytes);
             if expected.0 != kernel::generated::CHILD_ADDON_DIGEST {
                 return Err(format!(
                     "agent-run child add-on authority digest drift: expected {}, got {}",
@@ -3279,6 +3420,71 @@ fn validate_planning_documents(strict: &AgentRunSpec) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_planning_atom_bindings(strict: &AgentRunSpec) -> Result<(), String> {
+    if !matches!(
+        strict.assignment_kind,
+        kernel::generated::ValidationAssignmentKind::PlanningReview
+    ) {
+        if strict.atom_id_prefix.is_some()
+            || strict.atom_registry_path.is_some()
+            || strict.atom_registry_digest.is_some()
+        {
+            return Err("agent-run non-planning spec contains atom bindings".to_owned());
+        }
+        return Ok(());
+    }
+    match strict.boundary_id.0.as_str() {
+        "planning.task-atoms.v1" => {
+            let prefix = strict
+                .atom_id_prefix
+                .as_deref()
+                .ok_or_else(|| "agent-run task atoms missing atom_id_prefix".to_owned())?;
+            if prefix.trim().is_empty() {
+                return Err("agent-run task atoms empty atom_id_prefix".to_owned());
+            }
+            if strict.atom_registry_path.is_some() || strict.atom_registry_digest.is_some() {
+                return Err("agent-run task atoms cannot bind atom registry".to_owned());
+            }
+        }
+        "planning.work-map.v1" => {
+            if strict.atom_id_prefix.is_some() {
+                return Err("agent-run work-map cannot bind atom_id_prefix".to_owned());
+            }
+            let (path, digest) = atom_registry_binding_for_spec(strict)?;
+            crate::planning::load_atom_registry_ids(Path::new(path), digest)
+                .map_err(|error| format!("agent-run work-map atom registry invalid: {error:?}"))?;
+        }
+        _ => {
+            if strict.atom_id_prefix.is_some()
+                || strict.atom_registry_path.is_some()
+                || strict.atom_registry_digest.is_some()
+            {
+                return Err(
+                    "agent-run non atom/work-map planning spec has atom bindings".to_owned(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn atom_registry_binding_for_spec(spec: &AgentRunSpec) -> Result<(&str, &str), String> {
+    let path = spec
+        .atom_registry_path
+        .as_ref()
+        .map(|path| path.0.as_str())
+        .ok_or_else(|| "agent-run work-map missing atom_registry_path".to_owned())?;
+    let digest = spec
+        .atom_registry_digest
+        .as_ref()
+        .map(|digest| digest.0.as_str())
+        .ok_or_else(|| "agent-run work-map missing atom_registry_digest".to_owned())?;
+    if path.trim().is_empty() || digest.trim().is_empty() {
+        return Err("agent-run work-map empty atom registry binding".to_owned());
+    }
+    Ok((path, digest))
+}
+
 fn validate_doc(
     doc: &TaskDocument,
     expected_class: &str,
@@ -3398,6 +3604,14 @@ fn render_repair_prompt(
         prompt.push_str("\n\n");
         prompt.push_str(&planning_task_source_manifest_for_spec(spec)?);
     }
+    if spec.boundary_id.0 == "planning.work-map.v1" {
+        prompt.push_str("\n\n");
+        prompt.push_str(&planning_work_map_authority_for_spec(spec)?);
+    }
+    if spec.boundary_id.0 == "autopilot.delivery_submission.v2" {
+        prompt.push_str("\n\n");
+        prompt.push_str(&delivery_submission_authority_for_spec(spec)?);
+    }
     Ok(prompt)
 }
 
@@ -3412,6 +3626,93 @@ fn planning_task_source_manifest_for_spec(spec: &AgentRunSpec) -> Result<String,
             )
         })?;
     Ok(registry.canonical_source_manifest().to_owned())
+}
+
+fn planning_work_map_authority_for_spec(spec: &AgentRunSpec) -> Result<String, ValueRejection> {
+    let authority = crate::contract_authority::render_contract_authority("planning.work-map.v1")
+        .map_err(|error| {
+            value_rejection(
+                "work_map_admission_authority",
+                "package-generated planning.work-map.v1 admission authority",
+                error.to_string(),
+            )
+        })?;
+    let (path, digest) = atom_registry_binding_for_spec(spec).map_err(|error| {
+        value_rejection(
+            "atom_registry",
+            "spec-bound atom registry path and digest",
+            error,
+        )
+    })?;
+    let manifest = crate::planning::atom_link_manifest_for_registry(Path::new(path), digest)
+        .map_err(|error| {
+            value_rejection(
+                "atom_registry",
+                "digest-verified package-authoritative atom-link manifest",
+                format!("{error:?}"),
+            )
+        })?;
+    Ok(format!("{authority}\n\n{manifest}"))
+}
+
+fn delivery_submission_authority_for_spec(spec: &AgentRunSpec) -> Result<String, ValueRejection> {
+    let assignment_path = spec.assignment_path.as_ref().ok_or_else(|| {
+        value_rejection(
+            "assignment_path",
+            "delivery assignment authority",
+            "missing",
+        )
+    })?;
+    let assignment_digest = spec.assignment_digest.as_ref().ok_or_else(|| {
+        value_rejection("assignment_digest", "delivery assignment digest", "missing")
+    })?;
+    let worktree = spec
+        .worktree
+        .as_ref()
+        .ok_or_else(|| value_rejection("worktree", "delivery worktree authority", "missing"))?;
+    let required = spec.required_focused_evidence.ok_or_else(|| {
+        value_rejection(
+            "required_focused_evidence",
+            "delivery evidence requirement",
+            "missing",
+        )
+    })?;
+    let bytes = super::read_bounded_file(
+        Path::new(&assignment_path.0),
+        super::DELIVERY_ASSIGNMENT_MAX_BYTES,
+    )
+    .map_err(|error| {
+        value_rejection(
+            "assignment_path",
+            "bounded delivery assignment authority",
+            error.to_string(),
+        )
+    })?;
+    if sha256_hex(&bytes) != assignment_digest.0 {
+        return Err(value_rejection(
+            "assignment_digest",
+            "spec-bound delivery assignment digest",
+            "digest drift",
+        ));
+    }
+    let artifact_text = String::from_utf8(bytes).map_err(|error| {
+        value_rejection("assignment", "UTF-8 delivery assignment", error.to_string())
+    })?;
+    super::render_delivery_submission_authority(
+        &assignment_path.0,
+        &assignment_digest.0,
+        &worktree.0,
+        &spec.cwd.0,
+        required,
+        &artifact_text,
+    )
+    .map_err(|error| {
+        value_rejection(
+            "delivery_admission_authority",
+            "package-rendered delivery admission authority",
+            error.to_string(),
+        )
+    })
 }
 
 fn planning_task_input_set_from_spec(
@@ -3911,23 +4212,51 @@ fn validate_delivery_submission(
     submission: &kernel::generated::DeliverySubmissionV2,
 ) -> Result<(), ValueRejection> {
     let required = spec.required_focused_evidence.unwrap_or(0) as usize;
-    if submission.actual_changed_paths.is_empty()
-        || submission.execution_audit_ref.0.trim().is_empty()
-        || submission.focused_evidence_refs.len() < required
-    {
+    let assignment_path = spec.assignment_path.as_ref().ok_or_else(|| {
+        value_rejection(
+            "assignment_path",
+            "delivery assignment authority",
+            "missing",
+        )
+    })?;
+    let assignment_digest = spec.assignment_digest.as_ref().ok_or_else(|| {
+        value_rejection(
+            "assignment_digest",
+            "delivery assignment digest authority",
+            "missing",
+        )
+    })?;
+    let bytes = super::read_bounded_file(
+        Path::new(&assignment_path.0),
+        super::DELIVERY_ASSIGNMENT_MAX_BYTES,
+    )
+    .map_err(|error| {
+        value_rejection(
+            "assignment_path",
+            "bounded regular delivery assignment",
+            error.to_string(),
+        )
+    })?;
+    if sha256_hex(&bytes) != assignment_digest.0 {
         return Err(value_rejection(
-            "delivery_submission",
-            format!("changed paths, audit ref, and at least {required} focused evidence refs"),
-            "missing required delivery evidence",
+            "assignment_digest",
+            "spec-bound delivery assignment digest",
+            "digest drift",
         ));
     }
-    if !submission.hard_boundary_violations.is_empty() {
-        return Err(value_rejection(
-            "hard_boundary_violations",
-            "empty array",
-            submission.hard_boundary_violations.join(","),
-        ));
-    }
+    let assignment: super::DeliveryAssignmentArtifact =
+        serde_json::from_slice(&bytes).map_err(|error| {
+            value_rejection("assignment", "valid delivery assignment", error.to_string())
+        })?;
+    super::admit_delivery_submission_with_assignment(submission, &assignment, required).map_err(
+        |error| {
+            value_rejection(
+                "delivery_submission",
+                "closed succeeded/blocked delivery admission shape",
+                error,
+            )
+        },
+    )?;
     Ok(())
 }
 
@@ -4288,7 +4617,7 @@ fn package_tool_result(
             )
         })?;
     }
-    let audit = serde_json::json!({
+    let mut audit = serde_json::json!({
         "schema": "autopilot.tool_audit.v1",
         "tool_call_id": terminal.tool_call_id,
         "profile_id": terminal.details.profile_id,
@@ -4299,6 +4628,37 @@ fn package_tool_result(
         "binding": terminal.details.binding,
         "submission_digest": submission_digest,
     });
+    if matches!(
+        spec.assignment_kind,
+        kernel::generated::ValidationAssignmentKind::Delivery
+    ) {
+        let assignment_path = spec
+            .assignment_path
+            .as_ref()
+            .expect("validated delivery assignment path");
+        let assignment_digest = spec
+            .assignment_digest
+            .as_ref()
+            .expect("validated delivery assignment digest");
+        let worktree = spec.worktree.as_ref().expect("validated delivery worktree");
+        audit.as_object_mut().expect("tool audit is object").insert(
+            "delivery_policy".to_owned(),
+            serde_json::json!({
+                "version": super::DELIVERY_POLICY_VERSION,
+                "assignment_path": assignment_path.0,
+                "assignment_digest": assignment_digest.0,
+                "worktree": worktree.0,
+                "cwd": spec.cwd.0,
+                "policy_digest": super::delivery_policy_digest(
+                    &assignment_path.0,
+                    &assignment_digest.0,
+                    &worktree.0,
+                    &spec.cwd.0,
+                ),
+                "active_overrides": ["bash", "edit", "write"],
+            }),
+        );
+    }
     let audit_bytes = serde_json::to_vec_pretty(&audit)
         .map_err(|error| value_rejection("tool_audit", "serializable", error.to_string()))?;
     let audit_path = PathBuf::from(&spec.carrier_path.0).with_extension("tool-audit.json");

@@ -446,6 +446,91 @@ fn lane_delivery_core_rejects_changed_path_outside_approved_unit_scope() {
 }
 
 #[test]
+fn delivery_submission_admission_accepts_blocked_and_rejects_mixed_shapes() {
+    let assignment = runner::DeliveryAssignmentArtifact {
+        schema: "autopilot.delivery_assignment.v1".to_owned(),
+        workstream: id("main"),
+        assignment_id: id("assignment-main-L1"),
+        lane_id: id("L1"),
+        attempt: 1,
+        base_commit: Sha("0123456789abcdef0123456789abcdef01234567".to_owned()),
+        worktree: "/tmp/worktree".to_owned(),
+        ordered_units: vec![ApprovedUnit {
+            files: vec![ContractPath("README.md".to_owned())],
+            ..unit("U1", 1, &[])
+        }],
+    };
+    let mut submission = kernel::generated::DeliverySubmissionV2 {
+        actual_changed_paths: vec![ContractPath("README.md".to_owned())],
+        execution_audit_ref: Ref("audit:delivery".to_owned()),
+        focused_evidence_refs: vec![Ref("evidence:0".to_owned()), Ref("evidence:1".to_owned())],
+        terminal_status: kernel::generated::DeliveryOutcome::Succeeded,
+        hard_boundary_violations: Vec::new(),
+    };
+    assert_eq!(
+        runner::admit_delivery_submission_with_assignment(&submission, &assignment, 2),
+        Ok(runner::DeliverySubmissionOutcome::Succeeded)
+    );
+    submission.terminal_status = kernel::generated::DeliveryOutcome::Blocked;
+    submission.actual_changed_paths.clear();
+    submission.hard_boundary_violations.push(
+        "approved command expected planning checkout root, assigned worktree differed".to_owned(),
+    );
+    assert_eq!(
+        runner::admit_delivery_submission_with_assignment(&submission, &assignment, 2),
+        Ok(runner::DeliverySubmissionOutcome::Blocked)
+    );
+    assert!(
+        serde_json::from_value::<kernel::generated::DeliverySubmissionV2>(serde_json::json!({
+            "actual_changed_paths":[],"execution_audit_ref":"audit:delivery","focused_evidence_refs":["evidence:0","evidence:1"],"terminal_status":"unknown","hard_boundary_violations":["blocked"]
+        }))
+        .is_err(),
+        "unknown status must be rejected by the generated enum"
+    );
+
+    let mut mixed = submission.clone();
+    mixed.actual_changed_paths = vec![ContractPath("README.md".to_owned())];
+    assert!(runner::admit_delivery_submission_with_assignment(&mixed, &assignment, 2).is_err());
+    let mut mixed = submission.clone();
+    mixed.hard_boundary_violations.clear();
+    assert!(runner::admit_delivery_submission_with_assignment(&mixed, &assignment, 2).is_err());
+    let mut mixed = submission.clone();
+    mixed.terminal_status = kernel::generated::DeliveryOutcome::Succeeded;
+    assert!(runner::admit_delivery_submission_with_assignment(&mixed, &assignment, 2).is_err());
+}
+
+#[test]
+fn lane_delivery_core_consumes_blocked_without_packaging() {
+    let (mut core, spawn, spec, carrier_path, worktree) =
+        launched_core_delivery("blocked-delivery");
+    fs::create_dir_all(carrier_path.parent().expect("carrier parent")).expect("carrier dir");
+    fs::write(
+        &carrier_path,
+        serde_json::to_vec_pretty(&delivery_blocked_carrier_for_core(&spec, 2))
+            .expect("blocked carrier"),
+    )
+    .expect("carrier write");
+
+    let rejected = core.send_json(serde_json::json!({"v":1,"id":2,"kind":"task-completed","payload":{"task_id":"task-blocked-delivery","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}));
+    assert_eq!(rejected.kind, "done", "blocked response: {rejected:?}");
+    assert!(
+        done_status(&rejected).contains("rejection:delivery-blocked:assignment-main-L1"),
+        "blocked status was not visible: {rejected:?}"
+    );
+    let head = git_stdout(&worktree, &["rev-parse", "--verify", "HEAD^{commit}"]);
+    assert_eq!(
+        head.trim(),
+        spec["base_commit"].as_str().expect("base commit")
+    );
+    assert_eq!(git_stdout(&worktree, &["status", "--porcelain=v1"]), "");
+    let events = fs::read_to_string(core.event_log()).expect("events");
+    assert!(events.contains("agent:delivery-blocked"), "{events}");
+    assert!(!events.contains("agent:delivery-accepted"), "{events}");
+    assert!(!events.contains("validation:required"), "{events}");
+    core.shutdown();
+}
+
+#[test]
 fn lane_delivery_core_accepts_captured_spec_when_runner_spec_and_prompt_are_transient() {
     let (mut core, spawn, spec, carrier_path, worktree) =
         launched_core_delivery("transient-runner-files");
@@ -809,7 +894,7 @@ fn delivery_carrier_for_core_path(
         "focused_evidence_refs": (0..evidence_count)
             .map(|index| serde_json::json!(format!("evidence:{index}")))
             .collect::<Vec<_>>(),
-        "terminal_status": "done",
+        "terminal_status": "succeeded",
         "hard_boundary_violations": []
     });
     let submission_digest = sha256_hex(&serde_json::to_vec(&submission).expect("submission"));
@@ -825,6 +910,94 @@ fn delivery_carrier_for_core_path(
         "schema_digest":profile.4,
         "binding":binding,
         "submission_digest":submission_digest,
+        "delivery_policy":{
+            "version":drivers::runner::DELIVERY_POLICY_VERSION,
+            "assignment_path":typed.assignment_path.as_ref().expect("assignment path").0.clone(),
+            "assignment_digest":typed.assignment_digest.as_ref().expect("assignment digest").0.clone(),
+            "worktree":typed.worktree.as_ref().expect("worktree").0.clone(),
+            "cwd":typed.cwd.0.clone(),
+            "policy_digest":drivers::runner::delivery_policy_digest(
+                &typed.assignment_path.as_ref().expect("assignment path").0,
+                &typed.assignment_digest.as_ref().expect("assignment digest").0,
+                &typed.worktree.as_ref().expect("worktree").0,
+                &typed.cwd.0,
+            ),
+            "active_overrides":["bash","edit","write"],
+        },
+    });
+    let spec_bytes =
+        fs::read_to_string(spec["spec_path"].as_str().expect("spec path")).expect("spec bytes");
+    let carrier_path = PathBuf::from(spec["carrier_path"].as_str().expect("carrier path"));
+    let audit_path = carrier_path.with_extension("tool-audit.json");
+    let audit_bytes = serde_json::to_vec_pretty(&audit).expect("audit");
+    fs::create_dir_all(audit_path.parent().expect("audit parent")).expect("audit dir");
+    fs::write(&audit_path, &audit_bytes).expect("audit write");
+    serde_json::json!({
+        "schema":"autopilot.delivery_result.v2",
+        "assignment_id":spec["assignment_id"],"role_id":spec["role_id"],"mode":spec["mode"],
+        "run_revision":spec["run_revision"],"workstream":spec["workstream"],"lane_id":spec["lane_id"],
+        "attempt":spec["attempt"],"base_commit":spec["base_commit"],"worktree":spec["worktree"],
+        "action_id":spec["action_id"],"prompt_path":spec["prompt_path"],"prompt_digest":spec["prompt_digest"],
+        "spec_path":spec["spec_path"],
+        "spec_digest":sha256_hex(spec_bytes.as_bytes()),
+        "spec_bytes":spec_bytes,
+        "carrier_path":spec["carrier_path"],"boundary_id":spec["boundary_id"],"boundary_digest":spec["boundary_digest"],
+        "result_contract":spec["result_contract"],"result_contract_digest":spec["result_contract_digest"],
+        "settings_digest":spec["settings_digest"],"context_digest":spec["context_digest"],
+        "skills_digest":spec["skills_digest"],"subscription_digest":spec["subscription_digest"],
+        "runtime_extension_digest":spec["runtime_extension_digest"],"terminal_profile_id":profile.0,
+        "tool_name":profile.1,"tool_schema_digest":profile.4,"carrier_binding":binding,"tool_call_id":tool_call_id,
+        "tool_audit_ref":audit_path.display().to_string(),"tool_audit_digest":sha256_hex(&audit_bytes),
+        "submission_digest":submission_digest,"submission":submission
+    })
+}
+
+fn delivery_blocked_carrier_for_core(
+    spec: &serde_json::Value,
+    evidence_count: usize,
+) -> serde_json::Value {
+    let typed: kernel::generated::AgentRunSpec =
+        serde_json::from_value(spec.clone()).expect("typed runner spec");
+    let profile = kernel::generated::TERMINAL_PROFILES
+        .iter()
+        .find(|profile| profile.0 == "delivery-status.v2")
+        .expect("delivery profile");
+    let submission = serde_json::json!({
+        "actual_changed_paths": [],
+        "execution_audit_ref": "audit:delivery-blocked",
+        "focused_evidence_refs": (0..evidence_count)
+            .map(|index| serde_json::json!(format!("evidence:{index}")))
+            .collect::<Vec<_>>(),
+        "terminal_status": "blocked",
+        "hard_boundary_violations": ["approved command expected a different checkout root; no mutation performed"]
+    });
+    let submission_digest = sha256_hex(&serde_json::to_vec(&submission).expect("submission"));
+    let tool_call_id = "delivery-tool-call-blocked";
+    let binding = drivers::runner::child::carrier_binding(&typed);
+    let audit = serde_json::json!({
+        "schema":"autopilot.tool_audit.v1",
+        "tool_call_id":tool_call_id,
+        "profile_id":profile.0,
+        "tool_name":profile.1,
+        "boundary_id":profile.2,
+        "result_contract":profile.3,
+        "schema_digest":profile.4,
+        "binding":binding,
+        "submission_digest":submission_digest,
+        "delivery_policy":{
+            "version":drivers::runner::DELIVERY_POLICY_VERSION,
+            "assignment_path":typed.assignment_path.as_ref().expect("assignment path").0.clone(),
+            "assignment_digest":typed.assignment_digest.as_ref().expect("assignment digest").0.clone(),
+            "worktree":typed.worktree.as_ref().expect("worktree").0.clone(),
+            "cwd":typed.cwd.0.clone(),
+            "policy_digest":drivers::runner::delivery_policy_digest(
+                &typed.assignment_path.as_ref().expect("assignment path").0,
+                &typed.assignment_digest.as_ref().expect("assignment digest").0,
+                &typed.worktree.as_ref().expect("worktree").0,
+                &typed.cwd.0,
+            ),
+            "active_overrides":["bash","edit","write"],
+        },
     });
     let spec_bytes =
         fs::read_to_string(spec["spec_path"].as_str().expect("spec path")).expect("spec bytes");
@@ -880,6 +1053,22 @@ fn git_run(cwd: &Path, args: &[&str]) {
     );
 }
 
+fn git_stdout(cwd: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .current_dir(cwd)
+        .args(args)
+        .output()
+        .expect("git");
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}{}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("git stdout UTF-8")
+}
+
 fn sha256_hex(data: &[u8]) -> String {
     let digest = Sha256::digest(data);
     let mut out = String::with_capacity(digest.len() * 2);
@@ -893,12 +1082,15 @@ struct CoreProcess {
     child: Child,
     stdin: Option<ChildStdin>,
     stdout: BufReader<ChildStdout>,
+    event_log: PathBuf,
 }
 
 impl CoreProcess {
     fn spawn(cwd: &Path) -> Self {
+        let event_log = cwd.join(".pi/autopilot/main/events.jsonl");
         let mut child = Command::new(env!("CARGO_BIN_EXE_autopilot-core"))
             .current_dir(cwd)
+            .env("AUTOPILOT_CORE_EVENT_LOG", &event_log)
             .env(
                 "AUTOPILOT_NODE_EXECUTABLE",
                 std::env::current_exe().expect("test exe"),
@@ -926,6 +1118,7 @@ impl CoreProcess {
             child,
             stdin: Some(stdin),
             stdout,
+            event_log,
         }
     }
 
@@ -946,6 +1139,10 @@ impl CoreProcess {
                 line.trim_end()
             )
         })
+    }
+
+    fn event_log(&self) -> &Path {
+        &self.event_log
     }
 
     fn shutdown(mut self) {

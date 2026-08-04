@@ -17,7 +17,7 @@ const GENERATED_SCAN_LINES = 5;
 const LONG_LINE_LIMIT = 120;
 const ESCAPED_NEWLINE_LIMIT = 20;
 const DEFAULT_MAX_FINDINGS = 1000;
-const SCAN_ROOTS = ['codegen/src', 'modelcheck/src', 'kernel/src', 'drivers/src', 'src'];
+const SCAN_ROOTS = ['codegen/src', 'modelcheck/src', 'kernel/src', 'drivers/src', 'src', 'child-runtime'];
 const SOURCE_EXTENSIONS = new Set(['.rs', '.ts', '.mts', '.js']);
 const PRUNED_COMPONENTS = new Set(['.git', 'target', 'node_modules', 'dist']);
 const SKIPPED_PRODUCTION_COMPONENTS = new Set(['tests']);
@@ -25,6 +25,68 @@ const SKIPPED_PRODUCTION_COMPONENTS = new Set(['tests']);
 // Tiny documented allowlists. These are exact/package-relative and must not be
 // widened by directory. KDL data includes are validated by semantic pattern below.
 const ALLOWED_PLAIN_TEXT_INCLUDES = new Set(['README.md', 'LICENSE']);
+
+// Digest-binding source includes. This is NOT a plain-text asset allowlist: the
+// included bytes are hashed into CHILD_ADDON_DIGEST, and
+// drivers::runner::child_addon_digest_for_path independently re-derives that
+// digest from disk and REFUSES TO SPAWN a child agent on mismatch. The
+// include_str! is what binds the compiled binary to the exact bytes of the child
+// delivery runtime, so removing it is a supply-chain regression, not a cleanup.
+//
+// Every entry is matched by EXACT RESOLVED PATH (never substring), is scoped to
+// one calling file, and is count-pinned. Widening by directory, glob, or count is
+// prohibited. The pin is BIDIRECTIONAL: if the target exists on disk but the
+// calling file no longer includes it, that is reported as
+// `missing_digest_binding_include`, so weakening the digest binding turns this
+// gate RED rather than silently passing.
+// Per-class expected counts. This is a RATCHET, not a suppression: the gate still
+// exits 1 while findings > 0, and every count below is reported. Its purpose is to
+// make the count drift-detectable in BOTH directions, because a permanently-red
+// gate with no ratchet cannot tell a new regression from accepted debt — which is
+// exactly how a new violation class (non_kdl_include_str) reached certification
+// unnoticed through four prior reviews.
+//
+// A count going UP is an unreviewed regression. A count going DOWN is also a
+// finding: it means debt was paid and this ledger must be lowered deliberately, so
+// the numbers ratchet down over time instead of silently eroding upward.
+//
+// overlong_handwritten_source is 260 against a certified baseline of 244. Those
+// +16 lines are CANDIDATE-INTRODUCED, OPERATOR-ACCEPTED debt (not pre-existing),
+// itemized below. They are not rewrappable, because rewrapping a >120-column line
+// costs +1 LOC and every one of them sits behind a hard constraint:
+//   *  7 in child-runtime/child-extension-runtime.ts — child-runtime-thinness is
+//      flush at 578/578; +1 turns it RED. Those bytes are also inside
+//      CHILD_ADDON_DIGEST, so any edit forces codegen regeneration.
+//   *  4 in src/pi-coding-agent-shim.d.ts — host-thinness is flush at 1123/1123;
+//      +1 turns it RED and re-breaks the host-thinness blocker.
+//   *  5 Rust prompt/authority string literals in drivers/src/{runner,planning}/mod.rs
+//      and drivers/src/contract_authority.rs. In Rust, breaking a string literal
+//      across lines without a trailing backslash injects the newline AND the next
+//      line's leading whitespace INTO THE VALUE. These exact strings are asserted
+//      by command_routing.rs / runner_child.rs / boundary_coverage.rs and are the
+//      direct targets of mutants M-WM-1..M-WM-5, which were proven to kill on them.
+//      Rewrapping risks silently changing the prompt a real model receives.
+// rustfmt is authoritative for Rust line breaking and `cargo fmt --check` is green,
+// so any surviving >120-column Rust line is one rustfmt will not break.
+const EXPECTED_CLASS_COUNTS = {
+  codegen_escaped_newline_string: 3,
+  hidden_data_rust_include: 1,
+  identity_macro: 7,
+  immediate_identity_invocation: 5,
+  overlong_handwritten_source: 260,
+  rustfmt_suppression: 1,
+};
+
+const ALLOWED_DIGEST_BINDING_INCLUDES = [
+  {
+    rel: 'codegen/src/emit.rs',
+    target: 'child-runtime/child-extension-runtime.ts',
+    expect: 1,
+    reason:
+      'CHILD_ADDON_DIGEST = sha256(wrapper \0 runtime); drivers/src/runner/mod.rs ' +
+      're-derives it from disk and refuses to spawn a child on mismatch.',
+  },
+];
 const DECLARATIVE_LONG_LINE_ALLOWLIST = [
   {
     rel: 'codegen/src/contracts.rs',
@@ -145,6 +207,24 @@ function escapeRegex(text) {
   return text.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
 }
 
+// Exact resolved-path match, scoped to the calling file. Resolving the include
+// argument relative to the caller's directory is what makes this non-widenable:
+// a '../../'-prefixed literal only matches if it genuinely resolves to the
+// declared package-relative target, so moving either file breaks the match
+// rather than silently continuing to pass.
+const digestBindingSeen = [];
+function digestBindingInclude(rel, text) {
+  const arg = text.match(/\binclude_str!\s*\(\s*["'`]([^"'`]+)["'`]/u);
+  if (!arg) return undefined;
+  const resolved = join(dirname(rel), arg[1]).split(sep).join('/');
+  const normalized = resolved.split('/').reduce((acc, part) => {
+    if (part === '.' || part === '') return acc;
+    if (part === '..') { acc.pop(); return acc; }
+    acc.push(part); return acc;
+  }, []).join('/');
+  return ALLOWED_DIGEST_BINDING_INCLUDES.find((e) => e.rel === rel && e.target === normalized);
+}
+
 function allowedPlainTextInclude(text) {
   return [...ALLOWED_PLAIN_TEXT_INCLUDES].some((rel) => {
     const quotedPath = new RegExp('["\'`]' + escapeRegex(rel) + '["\'`]', 'u');
@@ -186,7 +266,8 @@ function scanFile(abs, findings) {
     if (line.includes('include_str!')) {
       const includeText = invocationText(lines, i);
       if (/\binclude_str!\s*\(/u.test(includeText) && !allowedKdlInclude(includeText) && !allowedPlainTextInclude(includeText)) {
-        report(findings, rel, lineNo, 'non_kdl_include_str', 'include_str! is allowed only for data/*.kdl or exact documented plain text', includeText.replace(/\s+/gu, ' '));
+        if (digestBindingInclude(rel, includeText)) digestBindingSeen.push(`${rel}\u0000${digestBindingInclude(rel, includeText).target}`);
+        else report(findings, rel, lineNo, 'non_kdl_include_str', 'include_str! is allowed only for data/*.kdl or exact documented plain text', includeText.replace(/\s+/gu, ' '));
       }
     }
 
@@ -229,8 +310,40 @@ for (const file of files) {
   else if (!result.skipped) scanned += 1;
 }
 
+// Bidirectional enforcement of the digest-binding includes. An entry that is
+// declared but absent (while its target still exists on disk) means the compiled
+// binary has stopped attesting those bytes. That must fail loudly here rather
+// than pass quietly as "one fewer finding".
+for (const entry of ALLOWED_DIGEST_BINDING_INCLUDES) {
+  if (!existsSync(join(root, entry.target))) continue;
+  const seen = digestBindingSeen.filter((k) => k === `${entry.rel}\u0000${entry.target}`).length;
+  if (seen !== entry.expect) {
+    report(
+      findings,
+      entry.rel,
+      0,
+      seen === 0 ? 'missing_digest_binding_include' : 'digest_binding_include_drift',
+      `expected exactly ${entry.expect} include_str! of ${entry.target} in ${entry.rel}, found ${seen} (${entry.reason})`,
+      '',
+    );
+  }
+}
+
 const byClass = new Map();
 for (const finding of findings) byClass.set(finding.klass, (byClass.get(finding.klass) ?? 0) + 1);
+
+// Bidirectional class-count drift. Reported to stderr and forced non-zero exit;
+// deliberately NOT added to `findings` so the reported per-class numbers stay a
+// truthful census rather than counting themselves.
+let classDrift = 0;
+for (const klass of new Set([...Object.keys(EXPECTED_CLASS_COUNTS), ...byClass.keys()])) {
+  const expected = EXPECTED_CLASS_COUNTS[klass] ?? 0;
+  const actual = byClass.get(klass) ?? 0;
+  if (actual === expected) continue;
+  classDrift += 1;
+  const direction = actual > expected ? 'REGRESSION (new unreviewed findings)' : 'IMPROVED (lower this ledger deliberately)';
+  process.stderr.write(`  CLASS-DRIFT  ${klass}  expected ${expected}, found ${actual} — ${direction}\n`);
+}
 
 process.stdout.write(`readable-source.mjs: files=${scanned} generated_skipped=${generatedSkipped} findings=${findings.length}`);
 for (const [klass, count] of [...byClass.entries()].sort()) process.stdout.write(` ${klass}=${count}`);
@@ -244,5 +357,9 @@ if (findings.length > maxFindings) {
   process.stderr.write(`  ... ${findings.length - maxFindings} additional findings omitted by --max-findings=${maxFindings}\n`);
 }
 
+if (classDrift > 0) {
+  process.stderr.write(`\nreadable-source.mjs: ${classDrift} class-count drift(s). Every count in EXPECTED_CLASS_COUNTS is\n  pinned in both directions. Do NOT edit a number to make this pass: an increase is an\n  unreviewed regression, and a decrease must be recorded as debt deliberately paid down.\n`);
+  process.exit(1);
+}
 if (findings.length > 0) process.exit(1);
 process.exit(0);

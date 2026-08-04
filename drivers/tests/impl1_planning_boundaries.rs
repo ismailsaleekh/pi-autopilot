@@ -754,6 +754,11 @@ impl Fixture {
         let count_file =
             serde_json::to_string(&self.root.join("fake-pi-count").display().to_string()).unwrap();
         let out_dir_text = serde_json::to_string(&out_dir.display().to_string()).unwrap();
+        let submit_bindings = submit_bindings_py();
+        // Interpolated from the codegen-emitted entry so this fixture cannot
+        // disagree with production about where the child runtime lives, and so
+        // the literal path does not appear in scanned static source.
+        let runtime_entry = serde_json::to_string(kernel::generated::CHILD_RUNTIME_ENTRY).unwrap();
         fs::write(&pi, format!(r#"#!/usr/bin/env python3
 import hashlib
 import json
@@ -796,10 +801,7 @@ session_dir = arg_value("--session-dir")
 addon_path = arg_value("-e")
 active_tools = sorted(filter(None, arg_value("--tools").split(",")))
 submit_tools = [tool for tool in active_tools if tool.startswith("autopilot_submit_")]
-bindings = {{
-    "autopilot_submit_atoms": ("planning.task-atoms.v1", "77d000b816b3c14dcdefeba0c23d4f4f9f8bedaf5b281081f1cea138e525e091"),
-    "autopilot_submit_plan_cluster": ("planning.work-map.v1", "237b2e049edc93e6b87d8319b621ba9746e52ed2ee8dfa99b8a53b6ef6695c5e"),
-}}
+bindings = {submit_bindings}
 if not session_dir:
     sys.stderr.write("fake pi: --session-dir is required\n")
     sys.exit(64)
@@ -813,11 +815,15 @@ except OSError:
     stored_messages = []
 
 with open(addon_path, "rb") as handle:
-    addon_digest = hashlib.sha256(handle.read()).hexdigest()
+    addon_bytes = handle.read()
+runtime_path = os.path.normpath(os.path.join(os.path.dirname(addon_path), "..", "..", {runtime_entry}))
+with open(runtime_path, "rb") as handle:
+    runtime_bytes = handle.read()
+addon_digest = hashlib.sha256(addon_bytes + b"\x00" + runtime_bytes).hexdigest()
 terminal_tool = next((tool for tool in active_tools if tool.startswith("autopilot_submit_")), "")
-boundary, schema_digest = bindings.get(terminal_tool, ("", ""))
+boundary, result_contract, schema_digest = bindings.get(terminal_tool, ("", "", ""))
 profile_id = os.environ.get("AUTOPILOT_TERMINAL_PROFILE", "")
-receipt = {{"type":"custom","customType":"pi-autopilot:child-tools","data":{{"self_digest":addon_digest,"profile_id":profile_id,"tool_name":terminal_tool,"boundary_id":boundary,"result_contract":boundary,"schema_digest":schema_digest,"binding":os.environ.get("AUTOPILOT_CARRIER_BINDING", ""),"active_tools":active_tools}},"id":"receipt-1","parentId":None}}
+receipt = {{"type":"custom","customType":"pi-autopilot:child-tools","data":{{"self_digest":addon_digest,"profile_id":profile_id,"tool_name":terminal_tool,"boundary_id":boundary,"result_contract":result_contract,"schema_digest":schema_digest,"binding":os.environ.get("AUTOPILOT_CARRIER_BINDING", ""),"active_tools":active_tools}},"id":"receipt-1","parentId":None}}
 
 if mode == "rpc":
     emit({{"type":"entry_appended","entry":receipt}})
@@ -840,8 +846,8 @@ if mode == "rpc":
                 handle.write(entry + "\n")
             emit({{"type":"response","id":command_id,"command":command_type,"success":True}})
             tool = submit_tools[0]
-            boundary, schema_digest = bindings[tool]
-            details = {{"profile_id":os.environ.get("AUTOPILOT_TERMINAL_PROFILE", ""),"tool_name":tool,"boundary_id":boundary,"result_contract":boundary,"schema_digest":schema_digest,"binding":os.environ.get("AUTOPILOT_CARRIER_BINDING", ""),"payload":json.loads(content)}}
+            boundary, result_contract, schema_digest = bindings[tool]
+            details = {{"profile_id":os.environ.get("AUTOPILOT_TERMINAL_PROFILE", ""),"tool_name":tool,"boundary_id":boundary,"result_contract":result_contract,"schema_digest":schema_digest,"binding":os.environ.get("AUTOPILOT_CARRIER_BINDING", ""),"payload":json.loads(content)}}
             call_id = "call_fake_submit"
             emit({{"type":"agent_start"}})
             emit({{"type":"turn_start"}})
@@ -1447,6 +1453,21 @@ fn task_file_digest(class: &str, authority_set_id: &str, body: &str) -> String {
         other => other,
     };
     sha256_hex(format!("{marker}\nauthority_set_id: {authority_set_id}\n\n{body}").as_bytes())
+}
+
+fn submit_bindings_py() -> String {
+    let rows = kernel::generated::TERMINAL_PROFILES
+        .iter()
+        .filter(|(_, tool_name, boundary_id, _, _)| {
+            boundary_id.get(..9) == Some("planning.")
+                && tool_name.get(..17) == Some("autopilot_submit_")
+        })
+        .map(|(_, tool_name, boundary_id, result_contract, digest)| {
+            format!("    {tool_name:?}: ({boundary_id:?}, {result_contract:?}, {digest:?})")
+        })
+        .collect::<Vec<_>>()
+        .join(",\n");
+    format!("{{\n{rows}\n}}")
 }
 
 fn sha256_hex(data: &[u8]) -> String {

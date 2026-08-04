@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import childExtension from "../../src/generated/child-extension.ts";
@@ -14,16 +16,79 @@ interface RegisteredTool {
   }>;
 }
 
+const DELIVERY_ENV_KEYS = [
+  "AUTOPILOT_DELIVERY_ASSIGNMENT_PATH",
+  "AUTOPILOT_DELIVERY_ASSIGNMENT_DIGEST",
+  "AUTOPILOT_DELIVERY_WORKTREE",
+  "AUTOPILOT_DELIVERY_CWD",
+  "AUTOPILOT_DELIVERY_ASSIGNMENT_ID",
+  "AUTOPILOT_DELIVERY_WORKSTREAM",
+  "AUTOPILOT_DELIVERY_LANE_ID",
+  "AUTOPILOT_DELIVERY_ATTEMPT",
+  "AUTOPILOT_DELIVERY_BASE_COMMIT",
+  "AUTOPILOT_DELIVERY_POLICY_DIGEST",
+] as const;
+const DELIVERY_POLICY_VERSION = "autopilot.delivery_tool_policy.v1";
+const deliveryTempDirs: string[] = [];
+
+function installDeliveryPolicyEnv(): { assignmentPath: string; assignmentDigest: string; policyDigest: string; worktree: string } {
+  const root = mkdtempSync(join(realpathSync.native(tmpdir()), "autopilot-delivery-policy-"));
+  deliveryTempDirs.push(root);
+  const worktree = join(root, "worktree");
+  const assignmentPath = join(root, "assignment.json");
+  mkdirSync(worktree);
+  writeFileSync(join(worktree, "README.md"), "fixture\n");
+  const assignment = {
+    schema: "autopilot.delivery_assignment.v1",
+    workstream: "main",
+    assignment_id: "assignment-main-L1",
+    lane_id: "L1",
+    attempt: 1,
+    base_commit: "0123456789abcdef0123456789abcdef01234567",
+    worktree,
+    ordered_units: [
+      { id: "U1", kind: "implementation", files: ["README.md"], commands: [{ command: "true" }] },
+    ],
+  };
+  const assignmentBytes = Buffer.from(JSON.stringify(assignment, null, 2));
+  writeFileSync(assignmentPath, assignmentBytes);
+  const assignmentDigest = createHash("sha256").update(assignmentBytes).digest("hex");
+  const policyDigest = createHash("sha256")
+    .update(`${DELIVERY_POLICY_VERSION}\0${assignmentPath}\0${assignmentDigest}\0${worktree}\0${worktree}`)
+    .digest("hex");
+  process.env.AUTOPILOT_DELIVERY_ASSIGNMENT_PATH = assignmentPath;
+  process.env.AUTOPILOT_DELIVERY_ASSIGNMENT_DIGEST = assignmentDigest;
+  process.env.AUTOPILOT_DELIVERY_WORKTREE = worktree;
+  process.env.AUTOPILOT_DELIVERY_CWD = worktree;
+  process.env.AUTOPILOT_DELIVERY_ASSIGNMENT_ID = assignment.assignment_id;
+  process.env.AUTOPILOT_DELIVERY_WORKSTREAM = assignment.workstream;
+  process.env.AUTOPILOT_DELIVERY_LANE_ID = assignment.lane_id;
+  process.env.AUTOPILOT_DELIVERY_ATTEMPT = String(assignment.attempt);
+  process.env.AUTOPILOT_DELIVERY_BASE_COMMIT = assignment.base_commit;
+  process.env.AUTOPILOT_DELIVERY_POLICY_DIGEST = policyDigest;
+  return { assignmentPath, assignmentDigest, policyDigest, worktree };
+}
+
+function clearDeliveryPolicyEnv(): void {
+  for (const key of DELIVERY_ENV_KEYS) delete process.env[key];
+  while (deliveryTempDirs.length > 0) rmSync(deliveryTempDirs.pop()!, { recursive: true, force: true });
+}
+
 test("selected terminal profile registers exactly one same-name schema", { concurrency: false }, async () => {
   const previousProfile = process.env.AUTOPILOT_TERMINAL_PROFILE;
   const previousBinding = process.env.AUTOPILOT_CARRIER_BINDING;
   try {
     const wrapperUrl = new URL("../../src/generated/child-extension.ts", import.meta.url);
-    const wrapperDigest = createHash("sha256").update(readFileSync(wrapperUrl)).digest("hex");
+    const runtimeUrl = new URL("../../child-runtime/child-extension-runtime.ts", import.meta.url);
+    const wrapperDigest = createHash("sha256")
+      .update(Buffer.concat([readFileSync(wrapperUrl), Buffer.from([0]), readFileSync(runtimeUrl)]))
+      .digest("hex");
     assert.equal(SUBMIT_TOOLS.length, 9);
     for (const expected of SUBMIT_TOOLS) {
       process.env.AUTOPILOT_TERMINAL_PROFILE = expected.profile_id;
       process.env.AUTOPILOT_CARRIER_BINDING = "binding-test";
+      clearDeliveryPolicyEnv();
+      const deliveryEnv = expected.profile_id === "delivery-status.v2" ? installDeliveryPolicyEnv() : undefined;
       const tools: RegisteredTool[] = [];
       const hooks = new Map<string, () => Promise<void>>();
       const entries: Array<{ type: string; data: Record<string, unknown> }> = [];
@@ -33,16 +98,40 @@ test("selected terminal profile registers exactly one same-name schema", { concu
         appendEntry(type: string, data: Record<string, unknown>) { entries.push({ type, data }); },
         getActiveTools() { return ["read", ...tools.map((tool) => tool.name)]; },
       };
-      childExtension(pi as never);
-      assert.equal(tools.length, 1);
-      assert.equal(tools[0]!.name, expected.name);
+      const previousCwd = process.cwd();
+      if (deliveryEnv) process.chdir(deliveryEnv.worktree);
+      try {
+        childExtension(pi as never);
+      } finally {
+        process.chdir(previousCwd);
+      }
+      assert.equal(tools.map((tool) => tool.name).includes(expected.name), true);
+      assert.equal(
+        tools.length,
+        expected.profile_id === "delivery-status.v2" ? 4 : 1,
+      );
+      const submitTool = tools.find((tool) => tool.name === expected.name)!;
       await hooks.get("session_start")!();
       assert.equal(entries.length, 1);
       assert.equal(entries[0]!.data.self_digest, wrapperDigest);
       assert.equal(entries[0]!.data.profile_id, expected.profile_id);
       assert.equal(entries[0]!.data.boundary_id, expected.boundary_id);
       assert.equal(entries[0]!.data.result_contract, expected.result_contract);
-      const result = await tools[0]!.execute("opaque-call", {});
+      if (deliveryEnv) {
+        assert.deepEqual(entries[0]!.data.active_tools, ["autopilot_emit_status", "bash", "edit", "read", "write"]);
+        assert.deepEqual(entries[0]!.data.delivery_policy, {
+          version: DELIVERY_POLICY_VERSION,
+          assignment_path: deliveryEnv.assignmentPath,
+          assignment_digest: deliveryEnv.assignmentDigest,
+          worktree: deliveryEnv.worktree,
+          cwd: deliveryEnv.worktree,
+          policy_digest: deliveryEnv.policyDigest,
+          allowed_unit_file_count: 1,
+          approved_command_count: 1,
+          active_overrides: ["bash", "edit", "write"],
+        });
+      }
+      const result = await submitTool.execute("opaque-call", {});
       assert.equal(result.terminate, true);
       assert.equal(result.details.profile_id, expected.profile_id);
       assert.equal(result.details.boundary_id, expected.boundary_id);
@@ -54,6 +143,7 @@ test("selected terminal profile registers exactly one same-name schema", { concu
     else process.env.AUTOPILOT_TERMINAL_PROFILE = previousProfile;
     if (previousBinding === undefined) delete process.env.AUTOPILOT_CARRIER_BINDING;
     else process.env.AUTOPILOT_CARRIER_BINDING = previousBinding;
+    clearDeliveryPolicyEnv();
   }
 });
 

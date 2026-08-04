@@ -12,7 +12,10 @@ mod types;
 pub use crate::generated::pi_rpc::*;
 pub use order::EventOrder;
 pub(crate) use types::settings_identity;
-pub use types::{RpcDiagnostics, RpcError, RpcShutdown, RpcSpawnConfig, launch_arguments};
+pub use types::{
+    DeliveryPolicyLaunchConfig, RpcDiagnostics, RpcError, RpcShutdown, RpcSpawnConfig,
+    launch_arguments,
+};
 
 const TERM_GRACE_POLL_MS: u64 = 20;
 
@@ -33,11 +36,27 @@ impl RpcClient {
                 "runtime add-on requires terminal profile and carrier binding".to_owned(),
             ));
         }
-        if config.runtime_addon.is_none()
-            && (config.terminal_profile.is_some() || config.carrier_binding.is_some())
+        if config.terminal_profile.as_deref() == Some("delivery-status.v2")
+            && config.delivery_policy.is_none()
         {
             return Err(RpcError::ProtocolViolation(
-                "terminal profile/binding without runtime add-on".to_owned(),
+                "delivery terminal profile requires delivery policy launch config".to_owned(),
+            ));
+        }
+        if config.terminal_profile.as_deref() != Some("delivery-status.v2")
+            && config.delivery_policy.is_some()
+        {
+            return Err(RpcError::ProtocolViolation(
+                "delivery policy launch config on non-delivery profile".to_owned(),
+            ));
+        }
+        if config.runtime_addon.is_none()
+            && (config.terminal_profile.is_some()
+                || config.carrier_binding.is_some()
+                || config.delivery_policy.is_some())
+        {
+            return Err(RpcError::ProtocolViolation(
+                "terminal profile/binding/policy without runtime add-on".to_owned(),
             ));
         }
         std::fs::create_dir_all(&config.session_dir).map_err(|error| {
@@ -55,6 +74,24 @@ impl RpcClient {
         }
         if let Some(binding) = &config.carrier_binding {
             command.env("AUTOPILOT_CARRIER_BINDING", binding);
+        }
+        if let Some(policy) = &config.delivery_policy {
+            command.env(
+                "AUTOPILOT_DELIVERY_ASSIGNMENT_PATH",
+                &policy.assignment_path,
+            );
+            command.env(
+                "AUTOPILOT_DELIVERY_ASSIGNMENT_DIGEST",
+                &policy.assignment_digest,
+            );
+            command.env("AUTOPILOT_DELIVERY_WORKTREE", &policy.worktree);
+            command.env("AUTOPILOT_DELIVERY_CWD", &policy.cwd);
+            command.env("AUTOPILOT_DELIVERY_ASSIGNMENT_ID", &policy.assignment_id);
+            command.env("AUTOPILOT_DELIVERY_WORKSTREAM", &policy.workstream);
+            command.env("AUTOPILOT_DELIVERY_LANE_ID", &policy.lane_id);
+            command.env("AUTOPILOT_DELIVERY_ATTEMPT", policy.attempt.to_string());
+            command.env("AUTOPILOT_DELIVERY_BASE_COMMIT", &policy.base_commit);
+            command.env("AUTOPILOT_DELIVERY_POLICY_DIGEST", &policy.policy_digest);
         }
         for key in ENV_DENY {
             command.env_remove(key);

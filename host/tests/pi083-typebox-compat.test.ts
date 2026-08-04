@@ -76,7 +76,7 @@ const validSamples: Record<string, Record<string, unknown>> = {
     actual_changed_paths: ["package.json"],
     execution_audit_ref: "reports/pi083.md",
     focused_evidence_refs: ["host/tests/pi083-typebox-compat.test.ts"],
-    terminal_status: "PASS",
+    terminal_status: "succeeded",
     hard_boundary_violations: [],
   },
   "autopilot.validation_submission.v2": {
@@ -111,7 +111,7 @@ const emptyArraySamples: Record<string, Record<string, unknown>> = {
     actual_changed_paths: [],
     execution_audit_ref: "reports/pi083.md",
     focused_evidence_refs: [],
-    terminal_status: "PASS",
+    terminal_status: "succeeded",
     hard_boundary_violations: [],
   },
   "autopilot.validation_submission.v2": {

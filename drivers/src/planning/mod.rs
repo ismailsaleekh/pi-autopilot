@@ -33,6 +33,7 @@ pub const REQUIRED_PLAN_REVIEW_CRITERIA: [&str; 7] = [
 ];
 const DRIVER_TABLES_KDL: &str = include_str!("../../../data/driver-tables.kdl");
 const PLANNING_KDL: &str = include_str!("../../../data/planning.kdl");
+pub const ATOM_REGISTRY_MAX_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AtomKind {
@@ -1327,7 +1328,7 @@ pub fn accept_questions(raw: &str, runtime: &BoundaryRuntime) -> Result<String, 
     validate_questions_shape(&questions, runtime)?;
     Ok(raw.to_owned())
 }
-#[acceptance_boundary(id = "planning.work-map.v1", producer = Producer::Model, visible = true, admits = "Plan compiler and synthesizer output must contain one or more executable implementation units only. Each unit kind must be exactly implementation. Never emit context-gate or verification units: unresolved context must be recorded as review-blocking evidence, and independent verification must be folded into exact criteria plus nonempty focused commands on the owning implementation unit. Each command must declare closed Git-visible effect authority: no-effect with no paths and none handling; declared-predictable with nonempty exact normalized generated paths and isolation, exact cleanup before the scope gate, or block-if-created handling; or unknown-generated with no paths and run-isolated handling. Every command must include a nonempty final-scope preservation statement proving verification leaves Git-visible state inside approved unit files. Each unit must have a nonempty objective, criteria, depends_on array, files array, commands array, and traceable links by real atom id. Call autopilot_submit_plan_cluster or autopilot_submit_synthesis as the final action.", mode = BoundaryMode::Enforce)]
+#[acceptance_boundary(id = "planning.work-map.v1", producer = Producer::Model, visible = true, admits = "Plan compiler and synthesizer output must contain one or more executable implementation units only. Each unit kind must be exactly implementation. Never emit context-gate or verification units: unresolved context must be recorded as review-blocking evidence, and independent verification must be folded into exact criteria plus nonempty focused commands on the owning implementation unit. Each units[].links element must equal exactly one bound atom registry atoms[].id byte-for-byte: no `atoms:` prefix, ranges, comma groups, task/source/scout/context/artifact refs, placeholders, or inferred expansion. Each command must declare closed Git-visible effect authority: no-effect with empty generated_paths and none handling; declared-predictable with nonempty exact normalized repo-relative Git-visible persistent generated_paths and isolation, exact cleanup before the scope gate, or block-if-created handling; or unknown-generated with empty generated_paths and run-isolated handling. External temporary paths are not generated_paths; commands leaving no persistent Git-visible repo state use no-effect + [] + none even if they temporarily write outside the repo and clean up. Every command must include a nonempty final-scope preservation statement proving verification leaves Git-visible state inside approved unit files. Each unit must have a nonempty objective, criteria, depends_on array, files array, commands array, and traceable links by real atom id. Call autopilot_submit_plan_cluster or autopilot_submit_synthesis as the final action.", mode = BoundaryMode::Enforce)]
 pub fn accept_work_map(raw: &str, runtime: &BoundaryRuntime) -> Result<String, Rejection> {
     let work_map = parse_model_payload::<WorkMap>(raw, runtime, "planning.work-map.v1")?;
     validate_work_map_shape(&work_map, runtime)?;
@@ -1940,10 +1941,15 @@ pub fn atom_registry_bytes(
         .map_err(|error| PlanningError::ContextGap(format!("atom registry json:{error}")))
 }
 
-pub fn load_atom_registry_ids(
+pub fn load_atom_registry(
     path: &Path,
     expected_digest: &str,
-) -> Result<BTreeSet<Id>, PlanningError> {
+) -> Result<PlanningAtomRegistry, PlanningError> {
+    if !is_sha256_hex(expected_digest) {
+        return Err(PlanningError::ContextGap(format!(
+            "atom-registry-expected-digest-malformed:{expected_digest}"
+        )));
+    }
     reject_link_components_for_absolute(path)
         .map_err(|error| PlanningError::ContextGap(format!("atom-registry-path:{error}")))?;
     let metadata = fs::symlink_metadata(path)
@@ -1953,11 +1959,18 @@ pub fn load_atom_registry_ids(
             "atom-registry-not-regular-file".to_owned(),
         ));
     }
-    let mut file = fs::File::open(path)
+    let file = fs::File::open(path)
         .map_err(|error| PlanningError::ContextGap(format!("atom-registry-open:{error}")))?;
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
+    file.take((ATOM_REGISTRY_MAX_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
         .map_err(|error| PlanningError::ContextGap(format!("atom-registry-read:{error}")))?;
+    if bytes.len() > ATOM_REGISTRY_MAX_BYTES {
+        return Err(PlanningError::ContextGap(format!(
+            "atom-registry-over-budget:max={ATOM_REGISTRY_MAX_BYTES}:got={}",
+            bytes.len()
+        )));
+    }
     let actual = sha256_hex(&bytes);
     if actual != expected_digest {
         return Err(PlanningError::ContextGap(format!(
@@ -1966,8 +1979,19 @@ pub fn load_atom_registry_ids(
     }
     let registry: PlanningAtomRegistry = serde_json::from_slice(&bytes)
         .map_err(|error| PlanningError::ContextGap(format!("atom-registry-json:{error}")))?;
+    if registry.schema.0 != "autopilot.planning_atom_registry.v1" {
+        return Err(PlanningError::ContextGap(format!(
+            "atom-registry-schema:{}",
+            registry.schema.0
+        )));
+    }
     let mut ids = BTreeSet::new();
-    for atom in registry.atoms {
+    for atom in &registry.atoms {
+        if atom.id.0.trim().is_empty() {
+            return Err(PlanningError::ContextGap(
+                "atom-registry-empty-id".to_owned(),
+            ));
+        }
         if !ids.insert(atom.id.clone()) {
             return Err(PlanningError::ContextGap(format!(
                 "atom-registry-duplicate:{}",
@@ -1975,7 +1999,40 @@ pub fn load_atom_registry_ids(
             )));
         }
     }
-    Ok(ids)
+    Ok(registry)
+}
+
+pub fn load_atom_registry_ids(
+    path: &Path,
+    expected_digest: &str,
+) -> Result<BTreeSet<Id>, PlanningError> {
+    Ok(load_atom_registry(path, expected_digest)?
+        .atoms
+        .into_iter()
+        .map(|atom| atom.id)
+        .collect())
+}
+
+pub fn atom_link_manifest_for_registry(
+    path: &Path,
+    expected_digest: &str,
+) -> Result<String, PlanningError> {
+    let registry = load_atom_registry(path, expected_digest)?;
+    let mut allowed_ids = registry
+        .atoms
+        .iter()
+        .map(|atom| atom.id.0.as_str())
+        .collect::<Vec<_>>();
+    allowed_ids.sort_unstable();
+    let allowed = allowed_ids.join(", ");
+    Ok(format!(
+        "Package-authoritative atom-link manifest for planning.work-map.v1\natom_registry_path: {}\natom_registry_digest: {expected_digest}\nallowed_ids_sorted: [{allowed}]\nrules:\n- Each units[].links array item MUST equal exactly one atoms[].id listed above, byte-for-byte.\n- Put only one atom id in each links[] array item.\n- Do not use an `atoms:` prefix.\n- Do not use ranges (for example TE01-001..TE01-003).\n- Do not use comma groups (for example TE01-001,TE01-002).\n- Do not use task/source/scout/context/artifact references or task heading refs.\n- Do not use placeholders, empty artifact refs, or inferred expansion.\n- The package will not rewrite, expand, or infer pseudo-links; non-exact links are rejected.",
+        path.display()
+    ))
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 pub fn sorted_registry_atoms(

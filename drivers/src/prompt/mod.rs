@@ -177,7 +177,7 @@ fn bind_mode_parameter(
 }
 
 fn contract_with_boundaries(
-    root: &Path,
+    _root: &Path,
     role: &Role,
     contract: &str,
 ) -> Result<String, PromptError> {
@@ -189,9 +189,10 @@ fn contract_with_boundaries(
         out.push_str("\n#### ");
         out.push_str(name);
         out.push_str("\n\n");
-        out.push_str(&read(
-            root.join("generated/prompts").join(format!("{name}.md")),
-        )?);
+        out.push_str(
+            &crate::contract_authority::render_generated_prompt_by_artifact(name)
+                .map_err(|error| PromptError::MissingTemplate(error.to_string()))?,
+        );
         if out.as_bytes().last().copied() != Some(b'\n') {
             out.push('\n');
         }

@@ -285,6 +285,15 @@ pub enum CriterionVerdict {
     PASS,
 }
 
+/// Closed v2 delivery outcome.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeliveryOutcome {
+    #[serde(rename = "blocked")]
+    Blocked,
+    #[serde(rename = "succeeded")]
+    Succeeded,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EvidenceContentKind {
     #[serde(rename = "acceptance-receipt")]
@@ -2030,7 +2039,7 @@ pub struct DeliverySubmissionV2 {
     #[serde(rename = "focused_evidence_refs")]
     pub focused_evidence_refs: Vec<Ref>,
     #[serde(rename = "terminal_status")]
-    pub terminal_status: DeliveryTerminalStatus,
+    pub terminal_status: DeliveryOutcome,
     #[serde(rename = "hard_boundary_violations")]
     pub hard_boundary_violations: Vec<String>,
 }
@@ -2952,7 +2961,7 @@ pub struct PlanUnit {
     /// Nonempty focused verification commands/tests tied to this unit.
     #[serde(rename = "commands")]
     pub commands: Vec<PlanUnitCommand>,
-    /// Atom ids accepted from task_atoms.
+    /// Each item must equal exactly one bound atom registry atoms[].id byte-for-byte; no `atoms:` prefix, range, comma group, task/source/scout/context/artifact ref, placeholder, or inferred expansion.
     #[serde(rename = "links")]
     pub links: Vec<Id>,
 }
@@ -2964,13 +2973,13 @@ pub struct PlanUnitCommand {
     pub command: String,
     #[serde(rename = "expected")]
     pub expected: String,
-    /// Closed Git-visible persistent repository effect classification.
+    /// Closed Git-visible persistent repository effect classification; no-effect means the final command leaves no persistent Git-visible repo state.
     #[serde(rename = "effect")]
     pub effect: CommandEffect,
-    /// Exact normalized repo-relative Git-visible generated artifact paths, empty unless effect is declared-predictable.
+    /// Exact normalized repo-relative Git-visible persistent generated artifact paths only, empty unless effect is declared-predictable; external temporary paths are not generated_paths.
     #[serde(rename = "generated_paths")]
     pub generated_paths: Vec<Path>,
-    /// Closed handling authority for Git-visible generated artifacts.
+    /// Closed handling authority for Git-visible generated artifacts; no-effect requires none, unknown-generated requires run-isolated.
     #[serde(rename = "handling")]
     pub handling: CommandEffectHandling,
     /// Nonempty final-scope-check statement proving verification leaves final Git-visible state inside approved unit files.
@@ -3147,12 +3156,14 @@ pub struct HostToCoreTaskCompletedPayload {
 pub const CONTRACT_SCHEMA: &str = "autopilot.contracts.v1";
 pub const CONTRACT_VERSION: u64 = 1;
 pub const CHILD_ADDON_DIGEST: &str =
-    "99850d55dbd44403b714f97033592943ee442530e1da0a6b77f809094731c1bd";
+    "971a8e6785e77d619ec36d8b20aa3f5f09eea8f8dd23ba7b590ec080a57b4426";
+
+pub const CHILD_RUNTIME_ENTRY: &str = "child-runtime/child-extension-runtime.ts";
 
 pub const AGENT_HANDOFF_ADMITS: &str = "When checkpointed, return one autopilot.agent-handoff.v1 object with exactly these required fields: schema, completed, remaining, critical_state, and next_action. Put finished obligations in completed, unfinished obligations in remaining, role-required scalar or array-of-scalar slots in critical_state, and the immediate resume instruction in next_action; do not invent completion.";
 pub const ALLOCATION_LANE_PROPOSAL_ADMITS: &str = "Return a lane proposal that groups only approved plan units. Preserve every unit id, dependency, predecessor forward criterion, downstream release edge, and verification obligation exactly as supplied. Do not invent file ownership or modify plan authority. Include ordered unit ids, one delivery boundary, context family id and estimate, focused tests, and launch wave.";
 pub const DELIVERY_RESULT_ADMITS: &str = "Submit exactly one terminal delivery carrier for your assigned role, mode, assignment, attempt, and run revision. Report the exact base, worktree, actual changed paths, execution audit reference, and required focused evidence. Do not claim validation, merge, package commit/tree, package state mutation, or success hidden behind missing evidence. The runtime establishes package commit/tree after accepting this carrier. If any hard boundary was violated or required evidence is missing, say so instead of reporting DONE.";
-pub const DELIVERY_SUBMISSION_V2_ADMITS: &str = "Call autopilot_emit_status exactly once with the actual changed paths, execution audit reference, focused evidence references, terminal status, and every hard-boundary violation. Do not include assignment or package identity.";
+pub const DELIVERY_SUBMISSION_V2_ADMITS: &str = "Call autopilot_emit_status exactly once with the actual changed paths, execution audit reference, focused evidence references, terminal status, and every hard-boundary violation. terminal_status must be exactly succeeded or blocked. Admission is closed and cross-field: succeeded requires nonempty safe actual_changed_paths, a nonempty execution_audit_ref, at least the required focused_evidence_refs, and empty hard_boundary_violations; blocked requires empty actual_changed_paths, a nonempty execution_audit_ref, at least the required focused_evidence_refs, and nonempty bounded hard_boundary_violations. Mixed or unknown shapes are rejected. If execution is blocked or authority conflicts, report blocked and stop; value repair may correct carrier metadata only and must not mutate files, seek another checkout, or manufacture success. Do not include assignment or package identity.";
 pub const FINDING_ADMITS: &str = "For each material issue, record one effect: forward-blocking, closure-blocking-forward-safe, or advisory. Tie the finding to exact criteria or forward edges and evidence. Do not use severity alone to decide scheduling, do not hide a mandatory blocker as advisory, and do not report a source repair requirement without the evidence that makes it mandatory.";
 pub const FINDING_V2_ADMITS: &str = "For each material issue, emit one deterministic finding id, classify kind/effect honestly, tie it to declared criteria/edges/evidence, and never hide a required blocker as advisory.";
 pub const PLAN_REVIEW_ADMITS: &str = "Plan review output must assign exactly one verdict to each required approval criterion and no others: review.mandatory-input-accounting, review.authority-fidelity, review.completeness-and-traceability, review.internal-consistency-and-scheduling, review.context-sufficiency, review.verification-strength, review.forward-validation. Execution is approved only when all seven exact criteria pass; missing, duplicate, unknown, blocker, advisory, fail, blocked, or needs-fix verdicts block execution terminally for this run. Call autopilot_submit_review as the final action.";
@@ -3161,43 +3172,111 @@ pub const SCOUT_DOSSIER_ADMITS: &str = "Repository scout and dossier output must
 pub const TASK_ATOMS_ADMITS: &str = "Task extractor output must use the exact runner-issued atom id prefix for every atoms[].id. New model submissions must name operator-task atoms with sources copied as exact decoded JSON sources[].source strings from the runtime-supplied package-authoritative task:// source manifest, and include no repository findings. Package-derived legacy aliases remain accepted only for compatibility; arbitrary values and prefix matches are never accepted. Call autopilot_submit_atoms as the final action with atoms containing id, kind, text, and sources.";
 pub const VALIDATION_SUBMISSION_V2_ADMITS: &str = "Call autopilot_emit_status exactly once with this closed JSON object. Verdict every required criterion exactly once, cite only declared evidence refs, embed every finding, and do not claim PASS/READY when Core would compute a material blocker.";
 pub const VALIDATION_VERDICT_ADMITS: &str = "Verdict every required criterion independently as PASS, FAIL, or BLOCKED, and attach evidence refs, finding refs, covered paths, semantic surfaces, and forward-edge ids. Do not issue an overall PASS while any required criterion is unverdicted, stale, failed, or blocked. Use FORWARD_READY, FORWARD_BLOCKED, or BLOCKED only for forward validation, and PASS, NEEDS_FIX, or BLOCKED only for closure/final validation.";
-pub const WORK_MAP_ADMITS: &str = "Plan compiler and synthesizer output must contain one or more executable implementation units only. Each unit kind must be exactly implementation. Never emit context-gate or verification units: unresolved context must be recorded as review-blocking evidence, and independent verification must be folded into exact criteria plus nonempty focused commands on the owning implementation unit. Each command must declare closed Git-visible effect authority: no-effect with no paths and none handling; declared-predictable with nonempty exact normalized generated paths and isolation, exact cleanup before the scope gate, or block-if-created handling; or unknown-generated with no paths and run-isolated handling. Every command must include a nonempty final-scope preservation statement proving verification leaves Git-visible state inside approved unit files. Each unit must have a nonempty objective, criteria, depends_on array, files array, commands array, and traceable links by real atom id. Call autopilot_submit_plan_cluster or autopilot_submit_synthesis as the final action.";
+pub const WORK_MAP_ADMITS: &str = "Plan compiler and synthesizer output must contain one or more executable implementation units only. Each unit kind must be exactly implementation. Never emit context-gate or verification units: unresolved context must be recorded as review-blocking evidence, and independent verification must be folded into exact criteria plus nonempty focused commands on the owning implementation unit. Each units[].links element must equal exactly one bound atom registry atoms[].id byte-for-byte: no `atoms:` prefix, ranges, comma groups, task/source/scout/context/artifact refs, placeholders, or inferred expansion. Each command must declare closed Git-visible effect authority: no-effect with empty generated_paths and none handling; declared-predictable with nonempty exact normalized repo-relative Git-visible persistent generated_paths and isolation, exact cleanup before the scope gate, or block-if-created handling; or unknown-generated with empty generated_paths and run-isolated handling. External temporary paths are not generated_paths; commands leaving no persistent Git-visible repo state use no-effect + [] + none even if they temporarily write outside the repo and clean up. Approved commands execute later inside a package-assigned delivery worktree/candidate root; the planning checkout absolute identity/path is not future execution authority. Command, expected, and scope_preservation text must use repository-relative facts plus typed base commit/tree/worktree authority and must not bake the planning checkout root as expected delivery identity. Exact command strings are transported unchanged; allocation and delivery must not rewrite them. If an approved command conflicts with the later assigned worktree, the implementer must submit the typed blocked outcome and stop rather than seeking another checkout. Every command must include a nonempty final-scope preservation statement proving verification leaves Git-visible state inside approved unit files. Each unit must have a nonempty objective, criteria, depends_on array, files array, commands array, and traceable links by real atom id. Call autopilot_submit_plan_cluster or autopilot_submit_synthesis as the final action.";
+
+pub const ADMISSION_CONTRACTS: [(&str, &str, &str); 13] = [
+    (
+        "agent_handoff",
+        "autopilot.agent-handoff.v1",
+        "When checkpointed, return one autopilot.agent-handoff.v1 object with exactly these required fields: schema, completed, remaining, critical_state, and next_action. Put finished obligations in completed, unfinished obligations in remaining, role-required scalar or array-of-scalar slots in critical_state, and the immediate resume instruction in next_action; do not invent completion.",
+    ),
+    (
+        "allocation_lane_proposal",
+        "autopilot.allocation_lane_proposal.v1",
+        "Return a lane proposal that groups only approved plan units. Preserve every unit id, dependency, predecessor forward criterion, downstream release edge, and verification obligation exactly as supplied. Do not invent file ownership or modify plan authority. Include ordered unit ids, one delivery boundary, context family id and estimate, focused tests, and launch wave.",
+    ),
+    (
+        "delivery_result",
+        "autopilot.delivery_result.v1",
+        "Submit exactly one terminal delivery carrier for your assigned role, mode, assignment, attempt, and run revision. Report the exact base, worktree, actual changed paths, execution audit reference, and required focused evidence. Do not claim validation, merge, package commit/tree, package state mutation, or success hidden behind missing evidence. The runtime establishes package commit/tree after accepting this carrier. If any hard boundary was violated or required evidence is missing, say so instead of reporting DONE.",
+    ),
+    (
+        "delivery_submission_v2",
+        "autopilot.delivery_submission.v2",
+        "Call autopilot_emit_status exactly once with the actual changed paths, execution audit reference, focused evidence references, terminal status, and every hard-boundary violation. terminal_status must be exactly succeeded or blocked. Admission is closed and cross-field: succeeded requires nonempty safe actual_changed_paths, a nonempty execution_audit_ref, at least the required focused_evidence_refs, and empty hard_boundary_violations; blocked requires empty actual_changed_paths, a nonempty execution_audit_ref, at least the required focused_evidence_refs, and nonempty bounded hard_boundary_violations. Mixed or unknown shapes are rejected. If execution is blocked or authority conflicts, report blocked and stop; value repair may correct carrier metadata only and must not mutate files, seek another checkout, or manufacture success. Do not include assignment or package identity.",
+    ),
+    (
+        "finding",
+        "autopilot.finding.v1",
+        "For each material issue, record one effect: forward-blocking, closure-blocking-forward-safe, or advisory. Tie the finding to exact criteria or forward edges and evidence. Do not use severity alone to decide scheduling, do not hide a mandatory blocker as advisory, and do not report a source repair requirement without the evidence that makes it mandatory.",
+    ),
+    (
+        "finding_v2",
+        "autopilot.finding.v2",
+        "For each material issue, emit one deterministic finding id, classify kind/effect honestly, tie it to declared criteria/edges/evidence, and never hide a required blocker as advisory.",
+    ),
+    (
+        "plan_review",
+        "planning.plan-review.v1",
+        "Plan review output must assign exactly one verdict to each required approval criterion and no others: review.mandatory-input-accounting, review.authority-fidelity, review.completeness-and-traceability, review.internal-consistency-and-scheduling, review.context-sufficiency, review.verification-strength, review.forward-validation. Execution is approved only when all seven exact criteria pass; missing, duplicate, unknown, blocker, advisory, fail, blocked, or needs-fix verdicts block execution terminally for this run. Call autopilot_submit_review as the final action.",
+    ),
+    (
+        "questions",
+        "planning.questions.v1",
+        "Question output must be an explicit questions array, which may be empty, or structured nominations. Each nomination must include class, evidence, and consequence. The class field is closed to: invalidated-decision, missing-material-decision, material-underdetermination, dod-hole, unsafe-irreversible. Call autopilot_submit_resolution as the final action.",
+    ),
+    (
+        "scout_dossier",
+        "planning.scout-dossier.v1",
+        "Repository scout and dossier output must cite current evidence and avoid work planning. Call autopilot_submit_scout_report as the final action with findings containing path, observation, and evidence_ref. A context-curation assignment calls autopilot_submit_context instead, with the same findings shape.",
+    ),
+    (
+        "task_atoms",
+        "planning.task-atoms.v1",
+        "Task extractor output must use the exact runner-issued atom id prefix for every atoms[].id. New model submissions must name operator-task atoms with sources copied as exact decoded JSON sources[].source strings from the runtime-supplied package-authoritative task:// source manifest, and include no repository findings. Package-derived legacy aliases remain accepted only for compatibility; arbitrary values and prefix matches are never accepted. Call autopilot_submit_atoms as the final action with atoms containing id, kind, text, and sources.",
+    ),
+    (
+        "validation_submission_v2",
+        "autopilot.validation_submission.v2",
+        "Call autopilot_emit_status exactly once with this closed JSON object. Verdict every required criterion exactly once, cite only declared evidence refs, embed every finding, and do not claim PASS/READY when Core would compute a material blocker.",
+    ),
+    (
+        "validation_verdict",
+        "autopilot.validation_verdict.v1",
+        "Verdict every required criterion independently as PASS, FAIL, or BLOCKED, and attach evidence refs, finding refs, covered paths, semantic surfaces, and forward-edge ids. Do not issue an overall PASS while any required criterion is unverdicted, stale, failed, or blocked. Use FORWARD_READY, FORWARD_BLOCKED, or BLOCKED only for forward validation, and PASS, NEEDS_FIX, or BLOCKED only for closure/final validation.",
+    ),
+    (
+        "work_map",
+        "planning.work-map.v1",
+        "Plan compiler and synthesizer output must contain one or more executable implementation units only. Each unit kind must be exactly implementation. Never emit context-gate or verification units: unresolved context must be recorded as review-blocking evidence, and independent verification must be folded into exact criteria plus nonempty focused commands on the owning implementation unit. Each units[].links element must equal exactly one bound atom registry atoms[].id byte-for-byte: no `atoms:` prefix, ranges, comma groups, task/source/scout/context/artifact refs, placeholders, or inferred expansion. Each command must declare closed Git-visible effect authority: no-effect with empty generated_paths and none handling; declared-predictable with nonempty exact normalized repo-relative Git-visible persistent generated_paths and isolation, exact cleanup before the scope gate, or block-if-created handling; or unknown-generated with empty generated_paths and run-isolated handling. External temporary paths are not generated_paths; commands leaving no persistent Git-visible repo state use no-effect + [] + none even if they temporarily write outside the repo and clean up. Approved commands execute later inside a package-assigned delivery worktree/candidate root; the planning checkout absolute identity/path is not future execution authority. Command, expected, and scope_preservation text must use repository-relative facts plus typed base commit/tree/worktree authority and must not bake the planning checkout root as expected delivery identity. Exact command strings are transported unchanged; allocation and delivery must not rewrite them. If an approved command conflicts with the later assigned worktree, the implementer must submit the typed blocked outcome and stop rather than seeking another checkout. Every command must include a nonempty final-scope preservation statement proving verification leaves Git-visible state inside approved unit files. Each unit must have a nonempty objective, criteria, depends_on array, files array, commands array, and traceable links by real atom id. Call autopilot_submit_plan_cluster or autopilot_submit_synthesis as the final action.",
+    ),
+];
 
 pub const SUBMIT_TOOLS: [(&str, &str, &str); 7] = [
     (
         "autopilot_submit_atoms",
         "planning.task-atoms.v1",
-        "77d000b816b3c14dcdefeba0c23d4f4f9f8bedaf5b281081f1cea138e525e091",
+        "afea4f1dae10430432387da2f42545976e435850d19dd2026667d139b5950e37",
     ),
     (
         "autopilot_submit_context",
         "planning.scout-dossier.v1",
-        "30f69b47c83079ce00ea22cab308e9a26eb7b24cae045aa1dd008221b45da618",
+        "2ee4052fac867c671c6c972066aad7bfa8ab3fee07292de62c09c4bc0c4d41e2",
     ),
     (
         "autopilot_submit_plan_cluster",
         "planning.work-map.v1",
-        "237b2e049edc93e6b87d8319b621ba9746e52ed2ee8dfa99b8a53b6ef6695c5e",
+        "9e34cb4e10cb2ef7061fe8d43973c849b0ec81b041d693506462ced5b4fa379e",
     ),
     (
         "autopilot_submit_resolution",
         "planning.questions.v1",
-        "a716699618f28675f8872ff8d039c40e8443c07cd6a94f907921ee2b9dd88abc",
+        "d1e73a08666c761604e71b81b58116ba057b0e3fe3103c3080b2b2a78a4b71dd",
     ),
     (
         "autopilot_submit_review",
         "planning.plan-review.v1",
-        "073f22c10d42166d5ec5d0a6465a1fa8f0df8fc1af2ce6a0702bed9b955786d8",
+        "60409306bbe13fcc510a6fb00450a50f71dbae44f4924dbfc5bd2eddf96810ed",
     ),
     (
         "autopilot_submit_scout_report",
         "planning.scout-dossier.v1",
-        "30f69b47c83079ce00ea22cab308e9a26eb7b24cae045aa1dd008221b45da618",
+        "2ee4052fac867c671c6c972066aad7bfa8ab3fee07292de62c09c4bc0c4d41e2",
     ),
     (
         "autopilot_submit_synthesis",
         "planning.work-map.v1",
-        "237b2e049edc93e6b87d8319b621ba9746e52ed2ee8dfa99b8a53b6ef6695c5e",
+        "9e34cb4e10cb2ef7061fe8d43973c849b0ec81b041d693506462ced5b4fa379e",
     ),
 ];
 
@@ -3207,56 +3286,56 @@ pub const TERMINAL_PROFILES: [(&str, &str, &str, &str, &str); 9] = [
         "autopilot_emit_status",
         "autopilot.delivery_submission.v2",
         "autopilot.delivery_result.v2",
-        "dc3894c6b09e07ffb83c1719b19caf501257c60d5b1c847917068ab75643d55d",
+        "e96282e3b70e4bde7deb2a122a505337052de8c3f187d164eb5cba430c7812dc",
     ),
     (
         "planning.plan-review.v1:autopilot_submit_review",
         "autopilot_submit_review",
         "planning.plan-review.v1",
         "planning.plan-review.v1",
-        "073f22c10d42166d5ec5d0a6465a1fa8f0df8fc1af2ce6a0702bed9b955786d8",
+        "60409306bbe13fcc510a6fb00450a50f71dbae44f4924dbfc5bd2eddf96810ed",
     ),
     (
         "planning.questions.v1:autopilot_submit_resolution",
         "autopilot_submit_resolution",
         "planning.questions.v1",
         "planning.questions.v1",
-        "a716699618f28675f8872ff8d039c40e8443c07cd6a94f907921ee2b9dd88abc",
+        "d1e73a08666c761604e71b81b58116ba057b0e3fe3103c3080b2b2a78a4b71dd",
     ),
     (
         "planning.scout-dossier.v1:autopilot_submit_context",
         "autopilot_submit_context",
         "planning.scout-dossier.v1",
         "planning.scout-dossier.v1",
-        "30f69b47c83079ce00ea22cab308e9a26eb7b24cae045aa1dd008221b45da618",
+        "2ee4052fac867c671c6c972066aad7bfa8ab3fee07292de62c09c4bc0c4d41e2",
     ),
     (
         "planning.scout-dossier.v1:autopilot_submit_scout_report",
         "autopilot_submit_scout_report",
         "planning.scout-dossier.v1",
         "planning.scout-dossier.v1",
-        "30f69b47c83079ce00ea22cab308e9a26eb7b24cae045aa1dd008221b45da618",
+        "2ee4052fac867c671c6c972066aad7bfa8ab3fee07292de62c09c4bc0c4d41e2",
     ),
     (
         "planning.task-atoms.v1:autopilot_submit_atoms",
         "autopilot_submit_atoms",
         "planning.task-atoms.v1",
         "planning.task-atoms.v1",
-        "77d000b816b3c14dcdefeba0c23d4f4f9f8bedaf5b281081f1cea138e525e091",
+        "afea4f1dae10430432387da2f42545976e435850d19dd2026667d139b5950e37",
     ),
     (
         "planning.work-map.v1:autopilot_submit_plan_cluster",
         "autopilot_submit_plan_cluster",
         "planning.work-map.v1",
         "planning.work-map.v1",
-        "237b2e049edc93e6b87d8319b621ba9746e52ed2ee8dfa99b8a53b6ef6695c5e",
+        "9e34cb4e10cb2ef7061fe8d43973c849b0ec81b041d693506462ced5b4fa379e",
     ),
     (
         "planning.work-map.v1:autopilot_submit_synthesis",
         "autopilot_submit_synthesis",
         "planning.work-map.v1",
         "planning.work-map.v1",
-        "237b2e049edc93e6b87d8319b621ba9746e52ed2ee8dfa99b8a53b6ef6695c5e",
+        "9e34cb4e10cb2ef7061fe8d43973c849b0ec81b041d693506462ced5b4fa379e",
     ),
     (
         "validation-status.v2",

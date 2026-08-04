@@ -3,5 +3,5 @@
   "compilerOptions": {
     "skipLibCheck": false
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts", "child-runtime/**/*.ts"]
 }
