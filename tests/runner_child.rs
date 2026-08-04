@@ -201,6 +201,50 @@ fn child_registration_receipt_is_required_before_first_prompt() {
 }
 
 #[test]
+fn delivery_child_policy_receipt_is_required_before_first_prompt() {
+    for (label, setup, expected) in [
+        (
+            "missing-policy",
+            "const suppressDeliveryPolicyReceipt = true;",
+            "missing delivery policy receipt",
+        ),
+        (
+            "drifted-authority",
+            "const driftDeliveryPolicyReceiptAuthority = true;",
+            "delivery policy receipt drift",
+        ),
+    ] {
+        let root = temp_root(&format!("runner-delivery-receipt-{label}"));
+        let worktree = delivery_worktree(&root, label);
+        let prompt_marker = root.join("prompt-reached.txt");
+        write_fake_pi(
+            &root,
+            &rpc_fake_pi(
+                &format!("const promptMarker = {:?};\n{setup}", prompt_marker),
+                "writeFileSync(promptMarker, 'prompted'); process.exit(97);",
+            ),
+        );
+        let spec = write_delivery_spec(&root, &worktree, |value| value);
+        let error = with_fake_path(&root, || {
+            child::main(&["--spec".to_owned(), spec.display().to_string()])
+        })
+        .expect_err("delivery policy receipt drift must fail before prompt");
+        assert!(
+            error.contains(expected),
+            "{label} did not fail with precise delivery policy receipt error: {error}"
+        );
+        assert!(
+            !prompt_marker.exists(),
+            "{label} reached prompt after invalid delivery policy receipt"
+        );
+        assert!(
+            !delivery_carrier_path(&worktree).exists(),
+            "{label} wrote a carrier after invalid delivery policy receipt"
+        );
+    }
+}
+
+#[test]
 fn registered_but_not_active_terminal_tool_is_rejected_before_prompt() {
     let root = temp_root("runner-inactive-terminal-tool");
     write_fake_pi(
@@ -2541,13 +2585,14 @@ function addonDigest() {{ if (addonPath === undefined) return ''; const runtimeP
 function sha256HexBytes(bytes) {{ return createHash('sha256').update(bytes).digest('hex'); }}
 function deliveryPolicyReceipt() {{
   if (receiptProfile !== 'delivery-status.v2') return undefined;
+  if (typeof suppressDeliveryPolicyReceipt !== 'undefined' && suppressDeliveryPolicyReceipt) return undefined;
   const assignmentPath = process.env.AUTOPILOT_DELIVERY_ASSIGNMENT_PATH ?? '';
   const assignmentDigest = process.env.AUTOPILOT_DELIVERY_ASSIGNMENT_DIGEST ?? '';
   const worktree = process.env.AUTOPILOT_DELIVERY_WORKTREE ?? '';
   const cwd = process.env.AUTOPILOT_DELIVERY_CWD ?? '';
   const bytes = readFileSync(assignmentPath);
   const artifact = JSON.parse(bytes.toString('utf8'));
-  return {{
+  const receipt = {{
     version:'autopilot.delivery_tool_policy.v1',
     assignment_path:assignmentPath,
     assignment_digest:assignmentDigest,
@@ -2558,6 +2603,8 @@ function deliveryPolicyReceipt() {{
     approved_command_count:new Set(artifact.ordered_units.flatMap(unit => unit.commands.map(command => command.command))).size,
     active_overrides:['bash','edit','write'],
   }};
+  if (typeof driftDeliveryPolicyReceiptAuthority !== 'undefined' && driftDeliveryPolicyReceiptAuthority) receipt.assignment_digest = `drift-${{assignmentDigest}}`;
+  return receipt;
 }}
 const receiptData = {{self_digest:addonDigest(),profile_id:receiptProfile,tool_name:terminalTool,boundary_id:receiptBoundary,result_contract:receiptResultContract,schema_digest:receiptSchema,binding:process.env.AUTOPILOT_CARRIER_BINDING ?? '',active_tools:[...activeTools].sort()}};
 const deliveryReceipt = deliveryPolicyReceipt();

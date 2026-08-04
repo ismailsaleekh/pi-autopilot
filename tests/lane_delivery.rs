@@ -423,6 +423,63 @@ fn lane_delivery_core_stdout_stays_json_when_runtime_packages_uncommitted_change
 }
 
 #[test]
+fn lane_delivery_core_rejects_tool_audit_policy_authority_drift_after_digest_update() {
+    let (mut core, spawn, spec, carrier_path, worktree) =
+        launched_core_delivery("tool-audit-policy-drift");
+    fs::write(
+        worktree.join("README.md"),
+        "delivery terminal fixture changed\n",
+    )
+    .expect("worktree edit");
+    let mut carrier = delivery_carrier_without_package_for_core(&spec, 2);
+    let audit_path = PathBuf::from(carrier["tool_audit_ref"].as_str().expect("tool audit ref"));
+    let original_audit_bytes = fs::read(&audit_path).expect("tool audit");
+    assert_eq!(
+        carrier["tool_audit_digest"]
+            .as_str()
+            .expect("tool audit digest"),
+        sha256_hex(&original_audit_bytes)
+    );
+    let mut audit: serde_json::Value =
+        serde_json::from_slice(&original_audit_bytes).expect("tool audit json");
+    audit["delivery_policy"]["active_overrides"] =
+        serde_json::json!(["bash", "edit", "write", "read"]);
+    let mutated_audit_bytes = serde_json::to_vec_pretty(&audit).expect("mutated audit");
+    fs::write(&audit_path, &mutated_audit_bytes).expect("audit rewrite");
+    carrier["tool_audit_digest"] = serde_json::json!(sha256_hex(&mutated_audit_bytes));
+    assert_eq!(
+        carrier["tool_audit_digest"]
+            .as_str()
+            .expect("updated tool audit digest"),
+        sha256_hex(&fs::read(&audit_path).expect("mutated audit reread"))
+    );
+    fs::create_dir_all(carrier_path.parent().expect("carrier parent")).expect("carrier dir");
+    fs::write(
+        &carrier_path,
+        serde_json::to_vec_pretty(&carrier).expect("delivery carrier"),
+    )
+    .expect("carrier write");
+
+    let rejected = core.send_json(serde_json::json!({"v":1,"id":2,"kind":"task-completed","payload":{"task_id":"task-tool-audit-policy-drift","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}));
+    assert_eq!(rejected.kind, "done", "rejected response: {rejected:?}");
+    let status = done_status(&rejected);
+    assert!(
+        status.contains(
+            "rejection:delivery-carrier-binding:delivery tool audit policy authority drift"
+        ),
+        "policy drift was not reported before validation: {rejected:?}"
+    );
+    assert!(
+        !status.contains("delivery tool audit digest drift"),
+        "test must pass the outer tool audit digest check first: {status}"
+    );
+    let events = fs::read_to_string(core.event_log()).expect("events");
+    assert!(!events.contains("agent:delivery-accepted"), "{events}");
+    assert!(!events.contains("validation:required"), "{events}");
+    core.shutdown();
+}
+
+#[test]
 fn lane_delivery_core_rejects_changed_path_outside_approved_unit_scope() {
     let (mut core, spawn, spec, carrier_path, worktree) =
         launched_core_delivery("outside-approved-scope");

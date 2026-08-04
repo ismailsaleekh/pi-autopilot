@@ -422,6 +422,12 @@ fn real_plan_compiler_prompt_renders_full_work_map_authority_and_atom_manifest()
         "placeholders, empty artifact refs, or inferred expansion",
         "External temporary paths are not generated_paths",
         "use no-effect + [] + none even if they temporarily write outside the repo and clean up",
+        "Approved commands execute later inside a package-assigned delivery worktree/candidate root",
+        "the planning checkout absolute identity/path is not future execution authority",
+        "Command, expected, and scope_preservation text must use repository-relative facts plus typed base commit/tree/worktree authority",
+        "must not bake the planning checkout root as expected delivery identity",
+        "Exact command strings are transported unchanged; allocation and delivery must not rewrite them",
+        "If an approved command conflicts with the later assigned worktree, the implementer must submit the typed blocked outcome and stop rather than seeking another checkout",
     ] {
         assert!(
             prompt.contains(required),
