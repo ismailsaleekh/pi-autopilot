@@ -583,7 +583,7 @@ artifact "questions" schema="planning.questions.v1" producer="Model" model_produ
 
 artifact "work_map" schema="planning.work-map.v1" producer="Model" model_produced=#true {
     doc "Model-facing work map. Link values are checked against the accepted atom registry by the planning driver."
-    admits "Plan compiler and synthesizer output must contain one or more executable implementation units only. Each unit kind must be exactly implementation. Never emit context-gate or verification units: unresolved context must be recorded as review-blocking evidence, and independent verification must be folded into exact criteria plus nonempty focused commands on the owning implementation unit. Each unit must have a nonempty objective, criteria, depends_on array, files array, commands array, and traceable links by real atom id. Call autopilot_submit_plan_cluster or autopilot_submit_synthesis as the final action."
+    admits "Plan compiler and synthesizer output must contain one or more executable implementation units only. Each unit kind must be exactly implementation. Never emit context-gate or verification units: unresolved context must be recorded as review-blocking evidence, and independent verification must be folded into exact criteria plus nonempty focused commands on the owning implementation unit. Each command must declare closed Git-visible effect authority: no-effect with no paths and none handling; declared-predictable with nonempty exact normalized generated paths and isolation, exact cleanup before the scope gate, or block-if-created handling; or unknown-generated with no paths and run-isolated handling. Every command must include a nonempty final-scope preservation statement proving verification leaves Git-visible state inside approved unit files. Each unit must have a nonempty objective, criteria, depends_on array, files array, commands array, and traceable links by real atom id. Call autopilot_submit_plan_cluster or autopilot_submit_synthesis as the final action."
     submit_tool "autopilot_submit_plan_cluster" label="Submit work map"
     submit_tool "autopilot_submit_synthesis" label="Submit synthesized work map"
     list "units" item="plan_unit" required=#true doc="Executable implementation units only."
@@ -600,6 +600,10 @@ artifact "work_map" schema="planning.work-map.v1" producer="Model" model_produce
     record "plan_unit_command" {
         field "command" type="string" required=#true
         field "expected" type="string" required=#true
+        field "effect" type="command_effect" required=#true doc="Closed Git-visible persistent repository effect classification."
+        list "generated_paths" item="path" required=#true doc="Exact normalized repo-relative Git-visible generated artifact paths, empty unless effect is declared-predictable."
+        field "handling" type="command_effect_handling" required=#true doc="Closed handling authority for Git-visible generated artifacts."
+        field "scope_preservation" type="string" required=#true doc="Nonempty final-scope-check statement proving verification leaves final Git-visible state inside approved unit files."
     }
 }
 
@@ -840,6 +844,10 @@ artifact "validation_context_v2" schema="autopilot.validation_context.v1" produc
         field "command_id" type="id" required=#true
         field "command" type="string" required=#true
         field "expected" type="string" required=#true
+        field "effect" type="command_effect" required=#true
+        list "generated_paths" item="path" required=#true
+        field "handling" type="command_effect_handling" required=#true
+        field "scope_preservation" type="string" required=#true
     }
     record "validation_context_evidence" {
         field "evidence_ref" type="ref" required=#true
@@ -1206,6 +1214,21 @@ enum "planning_review_verdict" {
 enum "plan_unit_kind" {
     doc "Closed work-map unit disposition. Only implementation units are executable delivery work. Context gates are review blockers and verification is carried as criteria plus commands on implementation units."
     value "implementation"
+}
+
+enum "command_effect" {
+    doc "Closed Git-visible persistent repository effect classification for typed verification commands."
+    value "no-effect"
+    value "declared-predictable"
+    value "unknown-generated"
+}
+
+enum "command_effect_handling" {
+    doc "Closed handling authority for Git-visible generated artifacts from typed verification commands."
+    value "none"
+    value "run-isolated"
+    value "exact-cleanup-before-scope-gate"
+    value "block-if-created"
 }
 
 enum "run_phase" {

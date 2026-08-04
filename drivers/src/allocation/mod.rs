@@ -3,7 +3,8 @@ use std::path::{Component, Path};
 
 use kernel::boundary::Rejection;
 use kernel::generated::{
-    AllocationLaneProposal, Id, Path as ContractPath, PlanUnitCommand, PlanUnitKind,
+    AllocationLaneProposal, CommandEffect, CommandEffectHandling, Id, Path as ContractPath,
+    PlanUnitCommand, PlanUnitKind, ValidationContextCommand,
 };
 use kernel_macros::acceptance_boundary;
 use serde::{Deserialize, Serialize};
@@ -42,6 +43,100 @@ pub fn approved_path_is_safe(path: &kernel::generated::Path) -> bool {
         && Path::new(&path.0)
             .components()
             .all(|component| matches!(component, Component::Normal(_)))
+}
+
+pub fn command_generated_path_is_safe(path: &kernel::generated::Path) -> bool {
+    let raw = path.0.as_str();
+    !raw.is_empty()
+        && raw.trim() == raw
+        && !raw.contains('\\')
+        && !Path::new(raw).is_absolute()
+        && raw
+            .split('/')
+            .all(|component| !component.is_empty() && component != "." && component != "..")
+        && Path::new(raw)
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+}
+
+pub fn validate_command_effect_authority_parts(
+    command: &str,
+    expected: &str,
+    scope_preservation: &str,
+    effect: &CommandEffect,
+    generated_paths: &[ContractPath],
+    handling: &CommandEffectHandling,
+) -> Result<(), String> {
+    if command.trim().is_empty()
+        || expected.trim().is_empty()
+        || scope_preservation.trim().is_empty()
+    {
+        return Err("command, expected, and scope_preservation must be nonempty".to_owned());
+    }
+
+    let mut seen_generated_paths = BTreeSet::new();
+    for path in generated_paths {
+        if !command_generated_path_is_safe(path) || !seen_generated_paths.insert(path.0.as_str()) {
+            return Err(format!(
+                "unsafe or duplicate generated path in command authority: {}",
+                path.0
+            ));
+        }
+    }
+
+    match (effect, handling) {
+        (CommandEffect::NoEffect, CommandEffectHandling::None) if generated_paths.is_empty() => {
+            Ok(())
+        }
+        (CommandEffect::NoEffect, _) => Err(
+            "no-effect command authority requires empty generated_paths and none handling".to_owned(),
+        ),
+        (CommandEffect::DeclaredPredictable, CommandEffectHandling::None) => Err(
+            "declared-predictable command authority requires non-none handling".to_owned(),
+        ),
+        (CommandEffect::DeclaredPredictable, _) if generated_paths.is_empty() => Err(
+            "declared-predictable command authority requires exact generated_paths".to_owned(),
+        ),
+        (CommandEffect::DeclaredPredictable, _) => Ok(()),
+        (CommandEffect::UnknownGenerated, CommandEffectHandling::RunIsolated)
+            if generated_paths.is_empty() =>
+        {
+            Ok(())
+        }
+        (CommandEffect::UnknownGenerated, _) => Err(
+            "unknown-generated command authority requires empty generated_paths and run-isolated handling"
+                .to_owned(),
+        ),
+    }
+}
+
+pub fn validate_plan_unit_command_effect_authority(
+    command: &PlanUnitCommand,
+) -> Result<(), String> {
+    validate_command_effect_authority_parts(
+        &command.command,
+        &command.expected,
+        &command.scope_preservation,
+        &command.effect,
+        &command.generated_paths,
+        &command.handling,
+    )
+}
+
+pub fn validate_validation_context_command_effect_authority(
+    command: &ValidationContextCommand,
+) -> Result<(), String> {
+    if command.command_id.0.trim().is_empty() {
+        return Err("validation context command_id must be nonempty".to_owned());
+    }
+    validate_command_effect_authority_parts(
+        &command.command,
+        &command.expected,
+        &command.scope_preservation,
+        &command.effect,
+        &command.generated_paths,
+        &command.handling,
+    )
 }
 
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
@@ -125,6 +220,8 @@ pub fn validate_allocation(
     policy: AllocationPolicy,
 ) -> Result<CanonicalAllocation, AllocationError> {
     reject_ownership(submission)?;
+    validate_approved_unit_authority(approved)?;
+    validate_approved_unit_authority(&submission.authority_echo)?;
     if !(1..=6).contains(&submission.lanes.len()) {
         return Err(AllocationError::WrongLaneCount {
             actual: submission.lanes.len(),
@@ -154,6 +251,16 @@ fn reject_ownership(submission: &AllocationSubmission) -> Result<(), AllocationE
     }
     if let Some(block) = submission.overlap_blocks.first() {
         return Err(AllocationError::InventedOwnership(block.clone()));
+    }
+    Ok(())
+}
+
+fn validate_approved_unit_authority(units: &[ApprovedUnit]) -> Result<(), AllocationError> {
+    for unit in units {
+        for command in &unit.commands {
+            validate_plan_unit_command_effect_authority(command)
+                .map_err(|_| AllocationError::AuthorityChanged(unit.id.clone()))?;
+        }
     }
     Ok(())
 }

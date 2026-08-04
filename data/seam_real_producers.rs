@@ -617,7 +617,7 @@ fn approved_units_from_work_map(work_map: &kernel::generated::WorkMap) -> Result
         let mut file_paths = BTreeSet::new();
         if unit.files.iter().any(|path| !allocation::approved_path_is_safe(path) || !file_paths.insert(path.0.as_str())) { return Err(format!("unit {} has unsafe or duplicate files", unit.id.0)); }
         if unit.commands.is_empty() { return Err(format!("unit {} missing commands", unit.id.0)); }
-        for command in &unit.commands { if command.command.trim().is_empty() || command.expected.trim().is_empty() { return Err(format!("unit {} has incomplete command obligation", unit.id.0)); } }
+        for command in &unit.commands { allocation::validate_plan_unit_command_effect_authority(command).map_err(|error| format!("unit {} has incomplete command authority: {error}", unit.id.0))?; }
         let order = index as u32 + 1;
         let criteria = unit.criteria.iter().enumerate().map(|(criterion_index, _)| idv(&format!("AC-{}-{}", unit.id.0, criterion_index + 1))).collect::<Vec<_>>();
         let criterion_text = criteria.iter().cloned().zip(unit.criteria.iter().cloned()).map(|(id, text)| allocation::ApprovedCriterion { id, text }).collect::<Vec<_>>();
@@ -668,7 +668,7 @@ fn validate_approved_units(units: &[ApprovedUnit]) -> Result<(), AnyError> {
             if criterion.text.trim().is_empty() || !criterion_seen.insert(criterion.id.clone()) { return Err(format!("approved unit {} malformed criterion {}", unit.id.0, criterion.id.0).into()); }
         }
         for dep in &unit.dependencies { if dep == &unit.id { return Err(format!("approved unit {} self dependency", unit.id.0).into()); } }
-        for command in &unit.commands { if command.command.trim().is_empty() || command.expected.trim().is_empty() { return Err(format!("approved unit {} has empty command", unit.id.0).into()); } }
+        for command in &unit.commands { allocation::validate_plan_unit_command_effect_authority(command).map_err(|error| -> AnyError { format!("approved unit {} has malformed command authority: {error}", unit.id.0).into() })?; }
     }
     for unit in units { for dep in &unit.dependencies { if !ids.contains(dep) { return Err(format!("approved unit {} depends on unknown unit {}", unit.id.0, dep.0).into()); } } }
     let by_id = units.iter().map(|unit| (unit.id.clone(), unit)).collect::<BTreeMap<_, _>>();

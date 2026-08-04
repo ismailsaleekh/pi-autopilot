@@ -371,13 +371,22 @@ fn lane_delivery_agent_git_mutation_and_incomplete_delivery_are_refused_without_
         assignment_json["ordered_units"][0]["files"],
         serde_json::json!(["keep.txt"])
     );
+    let delivered_command = &assignment_json["ordered_units"][0]["commands"][0];
+    assert_eq!(delivered_command["command"], "cargo test -q");
+    assert_eq!(delivered_command["effect"], "no-effect");
+    assert_eq!(delivered_command["generated_paths"], serde_json::json!([]));
+    assert_eq!(delivered_command["handling"], "none");
     assert_eq!(
-        assignment_json["ordered_units"][0]["commands"][0]["command"],
-        "cargo test -q"
+        delivered_command["scope_preservation"],
+        "Final Git-visible state remains limited to the approved unit files."
     );
     let prompt = fs::read_to_string(spec["prompt_path"].as_str().expect("prompt")).expect("prompt");
     assert!(
         prompt.contains("```````json autopilot.delivery_assignment.v1"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("Verification command effect authority is binding"),
         "{prompt}"
     );
     fs::write(assignment_path, b"{\"schema\":\"drift\"}").expect("assignment tamper");
@@ -564,7 +573,7 @@ fn launched_core_delivery(
                 "head_tree": repo_authority.manifest.head_tree,
             },
             "units":[
-                {"id":"U1","kind":"implementation","objective":"deliver U1","operator_order":1,"decisions":[],"criteria":["AC1"],"criterion_text":[{"id":"AC1","text":"criterion text AC1"}],"dependencies":[],"predecessor_forward_criteria":[],"downstream_release_edges":["EDGE1"],"files":["README.md"],"commands":[{"command":"cargo test -q","expected":"pass"}]}
+                {"id":"U1","kind":"implementation","objective":"deliver U1","operator_order":1,"decisions":[],"criteria":["AC1"],"criterion_text":[{"id":"AC1","text":"criterion text AC1"}],"dependencies":[],"predecessor_forward_criteria":[],"downstream_release_edges":["EDGE1"],"files":["README.md"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}]}
             ]
         }))
         .expect("approved json"),
@@ -707,6 +716,11 @@ fn unit(name: &str, order: u32, deps: &[&str]) -> ApprovedUnit {
         commands: vec![kernel::generated::PlanUnitCommand {
             command: "cargo test -q".to_owned(),
             expected: "pass".to_owned(),
+            effect: kernel::generated::CommandEffect::NoEffect,
+            generated_paths: Vec::new(),
+            handling: kernel::generated::CommandEffectHandling::None,
+            scope_preservation:
+                "Final Git-visible state remains limited to the approved unit files.".to_owned(),
         }],
     }
 }

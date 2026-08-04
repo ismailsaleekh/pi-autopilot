@@ -3073,12 +3073,14 @@ fn validate_delivery_assignment_artifact(
             }
         }
         for command in &unit.commands {
-            if command.command.trim().is_empty() || command.expected.trim().is_empty() {
-                return Err(format!(
-                    "agent-run delivery malformed command obligation: {}",
-                    unit.id.0
-                ));
-            }
+            crate::allocation::validate_plan_unit_command_effect_authority(command).map_err(
+                |error| {
+                    format!(
+                        "agent-run delivery malformed command authority: {}: {error}",
+                        unit.id.0
+                    )
+                },
+            )?;
         }
         previous.insert(unit.id.clone());
     }
@@ -3159,6 +3161,9 @@ fn validate_validation_spec_identity(strict: &AgentRunSpec) -> Result<(), String
             .map_err(|error| format!("agent-run validation assignment malformed: {error}"))?;
     let context: kernel::generated::ValidationContextV2 = serde_json::from_slice(&context_bytes)
         .map_err(|error| format!("agent-run validation context malformed: {error}"))?;
+    validate_validation_context_command_authority(&context).map_err(|error| {
+        format!("agent-run validation context malformed command authority: {error}")
+    })?;
     if assignment.action_id != strict.action_id
         || assignment.assignment_id != strict.assignment_id
         || assignment.workstream != strict.workstream
@@ -4013,11 +4018,35 @@ fn validate_validation_submission(
     validate_validation_submission_against(submission, &assignment, &context)
 }
 
+fn validate_validation_context_command_authority(
+    context: &kernel::generated::ValidationContextV2,
+) -> Result<(), String> {
+    for criterion in &context.criteria {
+        for command in &criterion.commands {
+            crate::allocation::validate_validation_context_command_effect_authority(command)
+                .map_err(|error| {
+                    format!(
+                        "criterion {} command {}: {error}",
+                        criterion.criterion_id.0, command.command_id.0
+                    )
+                })?;
+        }
+    }
+    Ok(())
+}
+
 fn validate_validation_submission_against(
     submission: &kernel::generated::ValidationSubmissionV2,
     assignment: &kernel::generated::ValidationAssignmentV2,
     context: &kernel::generated::ValidationContextV2,
 ) -> Result<(), ValueRejection> {
+    validate_validation_context_command_authority(context).map_err(|error| {
+        value_rejection(
+            "validation_context.commands",
+            "valid typed command-effect authority",
+            error,
+        )
+    })?;
     if submission.validation_id != assignment.validation_id
         || submission.assignment_id != assignment.assignment_id
         || submission.scope != assignment.scope

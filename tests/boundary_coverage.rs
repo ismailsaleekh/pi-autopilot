@@ -13,6 +13,7 @@ use drivers::transcript::{
 use kernel::boundary::{
     BOUNDARIES, BoundaryDescriptor, BoundaryMode, BoundaryRuntime, Producer, Rejection,
 };
+use sha2::{Digest as ShaDigest, Sha256};
 
 #[test]
 fn model_boundaries_are_enforced_or_loudly_reported_in_record_phase() {
@@ -195,27 +196,27 @@ fn work_map_boundary_rejects_non_delivery_kinds_and_empty_scope_or_commands() {
     for (label, raw) in [
         (
             "context gate kind",
-            serde_json::json!({"units":[{"id":"U1","kind":"context-gate","objective":"ctx","criteria":["c"],"depends_on":[],"files":["src/lib.rs"],"commands":[{"command":"cargo test -q","expected":"pass"}],"links":["W1"]}]}).to_string(),
+            serde_json::json!({"units":[{"id":"U1","kind":"context-gate","objective":"ctx","criteria":["c"],"depends_on":[],"files":["src/lib.rs"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"links":["W1"]}]}).to_string(),
         ),
         (
             "verification kind",
-            serde_json::json!({"units":[{"id":"U1","kind":"verification","objective":"verify","criteria":["c"],"depends_on":[],"files":["src/lib.rs"],"commands":[{"command":"cargo test -q","expected":"pass"}],"links":["W1"]}]}).to_string(),
+            serde_json::json!({"units":[{"id":"U1","kind":"verification","objective":"verify","criteria":["c"],"depends_on":[],"files":["src/lib.rs"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"links":["W1"]}]}).to_string(),
         ),
         (
             "missing files",
-            serde_json::json!({"units":[{"id":"U1","kind":"implementation","objective":"impl","criteria":["c"],"depends_on":[],"commands":[{"command":"cargo test -q","expected":"pass"}],"links":["W1"]}]}).to_string(),
+            serde_json::json!({"units":[{"id":"U1","kind":"implementation","objective":"impl","criteria":["c"],"depends_on":[],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"links":["W1"]}]}).to_string(),
         ),
         (
             "absolute file",
-            serde_json::json!({"units":[{"id":"U1","kind":"implementation","objective":"impl","criteria":["c"],"depends_on":[],"files":["/tmp/escape"],"commands":[{"command":"cargo test -q","expected":"pass"}],"links":["W1"]}]}).to_string(),
+            serde_json::json!({"units":[{"id":"U1","kind":"implementation","objective":"impl","criteria":["c"],"depends_on":[],"files":["/tmp/escape"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"links":["W1"]}]}).to_string(),
         ),
         (
             "parent file",
-            serde_json::json!({"units":[{"id":"U1","kind":"implementation","objective":"impl","criteria":["c"],"depends_on":[],"files":["../escape"],"commands":[{"command":"cargo test -q","expected":"pass"}],"links":["W1"]}]}).to_string(),
+            serde_json::json!({"units":[{"id":"U1","kind":"implementation","objective":"impl","criteria":["c"],"depends_on":[],"files":["../escape"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"links":["W1"]}]}).to_string(),
         ),
         (
             "duplicate files",
-            serde_json::json!({"units":[{"id":"U1","kind":"implementation","objective":"impl","criteria":["c"],"depends_on":[],"files":["src/lib.rs","src/lib.rs"],"commands":[{"command":"cargo test -q","expected":"pass"}],"links":["W1"]}]}).to_string(),
+            serde_json::json!({"units":[{"id":"U1","kind":"implementation","objective":"impl","criteria":["c"],"depends_on":[],"files":["src/lib.rs","src/lib.rs"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"links":["W1"]}]}).to_string(),
         ),
         (
             "empty commands",
@@ -227,6 +228,460 @@ fn work_map_boundary_rejects_non_delivery_kinds_and_empty_scope_or_commands() {
             "{label} work-map mutation was admitted"
         );
     }
+}
+
+#[test]
+fn work_map_command_effect_authority_accepts_valid_combinations() {
+    let mut runtime = boundary_runtime("planning.work-map.v1");
+    runtime.flip_to_enforce();
+    for command in [
+        command_authority(
+            "no-effect",
+            vec![],
+            "none",
+            "No final Git-visible state remains outside approved files.",
+        ),
+        command_authority(
+            "declared-predictable",
+            vec!["generated/cache.state"],
+            "run-isolated",
+            "Generated state is isolated before the final scope gate.",
+        ),
+        command_authority(
+            "declared-predictable",
+            vec!["generated/cache.state"],
+            "exact-cleanup-before-scope-gate",
+            "Generated state is exactly removed before the final scope gate even after failure.",
+        ),
+        command_authority(
+            "declared-predictable",
+            vec!["generated/cache.state"],
+            "block-if-created",
+            "Generated state blocks completion if it exists at the final scope gate.",
+        ),
+        command_authority(
+            "unknown-generated",
+            vec![],
+            "run-isolated",
+            "Unknown generated state is isolated from the final repository scope.",
+        ),
+    ] {
+        let raw = work_map_with_command(command).to_string();
+        accept_work_map(&raw, &runtime).expect("valid command-effect authority accepted");
+    }
+}
+
+#[test]
+fn work_map_command_effect_authority_rejects_cross_field_and_path_defects() {
+    let mut runtime = boundary_runtime("planning.work-map.v1");
+    runtime.flip_to_enforce();
+    for (label, command) in [
+        (
+            "none plus paths",
+            command_authority(
+                "no-effect",
+                vec!["generated/cache.state"],
+                "none",
+                "scope kept",
+            ),
+        ),
+        (
+            "declared empty paths",
+            command_authority("declared-predictable", vec![], "run-isolated", "scope kept"),
+        ),
+        (
+            "declared none handling",
+            command_authority(
+                "declared-predictable",
+                vec!["generated/cache.state"],
+                "none",
+                "scope kept",
+            ),
+        ),
+        (
+            "unknown non-isolation",
+            command_authority(
+                "unknown-generated",
+                vec![],
+                "block-if-created",
+                "scope kept",
+            ),
+        ),
+        (
+            "unsafe parent path",
+            command_authority(
+                "declared-predictable",
+                vec!["generated/../cache.state"],
+                "run-isolated",
+                "scope kept",
+            ),
+        ),
+        (
+            "unsafe dot path",
+            command_authority(
+                "declared-predictable",
+                vec!["generated/./cache.state"],
+                "run-isolated",
+                "scope kept",
+            ),
+        ),
+        (
+            "unsafe backslash path",
+            command_authority(
+                "declared-predictable",
+                vec!["generated\\cache.state"],
+                "run-isolated",
+                "scope kept",
+            ),
+        ),
+        (
+            "duplicate paths",
+            command_authority(
+                "declared-predictable",
+                vec!["generated/cache.state", "generated/cache.state"],
+                "run-isolated",
+                "scope kept",
+            ),
+        ),
+        (
+            "blank scope check",
+            command_authority("no-effect", vec![], "none", " "),
+        ),
+    ] {
+        let raw = work_map_with_command(command).to_string();
+        assert!(
+            accept_work_map(&raw, &runtime).is_err(),
+            "{label} command-effect authority was admitted"
+        );
+    }
+}
+
+#[test]
+fn work_map_command_only_payloads_fail_loudly_without_backfill() {
+    let mut runtime = boundary_runtime("planning.work-map.v1");
+    runtime.flip_to_enforce();
+    let raw = serde_json::json!({"units":[{
+        "id":"U1",
+        "kind":"implementation",
+        "objective":"implement assigned unit",
+        "criteria":["criterion is met"],
+        "depends_on":[],
+        "files":["src/unit.txt"],
+        "commands":[{"command":"verify assigned unit","expected":"pass"}],
+        "links":["W1"]
+    }]})
+    .to_string();
+    assert!(
+        accept_work_map(&raw, &runtime).is_err(),
+        "old command-only work-map payload must not be defaulted or backfilled"
+    );
+}
+
+#[test]
+fn historical_pre_command_effect_transcript_is_preserved_byte_exact() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../tests/historical-transcript-fixtures/planning.work-map.v1/transcripts.pre-command-effect-authority.json");
+    let bytes = fs::read(path).expect("historical transcript fixture");
+    let actual = Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert_eq!(
+        actual,
+        "1ee4b2c2354d03b1beeb6912c54a73df027580e1cd449949f2682b798510996e"
+    );
+}
+
+#[test]
+fn validation_context_effect_revalidation_is_wired_before_prompt_and_submission() {
+    let source = include_str!("../drivers/src/runner/child.rs");
+    let spec_start = source
+        .find("fn validate_validation_spec_identity")
+        .expect("validation spec identity function");
+    let spec_end = source[spec_start..]
+        .find("fn validate_planning_documents")
+        .map(|offset| spec_start + offset)
+        .expect("validation spec identity function end");
+    assert!(
+        source[spec_start..spec_end]
+            .contains("validate_validation_context_command_authority(&context)"),
+        "validation context effects must be re-admitted before the child prompt"
+    );
+    let submission_start = source
+        .find("fn validate_validation_submission_against")
+        .expect("validation submission authority function");
+    let submission_end = source[submission_start..]
+        .find("fn package_tool_result")
+        .map(|offset| submission_start + offset)
+        .expect("validation submission authority function end");
+    assert!(
+        source[submission_start..submission_end]
+            .contains("validate_validation_context_command_authority(context)"),
+        "validation context effects must be re-admitted at child and parent submission authority"
+    );
+}
+
+#[test]
+fn malformed_validation_context_command_authority_is_rejected_at_submission_admission() {
+    for (label, command) in [
+        (
+            "blank command",
+            validation_context_command_authority(
+                " ",
+                "pass",
+                "no-effect",
+                vec![],
+                "none",
+                "scope kept",
+            ),
+        ),
+        (
+            "blank expected",
+            validation_context_command_authority(
+                "verify assigned unit",
+                " ",
+                "no-effect",
+                vec![],
+                "none",
+                "scope kept",
+            ),
+        ),
+        (
+            "blank scope",
+            validation_context_command_authority(
+                "verify assigned unit",
+                "pass",
+                "no-effect",
+                vec![],
+                "none",
+                " ",
+            ),
+        ),
+        (
+            "declared empty paths",
+            validation_context_command_authority(
+                "verify assigned unit",
+                "pass",
+                "declared-predictable",
+                vec![],
+                "run-isolated",
+                "scope kept",
+            ),
+        ),
+        (
+            "unknown non-isolation",
+            validation_context_command_authority(
+                "verify assigned unit",
+                "pass",
+                "unknown-generated",
+                vec![],
+                "block-if-created",
+                "scope kept",
+            ),
+        ),
+        (
+            "unsafe path",
+            validation_context_command_authority(
+                "verify assigned unit",
+                "pass",
+                "declared-predictable",
+                vec!["generated/../cache.state"],
+                "run-isolated",
+                "scope kept",
+            ),
+        ),
+        (
+            "duplicate path",
+            validation_context_command_authority(
+                "verify assigned unit",
+                "pass",
+                "declared-predictable",
+                vec!["generated/cache.state", "generated/cache.state"],
+                "run-isolated",
+                "scope kept",
+            ),
+        ),
+    ] {
+        let (assignment, context, submission) = validation_authority_bundle(command);
+        assert!(
+            drivers::runner::child::admit_validation_submission_with_authority(
+                &submission,
+                &assignment,
+                &context
+            )
+            .is_err(),
+            "{label} validation context command authority was admitted"
+        );
+    }
+}
+
+fn validation_context_command_authority(
+    command: &str,
+    expected: &str,
+    effect: &str,
+    generated_paths: Vec<&str>,
+    handling: &str,
+    scope_preservation: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "command_id":"CMD1",
+        "command":command,
+        "expected":expected,
+        "effect":effect,
+        "generated_paths":generated_paths,
+        "handling":handling,
+        "scope_preservation":scope_preservation,
+    })
+}
+
+fn validation_authority_bundle(
+    command: serde_json::Value,
+) -> (
+    kernel::generated::ValidationAssignmentV2,
+    kernel::generated::ValidationContextV2,
+    kernel::generated::ValidationSubmissionV2,
+) {
+    let exact_commit = "1111111111111111111111111111111111111111";
+    let exact_tree = "2222222222222222222222222222222222222222";
+    let assignment = serde_json::json!({
+        "schema":"autopilot.validation_assignment.v2",
+        "validation_id":"VAL1",
+        "validation_key":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "workstream":"main",
+        "run_revision":1,
+        "role_id":"validator",
+        "mode":"validation",
+        "assignment_id":"A1",
+        "action_id":"ACT1",
+        "validation_attempt":1,
+        "semantic_round":1,
+        "scope":"forward",
+        "subject_kind":"lane-delivery",
+        "producer_assignment_ids":["producer-1"],
+        "producer_result_refs":["result:producer-1"],
+        "lane_id":"L1",
+        "candidate_id":"C1",
+        "exact_commit":exact_commit,
+        "exact_tree":exact_tree,
+        "candidate_root":".",
+        "forward_round":1,
+        "criteria_manifest_ref":"criteria:1",
+        "criteria_manifest_digest":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "evidence_manifest_ref":"evidence:1",
+        "evidence_manifest_digest":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "diff_ref":"diff:1",
+        "diff_digest":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "prior_finding_refs":[],
+        "allowed_read_roots":["."],
+        "allowed_command_ids":["CMD1"],
+        "max_transport_attempts":1
+    });
+    let context = serde_json::json!({
+        "schema":"autopilot.validation_context.v2",
+        "context_id":"CTX1",
+        "revision":1,
+        "validation_id":"VAL1",
+        "assignment_id":"A1",
+        "exact_commit":exact_commit,
+        "exact_tree":exact_tree,
+        "candidate":{
+            "source_root":".",
+            "diff_ref":"diff:1",
+            "diff_digest":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "actual_changed_paths":["src/unit.txt"],
+            "execution_audit_ref":"audit:1"
+        },
+        "criteria":[{
+            "criterion_id":"CR1",
+            "requirement_text":"criterion is met",
+            "mandatory":true,
+            "covered_paths":["src/unit.txt"],
+            "semantic_surface_ids":["surface-1"],
+            "forward_edge_ids":["edge-1"],
+            "commands":[command],
+            "witness_ids":["witness-1"]
+        }],
+        "evidence":[{
+            "evidence_ref":"evidence:command-1",
+            "digest":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "kind":"command-output",
+            "exact_commit":exact_commit,
+            "exact_tree":exact_tree,
+            "command_id":"CMD1"
+        }],
+        "prior_findings":[],
+        "applicable_decision_refs":[],
+        "applicable_constraint_refs":[],
+        "included_context_classes":["diff"],
+        "forbidden_context_classes":["producer-reasoning"],
+        "allowed_read_roots":["."],
+        "excluded_refs":[]
+    });
+    let submission = serde_json::json!({
+        "schema":"autopilot.validation_submission.v2",
+        "validation_id":"VAL1",
+        "assignment_id":"A1",
+        "scope":"forward",
+        "exact_commit":exact_commit,
+        "exact_tree":exact_tree,
+        "outcome":"FORWARD_READY",
+        "criterion_results":[{
+            "criterion_id":"CR1",
+            "verdict":"PASS",
+            "evidence_refs":["evidence:command-1"],
+            "finding_ids":[],
+            "covered_paths":["src/unit.txt"],
+            "semantic_surface_ids":["surface-1"],
+            "forward_edge_ids":["edge-1"]
+        }],
+        "findings":[]
+    });
+    (
+        serde_json::from_value(assignment).expect("typed assignment"),
+        serde_json::from_value(context).expect("typed context"),
+        serde_json::from_value(submission).expect("typed submission"),
+    )
+}
+
+#[test]
+fn prompt_guidance_names_command_effect_authority() {
+    let admits = kernel::generated::WORK_MAP_ADMITS;
+    assert!(
+        admits.contains("closed Git-visible effect authority"),
+        "{admits}"
+    );
+    assert!(admits.contains("declared-predictable"), "{admits}");
+    assert!(admits.contains("run-isolated"), "{admits}");
+    assert!(admits.contains("final-scope preservation"), "{admits}");
+}
+
+fn command_authority(
+    effect: &str,
+    generated_paths: Vec<&str>,
+    handling: &str,
+    scope_preservation: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "command":"verify assigned unit",
+        "expected":"verification completes with declared final scope",
+        "effect":effect,
+        "generated_paths":generated_paths,
+        "handling":handling,
+        "scope_preservation":scope_preservation,
+    })
+}
+
+fn work_map_with_command(command: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({"units":[{
+        "id":"U1",
+        "kind":"implementation",
+        "objective":"implement assigned unit",
+        "criteria":["criterion is met"],
+        "depends_on":[],
+        "files":["src/unit.txt"],
+        "commands":[command],
+        "links":["W1"]
+    }]})
 }
 
 #[test]

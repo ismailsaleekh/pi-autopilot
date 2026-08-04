@@ -41,6 +41,8 @@ export type AttemptAttribute = "interrupted" | "checkpointed" | "superseded";
 export type AttestedActionKind = "launch-attested-pi" | "reconcile-attested-pi";
 export type CandidateState = "queued" | "preparing" | "conflicted" | "resolving" | "focused-checking" | "ready-to-commit" | "committed" | "needs-fix" | "failed" | "superseded";
 export type ClosureVerdict = "PASS" | "NEEDS_FIX" | "BLOCKED";
+export type CommandEffect = "no-effect" | "declared-predictable" | "unknown-generated";
+export type CommandEffectHandling = "none" | "run-isolated" | "exact-cleanup-before-scope-gate" | "block-if-created";
 export type CommandReceiptKind = "final-command" | "full-suite" | "focused";
 export type ContextAnchorForm = "task" | "plan" | "dossier" | "run" | "version-control-lines" | "version-control-whole-file" | "json";
 export type CriterionVerdict = "PASS" | "FAIL" | "BLOCKED";
@@ -1009,6 +1011,10 @@ export interface ValidationContextCommand {
   command_id: Id;
   command: string;
   expected: string;
+  effect: CommandEffect;
+  generated_paths: Path[];
+  handling: CommandEffectHandling;
+  scope_preservation: string;
 }
 
 export interface ValidationContextEvidence {
@@ -1131,6 +1137,10 @@ export interface PlanUnit {
 export interface PlanUnitCommand {
   command: string;
   expected: string;
+  effect: CommandEffect;
+  generated_paths: Path[];
+  handling: CommandEffectHandling;
+  scope_preservation: string;
 }
 
 export interface CoreToHostDonePayload {

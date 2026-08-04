@@ -798,7 +798,7 @@ active_tools = sorted(filter(None, arg_value("--tools").split(",")))
 submit_tools = [tool for tool in active_tools if tool.startswith("autopilot_submit_")]
 bindings = {{
     "autopilot_submit_atoms": ("planning.task-atoms.v1", "77d000b816b3c14dcdefeba0c23d4f4f9f8bedaf5b281081f1cea138e525e091"),
-    "autopilot_submit_plan_cluster": ("planning.work-map.v1", "f4b774b90b653568c38a0971e9472e5aa3dae80c56ea7dd7f3136b5b5f5376f2"),
+    "autopilot_submit_plan_cluster": ("planning.work-map.v1", "237b2e049edc93e6b87d8319b621ba9746e52ed2ee8dfa99b8a53b6ef6695c5e"),
 }}
 if not session_dir:
     sys.stderr.write("fake pi: --session-dir is required\n")
@@ -1401,7 +1401,7 @@ fn planning_doc(path: &str, class: TaskDocumentClass, body: &str) -> TaskDocumen
 }
 
 fn work_map(links: &[&str]) -> String {
-    json!({"units":[{"id":"U1","kind":"implementation","objective":"Implement unit","criteria":["done"],"depends_on":[],"files":["src/lib.rs"],"commands":[{"command":"cargo test -q","expected":"pass"}],"links":links}]})
+    json!({"units":[{"id":"U1","kind":"implementation","objective":"Implement unit","criteria":["done"],"depends_on":[],"files":["src/lib.rs"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"links":links}]})
         .to_string()
 }
 

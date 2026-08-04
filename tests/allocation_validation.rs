@@ -3,7 +3,10 @@ use drivers::allocation::{
     accept_lane_proposal, validate_allocation,
 };
 use kernel::boundary::{BoundaryMode, Producer, boundary_by_id};
-use kernel::generated::{AllocationLaneProposal, DeliveryBoundary, Id, TestId};
+use kernel::generated::{
+    AllocationLaneProposal, CommandEffect, CommandEffectHandling, DeliveryBoundary, Id,
+    Path as ContractPath, PlanUnitCommand, TestId,
+};
 
 #[test]
 fn allocator_boundary_is_a_registered_model_boundary() {
@@ -67,6 +70,25 @@ fn totality_requires_exact_assignment_or_future_reason() {
     assert_eq!(
         validate_allocation(&four_units, &partial, policy()).expect_err("blank future rejected"),
         AllocationError::FutureWithoutReason(id("u4"))
+    );
+}
+
+#[test]
+fn malformed_command_effect_authority_is_rejected_before_allocation() {
+    let mut approved = units();
+    approved[0].commands.push(PlanUnitCommand {
+        command: "verify assigned unit".to_owned(),
+        expected: "pass".to_owned(),
+        effect: CommandEffect::UnknownGenerated,
+        generated_paths: vec![ContractPath("generated/cache.state".to_owned())],
+        handling: CommandEffectHandling::BlockIfCreated,
+        scope_preservation: "Final Git-visible state remains inside approved files.".to_owned(),
+    });
+    let malformed_echo = submission_for(&approved, lanes());
+    assert_eq!(
+        validate_allocation(&approved, &malformed_echo, policy())
+            .expect_err("malformed command authority rejected before allocation"),
+        AllocationError::AuthorityChanged(id("u1"))
     );
 }
 

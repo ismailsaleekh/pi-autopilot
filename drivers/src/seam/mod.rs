@@ -1220,12 +1220,14 @@ fn validate_delivery_artifact_units(units: &[ApprovedUnit]) -> Result<(), String
             }
         }
         for command in &unit.commands {
-            if command.command.trim().is_empty() || command.expected.trim().is_empty() {
-                return Err(format!(
-                    "delivery assignment unit {} malformed command",
-                    unit.id.0
-                ));
-            }
+            crate::allocation::validate_plan_unit_command_effect_authority(command).map_err(
+                |error| {
+                    format!(
+                        "delivery assignment unit {} malformed command authority: {error}",
+                        unit.id.0
+                    )
+                },
+            )?;
         }
         previous.insert(unit.id.clone());
     }

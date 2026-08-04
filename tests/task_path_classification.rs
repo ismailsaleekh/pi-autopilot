@@ -555,7 +555,7 @@ fn task_path_classification_delivery_runtime_packages_uncommitted_lane_changes_a
     fs::write(root.join(".pi/autopilot/main/approved-plan.json"), serde_json::to_vec_pretty(&serde_json::json!({
         "repository_authority": {"manifest_path": repo_authority.path, "manifest_digest": repo_authority.digest, "head_commit": repo_authority.manifest.head_commit, "head_tree": repo_authority.manifest.head_tree},
         "units":[
-            {"id":"U1","kind":"implementation","objective":"deliver U1","operator_order":1,"decisions":[],"criteria":["AC1"],"criterion_text":[{"id":"AC1","text":"criterion text AC1"}],"dependencies":[],"predecessor_forward_criteria":[],"downstream_release_edges":["EDGE1"],"files":["README.md",".gitignore"],"commands":[{"command":"cargo test -q","expected":"pass"}]}
+            {"id":"U1","kind":"implementation","objective":"deliver U1","operator_order":1,"decisions":[],"criteria":["AC1"],"criterion_text":[{"id":"AC1","text":"criterion text AC1"}],"dependencies":[],"predecessor_forward_criteria":[],"downstream_release_edges":["EDGE1"],"files":["README.md",".gitignore"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}]}
         ]
     })).expect("approved json")).expect("approved plan");
     let previous = std::env::current_dir().expect("cwd");
@@ -715,7 +715,15 @@ fn task_path_classification_delivery_runtime_packages_uncommitted_lane_changes_a
     );
     assert_eq!(
         criterion["commands"],
-        serde_json::json!([{"command_id":"CMD-U1-1","command":"cargo test -q","expected":"pass"}])
+        serde_json::json!([{
+            "command_id":"CMD-U1-1",
+            "command":"cargo test -q",
+            "expected":"pass",
+            "effect":"no-effect",
+            "generated_paths":[],
+            "handling":"none",
+            "scope_preservation":"Final Git-visible state remains limited to the approved unit files."
+        }])
     );
     let evidence_ref = validation_context["evidence"][0]["evidence_ref"]
         .as_str()
@@ -871,7 +879,7 @@ fn task_path_classification_delivery_runtime_adopts_existing_agent_commit_withou
     fs::write(root.join(".pi/autopilot/main/approved-plan.json"), serde_json::to_vec_pretty(&serde_json::json!({
         "repository_authority": {"manifest_path": repo_authority.path, "manifest_digest": repo_authority.digest, "head_commit": repo_authority.manifest.head_commit, "head_tree": repo_authority.manifest.head_tree},
         "units":[
-            {"id":"U1","kind":"implementation","objective":"deliver U1","operator_order":1,"decisions":[],"criteria":["AC1"],"criterion_text":[{"id":"AC1","text":"criterion text AC1"}],"dependencies":[],"predecessor_forward_criteria":[],"downstream_release_edges":["EDGE1"],"files":["README.md"],"commands":[{"command":"cargo test -q","expected":"pass"}]}
+            {"id":"U1","kind":"implementation","objective":"deliver U1","operator_order":1,"decisions":[],"criteria":["AC1"],"criterion_text":[{"id":"AC1","text":"criterion text AC1"}],"dependencies":[],"predecessor_forward_criteria":[],"downstream_release_edges":["EDGE1"],"files":["README.md"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}]}
         ]
     })).expect("approved json")).expect("approved plan");
     let previous = std::env::current_dir().expect("cwd");
@@ -957,9 +965,9 @@ fn task_path_classification_delivery_terminal_carrier_is_core_accepted_and_incom
     fs::write(root.join(".pi/autopilot/main/approved-plan.json"), serde_json::to_vec_pretty(&serde_json::json!({
         "repository_authority": {"manifest_path": repo_authority.path, "manifest_digest": repo_authority.digest, "head_commit": repo_authority.manifest.head_commit, "head_tree": repo_authority.manifest.head_tree},
         "units":[
-            {"id":"U1","kind":"implementation","objective":"deliver U1","operator_order":1,"decisions":[],"criteria":["AC1"],"criterion_text":[{"id":"AC1","text":"criterion text AC1"}],"dependencies":[],"predecessor_forward_criteria":[],"downstream_release_edges":["EDGE1"],"files":["README.md"],"commands":[{"command":"cargo test -q","expected":"pass"}]},
-            {"id":"U2","kind":"implementation","objective":"deliver U2","operator_order":2,"decisions":[],"criteria":["AC2"],"criterion_text":[{"id":"AC2","text":"criterion text AC2"}],"dependencies":["U1"],"predecessor_forward_criteria":[],"downstream_release_edges":["EDGE2"],"files":["README.md"],"commands":[{"command":"cargo test -q","expected":"pass"}]},
-            {"id":"U3","kind":"implementation","objective":"deliver U3","operator_order":3,"decisions":[],"criteria":["AC3"],"criterion_text":[{"id":"AC3","text":"criterion text AC3"}],"dependencies":["U2"],"predecessor_forward_criteria":[],"downstream_release_edges":["EDGE3"],"files":["README.md"],"commands":[{"command":"cargo test -q","expected":"pass"}]}
+            {"id":"U1","kind":"implementation","objective":"deliver U1","operator_order":1,"decisions":[],"criteria":["AC1"],"criterion_text":[{"id":"AC1","text":"criterion text AC1"}],"dependencies":[],"predecessor_forward_criteria":[],"downstream_release_edges":["EDGE1"],"files":["README.md"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}]},
+            {"id":"U2","kind":"implementation","objective":"deliver U2","operator_order":2,"decisions":[],"criteria":["AC2"],"criterion_text":[{"id":"AC2","text":"criterion text AC2"}],"dependencies":["U1"],"predecessor_forward_criteria":[],"downstream_release_edges":["EDGE2"],"files":["README.md"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}]},
+            {"id":"U3","kind":"implementation","objective":"deliver U3","operator_order":3,"decisions":[],"criteria":["AC3"],"criterion_text":[{"id":"AC3","text":"criterion text AC3"}],"dependencies":["U2"],"predecessor_forward_criteria":[],"downstream_release_edges":["EDGE3"],"files":["README.md"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}]}
         ]
     })).expect("approved json")).expect("approved plan");
     let previous = std::env::current_dir().expect("cwd");

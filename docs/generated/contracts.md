@@ -472,6 +472,10 @@ Sources: `data/contracts.kdl`.
 | work_map | list | plan_unit.links | id | true |  | Atom ids accepted from task_atoms. |
 | work_map | field | plan_unit_command.command | string | true |  |  |
 | work_map | field | plan_unit_command.expected | string | true |  |  |
+| work_map | field | plan_unit_command.effect | command_effect | true |  | Closed Git-visible persistent repository effect classification. |
+| work_map | list | plan_unit_command.generated_paths | path | true |  | Exact normalized repo-relative Git-visible generated artifact paths, empty unless effect is declared-predictable. |
+| work_map | field | plan_unit_command.handling | command_effect_handling | true |  | Closed handling authority for Git-visible generated artifacts. |
+| work_map | field | plan_unit_command.scope_preservation | string | true |  | Nonempty final-scope-check statement proving verification leaves final Git-visible state inside approved unit files. |
 | plan_review | list | verdicts | plan_review_verdict | true |  | Criterion verdicts. |
 | plan_review | field | plan_review_verdict.criterion_id | id | true |  |  |
 | plan_review | field | plan_review_verdict.verdict | planning_review_verdict | true |  |  |
@@ -653,6 +657,10 @@ Sources: `data/contracts.kdl`.
 | validation_context_v2 | field | validation_context_command.command_id | id | true |  |  |
 | validation_context_v2 | field | validation_context_command.command | string | true |  |  |
 | validation_context_v2 | field | validation_context_command.expected | string | true |  |  |
+| validation_context_v2 | field | validation_context_command.effect | command_effect | true |  |  |
+| validation_context_v2 | list | validation_context_command.generated_paths | path | true |  |  |
+| validation_context_v2 | field | validation_context_command.handling | command_effect_handling | true |  |  |
+| validation_context_v2 | field | validation_context_command.scope_preservation | string | true |  |  |
 | validation_context_v2 | field | validation_context_evidence.evidence_ref | ref | true |  |  |
 | validation_context_v2 | field | validation_context_evidence.digest | digest | true |  |  |
 | validation_context_v2 | field | validation_context_evidence.kind | string | true |  |  |
@@ -905,6 +913,8 @@ Sources: `data/contracts.kdl`.
 | planning_question_class | invalidated-decision, missing-material-decision, material-underdetermination, dod-hole, unsafe-irreversible |
 | planning_review_verdict | pass, blocker, advisory, fail, blocked, needs-fix |
 | plan_unit_kind | implementation |
+| command_effect | no-effect, declared-predictable, unknown-generated |
+| command_effect_handling | none, run-isolated, exact-cleanup-before-scope-gate, block-if-created |
 | run_phase | planning, ready-to-execute, allocating, executing, final-verification, ready-to-close, terminal |
 | run_health | healthy, degraded, paused, unsafe-halt |
 | run_outcome | null, closed, aborted |

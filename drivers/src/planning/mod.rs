@@ -4,6 +4,7 @@ use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
+use crate::allocation::validate_plan_unit_command_effect_authority;
 use crate::roles::kdl::{attr as kdl_attr, boundary_runtime as runtime_by_id, table_values};
 use kernel::boundary::{BoundaryRuntime, Rejection};
 use kernel::generated::{
@@ -1326,7 +1327,7 @@ pub fn accept_questions(raw: &str, runtime: &BoundaryRuntime) -> Result<String, 
     validate_questions_shape(&questions, runtime)?;
     Ok(raw.to_owned())
 }
-#[acceptance_boundary(id = "planning.work-map.v1", producer = Producer::Model, visible = true, admits = "Plan compiler and synthesizer output must contain one or more executable implementation units only. Each unit kind must be exactly implementation. Never emit context-gate or verification units: unresolved context must be recorded as review-blocking evidence, and independent verification must be folded into exact criteria plus nonempty focused commands on the owning implementation unit. Each unit must have a nonempty objective, criteria, depends_on array, files array, commands array, and traceable links by real atom id. Call autopilot_submit_plan_cluster or autopilot_submit_synthesis as the final action.", mode = BoundaryMode::Enforce)]
+#[acceptance_boundary(id = "planning.work-map.v1", producer = Producer::Model, visible = true, admits = "Plan compiler and synthesizer output must contain one or more executable implementation units only. Each unit kind must be exactly implementation. Never emit context-gate or verification units: unresolved context must be recorded as review-blocking evidence, and independent verification must be folded into exact criteria plus nonempty focused commands on the owning implementation unit. Each command must declare closed Git-visible effect authority: no-effect with no paths and none handling; declared-predictable with nonempty exact normalized generated paths and isolation, exact cleanup before the scope gate, or block-if-created handling; or unknown-generated with no paths and run-isolated handling. Every command must include a nonempty final-scope preservation statement proving verification leaves Git-visible state inside approved unit files. Each unit must have a nonempty objective, criteria, depends_on array, files array, commands array, and traceable links by real atom id. Call autopilot_submit_plan_cluster or autopilot_submit_synthesis as the final action.", mode = BoundaryMode::Enforce)]
 pub fn accept_work_map(raw: &str, runtime: &BoundaryRuntime) -> Result<String, Rejection> {
     let work_map = parse_model_payload::<WorkMap>(raw, runtime, "planning.work-map.v1")?;
     validate_work_map_shape(&work_map, runtime)?;
@@ -2239,17 +2240,22 @@ fn validate_work_map_shape(work_map: &WorkMap, runtime: &BoundaryRuntime) -> Res
             )?;
         }
         for command in &unit.commands {
-            if is_blank(&command.command) || is_blank(&command.expected) {
+            if let Err(error) = validate_plan_unit_command_effect_authority(command) {
                 reject_value(
                     runtime,
                     "planning.work-map.v1",
                     "units.commands",
-                    "non-empty command and expected outcome",
+                    "non-empty command/expected/scope authority with valid closed effect, generated_paths, and handling",
                     &format!(
-                        "command={:?} expected={:?}",
-                        command.command, command.expected
+                        "command={:?} expected={:?} effect={:?} generated_paths={:?} handling={:?} scope_preservation={:?}; {error}",
+                        command.command,
+                        command.expected,
+                        command.effect,
+                        command.generated_paths,
+                        command.handling,
+                        command.scope_preservation
                     ),
-                    "State the focused command and expected outcome exactly.",
+                    "Declare exact command-effect authority without inferring from the command string.",
                 )?;
             }
         }

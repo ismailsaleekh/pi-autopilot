@@ -147,13 +147,43 @@ export const WORK_MAP_TOOL_PARAMETERS = {
                 "command": {
                   "type": "string"
                 },
+                "effect": {
+                  "enum": [
+                    "no-effect",
+                    "declared-predictable",
+                    "unknown-generated"
+                  ],
+                  "type": "string"
+                },
                 "expected": {
+                  "type": "string"
+                },
+                "generated_paths": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "handling": {
+                  "enum": [
+                    "none",
+                    "run-isolated",
+                    "exact-cleanup-before-scope-gate",
+                    "block-if-created"
+                  ],
+                  "type": "string"
+                },
+                "scope_preservation": {
                   "type": "string"
                 }
               },
               "required": [
                 "command",
-                "expected"
+                "expected",
+                "effect",
+                "generated_paths",
+                "handling",
+                "scope_preservation"
               ],
               "type": "object"
             },
@@ -216,7 +246,7 @@ export const WORK_MAP_TOOL_PARAMETERS = {
   ],
   "type": "object"
 } as TSchema;
-export const WORK_MAP_TOOL_SCHEMA_DIGEST = "f4b774b90b653568c38a0971e9472e5aa3dae80c56ea7dd7f3136b5b5f5376f2";
+export const WORK_MAP_TOOL_SCHEMA_DIGEST = "237b2e049edc93e6b87d8319b621ba9746e52ed2ee8dfa99b8a53b6ef6695c5e";
 
 export const PLAN_REVIEW_TOOL_PARAMETERS = {
   "additionalProperties": true,

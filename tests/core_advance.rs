@@ -550,7 +550,7 @@ fn write_approved_plan(root: &Path, units: usize, block_after_first: bool) {
                 "predecessor_forward_criteria": predecessor_forward_criteria,
                 "downstream_release_edges": [format!("EDGE{index}")],
                 "files": [format!("l{index}.txt")],
-                "commands": [{"command":"cargo test -q","expected":"pass"}]
+                "commands": [{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}]
             })
         })
         .collect::<Vec<_>>();

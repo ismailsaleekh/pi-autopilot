@@ -53,6 +53,17 @@ const FRAME_VALIDATION_DESCRIPTORS = {
       "NEEDS_FIX",
       "BLOCKED"
     ],
+    "command_effect": [
+      "no-effect",
+      "declared-predictable",
+      "unknown-generated"
+    ],
+    "command_effect_handling": [
+      "none",
+      "run-isolated",
+      "exact-cleanup-before-scope-gate",
+      "block-if-created"
+    ],
     "command_receipt_kind": [
       "final-command",
       "full-suite",

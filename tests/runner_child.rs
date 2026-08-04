@@ -1809,11 +1809,11 @@ const requestedTools = process.argv[toolsIndex + 1].split(',').filter(Boolean);
 const submitBindings = {{
   autopilot_submit_atoms: ['planning.task-atoms.v1', '77d000b816b3c14dcdefeba0c23d4f4f9f8bedaf5b281081f1cea138e525e091'],
   autopilot_submit_context: ['planning.scout-dossier.v1', '30f69b47c83079ce00ea22cab308e9a26eb7b24cae045aa1dd008221b45da618'],
-  autopilot_submit_plan_cluster: ['planning.work-map.v1', 'f4b774b90b653568c38a0971e9472e5aa3dae80c56ea7dd7f3136b5b5f5376f2'],
+  autopilot_submit_plan_cluster: ['planning.work-map.v1', '237b2e049edc93e6b87d8319b621ba9746e52ed2ee8dfa99b8a53b6ef6695c5e'],
   autopilot_submit_resolution: ['planning.questions.v1', 'a716699618f28675f8872ff8d039c40e8443c07cd6a94f907921ee2b9dd88abc'],
   autopilot_submit_review: ['planning.plan-review.v1', '073f22c10d42166d5ec5d0a6465a1fa8f0df8fc1af2ce6a0702bed9b955786d8'],
   autopilot_submit_scout_report: ['planning.scout-dossier.v1', '30f69b47c83079ce00ea22cab308e9a26eb7b24cae045aa1dd008221b45da618'],
-  autopilot_submit_synthesis: ['planning.work-map.v1', 'f4b774b90b653568c38a0971e9472e5aa3dae80c56ea7dd7f3136b5b5f5376f2'],
+  autopilot_submit_synthesis: ['planning.work-map.v1', '237b2e049edc93e6b87d8319b621ba9746e52ed2ee8dfa99b8a53b6ef6695c5e'],
 }};
 let activeTools = requestedTools.filter(name => !name.startsWith('autopilot_submit_') || (addonPath !== undefined && submitBindings[name]));
 const terminalTool = activeTools.find(name => name.startsWith('autopilot_submit_'));
