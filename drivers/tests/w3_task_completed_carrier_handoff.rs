@@ -6,6 +6,7 @@ use std::sync::{Mutex, OnceLock};
 
 use drivers::runner::{self, PlanningRunnerRequest, RunnerTaskDocument};
 use drivers::seam::{self, CoreState};
+use drivers::vcs::GitVcs;
 use kernel::generated::{ContractId, Id, ModeId, Ref, SeamEnvelope};
 use serde_json::json;
 use sha2::{Digest as ShaDigest, Sha256};
@@ -62,6 +63,15 @@ impl Fixture {
             ));
             match fs::create_dir(&root) {
                 Ok(()) => {
+                    let vcs = GitVcs::new(&temp);
+                    vcs.init_fixture(&root).unwrap();
+                    fs::write(
+                        root.join(".gitignore"),
+                        ".pi/autopilot/\n.pi/tasks/\nbin/\n",
+                    )
+                    .unwrap();
+                    vcs.stage_all(&root).unwrap();
+                    vcs.snapshot(&root, "fixture root").unwrap();
                     std::env::set_current_dir(&root).unwrap();
                     return Self { root };
                 }

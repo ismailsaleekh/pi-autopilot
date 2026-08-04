@@ -46,7 +46,22 @@ struct AgentCarrier {
     raw_output: String,
 }
 #[derive(Debug, Deserialize, Serialize)]
-struct ApprovedPlanArtifact { units: Vec<ApprovedUnit> }
+struct ApprovedPlanArtifact {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    repository_authority: Option<ApprovedRepositoryAuthority>,
+    units: Vec<ApprovedUnit>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct ApprovedRepositoryAuthority {
+    manifest_path: String,
+    manifest_digest: String,
+    head_commit: Sha,
+    head_tree: Sha,
+}
+
+pub const REQUIRED_PLAN_REVIEW_CRITERIA: [&str; 7] =
+    planning::REQUIRED_PLAN_REVIEW_CRITERIA;
 
 fn planning_assignments(workstream: &str) -> Result<Vec<AgentAssignment>, planning::PlanningError> {
     let assignments = planning::planning_assignments_for_workstream(workstream)?;
@@ -224,7 +239,7 @@ fn planning_action_from_binding(binding: &runner::IssuedRunnerBinding) -> Result
 }
 
 fn validate_reemit_spec_binding(spec: &kernel::generated::AgentRunSpec, binding: &runner::IssuedRunnerBinding) -> Result<(), AnyError> {
-    if spec.action_id != binding.action_id || spec.assignment_id != binding.assignment_id || spec.run_revision != binding.run_revision || spec.workstream != binding.workstream || spec.role_id != binding.role_id || spec.mode != binding.mode || spec.boundary_id != binding.boundary_id || spec.result_contract != binding.result_contract || spec.prompt_path.0 != binding.prompt_path || spec.prompt_digest.0 != binding.prompt_digest || spec.spec_path.0 != binding.spec_path || spec.carrier_path.0 != binding.carrier_path || spec.session_id != binding.session_id || spec.boundary_digest.0 != binding.boundary_digest || spec.result_contract_digest.0 != binding.result_contract_digest || spec.settings_digest.0 != binding.settings_digest || spec.context_digest.0 != binding.context_digest || spec.skills_digest.0 != binding.skills_digest || spec.subscription_digest.0 != binding.subscription_digest {
+    if spec.action_id != binding.action_id || spec.assignment_id != binding.assignment_id || spec.run_revision != binding.run_revision || spec.workstream != binding.workstream || spec.role_id != binding.role_id || spec.mode != binding.mode || spec.boundary_id != binding.boundary_id || spec.result_contract != binding.result_contract || spec.prompt_path.0 != binding.prompt_path || spec.prompt_digest.0 != binding.prompt_digest || spec.spec_path.0 != binding.spec_path || spec.carrier_path.0 != binding.carrier_path || spec.session_id != binding.session_id || spec.boundary_digest.0 != binding.boundary_digest || spec.result_contract_digest.0 != binding.result_contract_digest || spec.settings_digest.0 != binding.settings_digest || spec.context_digest.0 != binding.context_digest || spec.skills_digest.0 != binding.skills_digest || spec.subscription_digest.0 != binding.subscription_digest || spec.assignment_path.as_ref().map(|path| path.0.as_str()) != binding.assignment_path.as_deref() || spec.assignment_digest.as_ref().map(|digest| digest.0.as_str()) != binding.assignment_digest.as_deref() || spec.repository_manifest_path.as_ref().map(|path| path.0.as_str()) != binding.repository_manifest_path.as_deref() || spec.repository_manifest_digest.as_ref().map(|digest| digest.0.as_str()) != binding.repository_manifest_digest.as_deref() || spec.repository_head_commit.as_ref().map(|sha| sha.0.as_str()) != binding.repository_head_commit.as_ref().map(|sha| sha.0.as_str()) || spec.repository_head_tree.as_ref().map(|sha| sha.0.as_str()) != binding.repository_head_tree.as_ref().map(|sha| sha.0.as_str()) {
         return Err(format!("CONTEXT_GAP:planning-reemit:spec-binding-drift:{}:{}:{}", binding.assignment_id.0, binding.action_id.0, binding.run_revision).into());
     }
     Ok(())
@@ -504,15 +519,82 @@ fn accepted_artifact_categories_for_role(role: &str, boundary_id: &str) -> Resul
 
 fn write_work_map(workstream: &str, raw: &str) -> Result<(), AnyError> { let path = work_map_path(workstream); if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; } fs::write(path, raw)?; Ok(()) }
 fn read_work_map(workstream: &str) -> Result<String, String> { fs::read_to_string(work_map_path(workstream)).map_err(|error| error.to_string()) }
-fn write_approved_plan(workstream: &str, units: &[ApprovedUnit]) -> Result<(), AnyError> { let path = plan_path(workstream); if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; } fs::write(path, serde_json::to_vec_pretty(&ApprovedPlanArtifact { units: units.to_vec() })?)?; Ok(()) }
-fn read_approved_plan(workstream: &str) -> Result<Vec<ApprovedUnit>, String> { let text = fs::read_to_string(plan_path(workstream)).map_err(|error| error.to_string())?; let artifact: ApprovedPlanArtifact = serde_json::from_str(&text).map_err(|error| error.to_string())?; if artifact.units.is_empty() { return Err("empty approved plan".to_owned()); } Ok(artifact.units) }
+fn write_approved_plan(workstream: &str, repository_authority: ApprovedRepositoryAuthority, units: &[ApprovedUnit]) -> Result<(), AnyError> {
+    validate_approved_units(units)?;
+    let artifact = ApprovedPlanArtifact { repository_authority: Some(repository_authority), units: units.to_vec() };
+    let bytes = serde_json::to_vec_pretty(&artifact)?;
+    let path = plan_path(workstream);
+    if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
+    match OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(mut file) => { file.write_all(&bytes)?; file.sync_all()?; Ok(()) }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let existing = fs::read(&path)?;
+            if existing == bytes { Ok(()) } else { Err("CONTEXT_GAP:approved-plan:digest drift".into()) }
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+fn read_approved_plan_artifact(workstream: &str) -> Result<ApprovedPlanArtifact, String> {
+    let text = fs::read_to_string(plan_path(workstream)).map_err(|error| error.to_string())?;
+    let artifact: ApprovedPlanArtifact = serde_json::from_str(&text).map_err(|error| error.to_string())?;
+    validate_approved_units(&artifact.units).map_err(|error| error.to_string())?;
+    Ok(artifact)
+}
+fn read_approved_plan(workstream: &str) -> Result<Vec<ApprovedUnit>, String> { Ok(read_approved_plan_artifact(workstream)?.units) }
+fn approved_repository_authority_for_carrier(carrier: &AgentCarrier) -> Result<ApprovedRepositoryAuthority, String> {
+    let spec_bytes = fs::read(&carrier.spec_path).map_err(|error| format!("spec-read:{}:{error}", carrier.spec_path))?;
+    let spec_digest = sha256_hex_local(&spec_bytes);
+    if spec_digest != carrier.spec_digest { return Err(format!("spec-digest:expected={} got={spec_digest}", carrier.spec_digest)); }
+    let spec: kernel::generated::AgentRunSpec = serde_json::from_slice(&spec_bytes).map_err(|error| format!("spec-json:{error}"))?;
+    let path = spec.repository_manifest_path.as_ref().ok_or_else(|| "missing repository_manifest_path".to_owned())?;
+    let digest = spec.repository_manifest_digest.as_ref().ok_or_else(|| "missing repository_manifest_digest".to_owned())?;
+    let head_commit = spec.repository_head_commit.as_ref().ok_or_else(|| "missing repository_head_commit".to_owned())?;
+    let head_tree = spec.repository_head_tree.as_ref().ok_or_else(|| "missing repository_head_tree".to_owned())?;
+    let binding = runner::read_repository_authority_binding(Path::new(&path.0), &digest.0).map_err(|error| error.to_string())?;
+    if binding.manifest.head_commit != head_commit.0 || binding.manifest.head_tree != head_tree.0 {
+        return Err(format!("repository manifest head/tree drift: manifest {}/{} spec {}/{}", binding.manifest.head_commit, binding.manifest.head_tree, head_commit.0, head_tree.0));
+    }
+    Ok(ApprovedRepositoryAuthority { manifest_path: binding.path, manifest_digest: binding.digest, head_commit: Sha(binding.manifest.head_commit), head_tree: Sha(binding.manifest.head_tree) })
+}
 fn apply_planning_side_effects(carrier: &AgentCarrier) -> Result<(), String> {
     if carrier.boundary_id == "planning.work-map.v1" && is_canonical_output_assignment(&carrier.workstream, &carrier.assignment_id, &carrier.boundary_id)? { write_work_map(&carrier.workstream, &carrier.raw_output).map_err(|error| format!("CONTEXT_GAP:work-map:{error}"))?; }
     if carrier.boundary_id == "planning.plan-review.v1" {
+        review_approves_execution(&carrier.raw_output)?;
         let work_map = read_work_map(&carrier.workstream).map_err(|error| format!("CONTEXT_GAP:approved-plan:{error}"))?;
         let units = parse_approved_units(&work_map).map_err(|error| format!("CONTEXT_GAP:approved-plan:{error}"))?;
-        write_approved_plan(&carrier.workstream, &units).map_err(|error| format!("CONTEXT_GAP:approved-plan:{error}"))?;
+        let repository_authority = approved_repository_authority_for_carrier(carrier).map_err(|error| format!("CONTEXT_GAP:approved-plan:repository-authority:{error}"))?;
+        write_approved_plan(&carrier.workstream, repository_authority, &units).map_err(|error| format!("CONTEXT_GAP:approved-plan:{error}"))?;
     }
+    Ok(())
+}
+
+pub fn review_approves_execution(raw: &str) -> Result<(), String> {
+    let review: kernel::generated::PlanReview = serde_json::from_str(raw).map_err(|error| format!("plan-review-json:{error}"))?;
+    let required = REQUIRED_PLAN_REVIEW_CRITERIA.iter().copied().collect::<BTreeSet<_>>();
+    let mut seen = BTreeSet::new();
+    let mut missing = required.clone();
+    let mut duplicate = Vec::new();
+    let mut unknown = Vec::new();
+    let mut non_pass = Vec::new();
+    for verdict in &review.verdicts {
+        let id = verdict.criterion_id.0.as_str();
+        if !required.contains(id) { unknown.push(id.to_owned()); continue; }
+        if !seen.insert(id.to_owned()) { duplicate.push(id.to_owned()); }
+        missing.remove(id);
+        if verdict.verdict != kernel::generated::PlanningReviewVerdict::Pass {
+            non_pass.push(format!("{}={:?}", verdict.criterion_id.0, verdict.verdict));
+        }
+    }
+    if !unknown.is_empty() || !duplicate.is_empty() || !missing.is_empty() {
+        return Err(format!(
+            "plan-review:criteria-set-drift:missing=[{}];duplicate=[{}];unknown=[{}];required=[{}]",
+            missing.into_iter().collect::<Vec<_>>().join(","),
+            duplicate.join(","),
+            unknown.join(","),
+            REQUIRED_PLAN_REVIEW_CRITERIA.join(",")
+        ));
+    }
+    if !non_pass.is_empty() { return Err(format!("plan-review:blocked:{}", non_pass.join(","))); }
     Ok(())
 }
 
@@ -528,27 +610,116 @@ fn parse_approved_units(raw: &str) -> Result<Vec<ApprovedUnit>, String> {
     approved_units_from_work_map(&work_map)
 }
 fn approved_units_from_work_map(work_map: &kernel::generated::WorkMap) -> Result<Vec<ApprovedUnit>, String> {
-    if work_map.units.is_empty() { return Err("expected at least 1 approved unit, got 0".to_owned()); }
+    validate_work_map_graph(work_map)?;
     work_map.units.iter().enumerate().map(|(index, unit)| {
         if unit.id.0.trim().is_empty() || unit.objective.trim().is_empty() || unit.criteria.is_empty() { return Err(format!("unit {} missing criteria/objective", unit.id.0)); }
+        if unit.files.is_empty() { return Err(format!("unit {} missing files", unit.id.0)); }
+        let mut file_paths = BTreeSet::new();
+        if unit.files.iter().any(|path| !allocation::approved_path_is_safe(path) || !file_paths.insert(path.0.as_str())) { return Err(format!("unit {} has unsafe or duplicate files", unit.id.0)); }
+        if unit.commands.is_empty() { return Err(format!("unit {} missing commands", unit.id.0)); }
+        for command in &unit.commands { if command.command.trim().is_empty() || command.expected.trim().is_empty() { return Err(format!("unit {} has incomplete command obligation", unit.id.0)); } }
         let order = index as u32 + 1;
-        Ok(ApprovedUnit { id: unit.id.clone(), operator_order: order, decisions: unit.links.clone(), criteria: unit.criteria.iter().enumerate().map(|(criterion_index, _)| idv(&format!("AC-{}-{}", unit.id.0, criterion_index + 1))).collect(), dependencies: if index == 0 { Vec::new() } else { vec![work_map.units[index - 1].id.clone()] }, predecessor_forward_criteria: if order <= 1 { Vec::new() } else { vec![idv(&format!("FC{}", order - 1))] }, downstream_release_edges: vec![idv(&format!("EDGE{order}"))] })
+        let criteria = unit.criteria.iter().enumerate().map(|(criterion_index, _)| idv(&format!("AC-{}-{}", unit.id.0, criterion_index + 1))).collect::<Vec<_>>();
+        let criterion_text = criteria.iter().cloned().zip(unit.criteria.iter().cloned()).map(|(id, text)| allocation::ApprovedCriterion { id, text }).collect::<Vec<_>>();
+        Ok(ApprovedUnit { id: unit.id.clone(), kind: unit.kind.clone(), objective: unit.objective.clone(), operator_order: order, decisions: unit.links.clone(), criteria, criterion_text, dependencies: unit.depends_on.clone(), predecessor_forward_criteria: unit.depends_on.iter().map(|dep| idv(&format!("unit-complete:{}", dep.0))).collect(), downstream_release_edges: vec![idv(&format!("unit:{}", unit.id.0))], files: unit.files.clone(), commands: unit.commands.clone() })
     }).collect()
 }
-fn allocation_submission_from_plan(workstream: &str, approved: &[ApprovedUnit]) -> Result<AllocationSubmission, String> {
-    if approved.is_empty() { return Err("expected at least 1 approved unit, got 0".to_owned()); }
-    let lanes = approved.iter().take(6).enumerate().map(|(index, unit)| AllocationLaneProposal { lane_id: idv(&format!("L{}", index + 1)), objective: format!("deliver approved unit {}", unit.id.0), ordered_unit_ids: vec![unit.id.clone()], rationale: format!("unit {} from approved plan", unit.id.0), delivery_boundary: DeliveryBoundary("approved-plan-unit".to_owned()), predecessor_forward_criteria: unit.predecessor_forward_criteria.clone(), downstream_release_edges: unit.downstream_release_edges.clone(), context_family_id: idv(&format!("approved-plan:{workstream}")), context_estimate: 100, focused_tests: vec![TestId("cargo test -q".to_owned())], launch_wave: index as u32, continue_existing_logical_lane: None }).collect();
-    Ok(AllocationSubmission { lanes, future_units: approved.iter().skip(6).map(|unit| FutureUnit { unit_id: unit.id.clone(), reason: "parallel cap lane limit; retained for future allocation".to_owned() }).collect(), authority_echo: approved.to_vec(), ownership_claims: Vec::new(), overlap_blocks: Vec::new() })
+fn validate_work_map_graph(work_map: &kernel::generated::WorkMap) -> Result<(), String> {
+    if work_map.units.is_empty() { return Err("expected at least 1 approved unit, got 0".to_owned()); }
+    let mut ids = BTreeSet::new();
+    for unit in &work_map.units {
+        if !ids.insert(unit.id.clone()) { return Err(format!("duplicate unit id {}", unit.id.0)); }
+    }
+    let by_id = work_map.units.iter().map(|unit| (unit.id.clone(), unit)).collect::<BTreeMap<_, _>>();
+    for unit in &work_map.units {
+        for dep in &unit.depends_on {
+            if dep == &unit.id { return Err(format!("unit {} depends on itself", unit.id.0)); }
+            if !ids.contains(dep) { return Err(format!("unit {} depends on unknown unit {}", unit.id.0, dep.0)); }
+        }
+    }
+    let mut visiting = BTreeSet::new();
+    let mut done = BTreeSet::new();
+    for unit in &work_map.units { visit_work_map_unit(&unit.id, &by_id, &mut visiting, &mut done)?; }
+    Ok(())
+}
+fn visit_work_map_unit(id: &Id, by_id: &BTreeMap<Id, &kernel::generated::PlanUnit>, visiting: &mut BTreeSet<Id>, done: &mut BTreeSet<Id>) -> Result<(), String> {
+    if done.contains(id) { return Ok(()); }
+    if !visiting.insert(id.clone()) { return Err(format!("work-map dependency cycle at {}", id.0)); }
+    let unit = by_id.get(id).ok_or_else(|| format!("unit {} missing during graph walk", id.0))?;
+    for dep in &unit.depends_on { visit_work_map_unit(dep, by_id, visiting, done)?; }
+    visiting.remove(id);
+    done.insert(id.clone());
+    Ok(())
+}
+fn validate_approved_units(units: &[ApprovedUnit]) -> Result<(), AnyError> {
+    if units.is_empty() { return Err("empty approved plan".into()); }
+    let mut ids = BTreeSet::new();
+    for unit in units {
+        if !ids.insert(unit.id.clone()) { return Err(format!("approved plan duplicate unit {}", unit.id.0).into()); }
+        if unit.kind != kernel::generated::PlanUnitKind::Implementation || unit.objective.trim().is_empty() || unit.criteria.is_empty() || unit.criterion_text.is_empty() || unit.files.is_empty() || unit.commands.is_empty() {
+            return Err(format!("approved unit {} incomplete", unit.id.0).into());
+        }
+        let mut file_paths = BTreeSet::new();
+        if unit.files.iter().any(|path| !allocation::approved_path_is_safe(path) || !file_paths.insert(path.0.as_str())) { return Err(format!("approved unit {} has unsafe or duplicate files", unit.id.0).into()); }
+        let criterion_ids = unit.criterion_text.iter().map(|criterion| criterion.id.clone()).collect::<Vec<_>>();
+        if criterion_ids != unit.criteria { return Err(format!("approved unit {} criteria/criterion_text drift", unit.id.0).into()); }
+        let mut criterion_seen = BTreeSet::new();
+        for criterion in &unit.criterion_text {
+            if criterion.text.trim().is_empty() || !criterion_seen.insert(criterion.id.clone()) { return Err(format!("approved unit {} malformed criterion {}", unit.id.0, criterion.id.0).into()); }
+        }
+        for dep in &unit.dependencies { if dep == &unit.id { return Err(format!("approved unit {} self dependency", unit.id.0).into()); } }
+        for command in &unit.commands { if command.command.trim().is_empty() || command.expected.trim().is_empty() { return Err(format!("approved unit {} has empty command", unit.id.0).into()); } }
+    }
+    for unit in units { for dep in &unit.dependencies { if !ids.contains(dep) { return Err(format!("approved unit {} depends on unknown unit {}", unit.id.0, dep.0).into()); } } }
+    let by_id = units.iter().map(|unit| (unit.id.clone(), unit)).collect::<BTreeMap<_, _>>();
+    let mut visiting = BTreeSet::new();
+    let mut done = BTreeSet::new();
+    for unit in units { visit_approved_unit(&unit.id, &by_id, &mut visiting, &mut done).map_err(|error| -> AnyError { error.into() })?; }
+    Ok(())
+}
+fn visit_approved_unit(id: &Id, by_id: &BTreeMap<Id, &ApprovedUnit>, visiting: &mut BTreeSet<Id>, done: &mut BTreeSet<Id>) -> Result<(), String> {
+    if done.contains(id) { return Ok(()); }
+    if !visiting.insert(id.clone()) { return Err(format!("approved plan dependency cycle at {}", id.0)); }
+    let unit = by_id.get(id).ok_or_else(|| format!("approved unit {} missing during graph walk", id.0))?;
+    for dep in &unit.dependencies { visit_approved_unit(dep, by_id, visiting, done)?; }
+    visiting.remove(id);
+    done.insert(id.clone());
+    Ok(())
+}
+fn approved_lane_id(index: usize) -> Id { idv(&format!("L{}", index + 1)) }
+fn allocation_submission_from_plan(workstream: &str, approved: &[ApprovedUnit], state: &CoreState) -> Result<AllocationSubmission, String> {
+    validate_approved_units(approved).map_err(|error| error.to_string())?;
+    let mut open = approved.iter().enumerate().filter(|(index, _)| !lane_closed(state, &approved_lane_id(*index))).collect::<Vec<_>>();
+    open.sort_by_key(|(index, unit)| {
+        let lane_id = approved_lane_id(*index);
+        let live = lane_has_live_delivery(state, &lane_id);
+        let blocked = unit.predecessor_forward_criteria.iter().any(|gate| !state.state.refs.contains_key(&Ref(format!("gate:{}", gate.0))));
+        (!live, blocked, *index)
+    });
+    let scheduled = open.into_iter().take(6).collect::<Vec<_>>();
+    let scheduled_ids = scheduled.iter().map(|(_, unit)| unit.id.clone()).collect::<BTreeSet<_>>();
+    let lanes = scheduled.into_iter().map(|(index, unit)| {
+        let focused_tests = unit.commands.iter().map(|command| TestId(command.command.clone())).collect::<Vec<_>>();
+        let lane_id = approved_lane_id(index);
+        let continuation = lane_has_live_delivery(state, &lane_id).then_some(true);
+        AllocationLaneProposal { lane_id, objective: unit.objective.clone(), ordered_unit_ids: vec![unit.id.clone()], rationale: format!("unit {} from approved plan", unit.id.0), delivery_boundary: DeliveryBoundary("approved-plan-unit".to_owned()), predecessor_forward_criteria: unit.predecessor_forward_criteria.clone(), downstream_release_edges: unit.downstream_release_edges.clone(), context_family_id: idv(&format!("approved-plan:{workstream}")), context_estimate: 100, focused_tests, launch_wave: index as u32, continue_existing_logical_lane: continuation }
+    }).collect();
+    let future_units = approved.iter().enumerate().filter(|(_, unit)| !scheduled_ids.contains(&unit.id)).map(|(index, unit)| FutureUnit {
+        unit_id: unit.id.clone(),
+        reason: if lane_closed(state, &approved_lane_id(index)) { "unit already closed; retained as approved authority outside the active allocation window".to_owned() } else { "parallel allocation window is six lanes; retained for the next deterministic allocation window".to_owned() },
+    }).collect();
+    Ok(AllocationSubmission { lanes, future_units, authority_echo: approved.to_vec(), ownership_claims: Vec::new(), overlap_blocks: Vec::new() })
 }
 fn lane_readiness_from_events(lanes: &[AllocationLaneProposal], approved: &[ApprovedUnit], state: &CoreState) -> Vec<LaneReadiness> {
     lanes.iter().map(|lane| { let units = lane.ordered_unit_ids.iter().filter_map(|id| approved.iter().find(|unit| unit.id == *id)).collect::<Vec<_>>(); LaneReadiness { lane_id: lane.lane_id.clone(), predecessor_gates_met: units.iter().flat_map(|unit| &unit.predecessor_forward_criteria).all(|gate| state.state.refs.contains_key(&Ref(format!("gate:{}", gate.0)))), blockers_clear: !state.state.refs.contains_key(&Ref(format!("blocker:{}", lane.lane_id.0))), unit_free: lane.ordered_unit_ids.iter().all(|unit| !state.state.refs.contains_key(&Ref(format!("unit-active:{}", unit.0)))), route_ready: true, preflight_passed: git_stdout(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")), &["rev-parse", "--verify", "HEAD"]).is_ok(), pressure_delay: false } }).collect()
 }
 fn active_implementers(state: &CoreState) -> usize { state.state.refs.keys().filter_map(|reference| runner::decode_binding_ref(&reference.0)).filter(|binding| binding.role_id.0 == "implementer" && !terminal_consumed(state, binding)).count() }
-fn assignment(workstream: &str, lane_id: &Id) -> Result<RunnerAssignment, AnyError> {
+fn assignment(workstream: &str, lane_id: &Id, approved: &[ApprovedUnit], submission: &AllocationSubmission) -> Result<RunnerAssignment, AnyError> {
     let cwd = fs::canonicalize(std::env::current_dir()?)?;
-    let base = git_stdout(&cwd, &["rev-parse", "--verify", "HEAD^{commit}"]).map_err(|error| format!("CONTEXT_GAP:base-commit:{error}"))?;
-    let base = Sha(base.trim().to_owned());
+    let base = selected_delivery_base(&cwd, workstream).map_err(|error| format!("CONTEXT_GAP:base-commit:{error}"))?;
     let worktree = prepare_delivery_worktree(&cwd, workstream, lane_id, &base).map_err(|error| format!("CONTEXT_GAP:worktree:{error}"))?;
+    let lane = submission.lanes.iter().find(|lane| lane.lane_id == *lane_id).ok_or_else(|| format!("CONTEXT_GAP:assignment:unknown lane {}", lane_id.0))?;
+    let approved_units = lane.ordered_unit_ids.iter().map(|unit_id| approved.iter().find(|unit| unit.id == *unit_id).cloned().ok_or_else(|| format!("CONTEXT_GAP:assignment:unknown unit {}", unit_id.0))).collect::<Result<Vec<_>, _>>()?;
     Ok(RunnerAssignment {
         workstream: idv(workstream),
         action_id: idv(&format!("action-{workstream}-{}", lane_id.0)),
@@ -562,13 +733,32 @@ fn assignment(workstream: &str, lane_id: &Id) -> Result<RunnerAssignment, AnyErr
         worktree,
         session_file: PathBuf::from(format!(".pi/autopilot/{workstream}/session.json")),
         roster_assignment: "openai-codex/gpt-subscription".to_owned(),
+        approved_units,
     })
+}
+fn selected_delivery_base(repo: &Path, workstream: &str) -> Result<Sha, String> {
+    let run_main = run_main_ref(workstream);
+    let first = git_stdout(repo, &["rev-parse", "--verify", &format!("{run_main}^{{commit}}")])
+        .map_err(|error| format!("run-main missing or malformed: {run_main}: {error}"))?;
+    let second = git_stdout(repo, &["rev-parse", "--verify", &format!("{run_main}^{{commit}}")])
+        .map_err(|error| format!("run-main moved while reading: {run_main}: {error}"))?;
+    let first = first.trim();
+    let second = second.trim();
+    if first != second { return Err(format!("run-main moved while selecting base: first={first} second={second}")); }
+    Ok(Sha(first.to_owned()))
 }
 fn prepare_delivery_worktree(repo: &Path, workstream: &str, lane_id: &Id, base: &Sha) -> Result<PathBuf, String> {
     let worktree = repo.join(".pi/autopilot").join(workstream).join("worktrees").join(&lane_id.0);
     let branch = lane_branch_ref(workstream, lane_id, 1);
     runner::reject_link_components_for_path(&worktree).map_err(|error| error.to_string())?;
-    if git_stdout(repo, &["rev-parse", "--verify", &branch]).is_err() { git_status(repo, &["update-ref", &branch, &base.0])?; }
+    let peeled_base = git_stdout(repo, &["rev-parse", "--verify", &format!("{}^{{commit}}", base.0)])?;
+    let peeled_base = peeled_base.trim().to_owned();
+    if peeled_base != base.0 { return Err(format!("selected base did not peel exactly: expected {}, got {peeled_base}", base.0)); }
+    match git_stdout(repo, &["rev-parse", "--verify", &format!("{branch}^{{commit}}")]) {
+        Ok(existing) if existing.trim() != base.0 => return Err(format!("lane branch base drift: expected {}, got {}", base.0, existing.trim())),
+        Ok(_) => {}
+        Err(_) => { git_status(repo, &["update-ref", &branch, &base.0, ""])?; }
+    }
     if !worktree.exists() {
         if let Some(parent) = worktree.parent() { fs::create_dir_all(parent).map_err(|error| error.to_string())?; }
         let checkout = branch.strip_prefix("refs/heads/").ok_or_else(|| format!("lane branch is not under refs/heads: {branch}"))?;
@@ -591,8 +781,9 @@ fn prepare_delivery_worktree(repo: &Path, workstream: &str, lane_id: &Id, base: 
     let symref = git_stdout(&canonical, &["symbolic-ref", "-q", "HEAD"])?;
     if symref.trim() != branch { return Err(format!("delivery worktree branch drift: expected {branch}, got {}", symref.trim())); }
     let head = git_stdout(&canonical, &["rev-parse", "--verify", "HEAD^{commit}"])?;
-    let branch_tip = git_stdout(repo.as_path(), &["rev-parse", "--verify", &branch])?;
-    if head.trim() != branch_tip.trim() { return Err(format!("delivery worktree head drift: expected {}, got {}", branch_tip.trim(), head.trim())); }
+    let branch_tip = git_stdout(repo.as_path(), &["rev-parse", "--verify", &format!("{branch}^{{commit}}")])?;
+    if branch_tip.trim() != base.0 { return Err(format!("delivery branch tip drift: expected {}, got {}", base.0, branch_tip.trim())); }
+    if head.trim() != base.0 { return Err(format!("delivery worktree head drift: expected {}, got {}", base.0, head.trim())); }
     let status = git_stdout(&canonical, &["status", "--porcelain"])?;
     if !status.trim().is_empty() { return Err("delivery worktree is dirty before launch".to_owned()); }
     Ok(canonical)

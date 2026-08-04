@@ -172,6 +172,9 @@ const FRAME_VALIDATION_DESCRIPTORS = {
       "repair-queued",
       "closed"
     ],
+    "plan_unit_kind": [
+      "implementation"
+    ],
     "planning_atom_kind": [
       "work",
       "decision",

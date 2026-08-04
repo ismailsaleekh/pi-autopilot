@@ -52,6 +52,7 @@ export type FindingEffect = "forward-blocking" | "closure-blocking-forward-safe"
 export type FindingKindV2 = "source-defect" | "test-defect" | "contract-defect" | "evidence-gap" | "context-gap" | "unsafe-boundary" | "advisory";
 export type ForwardVerdict = "FORWARD_READY" | "FORWARD_BLOCKED" | "BLOCKED";
 export type LaneState = "allocated" | "implementing" | "forward-validating-1" | "forward-fixing" | "forward-validating-2" | "forward-ready" | "release-queued" | "forward-integrated" | "deep-validating" | "closure-needs-fix" | "repair-queued" | "closed";
+export type PlanUnitKind = "implementation";
 export type PlanningAtomKind = "work" | "decision" | "constraint" | "acceptance" | "premise" | "question" | "reference";
 export type PlanningQuestionClass = "invalidated-decision" | "missing-material-decision" | "material-underdetermination" | "dod-hole" | "unsafe-irreversible";
 export type PlanningReviewVerdict = "pass" | "blocker" | "advisory" | "fail" | "blocked" | "needs-fix";
@@ -160,6 +161,10 @@ export interface AgentRunSpec {
   atom_registry_digest?: Digest | null;
   planning_inputs_path?: Path | null;
   planning_inputs_digest?: Digest | null;
+  repository_manifest_path?: Path | null;
+  repository_manifest_digest?: Digest | null;
+  repository_head_commit?: Sha | null;
+  repository_head_tree?: Sha | null;
 }
 
 export interface AllocationLaneProposal {
@@ -991,11 +996,19 @@ export interface ValidationContextV2Candidate {
 
 export interface ValidationContextCriterion {
   criterion_id: Id;
+  requirement_text: string;
   mandatory: boolean;
   covered_paths: Path[];
   semantic_surface_ids: Id[];
   forward_edge_ids: Id[];
+  commands: ValidationContextCommand[];
   witness_ids: Id[];
+}
+
+export interface ValidationContextCommand {
+  command_id: Id;
+  command: string;
+  expected: string;
 }
 
 export interface ValidationContextEvidence {
@@ -1106,9 +1119,18 @@ export interface WorkMap {
 
 export interface PlanUnit {
   id: Id;
+  kind: PlanUnitKind;
   objective: string;
   criteria: string[];
+  depends_on: Id[];
+  files: Path[];
+  commands: PlanUnitCommand[];
   links: Id[];
+}
+
+export interface PlanUnitCommand {
+  command: string;
+  expected: string;
 }
 
 export interface CoreToHostDonePayload {

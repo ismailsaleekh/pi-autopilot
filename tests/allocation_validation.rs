@@ -187,14 +187,23 @@ fn unit(
     gates: &[&str],
     edges: &[&str],
 ) -> ApprovedUnit {
+    let criterion_id = id(&format!("criterion-{id_value}"));
     ApprovedUnit {
         id: id(id_value),
+        kind: kernel::generated::PlanUnitKind::Implementation,
+        objective: format!("deliver {id_value}"),
         operator_order: order,
         decisions: ids(decisions),
-        criteria: vec![id(&format!("criterion-{id_value}"))],
+        criteria: vec![criterion_id.clone()],
+        criterion_text: vec![drivers::allocation::ApprovedCriterion {
+            id: criterion_id,
+            text: format!("criterion text for {id_value}"),
+        }],
         dependencies: ids(deps),
         predecessor_forward_criteria: ids(gates),
         downstream_release_edges: ids(edges),
+        files: Vec::new(),
+        commands: Vec::new(),
     }
 }
 

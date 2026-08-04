@@ -174,10 +174,11 @@ function makeEvidenceRepo(prefix) {
   mkdirSync(join(root, "src"));
   writeTaskPack(root, "set-host-core");
   writeFileSync(join(root, "src", "fixture.ts"), "export function autopilotFixture() { return 'real repository evidence'; }\n", "utf8");
+  writeFileSync(join(root, ".gitignore"), "events.jsonl\n", "utf8");
   git(root, ["init"]);
   git(root, ["config", "user.email", "autopilot-test@example.invalid"]);
   git(root, ["config", "user.name", "Autopilot Test"]);
-  git(root, ["add", "TASK-A.md", "TASK-B.md", "TASK-C.md", "CONTEXT.md", "src/fixture.ts"]);
+  git(root, ["add", ".gitignore", "TASK-A.md", "TASK-B.md", "TASK-C.md", "CONTEXT.md", "src/fixture.ts"]);
   git(root, ["commit", "-m", "seed real repository evidence"]);
   return root;
 }

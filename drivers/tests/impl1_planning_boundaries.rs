@@ -7,6 +7,7 @@ use std::sync::{Mutex, OnceLock};
 use drivers::planning::{self, TaskAnchorRegistry, TaskDocument, TaskDocumentClass, TaskInputSet};
 use drivers::runner::{self, PlanningRunnerRequest, RunnerTaskDocument};
 use drivers::seam::{self, CoreState};
+use drivers::vcs::GitVcs;
 use kernel::generated::{
     ContractId, Id, ModeId, PlanningAtomKind, Ref, SeamEnvelope, TaskAtom, TaskAtoms,
 };
@@ -694,6 +695,15 @@ impl Fixture {
             let root = temp.join(format!("pi-autopilot-impl1-{label}-{pid}-{nonce}"));
             match fs::create_dir(&root) {
                 Ok(()) => {
+                    let vcs = GitVcs::new(&temp);
+                    vcs.init_fixture(&root).unwrap();
+                    fs::write(
+                        root.join(".gitignore"),
+                        ".pi/autopilot/\n.pi/tasks/\nbin/\nout/\naccepted/\nfake-pi/\nfake-pi-count\nevents.jsonl\n",
+                    )
+                    .unwrap();
+                    vcs.stage_all(&root).unwrap();
+                    vcs.snapshot(&root, "fixture root").unwrap();
                     std::env::set_current_dir(&root).unwrap();
                     return Self { root };
                 }
@@ -788,7 +798,7 @@ active_tools = sorted(filter(None, arg_value("--tools").split(",")))
 submit_tools = [tool for tool in active_tools if tool.startswith("autopilot_submit_")]
 bindings = {{
     "autopilot_submit_atoms": ("planning.task-atoms.v1", "77d000b816b3c14dcdefeba0c23d4f4f9f8bedaf5b281081f1cea138e525e091"),
-    "autopilot_submit_plan_cluster": ("planning.work-map.v1", "d60fa316fa8d5f2baf1d1a764028bdaf5676e094ec23710c53917e760cfe939a"),
+    "autopilot_submit_plan_cluster": ("planning.work-map.v1", "f4b774b90b653568c38a0971e9472e5aa3dae80c56ea7dd7f3136b5b5f5376f2"),
 }}
 if not session_dir:
     sys.stderr.write("fake pi: --session-dir is required\n")
@@ -1391,7 +1401,7 @@ fn planning_doc(path: &str, class: TaskDocumentClass, body: &str) -> TaskDocumen
 }
 
 fn work_map(links: &[&str]) -> String {
-    json!({"units":[{"id":"U1","objective":"Implement unit","criteria":["done"],"links":links}]})
+    json!({"units":[{"id":"U1","kind":"implementation","objective":"Implement unit","criteria":["done"],"depends_on":[],"files":["src/lib.rs"],"commands":[{"command":"cargo test -q","expected":"pass"}],"links":links}]})
         .to_string()
 }
 
@@ -1400,7 +1410,7 @@ fn scout_dossier() -> String {
 }
 
 fn plan_review() -> String {
-    json!({"verdicts":[{"criterion_id":"AC-U1-1","verdict":"pass"}]}).to_string()
+    json!({"verdicts": drivers::seam::REQUIRED_PLAN_REVIEW_CRITERIA.iter().map(|criterion| json!({"criterion_id": criterion, "verdict": "pass"})).collect::<Vec<_>>()}).to_string()
 }
 
 fn runner_doc(path: &str, class: &str, authority_set_id: &str, body: &str) -> RunnerTaskDocument {

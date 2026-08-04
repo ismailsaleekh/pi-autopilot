@@ -13,10 +13,10 @@ use drivers::allocation::{
 };
 use drivers::dispatch::{DispatchInput, LaneReadiness, launch_lanes, select_ready_lanes};
 use drivers::runner::{
-    DeliveryExpectation, DeliveryRejection, PackageFacts, RunnerAssignment, RunnerTransportFacts,
-    accept_delivery, accept_delivery_with_package_facts, delivery_bg_action_with_facts,
-    delivery_issue_with_facts, establish_delivery_package, package_delivery_commit,
-    refuse_agent_git_mutation,
+    self, DeliveryExpectation, DeliveryRejection, PackageFacts, RunnerAssignment,
+    RunnerTransportFacts, accept_delivery, accept_delivery_with_package_facts,
+    delivery_bg_action_with_facts, delivery_issue_with_facts, establish_delivery_package,
+    package_delivery_commit, refuse_agent_git_mutation,
 };
 use drivers::{sim::SimPlatform, vcs::GitVcs};
 use kernel::generated::{
@@ -306,6 +306,8 @@ fn lane_delivery_agent_git_mutation_and_incomplete_delivery_are_refused_without_
     vcs.prepare(&worktree, &source, &tip.0, &["keep.txt"])
         .expect("runner delivery worktree");
     let worktree = fs::canonicalize(&worktree).expect("canonical runner worktree");
+    let mut scoped_unit = unit("l1", 1, &[]);
+    scoped_unit.objective = "deliver literal `````` backtick text safely".to_owned();
     let runner = RunnerAssignment {
         workstream: id("main"),
         action_id: id("action-main-l1"),
@@ -319,6 +321,7 @@ fn lane_delivery_agent_git_mutation_and_incomplete_delivery_are_refused_without_
         worktree: worktree.clone(),
         session_file: fixture.root.join("session.json"),
         roster_assignment: "openai-codex/gpt-subscription".to_owned(),
+        approved_units: vec![scoped_unit],
     };
     let node = fixture.root.join("node");
     let wrapper = fixture.root.join("bin/autopilot-agent-run.mjs");
@@ -352,6 +355,40 @@ fn lane_delivery_agent_git_mutation_and_incomplete_delivery_are_refused_without_
     );
     assert_eq!(spec["lane_id"], "l1");
     assert_eq!(spec["attempt"], expected.attempt);
+    let assignment_path = spec["assignment_path"].as_str().expect("assignment path");
+    let assignment_bytes = fs::read(assignment_path).expect("assignment artifact");
+    assert_eq!(
+        sha256_hex(&assignment_bytes),
+        spec["assignment_digest"].as_str().unwrap()
+    );
+    let assignment_json: serde_json::Value =
+        serde_json::from_slice(&assignment_bytes).expect("assignment json");
+    assert_eq!(
+        assignment_json["schema"],
+        "autopilot.delivery_assignment.v1"
+    );
+    assert_eq!(
+        assignment_json["ordered_units"][0]["files"],
+        serde_json::json!(["keep.txt"])
+    );
+    assert_eq!(
+        assignment_json["ordered_units"][0]["commands"][0]["command"],
+        "cargo test -q"
+    );
+    let prompt = fs::read_to_string(spec["prompt_path"].as_str().expect("prompt")).expect("prompt");
+    assert!(
+        prompt.contains("```````json autopilot.delivery_assignment.v1"),
+        "{prompt}"
+    );
+    fs::write(assignment_path, b"{\"schema\":\"drift\"}").expect("assignment tamper");
+    let collision =
+        delivery_issue_with_facts(&runner, &facts).expect_err("assignment collision must fail");
+    assert!(
+        collision
+            .to_string()
+            .contains("create-once artifact collision"),
+        "{collision}"
+    );
 }
 
 #[test]
@@ -377,6 +414,29 @@ fn lane_delivery_core_stdout_stays_json_when_runtime_packages_uncommitted_change
 }
 
 #[test]
+fn lane_delivery_core_rejects_changed_path_outside_approved_unit_scope() {
+    let (mut core, spawn, spec, carrier_path, worktree) =
+        launched_core_delivery("outside-approved-scope");
+    fs::write(worktree.join("outside.txt"), "out-of-scope delivery\n").expect("outside edit");
+    fs::create_dir_all(carrier_path.parent().expect("carrier parent")).expect("carrier dir");
+    fs::write(
+        &carrier_path,
+        serde_json::to_vec_pretty(&delivery_carrier_for_core_path(&spec, 2, "outside.txt"))
+            .expect("delivery carrier"),
+    )
+    .expect("carrier write");
+
+    let rejected = core.send_json(serde_json::json!({"v":1,"id":2,"kind":"task-completed","payload":{"task_id":"task-outside-approved-scope","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}));
+    assert_eq!(rejected.kind, "done", "rejected response: {rejected:?}");
+    assert!(
+        done_status(&rejected)
+            .contains("delivery changed path is outside approved unit scope: outside.txt"),
+        "rejection did not name the out-of-scope path: {rejected:?}"
+    );
+    core.shutdown();
+}
+
+#[test]
 fn lane_delivery_core_accepts_captured_spec_when_runner_spec_and_prompt_are_transient() {
     let (mut core, spawn, spec, carrier_path, worktree) =
         launched_core_delivery("transient-runner-files");
@@ -396,6 +456,56 @@ fn lane_delivery_core_accepts_captured_spec_when_runner_spec_and_prompt_are_tran
 
     let accepted = core.send_json(serde_json::json!({"v":1,"id":2,"kind":"task-completed","payload":{"task_id":"task-transient-runner-files","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}));
     assert_eq!(accepted.kind, "spawn", "accepted response: {accepted:?}");
+    core.shutdown();
+}
+
+#[test]
+fn lane_delivery_core_rejects_oversized_terminal_carrier_before_parsing() {
+    let (mut core, spawn, _spec, carrier_path, _worktree) =
+        launched_core_delivery("oversized-terminal-carrier");
+    fs::create_dir_all(carrier_path.parent().expect("carrier parent")).expect("carrier dir");
+    fs::write(
+        &carrier_path,
+        vec![b'x'; drivers::seam::MAX_TERMINAL_CARRIER_BYTES + 1],
+    )
+    .expect("oversized carrier write");
+
+    let rejected = core.send_json(serde_json::json!({"v":1,"id":2,"kind":"task-completed","payload":{"task_id":"task-oversized-terminal-carrier","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}));
+    assert_eq!(rejected.kind, "done", "rejected response: {rejected:?}");
+    let status = done_status(&rejected);
+    assert!(status.contains("bounded read oversized"), "{status}");
+    assert!(status.contains("delivery-carrier"), "{status}");
+    core.shutdown();
+}
+
+#[test]
+fn lane_delivery_core_rejects_oversized_assignment_artifact_before_digesting() {
+    let (mut core, spawn, spec, carrier_path, worktree) =
+        launched_core_delivery("oversized-assignment-read");
+    fs::write(
+        worktree.join("README.md"),
+        "delivery terminal fixture changed\n",
+    )
+    .expect("worktree edit");
+    fs::create_dir_all(carrier_path.parent().expect("carrier parent")).expect("carrier dir");
+    fs::write(
+        &carrier_path,
+        serde_json::to_vec_pretty(&delivery_carrier_without_package_for_core(&spec, 2))
+            .expect("delivery carrier"),
+    )
+    .expect("carrier write");
+    let assignment_path = spec["assignment_path"].as_str().expect("assignment path");
+    fs::write(
+        assignment_path,
+        vec![b'x'; runner::DELIVERY_ASSIGNMENT_MAX_BYTES + 1],
+    )
+    .expect("oversized assignment write");
+
+    let rejected = core.send_json(serde_json::json!({"v":1,"id":2,"kind":"task-completed","payload":{"task_id":"task-oversized-assignment-read","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}));
+    assert_eq!(rejected.kind, "done", "rejected response: {rejected:?}");
+    let status = done_status(&rejected);
+    assert!(status.contains("bounded read oversized"), "{status}");
+    assert!(status.contains("assignment-main-L1.json"), "{status}");
     core.shutdown();
 }
 
@@ -441,12 +551,20 @@ fn launched_core_delivery(
     let root = fixture.root;
     fs::write(root.join("README.md"), "delivery terminal fixture\n").expect("fixture file");
     git_init_for_core(&root);
+    let repo_authority =
+        runner::repository_authority_binding(&root, "main").expect("repo authority");
     fs::create_dir_all(root.join(".pi/autopilot/main")).expect("plan dir");
     fs::write(
         root.join(".pi/autopilot/main/approved-plan.json"),
         serde_json::to_vec_pretty(&serde_json::json!({
+            "repository_authority": {
+                "manifest_path": repo_authority.path,
+                "manifest_digest": repo_authority.digest,
+                "head_commit": repo_authority.manifest.head_commit,
+                "head_tree": repo_authority.manifest.head_tree,
+            },
             "units":[
-                {"id":"U1","operator_order":1,"decisions":[],"criteria":["AC1"],"dependencies":[],"predecessor_forward_criteria":[],"downstream_release_edges":["EDGE1"]}
+                {"id":"U1","kind":"implementation","objective":"deliver U1","operator_order":1,"decisions":[],"criteria":["AC1"],"criterion_text":[{"id":"AC1","text":"criterion text AC1"}],"dependencies":[],"predecessor_forward_criteria":[],"downstream_release_edges":["EDGE1"],"files":["README.md"],"commands":[{"command":"cargo test -q","expected":"pass"}]}
             ]
         }))
         .expect("approved json"),
@@ -566,11 +684,18 @@ fn units() -> Vec<ApprovedUnit> {
 }
 
 fn unit(name: &str, order: u32, deps: &[&str]) -> ApprovedUnit {
+    let criterion_id = id(&format!("criterion-{name}"));
     ApprovedUnit {
         id: id(name),
+        kind: kernel::generated::PlanUnitKind::Implementation,
+        objective: format!("deliver {name}"),
         operator_order: order,
         decisions: Vec::new(),
-        criteria: vec![id(&format!("criterion-{name}"))],
+        criteria: vec![criterion_id.clone()],
+        criterion_text: vec![drivers::allocation::ApprovedCriterion {
+            id: criterion_id,
+            text: format!("criterion text for {name}"),
+        }],
         dependencies: ids(deps),
         predecessor_forward_criteria: if name == "u1" {
             Vec::new()
@@ -578,6 +703,11 @@ fn unit(name: &str, order: u32, deps: &[&str]) -> ApprovedUnit {
             vec![id(&format!("fg-{name}"))]
         },
         downstream_release_edges: vec![id(&format!("edge-{name}"))],
+        files: vec![ContractPath("keep.txt".to_owned())],
+        commands: vec![kernel::generated::PlanUnitCommand {
+            command: "cargo test -q".to_owned(),
+            expected: "pass".to_owned(),
+        }],
     }
 }
 
@@ -645,6 +775,14 @@ fn delivery_carrier_without_package_for_core(
     spec: &serde_json::Value,
     evidence_count: usize,
 ) -> serde_json::Value {
+    delivery_carrier_for_core_path(spec, evidence_count, "README.md")
+}
+
+fn delivery_carrier_for_core_path(
+    spec: &serde_json::Value,
+    evidence_count: usize,
+    changed_path: &str,
+) -> serde_json::Value {
     let typed: kernel::generated::AgentRunSpec =
         serde_json::from_value(spec.clone()).expect("typed runner spec");
     let profile = kernel::generated::TERMINAL_PROFILES
@@ -652,7 +790,7 @@ fn delivery_carrier_without_package_for_core(
         .find(|profile| profile.0 == "delivery-status.v2")
         .expect("delivery profile");
     let submission = serde_json::json!({
-        "actual_changed_paths": ["README.md"],
+        "actual_changed_paths": [changed_path],
         "execution_audit_ref": "audit:delivery",
         "focused_evidence_refs": (0..evidence_count)
             .map(|index| serde_json::json!(format!("evidence:{index}")))
@@ -703,6 +841,7 @@ fn delivery_carrier_without_package_for_core(
 
 fn git_init_for_core(root: &Path) {
     git_run(root, &["init", "-b", "main"]);
+    fs::write(root.join(".gitignore"), ".pi/autopilot/\n.pi/tasks/\n").expect("gitignore");
     git_run(
         root,
         &["config", "user.email", "lane-delivery@example.invalid"],

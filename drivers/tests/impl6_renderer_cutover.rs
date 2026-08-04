@@ -129,7 +129,7 @@ fn mandatory_accepted_artifact_gap_refuses_planning_issue() {
 }
 
 #[test]
-fn on_demand_context_gap_is_rendered_but_does_not_refuse_issue() {
+fn on_demand_source_anchor_is_manifest_bound_without_gap() {
     let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
     let fixture = Fixture::new("on-demand-gap");
     fixture.install_transport();
@@ -160,16 +160,31 @@ fn on_demand_context_gap_is_rendered_but_does_not_refuse_issue() {
             .registry(registry)
             .accepted_planning_artifacts(artifacts),
         )
-        .expect("on_demand source-anchor gap must not block issue");
+        .expect("on_demand source-anchor manifest binding must not block issue");
     let manifest =
         context_manifest_from_prompt(&fs::read_to_string(&issue.binding.prompt_path).unwrap());
     assert!(
-        manifest["gaps"].as_array().unwrap().iter().any(|gap| {
+        manifest["on_demand"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| {
+                item["id"]
+                    .as_str()
+                    .is_some_and(|id| id.contains(":on_demand:source-anchor"))
+                    && item["source_uri"]
+                        .as_str()
+                        .is_some_and(|uri| uri.starts_with("json://"))
+            }),
+        "on_demand source-anchor manifest binding should be visible: {manifest}"
+    );
+    assert!(
+        !manifest["gaps"].as_array().unwrap().iter().any(|gap| {
             gap["id"]
                 .as_str()
-                .is_some_and(|id| id.contains(":on_demand:source-anchor:gap"))
+                .is_some_and(|id| id.contains(":source-anchor:gap"))
         }),
-        "on_demand source-anchor gap should be visible: {manifest}"
+        "source-anchor must not remain a gap: {manifest}"
     );
 }
 
@@ -356,6 +371,15 @@ impl Fixture {
             let root = temp.join(format!("pi-autopilot-impl6-{label}-{pid}-{nonce}"));
             match fs::create_dir(&root) {
                 Ok(()) => {
+                    let vcs = GitVcs::new(&temp);
+                    vcs.init_fixture(&root).unwrap();
+                    fs::write(
+                        root.join(".gitignore"),
+                        ".pi/autopilot/\n.pi/tasks/\nbin/\naccepted/\nrepo/\n",
+                    )
+                    .unwrap();
+                    vcs.stage_all(&root).unwrap();
+                    vcs.snapshot(&root, "fixture root").unwrap();
                     std::env::set_current_dir(&root).unwrap();
                     return Self { root };
                 }
@@ -496,6 +520,7 @@ impl Fixture {
         let repo = self.root.join("repo");
         let vcs = GitVcs::new(&self.root);
         vcs.init_fixture(&repo).unwrap();
+        fs::write(repo.join(".gitignore"), ".pi/autopilot/\n.pi/tasks/\n").unwrap();
         fs::write(
             repo.join("task.md"),
             "[authority]\nauthority_set_id: auth\n\n# Task\nDo the work.\n",
@@ -515,6 +540,7 @@ impl Fixture {
         let repo = self.root.join("repo");
         let vcs = GitVcs::new(&self.root);
         vcs.init_fixture(&repo).unwrap();
+        fs::write(repo.join(".gitignore"), ".pi/autopilot/\n.pi/tasks/\n").unwrap();
         for index in 1..=6 {
             fs::write(
                 repo.join(format!("A{index}.md")),
@@ -587,8 +613,8 @@ fn raw_output_for_spec(spec: &serde_json::Value) -> String {
             json!({"atoms":[{"id":format!("{prefix}W-001"),"kind":"work","text":"Do the work","sources":["task.md"]}]}).to_string()
         }
         "planning.scout-dossier.v1" => json!({"findings":[{"path":"task.md","observation":"task authority exists","evidence_ref":"task.md"}]}).to_string(),
-        "planning.work-map.v1" => json!({"units":[{"id":"U1","objective":"Implement unit","criteria":["done"],"links":["TE01-W-001"]}]}).to_string(),
-        "planning.plan-review.v1" => json!({"verdicts":[{"criterion_id":"AC-U1-1","verdict":"pass"}]}).to_string(),
+        "planning.work-map.v1" => json!({"units":[{"id":"U1","kind":"implementation","objective":"Implement unit","criteria":["done"],"depends_on":[],"files":["src/lib.rs"],"commands":[{"command":"cargo test -q","expected":"pass"}],"links":["TE01-W-001"]}]}).to_string(),
+        "planning.plan-review.v1" => json!({"verdicts": seam::REQUIRED_PLAN_REVIEW_CRITERIA.iter().map(|criterion| json!({"criterion_id": criterion, "verdict": "pass"})).collect::<Vec<_>>()}).to_string(),
         other => panic!("unsupported boundary in test: {other}"),
     }
 }

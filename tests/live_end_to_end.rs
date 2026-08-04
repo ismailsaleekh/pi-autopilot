@@ -477,9 +477,9 @@ fn planned_atoms_with_dispositions(raw: &str) -> Vec<Atom> {
 
 fn approved_units() -> Vec<ApprovedUnit> {
     vec![
-        unit("U1", 1, &[], &["FC1"], &["EDGE1"]),
-        unit("U2", 2, &["U1"], &["FC1"], &["EDGE2"]),
-        unit("U3", 3, &["U2"], &["FC2"], &["EDGE3"]),
+        unit("U1", 1, &[], &[], &["EDGE1"]),
+        unit("U2", 2, &["U1"], &["unit-complete:U1"], &["EDGE2"]),
+        unit("U3", 3, &["U2"], &["unit-complete:U2"], &["EDGE3"]),
     ]
 }
 
@@ -498,14 +498,23 @@ fn submission(approved: &[ApprovedUnit]) -> AllocationSubmission {
 }
 
 fn unit(name: &str, order: u32, deps: &[&str], gates: &[&str], edges: &[&str]) -> ApprovedUnit {
+    let criterion_id = id(&format!("AC-{name}"));
     ApprovedUnit {
         id: id(name),
+        kind: kernel::generated::PlanUnitKind::Implementation,
+        objective: format!("deliver {name}"),
         operator_order: order,
         decisions: Vec::new(),
-        criteria: vec![id(&format!("AC-{name}"))],
+        criteria: vec![criterion_id.clone()],
+        criterion_text: vec![drivers::allocation::ApprovedCriterion {
+            id: criterion_id,
+            text: format!("criterion text for {name}"),
+        }],
         dependencies: ids(deps),
         predecessor_forward_criteria: ids(gates),
         downstream_release_edges: ids(edges),
+        files: Vec::new(),
+        commands: Vec::new(),
     }
 }
 
@@ -513,9 +522,9 @@ fn lane(name: &str, unit_ids: &[&str], wave: u32) -> kernel::generated::Allocati
     let gates = unit_ids
         .iter()
         .flat_map(|unit| match *unit {
-            "U1" => vec!["FC1"],
-            "U2" => vec!["FC1"],
-            _ => vec!["FC2"],
+            "U1" => vec![],
+            "U2" => vec!["unit-complete:U1"],
+            _ => vec!["unit-complete:U2"],
         })
         .collect::<Vec<_>>();
     let edges = unit_ids

@@ -125,6 +125,57 @@ fn transcript_root() -> PathBuf {
 }
 
 #[test]
+fn plan_review_approval_requires_the_complete_exact_all_pass_set() {
+    let mut runtime = boundary_runtime("planning.plan-review.v1");
+    runtime.flip_to_enforce();
+    let one_pass = serde_json::json!({"verdicts":[{"criterion_id":"review.mandatory-input-accounting","verdict":"pass"}]}).to_string();
+    assert!(
+        accept_plan_review(&one_pass, &runtime).is_err(),
+        "incomplete review must be repaired at the child boundary before parent adjudication"
+    );
+    assert!(drivers::seam::review_approves_execution(&one_pass).is_err());
+    let duplicate = serde_json::json!({"verdicts": [
+        {"criterion_id":"review.mandatory-input-accounting","verdict":"pass"},
+        {"criterion_id":"review.mandatory-input-accounting","verdict":"pass"},
+        {"criterion_id":"review.authority-fidelity","verdict":"pass"},
+        {"criterion_id":"review.completeness-and-traceability","verdict":"pass"},
+        {"criterion_id":"review.internal-consistency-and-scheduling","verdict":"pass"},
+        {"criterion_id":"review.context-sufficiency","verdict":"pass"},
+        {"criterion_id":"review.verification-strength","verdict":"pass"},
+        {"criterion_id":"review.forward-validation","verdict":"pass"}
+    ]})
+    .to_string();
+    assert!(drivers::seam::review_approves_execution(&duplicate).is_err());
+    let all_pass = serde_json::json!({"verdicts": drivers::seam::REQUIRED_PLAN_REVIEW_CRITERIA.iter().map(|criterion| serde_json::json!({"criterion_id": criterion, "verdict": "pass"})).collect::<Vec<_>>()}).to_string();
+    accept_plan_review(&all_pass, &runtime).expect("complete review shape accepted");
+    drivers::seam::review_approves_execution(&all_pass).expect("complete all-pass review approves");
+    let blocked = serde_json::json!({"verdicts": drivers::seam::REQUIRED_PLAN_REVIEW_CRITERIA.iter().map(|criterion| serde_json::json!({"criterion_id": criterion, "verdict": if *criterion == "review.context-sufficiency" { "blocked" } else { "pass" }})).collect::<Vec<_>>()}).to_string();
+    accept_plan_review(&blocked, &runtime)
+        .expect("complete blocked review shape must reach parent adjudication");
+    assert!(drivers::seam::review_approves_execution(&blocked).is_err());
+}
+
+#[test]
+fn required_plan_review_criteria_are_exposed_exactly_once_in_contract_text() {
+    let admits = kernel::generated::PLAN_REVIEW_ADMITS;
+    for criterion in drivers::seam::REQUIRED_PLAN_REVIEW_CRITERIA {
+        assert!(
+            admits.contains(criterion),
+            "missing {criterion} from admits: {admits}"
+        );
+        assert_eq!(
+            admits.matches(criterion).count(),
+            1,
+            "duplicate {criterion} in admits: {admits}"
+        );
+    }
+    assert_eq!(
+        admits.matches("review.").count(),
+        drivers::seam::REQUIRED_PLAN_REVIEW_CRITERIA.len()
+    );
+}
+
+#[test]
 fn replay_gate_rejects_malformed_work_map() {
     let raw =
         "### unit\n- **id:** U1\n- **objective:** Do it.\n- **acceptance criteria:**\n  - tested\n";
@@ -135,6 +186,47 @@ fn replay_gate_rejects_malformed_work_map() {
         Err(value) => value,
     };
     assert_eq!(rejection.boundary_id(), "planning.work-map.v1");
+}
+
+#[test]
+fn work_map_boundary_rejects_non_delivery_kinds_and_empty_scope_or_commands() {
+    let mut runtime = boundary_runtime("planning.work-map.v1");
+    runtime.flip_to_enforce();
+    for (label, raw) in [
+        (
+            "context gate kind",
+            serde_json::json!({"units":[{"id":"U1","kind":"context-gate","objective":"ctx","criteria":["c"],"depends_on":[],"files":["src/lib.rs"],"commands":[{"command":"cargo test -q","expected":"pass"}],"links":["W1"]}]}).to_string(),
+        ),
+        (
+            "verification kind",
+            serde_json::json!({"units":[{"id":"U1","kind":"verification","objective":"verify","criteria":["c"],"depends_on":[],"files":["src/lib.rs"],"commands":[{"command":"cargo test -q","expected":"pass"}],"links":["W1"]}]}).to_string(),
+        ),
+        (
+            "missing files",
+            serde_json::json!({"units":[{"id":"U1","kind":"implementation","objective":"impl","criteria":["c"],"depends_on":[],"commands":[{"command":"cargo test -q","expected":"pass"}],"links":["W1"]}]}).to_string(),
+        ),
+        (
+            "absolute file",
+            serde_json::json!({"units":[{"id":"U1","kind":"implementation","objective":"impl","criteria":["c"],"depends_on":[],"files":["/tmp/escape"],"commands":[{"command":"cargo test -q","expected":"pass"}],"links":["W1"]}]}).to_string(),
+        ),
+        (
+            "parent file",
+            serde_json::json!({"units":[{"id":"U1","kind":"implementation","objective":"impl","criteria":["c"],"depends_on":[],"files":["../escape"],"commands":[{"command":"cargo test -q","expected":"pass"}],"links":["W1"]}]}).to_string(),
+        ),
+        (
+            "duplicate files",
+            serde_json::json!({"units":[{"id":"U1","kind":"implementation","objective":"impl","criteria":["c"],"depends_on":[],"files":["src/lib.rs","src/lib.rs"],"commands":[{"command":"cargo test -q","expected":"pass"}],"links":["W1"]}]}).to_string(),
+        ),
+        (
+            "empty commands",
+            serde_json::json!({"units":[{"id":"U1","kind":"implementation","objective":"impl","criteria":["c"],"depends_on":[],"files":["src/lib.rs"],"commands":[],"links":["W1"]}]}).to_string(),
+        ),
+    ] {
+        assert!(
+            accept_work_map(&raw, &runtime).is_err(),
+            "{label} work-map mutation was admitted"
+        );
+    }
 }
 
 #[test]

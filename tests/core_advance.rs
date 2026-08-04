@@ -6,6 +6,7 @@ use std::process::Command;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use drivers::runner;
 use drivers::seam::{self, CoreState};
 use kernel::generated::{CoreToHostDonePayload, CoreToHostSpawnPayload, EventRow, SeamEnvelope};
 use sha2::{Digest as ShaDigest, Sha256};
@@ -16,6 +17,7 @@ static CWD_LOCK: Mutex<()> = Mutex::new(());
 fn multi_unit_plan_dispatches_next_lane_after_integration() {
     let _guard = CWD_LOCK.lock().expect("cwd lock");
     let fixture = AdvanceFixture::new("dispatch-next", 2, false);
+    let original_head = git_out(&fixture.root, &["rev-parse", "--verify", "HEAD^{commit}"]);
     let mut state = fixture.state();
     let first = send_command(&mut state, "autopilot main");
     let first_spawn = spawn_payload(first);
@@ -26,6 +28,88 @@ fn multi_unit_plan_dispatches_next_lane_after_integration() {
     let next = spawn_payload(after_l1);
     assert_eq!(next.action.assignment_id.0, "assignment-main-L2");
     assert_eq!(fixture.count_agent_spawns("assignment-main-L2"), 1);
+    let run_main = git_out(
+        &fixture.root,
+        &[
+            "rev-parse",
+            "--verify",
+            "refs/heads/autopilot/run/main/main^{commit}",
+        ],
+    );
+    let next_spec = fixture.delivery_spec(&next);
+    assert_eq!(next_spec["base_commit"], run_main);
+    let next_worktree = PathBuf::from(next_spec["worktree"].as_str().expect("worktree"));
+    assert_eq!(
+        git_out(&next_worktree, &["rev-parse", "--verify", "HEAD^{commit}"]),
+        run_main
+    );
+    assert_ne!(run_main, original_head);
+}
+
+#[test]
+fn deleting_run_main_after_execution_begins_is_loud() {
+    let _guard = CWD_LOCK.lock().expect("cwd lock");
+    let fixture = AdvanceFixture::new("run-main-delete", 2, false);
+    let mut state = fixture.state();
+    let first = send_command(&mut state, "autopilot main");
+    assert_eq!(first.kind, "spawn", "response: {first:?}");
+    run(
+        &fixture.root,
+        &["update-ref", "-d", "refs/heads/autopilot/run/main/main"],
+    );
+    let refused = send_command(&mut state, "autopilot main");
+    assert_eq!(refused.kind, "done", "response: {refused:?}");
+    let status = done_status(&refused);
+    assert!(
+        status.contains("run-main missing after execution began"),
+        "{status}"
+    );
+}
+
+#[test]
+fn wrong_preexisting_run_main_before_execution_is_loud_and_not_adopted() {
+    let _guard = CWD_LOCK.lock().expect("cwd lock");
+    let fixture = AdvanceFixture::new("run-main-wrong-preexisting", 1, false);
+    let baseline = git_out(&fixture.root, &["rev-parse", "--verify", "HEAD^{commit}"]);
+    let baseline_tree = git_out(&fixture.root, &["rev-parse", "--verify", "HEAD^{tree}"]);
+    let foreign = git_out(
+        &fixture.root,
+        &["commit-tree", &baseline_tree, "-m", "foreign run-main"],
+    );
+    assert_ne!(foreign, baseline);
+    run(
+        &fixture.root,
+        &[
+            "update-ref",
+            "refs/heads/autopilot/run/main/main",
+            &foreign,
+            "",
+        ],
+    );
+
+    let mut state = fixture.state();
+    let refused = send_command(&mut state, "autopilot main");
+    assert_eq!(refused.kind, "done", "response: {refused:?}");
+    let status = done_status(&refused);
+    assert!(
+        status.contains("run-main preexisting baseline drift"),
+        "{status}"
+    );
+    assert!(status.contains(&baseline), "{status}");
+    assert!(status.contains(&foreign), "{status}");
+    assert_eq!(
+        git_out(
+            &fixture.root,
+            &[
+                "rev-parse",
+                "--verify",
+                "refs/heads/autopilot/run/main/main^{commit}",
+            ],
+        ),
+        foreign,
+        "foreign preexisting run-main must not be adopted or overwritten"
+    );
+    assert_eq!(fixture.count_agent_spawns("assignment-main-L1"), 0);
 }
 
 #[test]
@@ -56,6 +140,56 @@ fn sequential_plan_reaches_closure_and_result_ref() {
 }
 
 #[test]
+fn seven_unit_plan_advances_beyond_the_six_lane_window_and_closes() {
+    let _guard = CWD_LOCK.lock().expect("cwd lock");
+    let fixture = AdvanceFixture::new("seven-unit-closure", 7, true);
+    let mut state = fixture.state();
+    let mut response = send_command(&mut state, "autopilot main");
+
+    for index in 1..=7 {
+        let spawned = spawn_payload(response);
+        assert_eq!(
+            spawned.action.assignment_id.0,
+            format!("assignment-main-L{index}"),
+            "unit {index} must retain its stable lane identity across allocation windows"
+        );
+        response = fixture.complete_lane(&mut state, &spawned, &format!("l{index}"));
+    }
+
+    assert_eq!(response.kind, "done", "response: {response:?}");
+    assert!(
+        done_status(&response).contains("lifecycle:close:result_ref=refs/autopilot/results/main/"),
+        "status: {}",
+        done_status(&response)
+    );
+    assert_eq!(fixture.count_agent_spawns("assignment-main-L7"), 1);
+}
+
+#[test]
+fn parallel_seven_unit_window_counts_live_lanes_as_continuations() {
+    let _guard = CWD_LOCK.lock().expect("cwd lock");
+    let fixture = AdvanceFixture::new("parallel-seven-unit-window", 7, false);
+    let mut state = fixture.state();
+
+    for index in 1..=4 {
+        let spawned = spawn_payload(send_command(&mut state, "autopilot main"));
+        assert_eq!(
+            spawned.action.assignment_id.0,
+            format!("assignment-main-L{index}"),
+            "independent lane {index} must dispatch without double-counting live lanes"
+        );
+    }
+
+    let waiting = send_command(&mut state, "autopilot main");
+    assert_eq!(waiting.kind, "done", "response: {waiting:?}");
+    let status = done_status(&waiting);
+    assert!(status.contains("dispatch:waiting"), "status: {status}");
+    assert!(status.contains("active_implementers=4"), "status: {status}");
+    assert!(!status.contains("ParallelCapExceeded"), "status: {status}");
+    assert_eq!(fixture.count_agent_spawns("assignment-main-L7"), 0);
+}
+
+#[test]
 fn advance_waits_while_work_is_in_flight() {
     let _guard = CWD_LOCK.lock().expect("cwd lock");
     let fixture = AdvanceFixture::new("wait-in-flight", 2, true);
@@ -77,6 +211,16 @@ fn quiescent_incomplete_run_fails_loudly() {
     let _guard = CWD_LOCK.lock().expect("cwd lock");
     let fixture = AdvanceFixture::new("stuck", 2, true);
     let mut state = fixture.state();
+    let baseline = git_out(&fixture.root, &["rev-parse", "--verify", "HEAD^{commit}"]);
+    run(
+        &fixture.root,
+        &[
+            "update-ref",
+            "refs/heads/autopilot/run/main/main",
+            &baseline,
+            "",
+        ],
+    );
     let appended = send_command(&mut state, "append:final-precondition:unit-closed:L1");
     assert_eq!(appended.kind, "done");
 
@@ -89,7 +233,7 @@ fn quiescent_incomplete_run_fails_loudly() {
     );
     assert!(status.contains("blocked=[L2:"), "status: {status}");
     assert!(
-        status.contains("unmet_dependency_gate:FC1"),
+        status.contains("unmet_dependency_gate:unit-complete:U1"),
         "status: {status}"
     );
     assert!(status.contains("active_implementers=0"), "status: {status}");
@@ -161,7 +305,7 @@ fn forward_criteria_gate_opens_when_the_predecessor_closes() {
 
     // The gate must be recorded as real evidence in the event log.
     let events = fs::read_to_string(&fixture.event_path).expect("events");
-    assert!(events.contains("gate:FC1"), "events: {events}");
+    assert!(events.contains("gate:unit-complete:U1"), "events: {events}");
 }
 
 /// A lane with a LIVE implementer binding must never be dispatched twice.
@@ -384,32 +528,48 @@ impl Drop for AdvanceFixture {
 fn write_approved_plan(root: &Path, units: usize, block_after_first: bool) {
     let rows = (1..=units)
         .map(|index| {
-            let dependencies = if index == 1 {
+            let dependencies = if !block_after_first || index == 1 {
                 Vec::<String>::new()
             } else {
                 vec![format!("U{}", index - 1)]
             };
             let predecessor_forward_criteria = if block_after_first && index > 1 {
-                vec![format!("FC{}", index - 1)]
+                vec![format!("unit-complete:U{}", index - 1)]
             } else {
                 Vec::new()
             };
             serde_json::json!({
                 "id": format!("U{index}"),
+                "kind": "implementation",
+                "objective": format!("deliver U{index}"),
                 "operator_order": index,
                 "decisions": [],
                 "criteria": [format!("AC{index}")],
+                "criterion_text": [{"id": format!("AC{index}"), "text": format!("criterion text {index}")}],
                 "dependencies": dependencies,
                 "predecessor_forward_criteria": predecessor_forward_criteria,
-                "downstream_release_edges": [format!("EDGE{index}")]
+                "downstream_release_edges": [format!("EDGE{index}")],
+                "files": [format!("l{index}.txt")],
+                "commands": [{"command":"cargo test -q","expected":"pass"}]
             })
         })
         .collect::<Vec<_>>();
+    let repo_authority =
+        runner::repository_authority_binding(root, "main").expect("repo authority");
     let dir = root.join(".pi/autopilot/main");
     fs::create_dir_all(&dir).expect("plan dir");
     fs::write(
         dir.join("approved-plan.json"),
-        serde_json::to_vec_pretty(&serde_json::json!({ "units": rows })).expect("plan json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "repository_authority": {
+                "manifest_path": repo_authority.path,
+                "manifest_digest": repo_authority.digest,
+                "head_commit": repo_authority.manifest.head_commit,
+                "head_tree": repo_authority.manifest.head_tree,
+            },
+            "units": rows
+        }))
+        .expect("plan json"),
     )
     .expect("approved plan");
 }
@@ -645,6 +805,7 @@ fn git_init(root: &Path) {
     run(root, &["init"]);
     run(root, &["config", "user.email", "advance@example.invalid"]);
     run(root, &["config", "user.name", "Advance Fixture"]);
+    fs::write(root.join(".gitignore"), ".pi/autopilot/\n.pi/tasks/\n").expect("gitignore");
     run(root, &["add", "."]);
     run(root, &["commit", "-m", "fixture"]);
 }

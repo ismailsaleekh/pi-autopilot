@@ -486,6 +486,10 @@ artifact "agent_run_spec" schema="autopilot.agent_run_spec.v4" producer="Package
     field "atom_registry_digest" type="digest" required=#false nullable=#true
     field "planning_inputs_path" type="path" required=#false nullable=#true
     field "planning_inputs_digest" type="digest" required=#false nullable=#true
+    field "repository_manifest_path" type="path" required=#false nullable=#true doc="Required for fresh planning assignments: absolute path to the package-owned repository authority manifest bound at issue time. Historical specs may omit it only for inspection."
+    field "repository_manifest_digest" type="digest" required=#false nullable=#true doc="Required for fresh planning assignments: SHA-256 of repository_manifest_path bytes."
+    field "repository_head_commit" type="sha" required=#false nullable=#true doc="Required for fresh planning assignments: exact HEAD commit recorded in the repository authority manifest."
+    field "repository_head_tree" type="sha" required=#false nullable=#true doc="Required for fresh planning assignments: exact HEAD tree recorded in the repository authority manifest."
 }
 
 artifact "run_identity" schema="autopilot.run_identity.v1" producer="Package" model_produced=#false {
@@ -579,21 +583,29 @@ artifact "questions" schema="planning.questions.v1" producer="Model" model_produ
 
 artifact "work_map" schema="planning.work-map.v1" producer="Model" model_produced=#true {
     doc "Model-facing work map. Link values are checked against the accepted atom registry by the planning driver."
-    admits "Plan compiler and synthesizer output must contain one or more units. Each unit must have an objective, acceptance criteria, and traceable links by real atom id. Call autopilot_submit_plan_cluster or autopilot_submit_synthesis as the final action."
+    admits "Plan compiler and synthesizer output must contain one or more executable implementation units only. Each unit kind must be exactly implementation. Never emit context-gate or verification units: unresolved context must be recorded as review-blocking evidence, and independent verification must be folded into exact criteria plus nonempty focused commands on the owning implementation unit. Each unit must have a nonempty objective, criteria, depends_on array, files array, commands array, and traceable links by real atom id. Call autopilot_submit_plan_cluster or autopilot_submit_synthesis as the final action."
     submit_tool "autopilot_submit_plan_cluster" label="Submit work map"
     submit_tool "autopilot_submit_synthesis" label="Submit synthesized work map"
-    list "units" item="plan_unit" required=#true doc="Executable plan units."
+    list "units" item="plan_unit" required=#true doc="Executable implementation units only."
     record "plan_unit" {
         field "id" type="id" required=#true
+        field "kind" type="plan_unit_kind" required=#true doc="Closed delivery disposition: the only legal value is implementation. Context gates belong in non-pass plan review evidence; verification belongs in criteria and commands."
         field "objective" type="string" required=#true
         list "criteria" item="string" required=#true
+        list "depends_on" item="id" required=#true doc="Exact declared predecessor unit ids; package must never invent positional dependencies."
+        list "files" item="path" required=#true doc="Nonempty declared relevant path scope for this executable delivery unit."
+        list "commands" item="plan_unit_command" required=#true doc="Nonempty focused verification commands/tests tied to this unit."
         list "links" item="id" required=#true doc="Atom ids accepted from task_atoms."
+    }
+    record "plan_unit_command" {
+        field "command" type="string" required=#true
+        field "expected" type="string" required=#true
     }
 }
 
 artifact "plan_review" schema="planning.plan-review.v1" producer="Model" model_produced=#true {
     doc "Model-facing plan review verdicts. Verdict is closed; finding text is optional and advisory unless the verdict requires explanation."
-    admits "Plan review output must assign a verdict to each criterion using pass, blocker, advisory, fail, blocked, or needs-fix. It must include at least one verdict. Call autopilot_submit_review as the final action."
+    admits "Plan review output must assign exactly one verdict to each required approval criterion and no others: review.mandatory-input-accounting, review.authority-fidelity, review.completeness-and-traceability, review.internal-consistency-and-scheduling, review.context-sufficiency, review.verification-strength, review.forward-validation. Execution is approved only when all seven exact criteria pass; missing, duplicate, unknown, blocker, advisory, fail, blocked, or needs-fix verdicts block execution terminally for this run. Call autopilot_submit_review as the final action."
     submit_tool "autopilot_submit_review" label="Submit plan review"
     list "verdicts" item="plan_review_verdict" required=#true doc="Criterion verdicts."
     record "plan_review_verdict" {
@@ -816,11 +828,18 @@ artifact "validation_context_v2" schema="autopilot.validation_context.v1" produc
     list "excluded_refs" item="validation_excluded_ref" required=#true
     record "validation_context_criterion" {
         field "criterion_id" type="id" required=#true
+        field "requirement_text" type="string" required=#true
         field "mandatory" type="bool" required=#true
         list "covered_paths" item="path" required=#true
         list "semantic_surface_ids" item="id" required=#true
         list "forward_edge_ids" item="id" required=#true
+        list "commands" item="validation_context_command" required=#true doc="Exact focused command obligations inherited from the owning approved unit."
         list "witness_ids" item="id" required=#true
+    }
+    record "validation_context_command" {
+        field "command_id" type="id" required=#true
+        field "command" type="string" required=#true
+        field "expected" type="string" required=#true
     }
     record "validation_context_evidence" {
         field "evidence_ref" type="ref" required=#true
@@ -1182,6 +1201,11 @@ enum "planning_review_verdict" {
     value "fail"
     value "blocked"
     value "needs-fix"
+}
+
+enum "plan_unit_kind" {
+    doc "Closed work-map unit disposition. Only implementation units are executable delivery work. Context gates are review blockers and verification is carried as criteria plus commands on implementation units."
+    value "implementation"
 }
 
 enum "run_phase" {

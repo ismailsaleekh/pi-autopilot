@@ -21,6 +21,15 @@ pub const MODEL_BOUNDARIES: [&str; 5] = [
     "planning.work-map.v1",
     "planning.plan-review.v1",
 ];
+pub const REQUIRED_PLAN_REVIEW_CRITERIA: [&str; 7] = [
+    "review.mandatory-input-accounting",
+    "review.authority-fidelity",
+    "review.completeness-and-traceability",
+    "review.internal-consistency-and-scheduling",
+    "review.context-sufficiency",
+    "review.verification-strength",
+    "review.forward-validation",
+];
 const DRIVER_TABLES_KDL: &str = include_str!("../../../data/driver-tables.kdl");
 const PLANNING_KDL: &str = include_str!("../../../data/planning.kdl");
 
@@ -1317,13 +1326,13 @@ pub fn accept_questions(raw: &str, runtime: &BoundaryRuntime) -> Result<String, 
     validate_questions_shape(&questions, runtime)?;
     Ok(raw.to_owned())
 }
-#[acceptance_boundary(id = "planning.work-map.v1", producer = Producer::Model, visible = true, admits = "Plan compiler and synthesizer output must contain one or more units. Each unit must have an objective, acceptance criteria, and traceable links by real atom id. Call autopilot_submit_plan_cluster or autopilot_submit_synthesis as the final action.", mode = BoundaryMode::Enforce)]
+#[acceptance_boundary(id = "planning.work-map.v1", producer = Producer::Model, visible = true, admits = "Plan compiler and synthesizer output must contain one or more executable implementation units only. Each unit kind must be exactly implementation. Never emit context-gate or verification units: unresolved context must be recorded as review-blocking evidence, and independent verification must be folded into exact criteria plus nonempty focused commands on the owning implementation unit. Each unit must have a nonempty objective, criteria, depends_on array, files array, commands array, and traceable links by real atom id. Call autopilot_submit_plan_cluster or autopilot_submit_synthesis as the final action.", mode = BoundaryMode::Enforce)]
 pub fn accept_work_map(raw: &str, runtime: &BoundaryRuntime) -> Result<String, Rejection> {
     let work_map = parse_model_payload::<WorkMap>(raw, runtime, "planning.work-map.v1")?;
     validate_work_map_shape(&work_map, runtime)?;
     Ok(raw.to_owned())
 }
-#[acceptance_boundary(id = "planning.plan-review.v1", producer = Producer::Model, visible = true, admits = "Plan review output must assign a verdict to each criterion using pass, blocker, advisory, fail, blocked, or needs-fix. It must include at least one verdict. Call autopilot_submit_review as the final action.", mode = BoundaryMode::Enforce)]
+#[acceptance_boundary(id = "planning.plan-review.v1", producer = Producer::Model, visible = true, admits = "Plan review output must assign exactly one verdict to each required approval criterion and no others: review.mandatory-input-accounting, review.authority-fidelity, review.completeness-and-traceability, review.internal-consistency-and-scheduling, review.context-sufficiency, review.verification-strength, review.forward-validation. Execution is approved only when all seven exact criteria pass; missing, duplicate, unknown, blocker, advisory, fail, blocked, or needs-fix verdicts block execution terminally for this run. Call autopilot_submit_review as the final action.", mode = BoundaryMode::Enforce)]
 pub fn accept_plan_review(raw: &str, runtime: &BoundaryRuntime) -> Result<String, Rejection> {
     let review = parse_model_payload::<PlanReview>(raw, runtime, "planning.plan-review.v1")?;
     validate_plan_review_shape(&review, runtime)?;
@@ -2188,6 +2197,62 @@ fn validate_work_map_shape(work_map: &WorkMap, runtime: &BoundaryRuntime) -> Res
                 "Attach criteria that make the unit verifiable.",
             )?;
         }
+        if unit.files.is_empty() {
+            reject_value(
+                runtime,
+                "planning.work-map.v1",
+                "units.files",
+                "one or more repository-relative paths",
+                "[]",
+                "Declare the exact path scope for this executable unit.",
+            )?;
+        }
+        let mut file_paths = BTreeSet::new();
+        for file in &unit.files {
+            let path = Path::new(&file.0);
+            let safe = !file.0.trim().is_empty()
+                && !file.0.contains('\\')
+                && !path.is_absolute()
+                && path
+                    .components()
+                    .all(|component| matches!(component, Component::Normal(_)))
+                && file_paths.insert(file.0.as_str());
+            if !safe {
+                reject_value(
+                    runtime,
+                    "planning.work-map.v1",
+                    "units.files",
+                    "unique normalized repository-relative paths",
+                    &file.0,
+                    "Remove absolute, parent, current-directory, empty, or duplicate path components.",
+                )?;
+            }
+        }
+        if unit.commands.is_empty() {
+            reject_value(
+                runtime,
+                "planning.work-map.v1",
+                "units.commands",
+                "one or more focused verification commands",
+                "[]",
+                "Fold verification into command obligations on the implementation unit.",
+            )?;
+        }
+        for command in &unit.commands {
+            if is_blank(&command.command) || is_blank(&command.expected) {
+                reject_value(
+                    runtime,
+                    "planning.work-map.v1",
+                    "units.commands",
+                    "non-empty command and expected outcome",
+                    &format!(
+                        "command={:?} expected={:?}",
+                        command.command, command.expected
+                    ),
+                    "State the focused command and expected outcome exactly.",
+                )?;
+            }
+        }
         if unit.links.is_empty() {
             reject_value(
                 runtime,
@@ -2206,27 +2271,34 @@ fn validate_plan_review_shape(
     review: &PlanReview,
     runtime: &BoundaryRuntime,
 ) -> Result<(), Rejection> {
-    if review.verdicts.is_empty() {
-        reject_value(
-            runtime,
-            "planning.plan-review.v1",
-            "verdicts",
-            "at least one criterion verdict",
-            "[]",
-            "Verdict each supplied review criterion.",
-        )?;
-    }
+    let required = REQUIRED_PLAN_REVIEW_CRITERIA
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let mut seen = BTreeSet::new();
     for verdict in &review.verdicts {
-        if is_blank(&verdict.criterion_id.0) {
+        let criterion = verdict.criterion_id.0.as_str();
+        if !required.contains(criterion) || !seen.insert(criterion) {
             reject_value(
                 runtime,
                 "planning.plan-review.v1",
                 "verdicts.criterion_id",
-                "non-empty criterion id",
-                &verdict.criterion_id.0,
-                "Name the criterion being reviewed.",
+                "each exact required review criterion exactly once",
+                criterion,
+                "Use only the seven package-declared review criterion ids without omissions or duplicates.",
             )?;
         }
+    }
+    let missing = required.difference(&seen).copied().collect::<Vec<_>>();
+    if !missing.is_empty() {
+        reject_value(
+            runtime,
+            "planning.plan-review.v1",
+            "verdicts",
+            "the complete exact required review criterion set",
+            &format!("missing={}", missing.join(",")),
+            "Verdict all seven package-declared review criteria in one submission.",
+        )?;
     }
     Ok(())
 }

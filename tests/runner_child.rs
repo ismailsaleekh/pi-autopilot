@@ -1,4 +1,5 @@
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#![recursion_limit = "256"]
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -9,10 +10,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use drivers::planning;
 use drivers::runner::{
-    child, planning_context_digest, planning_paths, role_tool_names, session_id_for,
-    settings_digest,
+    child, planning_context_digest, planning_paths, repository_authority_binding, role_tool_names,
+    session_id_for, settings_digest,
 };
 use drivers::seam::{self, CoreState};
+use drivers::vcs::GitVcs;
 use kernel::generated::{ContractId, Id, ModeId, SeamEnvelope, TaskDocument};
 use serde_json::{Value, json};
 use sha2::{Digest as ShaDigest, Sha256};
@@ -101,6 +103,63 @@ fn fake_pi_journey_writes_identity_carrier_and_isolated_exact_args() {
     assert_eq!(
         PathBuf::from(argv_record["cwd"].as_str().expect("cwd")),
         root
+    );
+}
+
+#[test]
+fn child_refuses_oversized_spec_and_prompt_before_parsing_or_launch() {
+    let spec_root = temp_root("runner-oversized-spec");
+    let oversized_spec = spec_root.join("oversized-spec.json");
+    fs::write(
+        &oversized_spec,
+        vec![b'x'; child::MAX_AGENT_RUN_SPEC_BYTES + 1],
+    )
+    .expect("oversized spec");
+    let spec_error = child::main(&["--spec".to_owned(), oversized_spec.display().to_string()])
+        .expect_err("oversized spec must be rejected before parsing");
+    assert!(
+        spec_error.contains("bounded read oversized"),
+        "{spec_error}"
+    );
+
+    let prompt_root = temp_root("runner-oversized-prompt");
+    let oversized_prompt = "x".repeat(child::MAX_RENDERED_PROMPT_BYTES + 1);
+    let prompt_spec = write_planning_spec_with_prompt(
+        &prompt_root,
+        |value| value,
+        "planning.task-atoms.v1",
+        "gpt-5.5",
+        &oversized_prompt,
+    );
+    let prompt_error = child::main(&["--spec".to_owned(), prompt_spec.display().to_string()])
+        .expect_err("oversized prompt must be rejected before launch");
+    assert!(
+        prompt_error.contains("bounded read oversized"),
+        "{prompt_error}"
+    );
+
+    let addon_root = temp_root("runner-oversized-addon");
+    let oversized_addon = addon_root.join("oversized-child-addon.ts");
+    let addon_spec = write_planning_spec(
+        &addon_root,
+        |mut value| {
+            value["runtime_extension_path"] = serde_json::json!(oversized_addon);
+            value["runtime_extension_digest"] = serde_json::json!("0".repeat(64));
+            value
+        },
+        "planning.task-atoms.v1",
+        "gpt-5.5",
+    );
+    fs::write(
+        &oversized_addon,
+        vec![b'x'; drivers::runner::CHILD_ADDON_MAX_BYTES + 1],
+    )
+    .expect("oversized child addon");
+    let addon_error = child::main(&["--spec".to_owned(), addon_spec.display().to_string()])
+        .expect_err("oversized child addon must be rejected before hashing");
+    assert!(
+        addon_error.contains("bounded read oversized"),
+        "{addon_error}"
     );
 }
 
@@ -534,6 +593,32 @@ fn terminal_tool_result_must_have_correlated_details_by_opaque_call_id() {
 }
 
 #[test]
+fn planning_child_rejects_missing_repository_manifest_binding() {
+    let root = temp_root("runner-missing-repo-manifest");
+    write_fake_pi(
+        &root,
+        &success_fake_pi(&task_atoms_output("TASK-A.md", "AUTHORITY-A-SENTINEL")),
+    );
+    let spec = write_planning_spec(
+        &root,
+        |mut value| {
+            value
+                .as_object_mut()
+                .unwrap()
+                .remove("repository_manifest_path");
+            value
+        },
+        "planning.task-atoms.v1",
+        "gpt-5.5",
+    );
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("missing repository manifest binding must fail");
+    assert!(error.contains("repository_manifest_path"), "{error}");
+}
+
+#[test]
 fn settings_digest_tracks_the_declared_launch_channel() {
     assert_ne!(settings_digest(true), settings_digest(false));
 }
@@ -561,7 +646,7 @@ fn real_core_agent_run_accepts_variadic_authority_spec() {
         .collect::<Vec<_>>();
     let context_documents = vec![context_document.clone()];
     let expected_context_digest =
-        planning_context_digest_for_spec("set-a", &authority_documents, &context_documents);
+        planning_context_digest_for_spec(&root, "set-a", &authority_documents, &context_documents);
     let spec = write_planning_spec(
         &root,
         |mut value| {
@@ -1596,8 +1681,10 @@ fn write_planning_spec_inner(
         "CONTEXT-SENTINEL-UNIQUE",
     );
     let context_documents = vec![context_document.clone()];
+    let repo_binding =
+        repository_authority_binding(root, "main").expect("repository authority binding");
     let context_digest =
-        planning_context_digest_for_spec("set-a", &authority_documents, &context_documents);
+        planning_context_digest_for_spec(root, "set-a", &authority_documents, &context_documents);
     let session_id = session_id_for(
         &Id(run_id.to_owned()),
         &Id("main".to_owned()),
@@ -1642,6 +1729,10 @@ fn write_planning_spec_inner(
         "authority_documents":authority_documents,
         "context_document":context_document,
         "context_documents":context_documents,
+        "repository_manifest_path":repo_binding.path,
+        "repository_manifest_digest":repo_binding.digest,
+        "repository_head_commit":repo_binding.manifest.head_commit,
+        "repository_head_tree":repo_binding.manifest.head_tree,
         "runtime_extension_path":child_addon_path(),
         "runtime_extension_digest":sha256_hex(&fs::read(child_addon_path()).expect("child addon")),
         "terminal_profile_id":"planning.task-atoms.v1:autopilot_submit_atoms",
@@ -1718,11 +1809,11 @@ const requestedTools = process.argv[toolsIndex + 1].split(',').filter(Boolean);
 const submitBindings = {{
   autopilot_submit_atoms: ['planning.task-atoms.v1', '77d000b816b3c14dcdefeba0c23d4f4f9f8bedaf5b281081f1cea138e525e091'],
   autopilot_submit_context: ['planning.scout-dossier.v1', '30f69b47c83079ce00ea22cab308e9a26eb7b24cae045aa1dd008221b45da618'],
-  autopilot_submit_plan_cluster: ['planning.work-map.v1', 'd60fa316fa8d5f2baf1d1a764028bdaf5676e094ec23710c53917e760cfe939a'],
+  autopilot_submit_plan_cluster: ['planning.work-map.v1', 'f4b774b90b653568c38a0971e9472e5aa3dae80c56ea7dd7f3136b5b5f5376f2'],
   autopilot_submit_resolution: ['planning.questions.v1', 'a716699618f28675f8872ff8d039c40e8443c07cd6a94f907921ee2b9dd88abc'],
   autopilot_submit_review: ['planning.plan-review.v1', '073f22c10d42166d5ec5d0a6465a1fa8f0df8fc1af2ce6a0702bed9b955786d8'],
   autopilot_submit_scout_report: ['planning.scout-dossier.v1', '30f69b47c83079ce00ea22cab308e9a26eb7b24cae045aa1dd008221b45da618'],
-  autopilot_submit_synthesis: ['planning.work-map.v1', 'd60fa316fa8d5f2baf1d1a764028bdaf5676e094ec23710c53917e760cfe939a'],
+  autopilot_submit_synthesis: ['planning.work-map.v1', 'f4b774b90b653568c38a0971e9472e5aa3dae80c56ea7dd7f3136b5b5f5376f2'],
 }};
 let activeTools = requestedTools.filter(name => !name.startsWith('autopilot_submit_') || (addonPath !== undefined && submitBindings[name]));
 const terminalTool = activeTools.find(name => name.startsWith('autopilot_submit_'));
@@ -2422,7 +2513,18 @@ fn temp_root(name: &str) -> PathBuf {
         .as_nanos();
     let root = std::env::temp_dir().join(format!("pi-autopilot-{name}-{nanos}"));
     fs::create_dir_all(&root).expect("temp root");
-    fs::canonicalize(&root).expect("canonical temp root")
+    let root = fs::canonicalize(&root).expect("canonical temp root");
+    let vcs = GitVcs::new(root.parent().expect("temp parent"));
+    vcs.init_fixture(&root).expect("fixture git repo");
+    fs::write(
+        root.join(".gitignore"),
+        ".pi/autopilot/\n.pi/tasks/\nrun-sessions/\npi\n*.json\n*.jsonl\n*.txt\nterminalmiss-prompts.jsonl\nstream-stats.json\nreal-pi-stream-stats.json\n",
+    )
+    .expect("gitignore");
+    vcs.stage_all(&root).expect("stage fixture root");
+    vcs.snapshot(&root, "fixture root")
+        .expect("commit fixture root");
+    root
 }
 
 const SKILLS_IDENTITY: &str = "agent-run-skills:disabled:v1";
@@ -2452,6 +2554,7 @@ fn task_document_digest(class: &str, authority_set_id: &str, body: &str) -> Stri
 }
 
 fn planning_context_digest_for_spec(
+    root: &Path,
     authority_set_id: &str,
     authority_documents: &[Value],
     context_documents: &[Value],
@@ -2462,8 +2565,14 @@ fn planning_context_digest_for_spec(
     let context_documents =
         serde_json::from_value::<Vec<TaskDocument>>(Value::Array(context_documents.to_vec()))
             .expect("context documents match agent-run spec schema");
-    planning_context_digest(authority_set_id, &authority_documents, &context_documents)
-        .expect("planning context digest")
+    let repo_authority = repository_authority_binding(root, "main").expect("repository authority");
+    planning_context_digest(
+        authority_set_id,
+        &authority_documents,
+        &context_documents,
+        &repo_authority,
+    )
+    .expect("planning context digest")
 }
 
 fn extract_task_source_manifest_json(text: &str) -> String {

@@ -51,7 +51,16 @@ const validSamples: Record<string, Record<string, unknown>> = {
     questions: [{ class: "dod-hole", evidence: "criterion missing", consequence: "cannot validate" }],
   },
   "planning.work-map.v1": {
-    units: [{ id: "unit-1", objective: "fix metadata", criteria: ["lock updated"], links: ["atom-1"] }],
+    units: [{
+      id: "unit-1",
+      kind: "implementation",
+      objective: "fix metadata",
+      criteria: ["lock updated"],
+      depends_on: [],
+      files: ["package.json"],
+      commands: [{ command: "npm test", expected: "exit 0" }],
+      links: ["atom-1"],
+    }],
   },
   "planning.plan-review.v1": {
     verdicts: [{ criterion_id: "c-1", verdict: "pass", finding: "covered" }],

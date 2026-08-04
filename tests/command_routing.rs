@@ -158,6 +158,209 @@ fn command_routing_all_public_commands_reach_driver_surfaces() {
 }
 
 #[test]
+fn planning_manifest_binds_real_head_source_anchor_and_rejects_dirty_repo() {
+    let root = temp_dir("source-anchor");
+    let repo = root.join("repo");
+    let vcs = GitVcs::new(&root);
+    vcs.init_fixture(&repo).expect("fixture repo");
+    let task_paths = write_task_pack(&repo, "set-source-anchor");
+    fs::write(
+        repo.join(".gitignore"),
+        ".pi/autopilot/\n.pi/tasks/\ntarget/\n",
+    )
+    .expect("package runtime ignores");
+    vcs.stage_all(&repo).expect("stage task");
+    vcs.snapshot(&repo, "task commit").expect("task commit");
+    let head = git_stdout(&repo, &["rev-parse", "--verify", "HEAD^{commit}"]);
+    fs::create_dir_all(repo.join(".pi/autopilot/package-owned")).expect("autopilot state");
+    fs::create_dir_all(repo.join(".pi/tasks/package-owned")).expect("task state");
+    fs::write(repo.join(".pi/autopilot/package-owned/state.json"), "{}\n")
+        .expect("autopilot state file");
+    fs::write(repo.join(".pi/tasks/package-owned/task.json"), "{}\n").expect("task state file");
+    let plan = send_with_log(
+        &format!("autopilot-plan main {}", task_paths.join(" ")),
+        &root.join("events.jsonl"),
+        Some(&repo),
+    );
+    let wave = planning_wave_payload(plan);
+    let first = &wave.actions[0];
+    let spec_path = repo
+        .join(".pi/autopilot/main/planning/specs")
+        .join(format!("{}.json", first.assignment_id.0));
+    let spec: serde_json::Value =
+        serde_json::from_slice(&fs::read(&spec_path).expect("spec bytes")).expect("spec json");
+    assert_eq!(spec["repository_head_commit"], head.trim());
+    let repository_manifest_path = spec["repository_manifest_path"]
+        .as_str()
+        .expect("repo manifest path");
+    let repository_manifest_digest = spec["repository_manifest_digest"]
+        .as_str()
+        .expect("repo manifest digest");
+    let manifest_bytes = fs::read(repository_manifest_path).expect("repo manifest bytes");
+    assert_eq!(sha256_hex(&manifest_bytes), repository_manifest_digest);
+    let repository_manifest: serde_json::Value =
+        serde_json::from_slice(&manifest_bytes).expect("repo manifest json");
+    assert_eq!(repository_manifest["head_commit"], head.trim());
+    assert_eq!(
+        repository_manifest["repo_root"],
+        fs::canonicalize(&repo).unwrap().display().to_string()
+    );
+    assert!(
+        repository_manifest["tracked_sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|source| source["whole_file_anchor"]
+                .as_str()
+                .is_some_and(|anchor| anchor.contains("#whole-file")))
+    );
+    let prompt_path = repo
+        .join(".pi/autopilot/main/planning/prompts")
+        .join(format!("{}.md", first.assignment_id.0));
+    let prompt = fs::read_to_string(prompt_path).expect("planning prompt");
+    assert!(
+        prompt.contains(&format!("\"git_commit\": \"{}\"", head.trim())),
+        "{prompt}"
+    );
+    assert!(prompt.contains(repository_manifest_digest), "{prompt}");
+    assert!(prompt.contains("source-anchor"), "{prompt}");
+
+    let non_git = temp_dir("source-anchor-non-git");
+    assert!(runner::repository_authority(&non_git).is_err());
+
+    let foreign_root = temp_dir("source-anchor-foreign-pi");
+    let foreign_repo = foreign_root.join("repo");
+    let vcs = GitVcs::new(&foreign_root);
+    vcs.init_fixture(&foreign_repo).expect("fixture repo");
+    fs::create_dir_all(foreign_repo.join(".pi/foreign")).expect("foreign pi dir");
+    fs::write(foreign_repo.join(".pi/foreign/evidence.txt"), "foreign\n").expect("foreign pi file");
+    let foreign_error = runner::repository_authority(&foreign_repo)
+        .expect_err("foreign untracked .pi paths must not inherit package runtime authority");
+    assert!(
+        format!("{foreign_error:?}").contains(".pi/foreign/evidence.txt"),
+        "{foreign_error:?}"
+    );
+
+    let ignored_foreign_root = temp_dir("source-anchor-ignored-foreign-pi");
+    let ignored_foreign_repo = ignored_foreign_root.join("repo");
+    let vcs = GitVcs::new(&ignored_foreign_root);
+    vcs.init_fixture(&ignored_foreign_repo)
+        .expect("fixture repo");
+    fs::write(
+        ignored_foreign_repo.join(".gitignore"),
+        ".pi/foreign/\ntarget/\n",
+    )
+    .expect("gitignore");
+    git_stdout(&ignored_foreign_repo, &["add", ".gitignore"]);
+    git_stdout(
+        &ignored_foreign_repo,
+        &["commit", "-m", "ignore foreign pi fixture"],
+    );
+    fs::create_dir_all(ignored_foreign_repo.join(".pi/foreign")).expect("ignored foreign pi dir");
+    fs::write(
+        ignored_foreign_repo.join(".pi/foreign/evidence.txt"),
+        "ignored foreign\n",
+    )
+    .expect("ignored foreign pi file");
+    fs::create_dir_all(ignored_foreign_repo.join("target")).expect("ordinary ignored build dir");
+    fs::write(
+        ignored_foreign_repo.join("target/residue"),
+        "ignored build\n",
+    )
+    .expect("ordinary ignored build file");
+    let ignored_foreign_error = runner::repository_authority(&ignored_foreign_repo)
+        .expect_err("ignored foreign .pi paths must not inherit package runtime authority");
+    assert!(
+        format!("{ignored_foreign_error:?}").contains(".pi/foreign"),
+        "{ignored_foreign_error:?}"
+    );
+
+    let dirty_root = temp_dir("source-anchor-dirty");
+    let dirty_repo = dirty_root.join("repo");
+    let vcs = GitVcs::new(&dirty_root);
+    vcs.init_fixture(&dirty_repo).expect("fixture repo");
+    let task_paths = write_task_pack(&dirty_repo, "set-source-anchor-dirty");
+    fs::write(dirty_repo.join("README.md"), "clean\n").expect("readme");
+    vcs.stage_all(&dirty_repo).expect("stage task");
+    vcs.snapshot(&dirty_repo, "task commit")
+        .expect("task commit");
+    fs::write(dirty_repo.join("README.md"), "dirty tracked mutation\n").expect("dirty");
+    fs::write(dirty_repo.join("UNTRACKED.txt"), "nonignored untracked\n").expect("untracked");
+    fs::create_dir_all(dirty_repo.join(".pi/foreign")).expect("foreign pi dir");
+    fs::write(dirty_repo.join(".pi/foreign/evidence.txt"), "foreign\n").expect("foreign pi file");
+    let dirty = send_with_log(
+        &format!("autopilot-plan main {}", task_paths.join(" ")),
+        &dirty_root.join("events.jsonl"),
+        Some(&dirty_repo),
+    );
+    let dirty_status = done_status(&dirty);
+    assert!(
+        dirty_status.contains("repository authority requires clean status"),
+        "{dirty_status}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn repository_authority_rejects_tracked_symlink_sources() {
+    let root = temp_dir("source-anchor-symlink");
+    let repo = root.join("repo");
+    let vcs = GitVcs::new(&root);
+    vcs.init_fixture(&repo).expect("fixture repo");
+    std::os::unix::fs::symlink("README.md", repo.join("tracked-link")).expect("symlink");
+    git_stdout(&repo, &["add", "tracked-link"]);
+    git_stdout(&repo, &["commit", "-m", "tracked symlink"]);
+
+    let error = runner::repository_authority(&repo).expect_err("tracked symlink must be refused");
+    let detail = format!("{error:?}");
+    assert!(detail.contains("120000"), "{detail}");
+    assert!(detail.contains("symlink"), "{detail}");
+}
+
+#[test]
+fn plan_review_refuses_tampered_repository_authority_manifest() {
+    let root = temp_dir("repo-authority-tamper");
+    let repo = root.join("repo");
+    let vcs = GitVcs::new(&root);
+    vcs.init_fixture(&repo).expect("fixture repo");
+    let task_paths = write_task_pack(&repo, "set-repo-authority-tamper");
+    vcs.stage_all(&repo).expect("stage task");
+    vcs.snapshot(&repo, "task commit").expect("task commit");
+    let event_log = root.join("events.jsonl");
+
+    let plan = send_with_log(
+        &format!("autopilot-plan main {}", task_paths.join(" ")),
+        &event_log,
+        Some(&repo),
+    );
+    let reviewer = complete_planning_until_assignment(
+        planning_wave_payload(plan),
+        &event_log,
+        &repo,
+        "planning-main-plan-reviewer-01",
+    );
+    let spec_path = repo
+        .join(".pi/autopilot/main/planning/specs")
+        .join(format!("{}.json", reviewer.assignment_id.0));
+    let spec: serde_json::Value =
+        serde_json::from_slice(&fs::read(&spec_path).expect("spec")).expect("spec json");
+    let manifest_path = spec["repository_manifest_path"]
+        .as_str()
+        .expect("manifest path");
+    let mut manifest = fs::read_to_string(manifest_path).expect("manifest");
+    manifest.push('\n');
+    fs::write(manifest_path, manifest).expect("tamper manifest");
+
+    let refused = send_planning_completion(&reviewer, &event_log, &repo, 930);
+    let status = done_status(&refused);
+    assert!(
+        status.contains("repository authority digest drift"),
+        "{status}"
+    );
+    assert!(!repo.join(".pi/autopilot/main/approved-plan.json").exists());
+}
+
+#[test]
 fn one_unit_work_map_reaches_ready_and_dispatches_one_lane() {
     let root = temp_dir("one-unit-plan");
     let repo = root.join("repo");
@@ -242,6 +445,54 @@ fn failed_plan_review_projection_is_loud_unconsumed_and_retryable() {
     let retried = send_planning_completion(&spawn_payload, &event_log, &repo, 901);
     assert!(done_status(&retried).contains("ready-to-execute:workstream=main"));
     assert!(repo.join(".pi/autopilot/main/approved-plan.json").exists());
+}
+
+#[test]
+fn blocked_plan_review_is_terminal_non_ready_and_not_retryable() {
+    let root = temp_dir("blocked-plan-review");
+    let repo = root.join("repo");
+    let vcs = GitVcs::new(&root);
+    vcs.init_fixture(&repo).expect("fixture repo");
+    let task_paths = write_task_pack(&repo, "set-blocked-plan-review");
+    vcs.stage_all(&repo).expect("stage task");
+    vcs.snapshot(&repo, "task commit").expect("task commit");
+    let event_log = root.join("events.jsonl");
+
+    let plan = send_with_log(
+        &format!("autopilot-plan main {}", task_paths.join(" ")),
+        &event_log,
+        Some(&repo),
+    );
+    let reviewer = complete_planning_until_assignment(
+        planning_wave_payload(plan),
+        &event_log,
+        &repo,
+        "planning-main-plan-reviewer-01",
+    );
+    let blocked_raw = serde_json::json!({"verdicts": drivers::seam::REQUIRED_PLAN_REVIEW_CRITERIA.iter().map(|criterion| {
+        let verdict = if matches!(*criterion, "review.context-sufficiency" | "review.forward-validation") { "blocked" } else { "pass" };
+        serde_json::json!({"criterion_id": criterion, "verdict": verdict})
+    }).collect::<Vec<_>>()}).to_string();
+    let blocked =
+        send_planning_completion_with_raw(&reviewer, &event_log, &repo, 910, &blocked_raw);
+    let status = done_status(&blocked);
+    assert!(status.contains("planning:blocked:"), "{status}");
+    assert!(!repo.join(".pi/autopilot/main/approved-plan.json").exists());
+    let events = fs::read_to_string(&event_log).expect("events");
+    assert!(!events.contains("planning:ready-to-execute"));
+    assert!(events.contains(
+        "terminal-consumed:action-planning-main-plan-reviewer-01:planning-main-plan-reviewer-01"
+    ));
+
+    let retried = send_planning_completion(&reviewer, &event_log, &repo, 920);
+    assert!(done_status(&retried).contains("rejection:terminal-binding:already-consumed"));
+    assert!(!repo.join(".pi/autopilot/main/approved-plan.json").exists());
+    let replayed = send_with_log(
+        &format!("autopilot-plan main {}", task_paths.join(" ")),
+        &event_log,
+        Some(&repo),
+    );
+    assert!(done_status(&replayed).contains("planning:blocked:"));
 }
 
 #[test]
@@ -701,11 +952,39 @@ fn send_planning_completion(
     send_planning_completion_with_work_map(action, event_log, cwd, id, None)
 }
 
+fn send_planning_completion_with_raw(
+    action: &BackgroundAction,
+    event_log: &Path,
+    cwd: &Path,
+    id: u64,
+    raw_output: &str,
+) -> SeamEnvelope {
+    send_planning_completion_inner(
+        action,
+        event_log,
+        cwd,
+        id,
+        Some(raw_output.to_owned()),
+        None,
+    )
+}
+
 fn send_planning_completion_with_work_map(
     action: &BackgroundAction,
     event_log: &Path,
     cwd: &Path,
     id: u64,
+    work_map_override: Option<&str>,
+) -> SeamEnvelope {
+    send_planning_completion_inner(action, event_log, cwd, id, None, work_map_override)
+}
+
+fn send_planning_completion_inner(
+    action: &BackgroundAction,
+    event_log: &Path,
+    cwd: &Path,
+    id: u64,
+    raw_override: Option<String>,
     work_map_override: Option<&str>,
 ) -> SeamEnvelope {
     let cwd = fs::canonicalize(cwd).expect("canonical cwd");
@@ -716,8 +995,9 @@ fn send_planning_completion_with_work_map(
     let spec_text = fs::read_to_string(&spec_path).expect("planning spec");
     let spec: serde_json::Value = serde_json::from_str(&spec_text).expect("planning spec json");
     let boundary_id = spec["boundary_id"].as_str().expect("boundary");
-    let raw_output =
-        common::planning_replay_output(boundary_id, &spec, &spec_path, work_map_override);
+    let raw_output = raw_override.unwrap_or_else(|| {
+        common::planning_replay_output(boundary_id, &spec, &spec_path, work_map_override)
+    });
     let carrier_path = cwd
         .join(".pi/autopilot/main/planning/carriers")
         .join(format!("{assignment_id}.json"));
@@ -780,7 +1060,7 @@ fn send_planning_completion_with_work_map(
 }
 
 fn one_unit_work_map() -> String {
-    serde_json::json!({"units":[{"id":"U1","objective":"Deliver the one accepted work unit.","criteria":["The focused acceptance path passes."],"links":["W1"]}]}).to_string()
+    serde_json::json!({"units":[{"id":"U1","kind":"implementation","objective":"Deliver the one accepted work unit.","criteria":["The focused acceptance path passes."],"depends_on":[],"files":["src/lib.rs"],"commands":[{"command":"cargo test -q","expected":"pass"}],"links":["W1"]}]}).to_string()
 }
 
 fn sha256_hex(data: &[u8]) -> String {
@@ -907,24 +1187,32 @@ fn complete_run_repo(root: &Path, workstream: &str, units: usize, _closed: &[&st
     let vcs = GitVcs::new(root);
     vcs.init_fixture(&repo).expect("fixture repo");
     fs::create_dir_all(repo.join("src")).expect("src dir");
+    fs::write(repo.join(".gitignore"), ".pi/autopilot/\n.pi/tasks/\n").expect("gitignore");
     fs::write(
         repo.join("src/lib.rs"),
         "pub fn health_status() -> &'static str { \"ok\" }\n",
     )
     .expect("lib");
-    git_stdout(&repo, &["add", "src/lib.rs"]);
+    git_stdout(&repo, &["add", ".gitignore", "src/lib.rs"]);
     git_stdout(&repo, &["commit", "-m", "fixture implementation"]);
+    let repo_authority =
+        runner::repository_authority_binding(&repo, workstream).expect("repo authority");
     fs::create_dir_all(repo.join(".pi/autopilot").join(workstream)).expect("autopilot dir");
     let approved_units = (1..=units)
         .map(|index| {
             serde_json::json!({
                 "id": format!("U{index}"),
+                "kind": "implementation",
+                "objective": format!("deliver U{index}"),
                 "operator_order": index,
                 "decisions": [],
                 "criteria": [format!("AC-U{index}-1")],
+                "criterion_text": [{"id": format!("AC-U{index}-1"), "text": format!("criterion text U{index}")}],
                 "dependencies": [],
                 "predecessor_forward_criteria": [],
-                "downstream_release_edges": [format!("EDGE{index}")]
+                "downstream_release_edges": [format!("EDGE{index}")],
+                "files": ["src/lib.rs"],
+                "commands": [{"command":"cargo test -q","expected":"pass"}]
             })
         })
         .collect::<Vec<_>>();
@@ -932,8 +1220,16 @@ fn complete_run_repo(root: &Path, workstream: &str, units: usize, _closed: &[&st
         repo.join(".pi/autopilot")
             .join(workstream)
             .join("approved-plan.json"),
-        serde_json::to_vec_pretty(&serde_json::json!({"units": approved_units}))
-            .expect("approved json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "repository_authority": {
+                "manifest_path": repo_authority.path,
+                "manifest_digest": repo_authority.digest,
+                "head_commit": repo_authority.manifest.head_commit,
+                "head_tree": repo_authority.manifest.head_tree,
+            },
+            "units": approved_units
+        }))
+        .expect("approved json"),
     )
     .expect("approved plan");
     let head = git_stdout(&repo, &["rev-parse", "--verify", "HEAD"]);
@@ -979,6 +1275,12 @@ fn append_active_binding(event_log: &Path, repo: &Path, workstream: &str) {
         context_digest: "digest".to_owned(),
         skills_digest: "digest".to_owned(),
         subscription_digest: "digest".to_owned(),
+        assignment_path: None,
+        assignment_digest: None,
+        repository_manifest_path: None,
+        repository_manifest_digest: None,
+        repository_head_commit: None,
+        repository_head_tree: None,
         mode_parameter: None,
         lane_id: Some(Id("L1".to_owned())),
         attempt: Some(1),

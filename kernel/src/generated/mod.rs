@@ -462,6 +462,13 @@ pub enum LaneState {
     RepairQueued,
 }
 
+/// Closed work-map unit disposition. Only implementation units are executable delivery work. Context gates are review blockers and verification is carried as criteria plus commands on implementation units.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlanUnitKind {
+    #[serde(rename = "implementation")]
+    Implementation,
+}
+
 /// Closed task atom kinds used by the task-extractor role.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PlanningAtomKind {
@@ -902,6 +909,22 @@ pub struct AgentRunSpec {
     #[serde(rename = "planning_inputs_digest")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub planning_inputs_digest: Option<Digest>,
+    /// Required for fresh planning assignments: absolute path to the package-owned repository authority manifest bound at issue time. Historical specs may omit it only for inspection.
+    #[serde(rename = "repository_manifest_path")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository_manifest_path: Option<Path>,
+    /// Required for fresh planning assignments: SHA-256 of repository_manifest_path bytes.
+    #[serde(rename = "repository_manifest_digest")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository_manifest_digest: Option<Digest>,
+    /// Required for fresh planning assignments: exact HEAD commit recorded in the repository authority manifest.
+    #[serde(rename = "repository_head_commit")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository_head_commit: Option<Sha>,
+    /// Required for fresh planning assignments: exact HEAD tree recorded in the repository authority manifest.
+    #[serde(rename = "repository_head_tree")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository_head_tree: Option<Sha>,
 }
 
 /// Allocator model proposal; package validates totality, dependencies, cap, and no invented ownership (D76 §7).
@@ -2632,6 +2655,8 @@ pub struct ValidationContextV2Candidate {
 pub struct ValidationContextCriterion {
     #[serde(rename = "criterion_id")]
     pub criterion_id: Id,
+    #[serde(rename = "requirement_text")]
+    pub requirement_text: String,
     #[serde(rename = "mandatory")]
     pub mandatory: bool,
     #[serde(rename = "covered_paths")]
@@ -2640,8 +2665,23 @@ pub struct ValidationContextCriterion {
     pub semantic_surface_ids: Vec<Id>,
     #[serde(rename = "forward_edge_ids")]
     pub forward_edge_ids: Vec<Id>,
+    /// Exact focused command obligations inherited from the owning approved unit.
+    #[serde(rename = "commands")]
+    pub commands: Vec<ValidationContextCommand>,
     #[serde(rename = "witness_ids")]
     pub witness_ids: Vec<Id>,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidationContextCommand {
+    #[serde(rename = "command_id")]
+    pub command_id: Id,
+    #[serde(rename = "command")]
+    pub command: String,
+    #[serde(rename = "expected")]
+    pub expected: String,
 }
 
 /// Generated record item.
@@ -2854,7 +2894,7 @@ pub struct CriterionResult {
 /// Model-facing work map. Link values are checked against the accepted atom registry by the planning driver.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkMap {
-    /// Executable plan units.
+    /// Executable implementation units only.
     #[serde(rename = "units")]
     pub units: Vec<PlanUnit>,
 }
@@ -2864,13 +2904,34 @@ pub struct WorkMap {
 pub struct PlanUnit {
     #[serde(rename = "id")]
     pub id: Id,
+    /// Closed delivery disposition: the only legal value is implementation. Context gates belong in non-pass plan review evidence; verification belongs in criteria and commands.
+    #[serde(rename = "kind")]
+    pub kind: PlanUnitKind,
     #[serde(rename = "objective")]
     pub objective: String,
     #[serde(rename = "criteria")]
     pub criteria: Vec<String>,
+    /// Exact declared predecessor unit ids; package must never invent positional dependencies.
+    #[serde(rename = "depends_on")]
+    pub depends_on: Vec<Id>,
+    /// Nonempty declared relevant path scope for this executable delivery unit.
+    #[serde(rename = "files")]
+    pub files: Vec<Path>,
+    /// Nonempty focused verification commands/tests tied to this unit.
+    #[serde(rename = "commands")]
+    pub commands: Vec<PlanUnitCommand>,
     /// Atom ids accepted from task_atoms.
     #[serde(rename = "links")]
     pub links: Vec<Id>,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanUnitCommand {
+    #[serde(rename = "command")]
+    pub command: String,
+    #[serde(rename = "expected")]
+    pub expected: String,
 }
 
 /// D78 §3.2 — command complete; Host returns to idle.
@@ -3050,13 +3111,13 @@ pub const DELIVERY_RESULT_ADMITS: &str = "Submit exactly one terminal delivery c
 pub const DELIVERY_SUBMISSION_V2_ADMITS: &str = "Call autopilot_emit_status exactly once with the actual changed paths, execution audit reference, focused evidence references, terminal status, and every hard-boundary violation. Do not include assignment or package identity.";
 pub const FINDING_ADMITS: &str = "For each material issue, record one effect: forward-blocking, closure-blocking-forward-safe, or advisory. Tie the finding to exact criteria or forward edges and evidence. Do not use severity alone to decide scheduling, do not hide a mandatory blocker as advisory, and do not report a source repair requirement without the evidence that makes it mandatory.";
 pub const FINDING_V2_ADMITS: &str = "For each material issue, emit one deterministic finding id, classify kind/effect honestly, tie it to declared criteria/edges/evidence, and never hide a required blocker as advisory.";
-pub const PLAN_REVIEW_ADMITS: &str = "Plan review output must assign a verdict to each criterion using pass, blocker, advisory, fail, blocked, or needs-fix. It must include at least one verdict. Call autopilot_submit_review as the final action.";
+pub const PLAN_REVIEW_ADMITS: &str = "Plan review output must assign exactly one verdict to each required approval criterion and no others: review.mandatory-input-accounting, review.authority-fidelity, review.completeness-and-traceability, review.internal-consistency-and-scheduling, review.context-sufficiency, review.verification-strength, review.forward-validation. Execution is approved only when all seven exact criteria pass; missing, duplicate, unknown, blocker, advisory, fail, blocked, or needs-fix verdicts block execution terminally for this run. Call autopilot_submit_review as the final action.";
 pub const QUESTIONS_ADMITS: &str = "Question output must be an explicit questions array, which may be empty, or structured nominations. Each nomination must include class, evidence, and consequence. The class field is closed to: invalidated-decision, missing-material-decision, material-underdetermination, dod-hole, unsafe-irreversible. Call autopilot_submit_resolution as the final action.";
 pub const SCOUT_DOSSIER_ADMITS: &str = "Repository scout and dossier output must cite current evidence and avoid work planning. Call autopilot_submit_scout_report as the final action with findings containing path, observation, and evidence_ref. A context-curation assignment calls autopilot_submit_context instead, with the same findings shape.";
 pub const TASK_ATOMS_ADMITS: &str = "Task extractor output must use the exact runner-issued atom id prefix for every atoms[].id. New model submissions must name operator-task atoms with sources copied as exact decoded JSON sources[].source strings from the runtime-supplied package-authoritative task:// source manifest, and include no repository findings. Package-derived legacy aliases remain accepted only for compatibility; arbitrary values and prefix matches are never accepted. Call autopilot_submit_atoms as the final action with atoms containing id, kind, text, and sources.";
 pub const VALIDATION_SUBMISSION_V2_ADMITS: &str = "Call autopilot_emit_status exactly once with this closed JSON object. Verdict every required criterion exactly once, cite only declared evidence refs, embed every finding, and do not claim PASS/READY when Core would compute a material blocker.";
 pub const VALIDATION_VERDICT_ADMITS: &str = "Verdict every required criterion independently as PASS, FAIL, or BLOCKED, and attach evidence refs, finding refs, covered paths, semantic surfaces, and forward-edge ids. Do not issue an overall PASS while any required criterion is unverdicted, stale, failed, or blocked. Use FORWARD_READY, FORWARD_BLOCKED, or BLOCKED only for forward validation, and PASS, NEEDS_FIX, or BLOCKED only for closure/final validation.";
-pub const WORK_MAP_ADMITS: &str = "Plan compiler and synthesizer output must contain one or more units. Each unit must have an objective, acceptance criteria, and traceable links by real atom id. Call autopilot_submit_plan_cluster or autopilot_submit_synthesis as the final action.";
+pub const WORK_MAP_ADMITS: &str = "Plan compiler and synthesizer output must contain one or more executable implementation units only. Each unit kind must be exactly implementation. Never emit context-gate or verification units: unresolved context must be recorded as review-blocking evidence, and independent verification must be folded into exact criteria plus nonempty focused commands on the owning implementation unit. Each unit must have a nonempty objective, criteria, depends_on array, files array, commands array, and traceable links by real atom id. Call autopilot_submit_plan_cluster or autopilot_submit_synthesis as the final action.";
 
 pub const SUBMIT_TOOLS: [(&str, &str, &str); 7] = [
     (
@@ -3072,7 +3133,7 @@ pub const SUBMIT_TOOLS: [(&str, &str, &str); 7] = [
     (
         "autopilot_submit_plan_cluster",
         "planning.work-map.v1",
-        "d60fa316fa8d5f2baf1d1a764028bdaf5676e094ec23710c53917e760cfe939a",
+        "f4b774b90b653568c38a0971e9472e5aa3dae80c56ea7dd7f3136b5b5f5376f2",
     ),
     (
         "autopilot_submit_resolution",
@@ -3092,7 +3153,7 @@ pub const SUBMIT_TOOLS: [(&str, &str, &str); 7] = [
     (
         "autopilot_submit_synthesis",
         "planning.work-map.v1",
-        "d60fa316fa8d5f2baf1d1a764028bdaf5676e094ec23710c53917e760cfe939a",
+        "f4b774b90b653568c38a0971e9472e5aa3dae80c56ea7dd7f3136b5b5f5376f2",
     ),
 ];
 
@@ -3144,14 +3205,14 @@ pub const TERMINAL_PROFILES: [(&str, &str, &str, &str, &str); 9] = [
         "autopilot_submit_plan_cluster",
         "planning.work-map.v1",
         "planning.work-map.v1",
-        "d60fa316fa8d5f2baf1d1a764028bdaf5676e094ec23710c53917e760cfe939a",
+        "f4b774b90b653568c38a0971e9472e5aa3dae80c56ea7dd7f3136b5b5f5376f2",
     ),
     (
         "planning.work-map.v1:autopilot_submit_synthesis",
         "autopilot_submit_synthesis",
         "planning.work-map.v1",
         "planning.work-map.v1",
-        "d60fa316fa8d5f2baf1d1a764028bdaf5676e094ec23710c53917e760cfe939a",
+        "f4b774b90b653568c38a0971e9472e5aa3dae80c56ea7dd7f3136b5b5f5376f2",
     ),
     (
         "validation-status.v2",

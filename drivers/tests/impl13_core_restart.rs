@@ -15,6 +15,7 @@ fn release_core_reemits_unacknowledged_planning_wave_after_restart() {
     let repo = temp_repo("impl13-preack-restart");
     let event_log = repo.join("events.jsonl");
     write_task_pack(&repo, "impl13-auth");
+    fs::write(repo.join(".gitignore"), "events.jsonl\n").expect("write event-log ignore");
     git(&repo, &["init"]);
     git(&repo, &["config", "user.email", "impl13@example.invalid"]);
     git(&repo, &["config", "user.name", "Impl 13"]);

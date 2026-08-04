@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -23,6 +23,10 @@ use sha2::{Digest as ShaDigest, Sha256};
 
 const DEFAULT_MAX_PI_STDOUT_BYTES: usize = 1024 * 1024;
 const DEFAULT_MAX_PI_STDERR_BYTES: usize = 256 * 1024;
+pub const MAX_AGENT_RUN_SPEC_BYTES: usize = 2 << 20;
+pub const MAX_RENDERED_PROMPT_BYTES: usize = 4 << 20;
+pub const MAX_VALIDATION_ARTIFACT_BYTES: usize = 2 << 20;
+const MAX_STARTUP_VALIDATION_MARKER_BYTES: usize = 64 << 10;
 const MAX_VALUE_ATTEMPTS: u32 = 3;
 const RUNTIME_ADDON_DIGEST_FIELD: &str = concat!("runtime_", "ext", "ension_digest");
 #[rustfmt::skip]
@@ -424,25 +428,26 @@ impl From<ValueRejection> for CarrierRejection {
     }
 }
 
+fn read_bounded_utf8(path: &Path, max_bytes: usize, label: &str) -> Result<String, String> {
+    let bytes =
+        super::read_bounded_file(path, max_bytes).map_err(|error| format!("{label}:{error}"))?;
+    String::from_utf8(bytes).map_err(|error| format!("{label}:utf8:{error}"))
+}
+
 pub fn main(args: &[String]) -> Result<(), String> {
     let spec_path = parse_args(args)?;
-    super::reject_link_components_for_path(&spec_path).map_err(|error| error.to_string())?;
-    super::require_regular_file(&spec_path).map_err(|error| error.to_string())?;
-    let raw = fs::read_to_string(&spec_path)
-        .map_err(|error| format!("agent-run spec read failed {:?}: {error}", spec_path))?;
+    let raw = read_bounded_utf8(&spec_path, MAX_AGENT_RUN_SPEC_BYTES, "agent-run spec read")?;
     let spec: AgentRunSpec = serde_json::from_str(&raw).map_err(|error| {
         format!("agent-run spec is malformed, incomplete, or has unknown fields: {error}")
     })?;
     let spec_digest = sha256_hex(raw.as_bytes());
     validate_spec(&spec, &spec_path)?;
     let prompt_path = PathBuf::from(&spec.prompt_path.0);
-    super::require_regular_file(&prompt_path).map_err(|error| error.to_string())?;
-    let prompt = fs::read_to_string(&prompt_path).map_err(|error| {
-        format!(
-            "agent-run prompt read failed {}: {error}",
-            spec.prompt_path.0
-        )
-    })?;
+    let prompt = read_bounded_utf8(
+        &prompt_path,
+        MAX_RENDERED_PROMPT_BYTES,
+        "agent-run prompt read",
+    )?;
     let digest = sha256_hex(prompt.as_bytes());
     if digest != spec.prompt_digest.0 {
         return Err(format!(
@@ -1819,8 +1824,20 @@ impl RpcAssignment {
 
     fn startup_validation_marker_matches(spec: &AgentRunSpec) -> Result<bool, String> {
         let path = startup_validation_marker_path(spec)?;
-        match fs::read(&path) {
-            Ok(bytes) => {
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(format!(
+                "agent-run startup validation marker metadata failed {}: {error}",
+                path.display()
+            )),
+            Ok(_) => {
+                let bytes = super::read_bounded_file(&path, MAX_STARTUP_VALIDATION_MARKER_BYTES)
+                    .map_err(|error| {
+                        format!(
+                            "agent-run startup validation marker read failed {}: {error}",
+                            path.display()
+                        )
+                    })?;
                 let marker: StartupValidationMarker =
                     serde_json::from_slice(&bytes).map_err(|error| {
                         format!(
@@ -1830,11 +1847,6 @@ impl RpcAssignment {
                     })?;
                 Ok(marker == StartupValidationMarker::new(spec))
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(error) => Err(format!(
-                "agent-run startup validation marker read failed {}: {error}",
-                path.display()
-            )),
         }
     }
 
@@ -2767,12 +2779,7 @@ fn validate_runtime_addon(strict: &AgentRunSpec) -> Result<(), String> {
     match runtime_addon(strict) {
         Some((path, expected)) => {
             let path = path_value("runtime_addon_path", &path.0)?;
-            super::reject_link_components_for_path(&path).map_err(|error| error.to_string())?;
-            super::require_regular_file(&path).map_err(|error| error.to_string())?;
-            let mut file = fs::File::open(&path)
-                .map_err(|error| format!("agent-run child add-on open failed: {error}"))?;
-            let mut bytes = Vec::new();
-            file.read_to_end(&mut bytes)
+            let bytes = super::read_bounded_file(&path, super::CHILD_ADDON_MAX_BYTES)
                 .map_err(|error| format!("agent-run child add-on read failed: {error}"))?;
             let actual = sha256_hex(&bytes);
             if expected.0 != kernel::generated::CHILD_ADDON_DIGEST {
@@ -2838,6 +2845,8 @@ fn validate_digests(strict: &AgentRunSpec) -> Result<(), String> {
             "base_commit": strict.base_commit.as_ref().map(|sha| sha.0.as_str()),
             "worktree": strict.worktree.as_ref().map(|path| path.0.as_str()),
             "required_focused_evidence": strict.required_focused_evidence,
+            "assignment_path": strict.assignment_path,
+            "assignment_digest": strict.assignment_digest.as_ref().map(|digest| digest.0.as_str()),
         }))?
     } else if matches!(
         strict.assignment_kind,
@@ -2855,8 +2864,26 @@ fn validate_digests(strict: &AgentRunSpec) -> Result<(), String> {
             .context_documents
             .as_ref()
             .ok_or_else(|| "agent-run missing context_documents".to_owned())?;
-        super::planning_context_digest(authority_set_id, authority_documents, context_documents)
-            .map_err(|error| error.to_string())?
+        let manifest_path = strict
+            .repository_manifest_path
+            .as_ref()
+            .ok_or_else(|| "agent-run planning missing repository_manifest_path".to_owned())?;
+        let manifest_digest = strict
+            .repository_manifest_digest
+            .as_ref()
+            .ok_or_else(|| "agent-run planning missing repository_manifest_digest".to_owned())?;
+        let repo_authority = super::read_repository_authority_binding(
+            Path::new(&manifest_path.0),
+            &manifest_digest.0,
+        )
+        .map_err(|error| error.to_string())?;
+        super::planning_context_digest(
+            authority_set_id,
+            authority_documents,
+            context_documents,
+            &repo_authority,
+        )
+        .map_err(|error| error.to_string())?
     } else {
         sha_json(&serde_json::json!({
             "assignment_path": strict.assignment_path,
@@ -2928,6 +2955,14 @@ fn validate_delivery_identity(strict: &AgentRunSpec) -> Result<(), String> {
     let required = strict
         .required_focused_evidence
         .ok_or_else(|| "agent-run missing focused evidence requirement".to_owned())?;
+    let assignment_path = strict
+        .assignment_path
+        .as_ref()
+        .ok_or_else(|| "agent-run delivery missing assignment_path".to_owned())?;
+    let assignment_digest = strict
+        .assignment_digest
+        .as_ref()
+        .ok_or_else(|| "agent-run delivery missing assignment_digest".to_owned())?;
     if attempt == 0 || base_commit.0.trim().is_empty() || required == 0 {
         return Err("agent-run delivery lane/attempt/base requirement drift".to_owned());
     }
@@ -2944,6 +2979,108 @@ fn validate_delivery_identity(strict: &AgentRunSpec) -> Result<(), String> {
             "agent-run delivery action/assignment drift: expected {expected_action}/{expected_assignment}, got {}/{}",
             strict.action_id.0, strict.assignment_id.0
         ));
+    }
+    let bytes = super::read_bounded_file(
+        Path::new(&assignment_path.0),
+        super::DELIVERY_ASSIGNMENT_MAX_BYTES,
+    )
+    .map_err(|error| format!("agent-run delivery assignment read: {error}"))?;
+    if sha256_hex(&bytes) != assignment_digest.0 {
+        return Err("agent-run delivery assignment digest drift".to_owned());
+    }
+    let artifact: super::DeliveryAssignmentArtifact = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("agent-run delivery assignment json: {error}"))?;
+    validate_delivery_assignment_artifact(strict, &artifact, lane_id, base_commit, worktree)?;
+    Ok(())
+}
+
+fn validate_delivery_assignment_artifact(
+    strict: &AgentRunSpec,
+    artifact: &super::DeliveryAssignmentArtifact,
+    lane_id: &kernel::generated::Id,
+    base_commit: &kernel::generated::Sha,
+    worktree: &kernel::generated::Path,
+) -> Result<(), String> {
+    if artifact.schema != "autopilot.delivery_assignment.v1"
+        || artifact.workstream != strict.workstream
+        || artifact.assignment_id != strict.assignment_id
+        || artifact.lane_id != *lane_id
+        || artifact.attempt != strict.attempt.unwrap_or_default()
+        || artifact.base_commit != *base_commit
+        || artifact.worktree != worktree.0
+        || artifact.ordered_units.is_empty()
+    {
+        return Err("agent-run delivery assignment authority drift".to_owned());
+    }
+    let mut previous = BTreeSet::new();
+    let mut ids = BTreeSet::new();
+    for unit in &artifact.ordered_units {
+        if !ids.insert(unit.id.clone()) {
+            return Err(format!("agent-run delivery duplicate unit: {}", unit.id.0));
+        }
+        if unit.kind != kernel::generated::PlanUnitKind::Implementation
+            || unit.objective.trim().is_empty()
+            || unit.criteria.is_empty()
+            || unit.criterion_text.is_empty()
+            || unit.files.is_empty()
+            || unit.commands.is_empty()
+        {
+            return Err(format!(
+                "agent-run delivery unit authority incomplete: {}",
+                unit.id.0
+            ));
+        }
+        let mut file_paths = BTreeSet::new();
+        if unit.files.iter().any(|path| {
+            !crate::allocation::approved_path_is_safe(path) || !file_paths.insert(path.0.as_str())
+        }) {
+            return Err(format!(
+                "agent-run delivery unit has unsafe or duplicate files: {}",
+                unit.id.0
+            ));
+        }
+        let criterion_ids = unit
+            .criterion_text
+            .iter()
+            .map(|criterion| criterion.id.clone())
+            .collect::<Vec<_>>();
+        if criterion_ids != unit.criteria {
+            return Err(format!("agent-run delivery criteria drift: {}", unit.id.0));
+        }
+        let mut criteria = BTreeSet::new();
+        for criterion in &unit.criterion_text {
+            if criterion.text.trim().is_empty() || !criteria.insert(criterion.id.clone()) {
+                return Err(format!(
+                    "agent-run delivery malformed criterion {}:{}",
+                    unit.id.0, criterion.id.0
+                ));
+            }
+        }
+        for dep in &unit.dependencies {
+            if dep == &unit.id {
+                return Err(format!("agent-run delivery self dependency: {}", unit.id.0));
+            }
+            if artifact
+                .ordered_units
+                .iter()
+                .any(|candidate| candidate.id == *dep)
+                && !previous.contains(dep)
+            {
+                return Err(format!(
+                    "agent-run delivery unit {} precedes dependency {}",
+                    unit.id.0, dep.0
+                ));
+            }
+        }
+        for command in &unit.commands {
+            if command.command.trim().is_empty() || command.expected.trim().is_empty() {
+                return Err(format!(
+                    "agent-run delivery malformed command obligation: {}",
+                    unit.id.0
+                ));
+            }
+        }
+        previous.insert(unit.id.clone());
     }
     Ok(())
 }
@@ -2992,15 +3129,17 @@ fn validate_validation_spec_identity(strict: &AgentRunSpec) -> Result<(), String
             Err(error) => return Err(error.to_string()),
         }
     }
-    for (label, path, digest) in [
-        ("assignment", &assignment_path.0, &assignment_digest.0),
-        ("context", &context_path.0, &context_digest.0),
-    ] {
-        let bytes = fs::read(path)
-            .map_err(|error| format!("agent-run validation {label} read failed: {error}"))?;
-        if sha256_hex(&bytes) != *digest {
-            return Err(format!("agent-run validation {label} digest drift"));
-        }
+    let assignment_bytes =
+        super::read_bounded_file(Path::new(&assignment_path.0), MAX_VALIDATION_ARTIFACT_BYTES)
+            .map_err(|error| format!("agent-run validation assignment read failed: {error}"))?;
+    let context_bytes =
+        super::read_bounded_file(Path::new(&context_path.0), MAX_VALIDATION_ARTIFACT_BYTES)
+            .map_err(|error| format!("agent-run validation context read failed: {error}"))?;
+    if sha256_hex(&assignment_bytes) != assignment_digest.0 {
+        return Err("agent-run validation assignment digest drift".to_owned());
+    }
+    if sha256_hex(&context_bytes) != context_digest.0 {
+        return Err("agent-run validation context digest drift".to_owned());
     }
     if strict
         .producer_assignment_ids
@@ -3016,11 +3155,10 @@ fn validate_validation_spec_identity(strict: &AgentRunSpec) -> Result<(), String
         return Err("agent-run validation identity fields are incomplete".to_owned());
     }
     let assignment: kernel::generated::ValidationAssignmentV2 =
-        serde_json::from_slice(&fs::read(&assignment_path.0).map_err(|error| error.to_string())?)
+        serde_json::from_slice(&assignment_bytes)
             .map_err(|error| format!("agent-run validation assignment malformed: {error}"))?;
-    let context: kernel::generated::ValidationContextV2 =
-        serde_json::from_slice(&fs::read(&context_path.0).map_err(|error| error.to_string())?)
-            .map_err(|error| format!("agent-run validation context malformed: {error}"))?;
+    let context: kernel::generated::ValidationContextV2 = serde_json::from_slice(&context_bytes)
+        .map_err(|error| format!("agent-run validation context malformed: {error}"))?;
     if assignment.action_id != strict.action_id
         || assignment.assignment_id != strict.assignment_id
         || assignment.workstream != strict.workstream
@@ -3060,10 +3198,43 @@ fn validate_planning_documents(strict: &AgentRunSpec) -> Result<(), String> {
             || strict.authority_documents.is_some()
             || strict.context_document.is_some()
             || strict.context_documents.is_some()
+            || strict.repository_manifest_path.is_some()
+            || strict.repository_manifest_digest.is_some()
+            || strict.repository_head_commit.is_some()
+            || strict.repository_head_tree.is_some()
         {
-            return Err("agent-run delivery spec contains planning documents".to_owned());
+            return Err(
+                "agent-run non-planning spec contains planning repository/documents".to_owned(),
+            );
         }
         return Ok(());
+    }
+    let repository_manifest_path = strict
+        .repository_manifest_path
+        .as_ref()
+        .ok_or_else(|| "agent-run planning missing repository_manifest_path".to_owned())?;
+    let repository_manifest_digest = strict
+        .repository_manifest_digest
+        .as_ref()
+        .ok_or_else(|| "agent-run planning missing repository_manifest_digest".to_owned())?;
+    let repository_head_commit = strict
+        .repository_head_commit
+        .as_ref()
+        .ok_or_else(|| "agent-run planning missing repository_head_commit".to_owned())?;
+    let repository_head_tree = strict
+        .repository_head_tree
+        .as_ref()
+        .ok_or_else(|| "agent-run planning missing repository_head_tree".to_owned())?;
+    let repository = super::read_repository_authority_binding(
+        Path::new(&repository_manifest_path.0),
+        &repository_manifest_digest.0,
+    )
+    .map_err(|error| error.to_string())?;
+    if repository.manifest.head_commit != repository_head_commit.0
+        || repository.manifest.head_tree != repository_head_tree.0
+        || repository.path != repository_manifest_path.0
+    {
+        return Err("agent-run planning repository authority spec drift".to_owned());
     }
     let authority_set_id = strict
         .authority_set_id
@@ -3759,12 +3930,23 @@ pub fn admit_validation_submission(
     spec: &AgentRunSpec,
     submission: &kernel::generated::ValidationSubmissionV2,
 ) -> Result<(), String> {
-    validate_validation_submission(spec, submission).map_err(|rejection| {
-        format!(
-            "field={} expected={} got={}",
-            rejection.field, rejection.expected, rejection.got
-        )
-    })
+    validate_validation_submission(spec, submission).map_err(format_value_rejection)
+}
+
+pub fn admit_validation_submission_with_authority(
+    submission: &kernel::generated::ValidationSubmissionV2,
+    assignment: &kernel::generated::ValidationAssignmentV2,
+    context: &kernel::generated::ValidationContextV2,
+) -> Result<(), String> {
+    validate_validation_submission_against(submission, assignment, context)
+        .map_err(format_value_rejection)
+}
+
+fn format_value_rejection(rejection: ValueRejection) -> String {
+    format!(
+        "field={} expected={} got={}",
+        rejection.field, rejection.expected, rejection.got
+    )
 }
 
 fn validate_validation_submission(
@@ -3779,22 +3961,63 @@ fn validate_validation_submission(
         .context_manifest_path
         .as_ref()
         .ok_or_else(|| value_rejection("context_manifest_path", "validation context", "missing"))?;
+    let assignment_digest = spec.assignment_digest.as_ref().ok_or_else(|| {
+        value_rejection(
+            "assignment_digest",
+            "validation assignment digest",
+            "missing",
+        )
+    })?;
+    let context_digest = spec.context_manifest_digest.as_ref().ok_or_else(|| {
+        value_rejection(
+            "context_manifest_digest",
+            "validation context digest",
+            "missing",
+        )
+    })?;
+    let assignment_bytes =
+        super::read_bounded_file(Path::new(&assignment_path.0), MAX_VALIDATION_ARTIFACT_BYTES)
+            .map_err(|error| {
+                value_rejection(
+                    "assignment_path",
+                    "bounded regular assignment",
+                    error.to_string(),
+                )
+            })?;
+    let context_bytes =
+        super::read_bounded_file(Path::new(&context_path.0), MAX_VALIDATION_ARTIFACT_BYTES)
+            .map_err(|error| {
+                value_rejection(
+                    "context_manifest_path",
+                    "bounded regular context",
+                    error.to_string(),
+                )
+            })?;
+    if sha256_hex(&assignment_bytes) != assignment_digest.0
+        || sha256_hex(&context_bytes) != context_digest.0
+    {
+        return Err(value_rejection(
+            "validation_artifact_digest",
+            "spec-bound assignment and context digests",
+            "digest drift",
+        ));
+    }
     let assignment: kernel::generated::ValidationAssignmentV2 =
-        serde_json::from_slice(&fs::read(&assignment_path.0).map_err(|error| {
-            value_rejection("assignment_path", "readable assignment", error.to_string())
-        })?)
-        .map_err(|error| value_rejection("assignment", "valid assignment", error.to_string()))?;
-    let context: kernel::generated::ValidationContextV2 =
-        serde_json::from_slice(&fs::read(&context_path.0).map_err(|error| {
-            value_rejection(
-                "context_manifest_path",
-                "readable context",
-                error.to_string(),
-            )
-        })?)
+        serde_json::from_slice(&assignment_bytes).map_err(|error| {
+            value_rejection("assignment", "valid assignment", error.to_string())
+        })?;
+    let context: kernel::generated::ValidationContextV2 = serde_json::from_slice(&context_bytes)
         .map_err(|error| {
             value_rejection("context", "valid validation context", error.to_string())
         })?;
+    validate_validation_submission_against(submission, &assignment, &context)
+}
+
+fn validate_validation_submission_against(
+    submission: &kernel::generated::ValidationSubmissionV2,
+    assignment: &kernel::generated::ValidationAssignmentV2,
+    context: &kernel::generated::ValidationContextV2,
+) -> Result<(), ValueRejection> {
     if submission.validation_id != assignment.validation_id
         || submission.assignment_id != assignment.assignment_id
         || submission.scope != assignment.scope
@@ -3855,26 +4078,138 @@ fn validate_validation_submission(
             .iter()
             .find(|criterion| criterion.criterion_id == result.criterion_id)
             .expect("criterion sets were proven equal");
-        if !criterion
-            .covered_paths
+        let issued_paths = criterion.covered_paths.iter().collect::<BTreeSet<_>>();
+        let actual_paths = result.covered_paths.iter().collect::<BTreeSet<_>>();
+        let issued_surfaces = criterion
+            .semantic_surface_ids
             .iter()
-            .all(|path| result.covered_paths.contains(path))
-            || !criterion
-                .semantic_surface_ids
-                .iter()
-                .all(|id| result.semantic_surface_ids.contains(id))
-            || !criterion
-                .forward_edge_ids
-                .iter()
-                .all(|id| result.forward_edge_ids.contains(id))
+            .collect::<BTreeSet<_>>();
+        let actual_surfaces = result.semantic_surface_ids.iter().collect::<BTreeSet<_>>();
+        let issued_edges = criterion.forward_edge_ids.iter().collect::<BTreeSet<_>>();
+        let actual_edges = result.forward_edge_ids.iter().collect::<BTreeSet<_>>();
+        if issued_paths.len() != criterion.covered_paths.len()
+            || actual_paths.len() != result.covered_paths.len()
+            || actual_paths != issued_paths
+            || issued_surfaces.len() != criterion.semantic_surface_ids.len()
+            || actual_surfaces.len() != result.semantic_surface_ids.len()
+            || actual_surfaces != issued_surfaces
+            || issued_edges.len() != criterion.forward_edge_ids.len()
+            || actual_edges.len() != result.forward_edge_ids.len()
+            || actual_edges != issued_edges
         {
             return Err(value_rejection(
                 "criterion_results.coverage",
-                "issued criterion coverage",
+                "exact issued criterion paths, surfaces, and forward edges without duplicates",
                 result.criterion_id.0.clone(),
             ));
         }
         blocked |= result.verdict != kernel::generated::CriterionVerdict::PASS;
+    }
+    let issued_paths = context
+        .criteria
+        .iter()
+        .flat_map(|criterion| criterion.covered_paths.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    let issued_surfaces = context
+        .criteria
+        .iter()
+        .flat_map(|criterion| criterion.semantic_surface_ids.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    let issued_edges = context
+        .criteria
+        .iter()
+        .flat_map(|criterion| criterion.forward_edge_ids.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    let mut findings = BTreeMap::new();
+    for finding in &submission.findings {
+        let criterion_ids = finding
+            .criterion_ids
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let edge_ids = finding.edge_ids.iter().cloned().collect::<BTreeSet<_>>();
+        let finding_evidence = finding
+            .evidence_refs
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let covered_paths = finding
+            .covered_paths
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let surfaces = finding
+            .semantic_surface_ids
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if finding.finding_id.0.trim().is_empty()
+            || finding.summary.trim().is_empty()
+            || finding.detail.trim().is_empty()
+            || criterion_ids.is_empty()
+            || criterion_ids.len() != finding.criterion_ids.len()
+            || !criterion_ids.is_subset(&required)
+            || edge_ids.is_empty()
+            || edge_ids.len() != finding.edge_ids.len()
+            || !edge_ids.is_subset(&issued_edges)
+            || finding_evidence.is_empty()
+            || finding_evidence.len() != finding.evidence_refs.len()
+            || !finding_evidence.is_subset(&evidence)
+            || covered_paths.is_empty()
+            || covered_paths.len() != finding.covered_paths.len()
+            || !covered_paths.is_subset(&issued_paths)
+            || surfaces.len() != finding.semantic_surface_ids.len()
+            || !surfaces.is_subset(&issued_surfaces)
+            || findings
+                .insert(finding.finding_id.clone(), finding)
+                .is_some()
+        {
+            return Err(value_rejection(
+                "findings",
+                "unique nonempty findings bound only to issued criteria, edges, evidence, paths, and surfaces",
+                finding.finding_id.0.clone(),
+            ));
+        }
+    }
+    for result in &submission.criterion_results {
+        let mut result_findings = BTreeSet::new();
+        for finding_id in &result.finding_ids {
+            let finding = findings.get(finding_id).ok_or_else(|| {
+                value_rejection(
+                    "criterion_results.finding_ids",
+                    "issued embedded finding id",
+                    finding_id.0.clone(),
+                )
+            })?;
+            if !result_findings.insert(finding_id.clone())
+                || !finding.criterion_ids.contains(&result.criterion_id)
+            {
+                return Err(value_rejection(
+                    "criterion_results.finding_ids",
+                    "unique finding ids tied to this criterion",
+                    finding_id.0.clone(),
+                ));
+            }
+        }
+    }
+    for finding in submission.findings.iter() {
+        for criterion_id in &finding.criterion_ids {
+            let result = submission
+                .criterion_results
+                .iter()
+                .find(|result| result.criterion_id == *criterion_id)
+                .expect("finding criteria were proven to be issued");
+            if !result.finding_ids.contains(&finding.finding_id)
+                || (finding.effect == kernel::generated::FindingEffect::ForwardBlocking
+                    && result.verdict == kernel::generated::CriterionVerdict::PASS)
+            {
+                return Err(value_rejection(
+                    "findings.criterion_ids",
+                    "bidirectional finding link with blocking verdict coherence",
+                    finding.finding_id.0.clone(),
+                ));
+            }
+        }
     }
     blocked |= submission
         .findings
@@ -4020,14 +4355,26 @@ fn package_tool_result(
             serde_json::to_value(&spec.context_digest).unwrap(),
         );
     } else {
-        let assignment_bytes = fs::read(
-            &spec
-                .assignment_path
-                .as_ref()
-                .expect("validated assignment path")
-                .0,
-        )
-        .map_err(|error| value_rejection("assignment", "readable", error.to_string()))?;
+        let assignment_path = spec
+            .assignment_path
+            .as_ref()
+            .expect("validated assignment path");
+        let assignment_digest = spec
+            .assignment_digest
+            .as_ref()
+            .expect("validated assignment digest");
+        let assignment_bytes =
+            super::read_bounded_file(Path::new(&assignment_path.0), MAX_VALIDATION_ARTIFACT_BYTES)
+                .map_err(|error| {
+                    value_rejection("assignment", "bounded regular artifact", error.to_string())
+                })?;
+        if sha256_hex(&assignment_bytes) != assignment_digest.0 {
+            return Err(value_rejection(
+                "assignment",
+                "spec-bound assignment digest",
+                "digest drift",
+            ));
+        }
         let assignment: kernel::generated::ValidationAssignmentV2 =
             serde_json::from_slice(&assignment_bytes)
                 .map_err(|error| value_rejection("assignment", "valid", error.to_string()))?;

@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -38,6 +38,9 @@ const BOUNDARY_ID: &str = "seam.host-frame.v1";
 /// would let a child force an arbitrary parent-side allocation before the
 /// receipt comparison can reject it.
 const MAX_CARRIER_SPEC_BYTES: usize = 1 << 20;
+pub const MAX_TERMINAL_CARRIER_BYTES: usize = 4 << 20;
+const MAX_VALIDATION_BOUND_ARTIFACT_BYTES: usize = 2 << 20;
+const MAX_TOOL_AUDIT_BYTES: usize = 256 << 10;
 const COMMAND_BOUNDARY_ID: &str = "seam.operator-command.v1";
 const COMMANDS_KDL: &str = include_str!("../../../data/commands.kdl");
 type AnyError = Box<dyn std::error::Error>;
@@ -358,9 +361,21 @@ fn advance_run(
     workstream: &str,
     state: &mut CoreState,
 ) -> Result<AdvanceRunOutcome, AnyError> {
-    let approved = read_approved_plan(workstream)
+    let approved_artifact = read_approved_plan_artifact(workstream)
         .map_err(|error| format!("CONTEXT_GAP:approved-plan:{error}"))?;
-    let submission = allocation_submission_from_plan(workstream, &approved)
+    let repository_authority = approved_artifact
+        .repository_authority
+        .as_ref()
+        .ok_or_else(|| "CONTEXT_GAP:approved-plan:missing repository authority".to_owned())?;
+    let cwd = fs::canonicalize(std::env::current_dir()?)?;
+    ensure_run_main_at_approved_baseline(
+        &cwd,
+        workstream,
+        repository_authority,
+        delivery_execution_started(state),
+    )?;
+    let approved = approved_artifact.units;
+    let submission = allocation_submission_from_plan(workstream, &approved, state)
         .map_err(|error| format!("CONTEXT_GAP:allocation:{error}"))?;
     let allocation = allocation::validate_allocation(
         &approved,
@@ -388,7 +403,7 @@ fn advance_run(
     // marker cannot silently re-enable double dispatch.
     selected.retain(|lane_id| !lane_has_live_delivery(state, lane_id));
     if let Some(lane_id) = selected.first() {
-        let assignment = assignment(workstream, lane_id)?;
+        let assignment = assignment(workstream, lane_id, &approved, &submission)?;
         let issue = runner::delivery_issue_with_facts(
             &assignment,
             &runner::RunnerTransportFacts::from_env()?,
@@ -428,18 +443,10 @@ fn lane_has_live_delivery(state: &CoreState, lane_id: &Id) -> bool {
 
 /// Forward-criterion gates satisfied by the lane that just closed.
 ///
-/// `predecessor_forward_criteria` is synthesized by the package itself: the unit at
-/// operator order N carries `FC{N-1}`, meaning "the unit at operator order N-1 has
-/// delivered" (see `approved_units_from_work_map` in data/seam_real_producers.rs).
-/// Readiness reads those as `gate:<criterion>` refs, but NOTHING EVER APPENDED THEM, so
-/// `predecessor_gates_met` was permanently false and no unit after the first could ever
-/// become dispatchable. LIVE run 18 closed L1 and then deadlocked on exactly that.
-///
-/// A closing lane therefore satisfies the gate its successors wait on. The mapping is
-/// derived from the approved plan, never invented: we look up the closing lane's unit,
-/// take its operator order N, and emit `gate:FC{N}` only when some other unit actually
-/// declares it. A criterion nobody declares is not emitted, and a lane we cannot resolve
-/// is a loud error rather than a silently ungated close.
+/// `predecessor_forward_criteria` is package-owned identity authority derived
+/// from exact declared `depends_on` unit ids, never from array position. A
+/// closing lane satisfies `unit-complete:<unit-id>` only for units it actually
+/// delivered and only when another approved delivery waits on that identity.
 fn satisfied_forward_gate_refs(
     workstream: &str,
     lane_id: Option<&Id>,
@@ -449,28 +456,19 @@ fn satisfied_forward_gate_refs(
     };
     let approved = read_approved_plan(workstream)
         .map_err(|error| format!("CONTEXT_GAP:approved-plan:{error}"))?;
-    let submission = allocation_submission_from_plan(workstream, &approved)
-        .map_err(|error| format!("CONTEXT_GAP:allocation:{error}"))?;
-    let lane = submission
-        .lanes
+    let unit = approved
         .iter()
-        .find(|lane| lane.lane_id == *lane_id)
+        .enumerate()
+        .find(|(index, _)| approved_lane_id(*index) == *lane_id)
+        .map(|(_, unit)| unit)
         .ok_or_else(|| format!("forward-gate:unknown-lane:{}", lane_id.0))?;
-    let mut refs = Vec::new();
-    for unit_id in &lane.ordered_unit_ids {
-        let unit = approved
-            .iter()
-            .find(|unit| unit.id == *unit_id)
-            .ok_or_else(|| format!("forward-gate:unknown-unit:{}", unit_id.0))?;
-        let criterion = Id(format!("FC{}", unit.operator_order));
-        if approved
-            .iter()
-            .any(|other| other.predecessor_forward_criteria.contains(&criterion))
-        {
-            refs.push(Ref(format!("gate:{}", criterion.0)));
-        }
-    }
-    Ok(refs)
+    let criterion = Id(format!("unit-complete:{}", unit.id.0));
+    Ok(approved
+        .iter()
+        .any(|other| other.predecessor_forward_criteria.contains(&criterion))
+        .then(|| Ref(format!("gate:{}", criterion.0)))
+        .into_iter()
+        .collect())
 }
 
 fn lane_closed(state: &CoreState, lane_id: &Id) -> bool {
@@ -636,8 +634,27 @@ fn accept_planning_carrier(
             ),
         );
     }
+    if terminal_consumed(state, &binding) {
+        return done(
+            id,
+            rejection(
+                "agent-result-terminal",
+                "terminal evidence for this planning binding is already final",
+            ),
+        );
+    }
     if let Err(error) = validate_agent_output(&binding, &carrier.raw_output) {
         return done(id, boundary_status(&error));
+    }
+    if carrier.boundary_id == "planning.plan-review.v1"
+        && let Err(error) = review_approves_execution(&carrier.raw_output)
+    {
+        if let Some(payload) = terminal {
+            append_terminal_event(state, payload, &binding)?;
+            record_task_completion_control(state, payload)?;
+            return planning_blocked_or_summary(id, &carrier.workstream, state);
+        }
+        return done(id, rejection("planning-postprocess", &error));
     }
     if let Err(error) = apply_planning_side_effects(&carrier) {
         return done(id, rejection("planning-postprocess", &error));
@@ -798,6 +815,12 @@ fn planning_blocked_or_summary(
     }
 }
 
+fn read_bounded_utf8(path: &Path, max_bytes: usize, label: &str) -> Result<String, String> {
+    let bytes =
+        runner::read_bounded_file(path, max_bytes).map_err(|error| format!("{label}:{error}"))?;
+    String::from_utf8(bytes).map_err(|error| format!("{label}:utf8:{error}"))
+}
+
 fn route_task_completed(
     id: u64,
     payload: HostToCoreTaskCompletedPayload,
@@ -822,14 +845,13 @@ fn route_task_completed(
     }
     if binding.result_contract.0 == "autopilot.delivery_result.v2" {
         let carrier_path = PathBuf::from(&binding.carrier_path);
-        let carrier_text = match fs::read_to_string(&carrier_path) {
+        let carrier_text = match read_bounded_utf8(
+            &carrier_path,
+            MAX_TERMINAL_CARRIER_BYTES,
+            "delivery-carrier-read",
+        ) {
             Ok(value) => value,
-            Err(error) => {
-                return done(
-                    id,
-                    rejection("carrier-read", &format!("{}:{error}", binding.carrier_path)),
-                );
-            }
+            Err(error) => return done(id, rejection("carrier-read", &error)),
         };
         let result_v2: kernel::generated::DeliveryResultV2 =
             match serde_json::from_str(&carrier_text) {
@@ -887,14 +909,13 @@ fn route_task_completed(
         return validation_completed(id, &binding, &payload, state);
     }
     if binding.result_contract.0.starts_with("planning.") {
-        let carrier_text = match fs::read_to_string(&binding.carrier_path) {
+        let carrier_text = match read_bounded_utf8(
+            Path::new(&binding.carrier_path),
+            MAX_TERMINAL_CARRIER_BYTES,
+            "planning-carrier-read",
+        ) {
             Ok(value) => value,
-            Err(error) => {
-                return done(
-                    id,
-                    rejection("carrier-read", &format!("{}:{error}", binding.carrier_path)),
-                );
-            }
+            Err(error) => return done(id, rejection("carrier-read", &error)),
         };
         let carrier: AgentCarrier = match serde_json::from_str(&carrier_text) {
             Ok(value) => value,
@@ -1088,6 +1109,129 @@ fn terminal_status_allowed(status: &str) -> bool {
     matches!(status, "completed" | "failed" | "killed")
 }
 
+fn validate_delivery_assignment_binding(
+    spec: &kernel::generated::AgentRunSpec,
+    binding: &runner::IssuedRunnerBinding,
+) -> Result<runner::DeliveryAssignmentArtifact, String> {
+    let binding_assignment_path = binding
+        .assignment_path
+        .as_deref()
+        .ok_or_else(|| "delivery binding missing assignment_path".to_owned())?;
+    let binding_assignment_digest = binding
+        .assignment_digest
+        .as_deref()
+        .ok_or_else(|| "delivery binding missing assignment_digest".to_owned())?;
+    if spec.assignment_path.as_ref().map(|path| path.0.as_str()) != Some(binding_assignment_path)
+        || spec
+            .assignment_digest
+            .as_ref()
+            .map(|digest| digest.0.as_str())
+            != Some(binding_assignment_digest)
+    {
+        return Err("delivery spec assignment binding drift".to_owned());
+    }
+    let bytes = runner::read_bounded_file(
+        Path::new(binding_assignment_path),
+        runner::DELIVERY_ASSIGNMENT_MAX_BYTES,
+    )
+    .map_err(|error| error.to_string())?;
+    if sha256_hex_local(&bytes) != binding_assignment_digest {
+        return Err("delivery assignment digest drift".to_owned());
+    }
+    let artifact: runner::DeliveryAssignmentArtifact = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("delivery assignment json:{error}"))?;
+    if artifact.schema != "autopilot.delivery_assignment.v1"
+        || artifact.workstream != binding.workstream
+        || artifact.assignment_id != binding.assignment_id
+        || Some(&artifact.lane_id) != binding.lane_id.as_ref()
+        || Some(artifact.attempt) != binding.attempt
+        || Some(&artifact.base_commit) != binding.base_commit.as_ref()
+        || Some(artifact.worktree.as_str()) != binding.worktree.as_deref()
+        || artifact.ordered_units.is_empty()
+    {
+        return Err("delivery assignment artifact identity drift".to_owned());
+    }
+    validate_delivery_artifact_units(&artifact.ordered_units)?;
+    Ok(artifact)
+}
+
+fn validate_delivery_artifact_units(units: &[ApprovedUnit]) -> Result<(), String> {
+    if units.is_empty() {
+        return Err("delivery assignment has no ordered units".to_owned());
+    }
+    let mut lane_ids = BTreeSet::new();
+    for unit in units {
+        if !lane_ids.insert(unit.id.clone()) {
+            return Err(format!("delivery assignment duplicate unit {}", unit.id.0));
+        }
+    }
+    let mut previous = BTreeSet::new();
+    for unit in units {
+        if unit.kind != kernel::generated::PlanUnitKind::Implementation
+            || unit.objective.trim().is_empty()
+            || unit.criteria.is_empty()
+            || unit.criterion_text.is_empty()
+            || unit.files.is_empty()
+            || unit.commands.is_empty()
+        {
+            return Err(format!("delivery assignment unit {} incomplete", unit.id.0));
+        }
+        let mut file_paths = BTreeSet::new();
+        if unit.files.iter().any(|path| {
+            !crate::allocation::approved_path_is_safe(path) || !file_paths.insert(path.0.as_str())
+        }) {
+            return Err(format!(
+                "delivery assignment unit {} has unsafe or duplicate files",
+                unit.id.0
+            ));
+        }
+        let criterion_ids = unit
+            .criterion_text
+            .iter()
+            .map(|criterion| criterion.id.clone())
+            .collect::<Vec<_>>();
+        if criterion_ids != unit.criteria {
+            return Err(format!(
+                "delivery assignment unit {} criteria/criterion_text drift",
+                unit.id.0
+            ));
+        }
+        let mut seen_criteria = BTreeSet::new();
+        for criterion in &unit.criterion_text {
+            if criterion.text.trim().is_empty() || !seen_criteria.insert(criterion.id.clone()) {
+                return Err(format!(
+                    "delivery assignment unit {} malformed criterion {}",
+                    unit.id.0, criterion.id.0
+                ));
+            }
+        }
+        for dep in &unit.dependencies {
+            if dep == &unit.id {
+                return Err(format!(
+                    "delivery assignment unit {} self dependency",
+                    unit.id.0
+                ));
+            }
+            if lane_ids.contains(dep) && !previous.contains(dep) {
+                return Err(format!(
+                    "delivery assignment unit {} precedes dependency {}",
+                    unit.id.0, dep.0
+                ));
+            }
+        }
+        for command in &unit.commands {
+            if command.command.trim().is_empty() || command.expected.trim().is_empty() {
+                return Err(format!(
+                    "delivery assignment unit {} malformed command",
+                    unit.id.0
+                ));
+            }
+        }
+        previous.insert(unit.id.clone());
+    }
+    Ok(())
+}
+
 fn validate_delivery_result_v2(
     result: &kernel::generated::DeliveryResultV2,
     binding: &runner::IssuedRunnerBinding,
@@ -1143,6 +1287,20 @@ fn validate_delivery_result_v2(
     }
     let spec: kernel::generated::AgentRunSpec =
         serde_json::from_slice(spec_bytes).map_err(|error| error.to_string())?;
+    let assignment = validate_delivery_assignment_binding(&spec, binding)?;
+    let allowed_paths = assignment
+        .ordered_units
+        .iter()
+        .flat_map(|unit| unit.files.iter().map(|path| path.0.as_str()))
+        .collect::<BTreeSet<_>>();
+    for changed_path in &result.submission.actual_changed_paths {
+        if !allowed_paths.contains(changed_path.0.as_str()) {
+            return Err(format!(
+                "delivery changed path is outside approved unit scope: {}",
+                changed_path.0
+            ));
+        }
+    }
     let profile = runner::terminal_profile_for(
         &binding.role_id.0,
         &binding.boundary_id.0,
@@ -1161,7 +1319,8 @@ fn validate_delivery_result_v2(
     if result.tool_audit_ref.0 != expected_audit.display().to_string() {
         return Err("delivery tool audit path drift".to_owned());
     }
-    let audit = fs::read(&expected_audit).map_err(|error| error.to_string())?;
+    let audit = runner::read_bounded_file(&expected_audit, MAX_TOOL_AUDIT_BYTES)
+        .map_err(|error| error.to_string())?;
     if sha256_hex_local(&audit) != result.tool_audit_digest.0 {
         return Err("delivery tool audit digest drift".to_owned());
     }
@@ -1889,6 +2048,17 @@ fn validate_validation_result_v2(
     }
     let spec: kernel::generated::AgentRunSpec =
         serde_json::from_slice(spec_bytes).map_err(|error| error.to_string())?;
+    if spec.assignment_path.as_ref() != Some(&result.assignment_path)
+        || spec.assignment_digest.as_ref() != Some(&result.assignment_digest)
+        || spec.context_manifest_path.as_ref() != Some(&result.context_manifest_path)
+        || spec.context_manifest_digest.as_ref() != Some(&result.context_manifest_digest)
+        || spec.validation_id.as_ref() != Some(&result.validation_id)
+        || spec.validation_attempt != Some(result.validation_attempt)
+        || spec.semantic_round != Some(result.semantic_round)
+        || spec.producer_assignment_ids.as_ref() != Some(&result.producer_assignment_ids)
+    {
+        return Err("validation carrier artifact binding drift".to_owned());
+    }
     let profile = runner::terminal_profile_for(
         &binding.role_id.0,
         &binding.boundary_id.0,
@@ -1903,8 +2073,11 @@ fn validate_validation_result_v2(
     {
         return Err("validation terminal profile provenance drift".to_owned());
     }
-    let assignment_bytes =
-        fs::read(&result.assignment_path.0).map_err(|error| error.to_string())?;
+    let assignment_bytes = runner::read_bounded_file(
+        Path::new(&result.assignment_path.0),
+        MAX_VALIDATION_BOUND_ARTIFACT_BYTES,
+    )
+    .map_err(|error| error.to_string())?;
     if sha256_hex_local(&assignment_bytes) != result.assignment_digest.0 {
         return Err("validation assignment digest drift".to_owned());
     }
@@ -1924,15 +2097,28 @@ fn validate_validation_result_v2(
     {
         return Err("validation assignment/submission identity drift".to_owned());
     }
-    let context = fs::read(&result.context_manifest_path.0).map_err(|error| error.to_string())?;
-    if sha256_hex_local(&context) != result.context_manifest_digest.0 {
+    let context_bytes = runner::read_bounded_file(
+        Path::new(&result.context_manifest_path.0),
+        MAX_VALIDATION_BOUND_ARTIFACT_BYTES,
+    )
+    .map_err(|error| error.to_string())?;
+    if sha256_hex_local(&context_bytes) != result.context_manifest_digest.0 {
         return Err("validation context digest drift".to_owned());
     }
+    let context: kernel::generated::ValidationContextV2 = serde_json::from_slice(&context_bytes)
+        .map_err(|error| format!("validation context json:{error}"))?;
+    runner::child::admit_validation_submission_with_authority(
+        &result.submission,
+        &assignment,
+        &context,
+    )
+    .map_err(|error| format!("validation submission authority:{error}"))?;
     let expected_audit = PathBuf::from(&binding.carrier_path).with_extension("tool-audit.json");
     if result.tool_audit_ref.0 != expected_audit.display().to_string() {
         return Err("validation tool audit path drift".to_owned());
     }
-    let audit = fs::read(&expected_audit).map_err(|error| error.to_string())?;
+    let audit = runner::read_bounded_file(&expected_audit, MAX_TOOL_AUDIT_BYTES)
+        .map_err(|error| error.to_string())?;
     if sha256_hex_local(&audit) != result.tool_audit_digest.0 {
         return Err("validation tool audit digest drift".to_owned());
     }
@@ -1952,8 +2138,11 @@ fn validation_completed(
     terminal: &HostToCoreTaskCompletedPayload,
     state: &mut CoreState,
 ) -> Result<SeamEnvelope, AnyError> {
-    let text = fs::read_to_string(&binding.carrier_path)
-        .map_err(|error| format!("validation-carrier-read:{}:{error}", binding.carrier_path))?;
+    let text = read_bounded_utf8(
+        Path::new(&binding.carrier_path),
+        MAX_TERMINAL_CARRIER_BYTES,
+        "validation-carrier-read",
+    )?;
     let result: kernel::generated::ValidationResultV2 = serde_json::from_str(&text)
         .map_err(|error| format!("validation-carrier:{}:{error}", binding.carrier_path))?;
     validate_validation_result_v2(&result, binding)?;
@@ -2043,15 +2232,7 @@ fn integrate_validated_candidate(
 ) -> Result<SeamEnvelope, AnyError> {
     let workstream = &binding.workstream.0;
     let cwd = fs::canonicalize(std::env::current_dir()?)?;
-    ensure_run_main(
-        &cwd,
-        workstream,
-        binding
-            .base_commit
-            .as_ref()
-            .map(|sha| sha.0.as_str())
-            .unwrap_or(&verdict.exact_commit.0),
-    )?;
+    verify_run_main_stable(&cwd, workstream)?;
     let candidate = crate::integration::CandidateRequest {
         candidate_id: binding.assignment_id.0.clone(),
         enqueue_sequence: state.state.sequence + 1,
@@ -2271,6 +2452,7 @@ fn validation_issue_for_delivery(
             .ok_or_else(|| "delivery binding missing worktree".to_owned())?,
     );
     let assignment_id = Id(format!("validator-{}", binding.assignment_id.0));
+    let approved_units = read_delivery_assignment_units(binding)?;
     runner::validation_issue(
         &runner::ValidationRunnerRequest {
             workstream: binding.workstream.clone(),
@@ -2288,10 +2470,41 @@ fn validation_issue_for_delivery(
             attempt,
             base_commit,
             worktree,
+            approved_units,
         },
         &runner::RunnerTransportFacts::from_env().map_err(|error| error.to_string())?,
     )
     .map_err(|error| error.to_string())
+}
+
+fn read_delivery_assignment_units(
+    binding: &runner::IssuedRunnerBinding,
+) -> Result<Vec<ApprovedUnit>, String> {
+    let path = binding
+        .assignment_path
+        .as_ref()
+        .ok_or_else(|| "delivery binding missing assignment_path".to_owned())?;
+    let digest = binding
+        .assignment_digest
+        .as_ref()
+        .ok_or_else(|| "delivery binding missing assignment_digest".to_owned())?;
+    let bytes = runner::read_bounded_file(
+        Path::new(path.as_str()),
+        runner::DELIVERY_ASSIGNMENT_MAX_BYTES,
+    )
+    .map_err(|error| format!("delivery assignment read:{error}"))?;
+    if sha256_hex_local(&bytes) != *digest {
+        return Err("delivery assignment digest drift".to_owned());
+    }
+    let artifact: runner::DeliveryAssignmentArtifact = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("delivery assignment json:{error}"))?;
+    if artifact.assignment_id != binding.assignment_id
+        || binding.lane_id.as_ref() != Some(&artifact.lane_id)
+        || artifact.ordered_units.is_empty()
+    {
+        return Err("delivery assignment identity drift".to_owned());
+    }
+    Ok(artifact.ordered_units)
 }
 
 fn focused_integration_checks(
@@ -2662,8 +2875,8 @@ fn execution_complete_snapshot(
         Ok(value) => value,
         Err(_) => return Ok(None),
     };
-    let required_count = approved.len().min(6);
-    if required_count == 0 || approved.len() > required_count {
+    let required_count = approved.len();
+    if required_count == 0 {
         return Ok(None);
     }
     let required_lanes = (1..=required_count)
@@ -3077,6 +3290,17 @@ fn active_validators(state: &CoreState) -> usize {
 fn active_work(state: &CoreState) -> bool {
     active_implementers(state) > 0 || active_validators(state) > 0
 }
+fn delivery_execution_started(state: &CoreState) -> bool {
+    state
+        .state
+        .refs
+        .keys()
+        .filter_map(|reference| runner::decode_binding_ref(&reference.0))
+        .any(|binding| matches!(binding.role_id.0.as_str(), "implementer" | "validator"))
+        || has_ref_prefix(state, "unit-closed:")
+        || has_ref_prefix(state, "candidate-queued:")
+        || has_ref_prefix(state, "integration:forward-integrated")
+}
 fn queued_candidates(state: &CoreState) -> usize {
     state
         .state
@@ -3096,12 +3320,97 @@ fn has_ref_prefix(state: &CoreState, prefix: &str) -> bool {
         .any(|reference| reference.0.starts_with(prefix))
 }
 
-fn ensure_run_main(repo: &Path, workstream: &str, base: &str) -> Result<(), String> {
+fn ensure_run_main_at_approved_baseline(
+    repo: &Path,
+    workstream: &str,
+    authority: &ApprovedRepositoryAuthority,
+    execution_started: bool,
+) -> Result<(), String> {
     let run_main = run_main_ref(workstream);
-    if git_stdout(repo, &["rev-parse", "--verify", &run_main]).is_ok() {
-        return Ok(());
+    let manifest_path = PathBuf::from(&authority.manifest_path);
+    let binding =
+        runner::read_repository_authority_binding(&manifest_path, &authority.manifest_digest)
+            .map_err(|error| format!("run-main:repository-authority:{error}"))?;
+    if binding.manifest.head_commit != authority.head_commit.0
+        || binding.manifest.head_tree != authority.head_tree.0
+    {
+        return Err(format!(
+            "run-main approved baseline drift: manifest head={} tree={} approved head={} tree={}",
+            binding.manifest.head_commit,
+            binding.manifest.head_tree,
+            authority.head_commit.0,
+            authority.head_tree.0
+        ));
     }
-    git_status(repo, &["update-ref", &run_main, base]).map_err(|error| format!("run-main:{error}"))
+    match git_stdout(
+        repo,
+        &["rev-parse", "--verify", &format!("{run_main}^{{commit}}")],
+    ) {
+        Ok(_) => {
+            let stable_tip = verify_run_main_stable(repo, workstream)?;
+            if execution_started {
+                git_status(
+                    repo,
+                    &["merge-base", "--is-ancestor", &authority.head_commit.0, &stable_tip],
+                )
+                .map_err(|error| {
+                    format!(
+                        "run-main approved baseline is not an ancestor of stable tip: baseline={} tip={stable_tip}: {error}",
+                        authority.head_commit.0
+                    )
+                })?;
+                Ok(())
+            } else if stable_tip == authority.head_commit.0 {
+                Ok(())
+            } else {
+                Err(format!(
+                    "run-main preexisting baseline drift: expected approved baseline {}, got {}",
+                    authority.head_commit.0, stable_tip
+                ))
+            }
+        }
+        Err(error) => {
+            if execution_started {
+                return Err(format!(
+                    "run-main missing after execution began: {run_main}: {error}"
+                ));
+            }
+            git_status(
+                repo,
+                &["update-ref", &run_main, &authority.head_commit.0, ""],
+            )
+            .map_err(|error| format!("run-main:create-cas:{error}"))?;
+            let actual = verify_run_main_stable(repo, workstream)?;
+            if actual != authority.head_commit.0 {
+                return Err(format!(
+                    "run-main created at wrong commit: expected {}, got {}",
+                    authority.head_commit.0, actual
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+fn verify_run_main_stable(repo: &Path, workstream: &str) -> Result<String, String> {
+    let run_main = run_main_ref(workstream);
+    let first = git_stdout(
+        repo,
+        &["rev-parse", "--verify", &format!("{run_main}^{{commit}}")],
+    )
+    .map_err(|error| format!("run-main missing or malformed: {run_main}: {error}"))?;
+    let second = git_stdout(
+        repo,
+        &["rev-parse", "--verify", &format!("{run_main}^{{commit}}")],
+    )
+    .map_err(|error| format!("run-main moved while verifying: {run_main}: {error}"))?;
+    if first.trim() != second.trim() {
+        return Err(format!(
+            "run-main moved while verifying: first={} second={}",
+            first.trim(),
+            second.trim()
+        ));
+    }
+    Ok(first.trim().to_owned())
 }
 fn run_main_ref(workstream: &str) -> String {
     format!(
@@ -3205,7 +3514,11 @@ fn record_context_prompt_for_action(state: &CoreState, action: &BackgroundAction
             "module-unreachable:context-prompt:no-runner-binding".to_owned()
         )];
     };
-    let prompt_text = match fs::read_to_string(&binding.prompt_path) {
+    let prompt_text = match read_bounded_utf8(
+        Path::new(&binding.prompt_path),
+        MAX_TERMINAL_CARRIER_BYTES,
+        "prompt-read",
+    ) {
         Ok(value) => value,
         Err(error) => {
             return vec![Ref(format!(

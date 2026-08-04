@@ -419,6 +419,10 @@ Sources: `data/contracts.kdl`.
 | agent_run_spec | field | atom_registry_digest | digest | false | true |  |
 | agent_run_spec | field | planning_inputs_path | path | false | true |  |
 | agent_run_spec | field | planning_inputs_digest | digest | false | true |  |
+| agent_run_spec | field | repository_manifest_path | path | false | true | Required for fresh planning assignments: absolute path to the package-owned repository authority manifest bound at issue time. Historical specs may omit it only for inspection. |
+| agent_run_spec | field | repository_manifest_digest | digest | false | true | Required for fresh planning assignments: SHA-256 of repository_manifest_path bytes. |
+| agent_run_spec | field | repository_head_commit | sha | false | true | Required for fresh planning assignments: exact HEAD commit recorded in the repository authority manifest. |
+| agent_run_spec | field | repository_head_tree | sha | false | true | Required for fresh planning assignments: exact HEAD tree recorded in the repository authority manifest. |
 | run_identity | field | repo_key | base32 | true |  | lowercase-base32(sha256("autopilot-repo-v1\0" + realpath(git-common-dir))) |
 | run_identity | field | run_id | uuidv7 | true |  | UUIDv7 run-id. |
 | run_identity | field | workstream | id | true |  |  |
@@ -457,11 +461,17 @@ Sources: `data/contracts.kdl`.
 | questions | field | planning_question.class | planning_question_class | true |  |  |
 | questions | field | planning_question.evidence | string | true |  |  |
 | questions | field | planning_question.consequence | string | true |  |  |
-| work_map | list | units | plan_unit | true |  | Executable plan units. |
+| work_map | list | units | plan_unit | true |  | Executable implementation units only. |
 | work_map | field | plan_unit.id | id | true |  |  |
+| work_map | field | plan_unit.kind | plan_unit_kind | true |  | Closed delivery disposition: the only legal value is implementation. Context gates belong in non-pass plan review evidence; verification belongs in criteria and commands. |
 | work_map | field | plan_unit.objective | string | true |  |  |
 | work_map | list | plan_unit.criteria | string | true |  |  |
+| work_map | list | plan_unit.depends_on | id | true |  | Exact declared predecessor unit ids; package must never invent positional dependencies. |
+| work_map | list | plan_unit.files | path | true |  | Nonempty declared relevant path scope for this executable delivery unit. |
+| work_map | list | plan_unit.commands | plan_unit_command | true |  | Nonempty focused verification commands/tests tied to this unit. |
 | work_map | list | plan_unit.links | id | true |  | Atom ids accepted from task_atoms. |
+| work_map | field | plan_unit_command.command | string | true |  |  |
+| work_map | field | plan_unit_command.expected | string | true |  |  |
 | plan_review | list | verdicts | plan_review_verdict | true |  | Criterion verdicts. |
 | plan_review | field | plan_review_verdict.criterion_id | id | true |  |  |
 | plan_review | field | plan_review_verdict.verdict | planning_review_verdict | true |  |  |
@@ -633,11 +643,16 @@ Sources: `data/contracts.kdl`.
 | validation_context_v2 | list | allowed_read_roots | path | true |  |  |
 | validation_context_v2 | list | excluded_refs | validation_excluded_ref | true |  |  |
 | validation_context_v2 | field | validation_context_criterion.criterion_id | id | true |  |  |
+| validation_context_v2 | field | validation_context_criterion.requirement_text | string | true |  |  |
 | validation_context_v2 | field | validation_context_criterion.mandatory | bool | true |  |  |
 | validation_context_v2 | list | validation_context_criterion.covered_paths | path | true |  |  |
 | validation_context_v2 | list | validation_context_criterion.semantic_surface_ids | id | true |  |  |
 | validation_context_v2 | list | validation_context_criterion.forward_edge_ids | id | true |  |  |
+| validation_context_v2 | list | validation_context_criterion.commands | validation_context_command | true |  | Exact focused command obligations inherited from the owning approved unit. |
 | validation_context_v2 | list | validation_context_criterion.witness_ids | id | true |  |  |
+| validation_context_v2 | field | validation_context_command.command_id | id | true |  |  |
+| validation_context_v2 | field | validation_context_command.command | string | true |  |  |
+| validation_context_v2 | field | validation_context_command.expected | string | true |  |  |
 | validation_context_v2 | field | validation_context_evidence.evidence_ref | ref | true |  |  |
 | validation_context_v2 | field | validation_context_evidence.digest | digest | true |  |  |
 | validation_context_v2 | field | validation_context_evidence.kind | string | true |  |  |
@@ -889,6 +904,7 @@ Sources: `data/contracts.kdl`.
 | planning_atom_kind | work, decision, constraint, acceptance, premise, question, reference |
 | planning_question_class | invalidated-decision, missing-material-decision, material-underdetermination, dod-hole, unsafe-irreversible |
 | planning_review_verdict | pass, blocker, advisory, fail, blocked, needs-fix |
+| plan_unit_kind | implementation |
 | run_phase | planning, ready-to-execute, allocating, executing, final-verification, ready-to-close, terminal |
 | run_health | healthy, degraded, paused, unsafe-halt |
 | run_outcome | null, closed, aborted |

@@ -13,6 +13,7 @@ static CWD_LOCK: Mutex<()> = Mutex::new(());
 use drivers::planning::{
     self, PlanningError, TaskDocumentClass, TaskInputSet, p1_inventory_from_input_set,
 };
+use drivers::runner;
 use drivers::seam::{self, CoreState};
 use kernel::generated::{CoreToHostDonePayload, CoreToHostSpawnPayload, SeamEnvelope};
 use sha2::{Digest as ShaDigest, Sha256};
@@ -548,10 +549,13 @@ fn task_path_classification_delivery_runtime_packages_uncommitted_lane_changes_a
     let root = temp_repo("delivery-runtime-package");
     fs::write(root.join("README.md"), "delivery terminal fixture\n").expect("fixture file");
     git_init(&root);
+    let repo_authority =
+        runner::repository_authority_binding(&root, "main").expect("repo authority");
     fs::create_dir_all(root.join(".pi/autopilot/main")).expect("plan dir");
     fs::write(root.join(".pi/autopilot/main/approved-plan.json"), serde_json::to_vec_pretty(&serde_json::json!({
+        "repository_authority": {"manifest_path": repo_authority.path, "manifest_digest": repo_authority.digest, "head_commit": repo_authority.manifest.head_commit, "head_tree": repo_authority.manifest.head_tree},
         "units":[
-            {"id":"U1","operator_order":1,"decisions":[],"criteria":["AC1"],"dependencies":[],"predecessor_forward_criteria":[],"downstream_release_edges":["EDGE1"]}
+            {"id":"U1","kind":"implementation","objective":"deliver U1","operator_order":1,"decisions":[],"criteria":["AC1"],"criterion_text":[{"id":"AC1","text":"criterion text AC1"}],"dependencies":[],"predecessor_forward_criteria":[],"downstream_release_edges":["EDGE1"],"files":["README.md",".gitignore"],"commands":[{"command":"cargo test -q","expected":"pass"}]}
         ]
     })).expect("approved json")).expect("approved plan");
     let previous = std::env::current_dir().expect("cwd");
@@ -703,6 +707,16 @@ fn task_path_classification_delivery_runtime_packages_uncommitted_lane_changes_a
         2
     );
     let criterion = &validation_context["criteria"][0];
+    assert_eq!(criterion["requirement_text"], "criterion text AC1");
+    assert_eq!(
+        criterion["covered_paths"],
+        serde_json::json!(["README.md", ".gitignore"]),
+        "validation criteria must retain complete approved scope, not fall back to changed paths"
+    );
+    assert_eq!(
+        criterion["commands"],
+        serde_json::json!([{"command_id":"CMD-U1-1","command":"cargo test -q","expected":"pass"}])
+    );
     let evidence_ref = validation_context["evidence"][0]["evidence_ref"]
         .as_str()
         .expect("evidence ref");
@@ -751,6 +765,69 @@ fn task_path_classification_delivery_runtime_packages_uncommitted_lane_changes_a
             "{label} must be rejected"
         );
     }
+    for (field, invented) in [
+        ("covered_paths", "outside-approved-scope.txt"),
+        ("semantic_surface_ids", "invented-surface"),
+        ("forward_edge_ids", "invented-edge"),
+    ] {
+        let mut forged = submission_value.clone();
+        forged["criterion_results"][0][field]
+            .as_array_mut()
+            .expect("coverage array")
+            .push(serde_json::json!(invented));
+        let forged: kernel::generated::ValidationSubmissionV2 =
+            serde_json::from_value(forged).expect("typed invented coverage submission");
+        assert!(
+            drivers::runner::child::admit_validation_submission(&typed_spec, &forged).is_err(),
+            "validator must not invent extra {field} authority"
+        );
+    }
+    let mut blocked_with_finding = submission_value.clone();
+    blocked_with_finding["outcome"] = serde_json::json!("BLOCKED");
+    blocked_with_finding["criterion_results"][0]["verdict"] = serde_json::json!("FAIL");
+    blocked_with_finding["criterion_results"][0]["finding_ids"] =
+        serde_json::json!(["finding-validation-1"]);
+    blocked_with_finding["findings"] = serde_json::json!([{
+        "finding_id":"finding-validation-1",
+        "kind":"source-defect",
+        "effect":"forward-blocking",
+        "summary":"issued scope defect",
+        "detail":"the exact issued criterion is not satisfied",
+        "criterion_ids":[criterion["criterion_id"].clone()],
+        "edge_ids":criterion["forward_edge_ids"].clone(),
+        "evidence_refs":[evidence_ref],
+        "covered_paths":criterion["covered_paths"].clone(),
+        "semantic_surface_ids":criterion["semantic_surface_ids"].clone()
+    }]);
+    let typed_blocked: kernel::generated::ValidationSubmissionV2 =
+        serde_json::from_value(blocked_with_finding.clone()).expect("typed blocked finding");
+    drivers::runner::child::admit_validation_submission(&typed_spec, &typed_blocked)
+        .expect("finding bound to exact issued authority");
+    for (field, invented) in [
+        ("criterion_ids", "invented-criterion"),
+        ("edge_ids", "invented-edge"),
+        ("evidence_refs", "invented-evidence"),
+        ("covered_paths", "invented-path"),
+        ("semantic_surface_ids", "invented-surface"),
+    ] {
+        let mut forged = blocked_with_finding.clone();
+        forged["findings"][0][field] = serde_json::json!([invented]);
+        let forged: kernel::generated::ValidationSubmissionV2 =
+            serde_json::from_value(forged).expect("typed forged finding scope");
+        assert!(
+            drivers::runner::child::admit_validation_submission(&typed_spec, &forged).is_err(),
+            "validator finding must not invent {field} authority"
+        );
+    }
+    let mut unknown_finding_link = blocked_with_finding.clone();
+    unknown_finding_link["criterion_results"][0]["finding_ids"] =
+        serde_json::json!(["invented-finding"]);
+    let unknown_finding_link: kernel::generated::ValidationSubmissionV2 =
+        serde_json::from_value(unknown_finding_link).expect("typed unknown finding link");
+    assert!(
+        drivers::runner::child::admit_validation_submission(&typed_spec, &unknown_finding_link)
+            .is_err()
+    );
     let mut omitted = valid_submission.clone();
     omitted.criterion_results.clear();
     assert!(drivers::runner::child::admit_validation_submission(&typed_spec, &omitted).is_err());
@@ -788,10 +865,13 @@ fn task_path_classification_delivery_runtime_adopts_existing_agent_commit_withou
     let root = temp_repo("delivery-runtime-adopt");
     fs::write(root.join("README.md"), "delivery terminal fixture\n").expect("fixture file");
     git_init(&root);
+    let repo_authority =
+        runner::repository_authority_binding(&root, "main").expect("repo authority");
     fs::create_dir_all(root.join(".pi/autopilot/main")).expect("plan dir");
     fs::write(root.join(".pi/autopilot/main/approved-plan.json"), serde_json::to_vec_pretty(&serde_json::json!({
+        "repository_authority": {"manifest_path": repo_authority.path, "manifest_digest": repo_authority.digest, "head_commit": repo_authority.manifest.head_commit, "head_tree": repo_authority.manifest.head_tree},
         "units":[
-            {"id":"U1","operator_order":1,"decisions":[],"criteria":["AC1"],"dependencies":[],"predecessor_forward_criteria":[],"downstream_release_edges":["EDGE1"]}
+            {"id":"U1","kind":"implementation","objective":"deliver U1","operator_order":1,"decisions":[],"criteria":["AC1"],"criterion_text":[{"id":"AC1","text":"criterion text AC1"}],"dependencies":[],"predecessor_forward_criteria":[],"downstream_release_edges":["EDGE1"],"files":["README.md"],"commands":[{"command":"cargo test -q","expected":"pass"}]}
         ]
     })).expect("approved json")).expect("approved plan");
     let previous = std::env::current_dir().expect("cwd");
@@ -871,12 +951,15 @@ fn task_path_classification_delivery_terminal_carrier_is_core_accepted_and_incom
     let root = temp_repo("delivery-terminal");
     fs::write(root.join("README.md"), "delivery terminal fixture\n").expect("fixture file");
     git_init(&root);
+    let repo_authority =
+        runner::repository_authority_binding(&root, "main").expect("repo authority");
     fs::create_dir_all(root.join(".pi/autopilot/main")).expect("plan dir");
     fs::write(root.join(".pi/autopilot/main/approved-plan.json"), serde_json::to_vec_pretty(&serde_json::json!({
+        "repository_authority": {"manifest_path": repo_authority.path, "manifest_digest": repo_authority.digest, "head_commit": repo_authority.manifest.head_commit, "head_tree": repo_authority.manifest.head_tree},
         "units":[
-            {"id":"U1","operator_order":1,"decisions":[],"criteria":["AC1"],"dependencies":[],"predecessor_forward_criteria":[],"downstream_release_edges":["EDGE1"]},
-            {"id":"U2","operator_order":2,"decisions":[],"criteria":["AC2"],"dependencies":["U1"],"predecessor_forward_criteria":[],"downstream_release_edges":["EDGE2"]},
-            {"id":"U3","operator_order":3,"decisions":[],"criteria":["AC3"],"dependencies":["U2"],"predecessor_forward_criteria":[],"downstream_release_edges":["EDGE3"]}
+            {"id":"U1","kind":"implementation","objective":"deliver U1","operator_order":1,"decisions":[],"criteria":["AC1"],"criterion_text":[{"id":"AC1","text":"criterion text AC1"}],"dependencies":[],"predecessor_forward_criteria":[],"downstream_release_edges":["EDGE1"],"files":["README.md"],"commands":[{"command":"cargo test -q","expected":"pass"}]},
+            {"id":"U2","kind":"implementation","objective":"deliver U2","operator_order":2,"decisions":[],"criteria":["AC2"],"criterion_text":[{"id":"AC2","text":"criterion text AC2"}],"dependencies":["U1"],"predecessor_forward_criteria":[],"downstream_release_edges":["EDGE2"],"files":["README.md"],"commands":[{"command":"cargo test -q","expected":"pass"}]},
+            {"id":"U3","kind":"implementation","objective":"deliver U3","operator_order":3,"decisions":[],"criteria":["AC3"],"criterion_text":[{"id":"AC3","text":"criterion text AC3"}],"dependencies":["U2"],"predecessor_forward_criteria":[],"downstream_release_edges":["EDGE3"],"files":["README.md"],"commands":[{"command":"cargo test -q","expected":"pass"}]}
         ]
     })).expect("approved json")).expect("approved plan");
     let previous = std::env::current_dir().expect("cwd");
@@ -1078,6 +1161,7 @@ fn git_init(root: &Path) {
         ],
     );
     run(root, &["config", "user.name", "Task Classification"]);
+    fs::write(root.join(".gitignore"), ".pi/autopilot/\n.pi/tasks/\n").expect("gitignore");
     run(root, &["add", "."]);
     run(root, &["commit", "-m", "task pack"]);
 }

@@ -64,6 +64,7 @@ fn doc(marker: &str, id: &str, body: &str) -> String {
 }
 
 fn init_repo(root: &Path) {
+    fs::write(root.join(".gitignore"), ".pi/autopilot/\n.pi/tasks/\n").expect("gitignore");
     run_git(root, &["init", "-q"]);
     run_git(root, &["config", "user.email", "test@example.com"]);
     run_git(root, &["config", "user.name", "Test"]);

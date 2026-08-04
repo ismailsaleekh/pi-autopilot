@@ -1,7 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Component, Path};
 
 use kernel::boundary::Rejection;
-use kernel::generated::{AllocationLaneProposal, Id};
+use kernel::generated::{
+    AllocationLaneProposal, Id, Path as ContractPath, PlanUnitCommand, PlanUnitKind,
+};
 use kernel_macros::acceptance_boundary;
 use serde::{Deserialize, Serialize};
 
@@ -10,15 +13,35 @@ use crate::roles::kdl::boundary_runtime;
 pub const BOUNDARY_ID: &str = "allocation.lane-proposal.v1";
 const IMPLEMENTER_CAPACITY: &str = "implementer";
 
-#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
 pub struct ApprovedUnit {
     pub id: Id,
+    pub kind: PlanUnitKind,
+    pub objective: String,
     pub operator_order: u32,
     pub decisions: Vec<Id>,
     pub criteria: Vec<Id>,
+    pub criterion_text: Vec<ApprovedCriterion>,
     pub dependencies: Vec<Id>,
     pub predecessor_forward_criteria: Vec<Id>,
     pub downstream_release_edges: Vec<Id>,
+    pub files: Vec<ContractPath>,
+    pub commands: Vec<PlanUnitCommand>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
+pub struct ApprovedCriterion {
+    pub id: Id,
+    pub text: String,
+}
+
+pub fn approved_path_is_safe(path: &kernel::generated::Path) -> bool {
+    !path.0.trim().is_empty()
+        && !path.0.contains('\\')
+        && !Path::new(&path.0).is_absolute()
+        && Path::new(&path.0)
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
 }
 
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]

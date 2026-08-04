@@ -140,13 +140,50 @@ export const WORK_MAP_TOOL_PARAMETERS = {
       "items": {
         "additionalProperties": true,
         "properties": {
+          "commands": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "command": {
+                  "type": "string"
+                },
+                "expected": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "command",
+                "expected"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
           "criteria": {
             "items": {
               "type": "string"
             },
             "type": "array"
           },
+          "depends_on": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "files": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "id": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "implementation"
+            ],
             "type": "string"
           },
           "links": {
@@ -161,8 +198,12 @@ export const WORK_MAP_TOOL_PARAMETERS = {
         },
         "required": [
           "id",
+          "kind",
           "objective",
           "criteria",
+          "depends_on",
+          "files",
+          "commands",
           "links"
         ],
         "type": "object"
@@ -175,7 +216,7 @@ export const WORK_MAP_TOOL_PARAMETERS = {
   ],
   "type": "object"
 } as TSchema;
-export const WORK_MAP_TOOL_SCHEMA_DIGEST = "d60fa316fa8d5f2baf1d1a764028bdaf5676e094ec23710c53917e760cfe939a";
+export const WORK_MAP_TOOL_SCHEMA_DIGEST = "f4b774b90b653568c38a0971e9472e5aa3dae80c56ea7dd7f3136b5b5f5376f2";
 
 export const PLAN_REVIEW_TOOL_PARAMETERS = {
   "additionalProperties": true,
