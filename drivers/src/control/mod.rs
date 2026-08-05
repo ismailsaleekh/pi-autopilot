@@ -211,22 +211,21 @@ pub fn effect_for(action: BackgroundAction) -> Effect {
     id = "control.bg-run-exact.v1",
     producer = Producer::Package,
     visible = true,
-    admits = "A parent bg_run call must byte-match exactly one live package-issued launch action bg_run object: name, command bytes, isAgent, timeoutSeconds, notifyOnCompletion, and triggerOnCompletion. Unissued launches are Unsafe(UnissuedBackgroundLaunch).",
+    admits = "A parent bg_run call must byte-match exactly one live package-issued launch action bg_run object. Package-issued actions retain durable completion notification and prohibit parent-turn triggering. Unissued launches are Unsafe(UnissuedBackgroundLaunch).",
     mode = BoundaryMode::Enforce
 )]
 pub fn admit_exact_bg_run<'a>(
     pair: (&'a BackgroundAction, &'a BackgroundActionBgRun),
 ) -> Result<&'a BackgroundAction, Rejection> {
     let (action, call) = pair;
-    if !matches_call(action, call) {
+    if !action.bg_run.notify_on_completion || action.bg_run.trigger_on_completion {
+        boundary_runtime(BOUNDARY_ID).reject("unsafe package completion profile".to_owned())?;
+    }
+    if &action.bg_run != call {
         boundary_runtime(BOUNDARY_ID)
             .reject("bg_run call did not match the live issued action".to_owned())?;
     }
     Ok(action)
-}
-
-fn matches_call(action: &BackgroundAction, call: &BackgroundActionBgRun) -> bool {
-    &action.bg_run == call
 }
 
 fn observation_value(observation: ControlObservation) -> serde_json::Value {

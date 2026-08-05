@@ -192,6 +192,46 @@ test("completed terminal sends only task-completed without Host carrier reads", 
   assert.deepEqual(transport.calls.at(-1).payload, { task_id: "task-plan", action_id: action.action_id, assignment_id: action.assignment_id, status: "completed" });
 });
 
+test("terminal Core failure emits typed machine status before operator prose and rethrows", async () => {
+  const failure = new Error("CoreUnavailable: terminal transport closed");
+  const { action, pi, terminalHandler } = await terminalFailureHarness(failure);
+
+  await assert.rejects(
+    () => terminalHandler(taskFromDescriptor(action.bg_run, "task-fail", "completed")),
+    (error) => error === failure,
+  );
+  assert.deepEqual(pi.messages, [
+    { appendEntry: { customType: "pi-autopilot-status-v1", data: { status: "rejection:host-terminal:CoreUnavailable: terminal transport closed" } } },
+    { message: { customType: "pi-autopilot", content: "Autopilot terminal handling failed for task=task-fail action=action-fail assignment=assignment-fail: CoreUnavailable: terminal transport closed", display: true, details: { level: "error" } }, options: { triggerTurn: false, deliverAs: "nextTurn" } },
+  ]);
+});
+
+test("terminal status publication failure reports both failures and rethrows the original", async () => {
+  const failure = new Error("CoreUnavailable: original terminal failure");
+  const { action, pi, terminalHandler } = await terminalFailureHarness(failure, () => { throw new Error("appendEntry unavailable"); });
+
+  await assert.rejects(
+    () => terminalHandler(taskFromDescriptor(action.bg_run, "task-fail", "completed")),
+    (error) => error === failure,
+  );
+  assert.equal(pi.messages.length, 1);
+  assert.match(pi.messages[0].message.content, /Status publication failed.*appendEntry unavailable.*terminal: CoreUnavailable: original terminal failure/u);
+  assert.deepEqual(pi.messages[0].options, { triggerTurn: false, deliverAs: "nextTurn" });
+});
+
+test("terminal failure machine detail is deterministically bounded", async () => {
+  const failure = new Error(`CoreUnavailable:${"x".repeat(300)}`);
+  const { action, pi, terminalHandler } = await terminalFailureHarness(failure);
+
+  await assert.rejects(
+    () => terminalHandler(taskFromDescriptor(action.bg_run, "task-fail", "completed")),
+    (error) => error === failure,
+  );
+  const status = pi.messages[0].appendEntry.data.status;
+  assert.equal(status.length, "rejection:host-terminal:".length + 240);
+  assert.ok(status.endsWith("…"));
+});
+
 test("extension buffers an immediate terminal task until its exact action binding is recorded", async () => {
   const pi = fakePi();
   const firstAction = terminalAction("action-1", "assignment-1", "first exact task", "node first");
@@ -237,6 +277,30 @@ test("extension buffers an immediate terminal task until its exact action bindin
   assert.deepEqual(started, [firstAction.bg_run, secondAction.bg_run]);
   assert.deepEqual(transport.calls.map((call) => call.kind), ["command", "task-completed"]);
 });
+
+async function terminalFailureHarness(failure, appendEntry) {
+  const action = terminalAction("action-fail", "assignment-fail", "failing terminal", "node terminal-fail");
+  const pi = fakePi();
+  if (appendEntry !== undefined) pi.appendEntry = appendEntry;
+  let terminalHandler;
+  const transport = {
+    async request(kind) {
+      if (kind === "command") return { v: 1, id: 1, kind: "spawn", payload: { action } };
+      throw failure;
+    },
+    close() {},
+  };
+  const backgroundTasks = {
+    async capabilities() { return completeCapabilities(); },
+    async run(descriptor) { return taskFromDescriptor(descriptor, "task-fail", "running"); },
+    onTerminal(handler) { terminalHandler = handler; return () => {}; },
+    async close() {},
+  };
+  autopilotExtension(pi, extensionOptions({ transport, backgroundTasks }));
+  await pi.events.get("session_start")({ reason: "startup" }, fakeCtx());
+  await pi.registrations.get("autopilot-plan").handler("main TASK-A.md TASK-B.md TASK-C.md CONTEXT.md", fakeCtx());
+  return { action, pi, terminalHandler };
+}
 
 function fakePi() {
   const registrations = new Map();
@@ -330,7 +394,7 @@ function terminalAction(actionId, assignmentId, name, command) {
       command,
       isAgent: true,
       notifyOnCompletion: true,
-      triggerOnCompletion: true,
+      triggerOnCompletion: false,
     },
     run_revision: 1,
     supersession_state: "live",

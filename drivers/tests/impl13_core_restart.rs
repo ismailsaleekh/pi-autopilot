@@ -26,6 +26,7 @@ fn release_core_reemits_unacknowledged_planning_wave_after_restart() {
     let first = send_command(raw, &event_log, &repo, 1);
     assert_eq!(first.kind, "spawn-wave", "first response: {first:?}");
     let first_wave = spawn_wave_payload(&first);
+    assert_machine_only_completion(&first_wave);
     assert_eq!(
         first_wave.actions.len(),
         7,
@@ -42,6 +43,7 @@ fn release_core_reemits_unacknowledged_planning_wave_after_restart() {
         done_status(&replay)
     );
     let replay_wave = spawn_wave_payload(&replay);
+    assert_machine_only_completion(&replay_wave);
     assert_eq!(
         action_keys(&replay_wave),
         first_actions,
@@ -154,6 +156,19 @@ fn done_status(envelope: &SeamEnvelope) -> Option<String> {
             .expect("done payload")
             .status
     })
+}
+
+fn assert_machine_only_completion(wave: &CoreToHostSpawnWavePayload) {
+    assert!(
+        wave.actions
+            .iter()
+            .all(|action| action.bg_run.notify_on_completion)
+    );
+    assert!(
+        wave.actions
+            .iter()
+            .all(|action| !action.bg_run.trigger_on_completion)
+    );
 }
 
 fn action_keys(wave: &CoreToHostSpawnWavePayload) -> Vec<(String, String, u64)> {

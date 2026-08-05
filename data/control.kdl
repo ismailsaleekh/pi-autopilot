@@ -47,5 +47,5 @@ watchdog "heartbeat" {
     display_name "autopilot heartbeat wait"
     isAgent "#false"
     notifyOnCompletion "#true"
-    triggerOnCompletion "#true"
+    triggerOnCompletion "#false"
 }

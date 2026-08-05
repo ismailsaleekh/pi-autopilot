@@ -108,7 +108,7 @@ for (const candidate of packageSets) {
         const firstDescriptor = runRequests[0].payload;
         assert.equal(firstDescriptor.isAgent, true);
         assert.equal(firstDescriptor.notifyOnCompletion, true);
-        assert.equal(firstDescriptor.triggerOnCompletion, true);
+        assert.equal(firstDescriptor.triggerOnCompletion, false);
         if (Object.prototype.hasOwnProperty.call(firstDescriptor, "timeoutSeconds")) {
           assert.equal(firstDescriptor.timeoutSeconds, 3600);
         }
@@ -120,7 +120,7 @@ for (const candidate of packageSets) {
         assert.ok(tracked, `tracked task metadata did not contain the exact Core descriptor command: ${JSON.stringify(status.tasks)}`);
         assert.equal(tracked.isAgent, true);
         assert.equal(tracked.notifyOnCompletion, true);
-        assert.equal(tracked.triggerOnCompletion, true);
+        assert.equal(tracked.triggerOnCompletion, false);
 
         await waitFor(() => terminalTasks.length >= 1, "terminal task publication");
         await probeClient.drainTerminalHandlers();

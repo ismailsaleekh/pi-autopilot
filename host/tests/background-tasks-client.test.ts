@@ -53,6 +53,7 @@ test("PiBackgroundTaskClient preserves bg_run descriptor identity and omits abse
   bus.on(BG_REQUEST_CHANNEL, (request) => {
     assert.equal(request.operation, "run");
     assert.equal(request.payload, descriptor, "run payload must be the validated Core descriptor object, not a rewrite");
+    assert.equal(request.payload.triggerOnCompletion, true, "the generic background client must remain policy-neutral");
     assert.equal(Object.prototype.hasOwnProperty.call(request.payload, "timeoutSeconds"), false);
     bus.emit(BG_RESPONSE_CHANNEL, {
       schema_version: BG_RESPONSE_SCHEMA,

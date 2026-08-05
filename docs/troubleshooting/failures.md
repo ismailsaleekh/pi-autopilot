@@ -32,6 +32,15 @@ All Autopilot failures are loud and typed. Match the symptom, then follow the po
 | 30 | `status-non-success` | The unit reported a non-success verdict; read the status + audit. |
 | 31 | `runtime-commit-failed` | Inspect the unit worktree / execution-commit evidence. |
 
+## Parent terminal delivery
+
+| Symptom | Cause | Behavior |
+|---|---|---|
+| `rejection:host-terminal:...` | Exact terminal correlation, Core transport, or follow-up effect application failed | Host emits the bounded machine status before operator prose and rethrows. Preserve the failed run for forensics; never resume it or let the parent model implement work directly. |
+| "Status publication failed" | The terminal path failed and Pi also rejected its machine-status entry | Host reports both failures through non-triggering operator prose and rethrows the original terminal error; treat the run as failed and preserve it. |
+| Durable background completion notice appears but no parent turn starts | Expected Autopilot behavior | EventBus terminal delivery advances Core directly. Autopilot-owned tasks use `notifyOnCompletion: true` and `triggerOnCompletion: false`; generic operator tasks remain unchanged. |
+| Central `control.bg-run-exact.v1` rejection before launch | A package descriptor disabled durable notification, enabled parent triggering, or drifted from the issued bytes | Treat as a package defect. Do not rewrite the descriptor in Host or bypass the exact admission boundary. |
+
 ## Semantic recovery
 
 | Symptom | Cause | Behavior |

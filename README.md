@@ -15,7 +15,7 @@
 
 ## Current architecture
 
-1. TypeScript Host validates Core frames, obtains background capabilities, forwards exact `bg_run` descriptors over `pi.events`, retains task/action/assignment bindings, and relays terminal events back to Core.
+1. TypeScript Host validates Core frames, obtains background capabilities, forwards exact `bg_run` descriptors over `pi.events`, retains task/action/assignment bindings, and relays terminal events back to Core. Autopilot-owned descriptors retain durable completion notification but disable parent-turn triggering; terminal failures emit a typed machine status and fail closed.
 2. Rust Core owns command parsing, four-file task-pack classification, planning inventory, role/mode/roster selection, runner spec generation, command bytes, terminal acceptance, and state mutation.
 3. `autopilot-agent-run` is only a package-contained wrapper: it resolves sibling `bin/autopilot-core.mjs` and invokes `agent-run --spec <absolute-spec.json>`. Installed packages never fall back to PATH, cwd, source trees, `dist/`, or unrelated binaries.
 4. Child `agent-run` validates `autopilot.agent_run_spec.v4`, launches Pi RPC with a run-owned session, `--no-extensions`, and one explicit codegen-anchored child add-on, and strips metered API-key overrides.

@@ -1,4 +1,4 @@
-use drivers::control::{BgRunGuard, GuardOutcome, GuardRejection};
+use drivers::control::{BgRunGuard, GuardOutcome, GuardRejection, admit_exact_bg_run};
 use kernel::{
     effect::Effect,
     failure::{Failure, HardBoundary},
@@ -59,6 +59,29 @@ fn unissued_bg_run_is_unsafe_and_nothing_runs() {
 }
 
 #[test]
+fn completion_profile_invariant_rejects_parent_turns_and_missing_notification() {
+    for (label, notify, trigger) in [
+        ("parent trigger", true, true),
+        ("no notification", false, false),
+    ] {
+        let mut issued = action("act-profile", "assign-profile", "printf ready");
+        issued.bg_run.notify_on_completion = notify;
+        issued.bg_run.trigger_on_completion = trigger;
+        let call = issued.bg_run.clone();
+        let direct = admit_exact_bg_run((&issued, &call)).expect_err(label);
+        assert_eq!(direct.actual(), "unsafe package completion profile");
+        let mut guard = BgRunGuard::new(vec![issued.clone()]);
+        let process = FakeProcess::default();
+
+        let rejection = guard.admit(&call).expect_err(label);
+
+        assert!(matches!(rejection, GuardRejection::Mismatch { valid } if *valid == issued));
+        assert_eq!(process.accepted_work, 0);
+        assert!(process.effects.is_empty());
+    }
+}
+
+#[test]
 fn duplicate_launch_is_idempotent_and_produces_no_second_work() {
     let issued = action("act-3", "assign-3", "printf ready");
     let mut guard = BgRunGuard::new(vec![issued]);
@@ -102,7 +125,7 @@ fn call(command: &str) -> BackgroundActionBgRun {
         is_agent: false,
         timeout_seconds: Some(1800),
         notify_on_completion: true,
-        trigger_on_completion: true,
+        trigger_on_completion: false,
     }
 }
 
@@ -117,7 +140,7 @@ fn action(action_id: &str, assignment_id: &str, command: &str) -> BackgroundActi
             is_agent: false,
             timeout_seconds: Some(1800),
             notify_on_completion: true,
-            trigger_on_completion: true,
+            trigger_on_completion: false,
         },
         run_revision: 42,
         expires_at: None,

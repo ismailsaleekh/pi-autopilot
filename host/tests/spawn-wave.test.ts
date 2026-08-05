@@ -13,7 +13,7 @@ function action(index: number) {
       command: `printf ${index}`,
       isAgent: true,
       notifyOnCompletion: true,
-      triggerOnCompletion: true,
+      triggerOnCompletion: false,
     },
     run_revision: 10,
     supersession_state: "live",

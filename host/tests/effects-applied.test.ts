@@ -207,7 +207,7 @@ function backgroundAction() {
       command: "printf 'exact'",
       isAgent: true,
       notifyOnCompletion: true,
-      triggerOnCompletion: true,
+      triggerOnCompletion: false,
     },
     run_revision: 7,
     supersession_state: "active",

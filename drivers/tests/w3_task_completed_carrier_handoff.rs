@@ -145,7 +145,7 @@ impl Fixture {
             "auth",
             "Repo context",
         );
-        runner::planning_issue(&PlanningRunnerRequest {
+        let issued = runner::planning_issue(&PlanningRunnerRequest {
             workstream: "ws".to_owned(),
             action_id: Id(format!("action-{assignment_id}")),
             assignment_id: Id(assignment_id.to_owned()),
@@ -163,7 +163,10 @@ impl Fixture {
             atom_registry_digest: None,
             accepted_planning_artifacts: Vec::new(),
         })
-        .unwrap()
+        .unwrap();
+        assert!(issued.action.bg_run.notify_on_completion);
+        assert!(!issued.action.bg_run.trigger_on_completion);
+        issued
     }
 }
 
@@ -181,6 +184,7 @@ fn append_ref(state: &mut CoreState, reference: &Ref) {
 }
 
 fn assert_spawn_assignment(response: &SeamEnvelope, assignment_id: &str) {
+    assert_machine_only_completion(response);
     assert!(
         matches!(response.kind.as_str(), "spawn" | "spawn-wave"),
         "expected spawn response: {response:?}"
@@ -191,6 +195,18 @@ fn assert_spawn_assignment(response: &SeamEnvelope, assignment_id: &str) {
             .any(|id| id == assignment_id),
         "spawn should launch {assignment_id}: {response:?}"
     );
+}
+
+fn assert_machine_only_completion(response: &SeamEnvelope) {
+    let actions = response
+        .payload
+        .get("actions")
+        .and_then(serde_json::Value::as_array);
+    let single = response.payload.get("action").into_iter();
+    for action in actions.into_iter().flatten().chain(single) {
+        assert_eq!(action["bg_run"]["notifyOnCompletion"], true);
+        assert_eq!(action["bg_run"]["triggerOnCompletion"], false);
+    }
 }
 
 fn spawned_assignment_ids(response: &SeamEnvelope) -> Vec<String> {

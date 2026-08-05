@@ -5,12 +5,17 @@ review_policy: behavioral
 covers_surfaces:
   - autopilot-agent-run
 covers_sources:
+  - data/control.kdl
+  - data/seam_real_producers.rs
+  - drivers/src/control/mod.rs
   - drivers/src/runner/mod.rs
   - drivers/src/runner/child.rs
-  - src/resolve-runner.ts
-signature_hash: 'sha256:a5ee2fb831b97d6f0e5450759d68bfb1bf43017a4d5c8f10df68c05755315709'
-body_hash: 'sha256:28a7af517eda3c3d5f0f7af8bde83f075455e97a52923debd5df8d387f3d9a7c'
-semantic_attestation: 'sha256:28a7af517eda3c3d5f0f7af8bde83f075455e97a52923debd5df8d387f3d9a7c'
+  - drivers/src/watchdog/mod.rs
+  - src/extension.ts
+  - src/resolve-core.ts
+signature_hash: 'sha256:3c050effcbb84d587bcdf366630b7b847070fd1efc7c18533e59fd9f83f2a07c'
+body_hash: 'sha256:6a4f813d84d805f3d7f308a534cb7283e072be61e9f0de42acb629d469cf7656'
+semantic_attestation: 'sha256:6a4f813d84d805f3d7f308a534cb7283e072be61e9f0de42acb629d469cf7656'
 stability: stable
 ---
 
@@ -22,7 +27,7 @@ Autopilot's child runner is split between a tiny npm wrapper and Rust Core-owned
 
 | Concern | Source |
 |---|---|
-| Package-contained runner resolution | `src/resolve-runner.ts` |
+| Package-contained runner resolution | `src/resolve-core.ts` |
 | Core command/spec construction | `drivers/src/runner/mod.rs` |
 | Child runner validation and Pi JSONL handling | `drivers/src/runner/child.rs` |
 | Terminal carrier acceptance | `drivers/src/seam/mod.rs` |
@@ -32,9 +37,11 @@ Autopilot's child runner is split between a tiny npm wrapper and Rust Core-owned
 
 1. `CoreTransport` resolves `process.execPath` and `bin/autopilot-agent-run.mjs` from the installed package and passes them to Core as transport facts.
 2. Core writes a strict `autopilot.agent_run_spec.v4`, rendered prompt, and a parent-selected generated terminal profile under deterministic `.pi/autopilot/<workstream>/...` paths.
-3. Core emits a `background_action` whose nested `bg_run` object is byte-exactly the public `pi-background-tasks@0.6.1` `run` payload.
-4. The Host forwards that object over `pi.events`; it does not rewrite fields, synthesize defaults, or call a Pi context method named `bg_run`.
-5. The background service executes the package-contained runner command and publishes one terminal event after durability.
+3. Core emits a `background_action` whose nested `bg_run` object is byte-exactly the public `pi-background-tasks@0.6.1` `run` payload. Every Autopilot-owned descriptor keeps `notifyOnCompletion: true` for durable operator notification and sets `triggerOnCompletion: false`, so completion is machine-consumed without waking the unrestricted parent model.
+4. The central `control.bg-run-exact.v1` boundary rejects any package-issued descriptor that disables notification or enables parent-turn triggering, then requires the Host call to match every descriptor byte.
+5. The Host forwards that object over `pi.events`; it does not rewrite fields, synthesize defaults, or call a Pi context method named `bg_run`. Generic background tasks outside Autopilot retain the background service's normal trigger behavior.
+6. The background service durably publishes one terminal event. The Host correlates it to the exact action and sends `task-completed` directly to Core; replay/re-emission and watchdog actions use the same machine-only completion profile.
+7. If correlation, Core transport, or next-effect application fails, the Host appends a bounded `rejection:host-terminal:` machine status before operator prose and rethrows. If machine-status publication itself fails, Host reports both failures through the non-triggering operator channel and still rethrows the original terminal error. It never infers success or continues after a possibly partial state transition.
 
 ## Child acceptance
 

@@ -673,7 +673,7 @@ function terminalAction(actionId, assignmentId, name, command) {
     action_id: actionId,
     assignment_id: assignmentId,
     kind: "launch-background",
-    bg_run: { name, command, isAgent: true, notifyOnCompletion: true, triggerOnCompletion: true },
+    bg_run: { name, command, isAgent: true, notifyOnCompletion: true, triggerOnCompletion: false },
     run_revision: 1,
     supersession_state: "live",
   };

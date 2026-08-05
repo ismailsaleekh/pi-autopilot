@@ -230,7 +230,7 @@ fn planning_action_from_binding(binding: &runner::IssuedRunnerBinding) -> Result
             is_agent: true,
             timeout_seconds: Some(3600),
             notify_on_completion: true,
-            trigger_on_completion: true,
+            trigger_on_completion: false,
         },
         run_revision: binding.run_revision,
         expires_at: None,

@@ -39,7 +39,7 @@ interface TaskBinding {
 
 export default function autopilotExtension(pi: ExtensionAPI, options: AutopilotExtensionOptions = {}): void {
   const operatorMessage = operatorMessageSink(pi);
-  const statusEntry = (status: string) => pi.appendEntry(AUTOPILOT_STATUS_CUSTOM_TYPE, buildAutopilotStatusEntryData(status));
+  const statusEntry = async (status: string) => pi.appendEntry(AUTOPILOT_STATUS_CUSTOM_TYPE, buildAutopilotStatusEntryData(status));
   const taskBindings = new Map<string, TaskBinding>();
   const unmatchedTerminalTasks = new Map<string, BgTaskSnapshot>();
   /**
@@ -99,14 +99,10 @@ export default function autopilotExtension(pi: ExtensionAPI, options: AutopilotE
       return;
     }
     taskBindings.delete(task.id);
-    validateTaskActionCorrelation(task, binding.action);
-    const ctx = currentCtx;
-    if (ctx === undefined) {
-      const message = `Autopilot received terminal background task ${correlationLabel(binding)} before Pi supplied a session context; terminal correlation was not forwarded.`;
-      await operatorMessage(message, "error");
-      throw new Error(message);
-    }
     try {
+      validateTaskActionCorrelation(task, binding.action);
+      const ctx = currentCtx;
+      if (ctx === undefined) throw new Error(`Autopilot received terminal background task ${correlationLabel(binding)} before Pi supplied a session context; terminal correlation was not forwarded.`);
       // A terminal event can only reach this point via a subscription created
       // inside activation, so the services are necessarily present. The
       // accessor still throws rather than assuming, keeping inertness structural.
@@ -119,7 +115,12 @@ export default function autopilotExtension(pi: ExtensionAPI, options: AutopilotE
       });
       await applyAndRecord(frame, ctx, commandOptions(services));
     } catch (error) {
-      await operatorMessage(`Autopilot terminal handling failed for ${correlationLabel(binding)}: ${boundedError(error)}`, "error");
+      const detail = boundedError(error);
+      await statusEntry(`rejection:host-terminal:${detail}`).catch(async (statusError) => {
+        await operatorMessage(`Status publication failed: ${boundedError(statusError)}; terminal: ${detail}`, "error");
+        throw error;
+      });
+      await operatorMessage(`Autopilot terminal handling failed for ${correlationLabel(binding)}: ${detail}`, "error");
       throw error;
     }
   }
@@ -303,9 +304,7 @@ function bufferUnmatchedTerminal(task: BgTaskSnapshot, unmatchedTerminalTasks: M
   unmatchedTerminalTasks.set(task.id, task);
 }
 
-function correlationLabel(binding: TaskBinding): string {
-  return `task=${binding.task_id} action=${binding.action.action_id} assignment=${binding.action.assignment_id}`;
-}
+function correlationLabel(binding: TaskBinding): string { return `task=${binding.task_id} action=${binding.action.action_id} assignment=${binding.action.assignment_id}`; }
 
 function operatorMessageSink(pi: ExtensionAPI): OperatorMessageSink {
   return (message: string, level: OperatorMessageLevel) => {

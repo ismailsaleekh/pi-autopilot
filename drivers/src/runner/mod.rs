@@ -1583,7 +1583,7 @@ fn action_from_doc(
             is_agent: true,
             timeout_seconds,
             notify_on_completion: true,
-            trigger_on_completion: true,
+            trigger_on_completion: false,
         },
         run_revision: spec.run_revision,
         expires_at: None,

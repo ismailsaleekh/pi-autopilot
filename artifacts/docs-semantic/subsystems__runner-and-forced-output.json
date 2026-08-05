@@ -1,0 +1,20 @@
+{
+  "schema_version": "autopilot.docs_semantic_attestation.v2",
+  "doc_id": "subsystems/runner-and-forced-output",
+  "reviewed_body_hash": "sha256:6a4f813d84d805f3d7f308a534cb7283e072be61e9f0de42acb629d469cf7656",
+  "reviewed_doc_sha256": "sha256:82d4bc42ff2b5bf35951afe705a41d75ede8c5e5591faf85f9f6f30a402565a9",
+  "covers_sources": [
+    "data/control.kdl",
+    "data/seam_real_producers.rs",
+    "drivers/src/control/mod.rs",
+    "drivers/src/runner/child.rs",
+    "drivers/src/runner/mod.rs",
+    "drivers/src/watchdog/mod.rs",
+    "src/extension.ts",
+    "src/resolve-core.ts"
+  ],
+  "verdict": "PASS",
+  "reviewer": "anthropic/claude-opus-5 via Pi subscription bg_delegate d93bd8933f44becb71ed4b2f8c9eb3ea7 (answer sha256:c401ff8e9e921c93c1819238f0d9193a5ac0c2a3d0f679eb1799a596525bb2f5; follows code PASS b1ab7a27dd2732110a04c8a08cfb35babd39e1d5e734dbd378326b28b818e061)",
+  "reviewed_at": "2026-08-05T20:48:32.479Z",
+  "notes": "Replacing the nonexistent src/resolve-runner.ts with the existing src/resolve-core.ts in both covers_sources and the Source map makes the runner document source coverage semantically accurate; resolveAgentRunner and resolveRunnerTransport are the package-contained runner-resolution APIs, and all other production code and prose retain the prior independent PASS."
+}
