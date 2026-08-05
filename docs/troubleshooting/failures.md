@@ -32,6 +32,16 @@ All Autopilot failures are loud and typed. Match the symptom, then follow the po
 | 30 | `status-non-success` | The unit reported a non-success verdict; read the status + audit. |
 | 31 | `runtime-commit-failed` | Inspect the unit worktree / execution-commit evidence. |
 
+## Semantic recovery
+
+| Symptom | Cause | Behavior |
+|---|---|---|
+| `planning:recovery-required` | First complete plan review found a correctable semantic/quality defect | One fresh Recovery Engineer receives original authority, canonical work map, complete rejected review, and repository evidence; repaired work map returns to unchanged full review. |
+| `delivery:recovery-required` or `validation:recovery-required` | Delivery reported `semantic-repairable`, or first forward validator found a correctable in-scope defect | One Recovery Engineer investigates in the original lane worktree under the original unit scope; normal delivery admission and independent round-two validation remain mandatory. Authority, infrastructure, and unsafe delivery classes never enter this lane. |
+| `recovery-exhausted` | Recovery delivery blocked, or unchanged rereview/round-two validator still rejects | Run remains fail-closed with original and recovery evidence preserved; no second semantic repair loop is issued. |
+| `planning-recovery-fail-closed` or `delivery-recovery-unsafe` | Recovery independently found missing authority, infrastructure, or unsafe residue instead of an admissible repair | Typed disposition and evidence are preserved; the original gate does not run and operator/infrastructure authority must resolve the boundary. |
+| Provider/auth/timeout/disk failure | Infrastructure rather than prior-agent semantic output | Never route to Recovery Engineer; use the existing typed transient/paused/unsafe lane. |
+
 ## Close / abort
 
 | Symptom | Cause | Fix |

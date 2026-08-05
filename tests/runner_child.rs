@@ -699,7 +699,7 @@ fn delivery_blocked_value_repair_repeats_no_mutation_authority_and_preserves_blo
         "Closed outcome admission:",
         "No-mutation blocked posture",
         "blocked: empty actual_changed_paths",
-        "Value repair may correct carrier metadata only; it must not mutate files, seek another checkout, or manufacture success.",
+        "Value repair may correct terminal carrier fields only; it must not mutate files, seek another checkout, or manufacture success.",
     ] {
         assert!(
             initial.contains(required),
@@ -2042,6 +2042,7 @@ fn write_delivery_spec(root: &Path, worktree: &Path, mutate: impl Fn(Value) -> V
             &["README.md"],
             &["printf approved"],
         )],
+        recovery: None,
     };
     let facts = RunnerTransportFacts::new(
         std::env::current_exe().expect("current exe"),
@@ -2113,7 +2114,8 @@ fn delivery_blocked_payload() -> String {
         "execution_audit_ref": "audit:delivery-blocked",
         "focused_evidence_refs": ["evidence:0", "evidence:1"],
         "terminal_status": "blocked",
-        "hard_boundary_violations": ["approved command expected a different checkout root; no mutation performed"]
+        "hard_boundary_violations": ["approved command expected a different checkout root; no mutation performed"],
+        "blocker_class": "semantic-repairable"
     })
     .to_string()
 }
@@ -2526,8 +2528,11 @@ const toolsIndex = process.argv.indexOf('--tools');
 if (toolsIndex === -1) {{ process.stderr.write('fake pi: --tools is required\n'); process.exit(64); }}
 const requestedTools = process.argv[toolsIndex + 1].split(',').filter(Boolean);
 const submitBindings = {submit_bindings};
-let activeTools = requestedTools.filter(name => !name.startsWith('autopilot_submit_') || (addonPath !== undefined && submitBindings[name]));
-const terminalTool = activeTools.find(name => submitBindings[name]);
+const terminalProfile = process.env.AUTOPILOT_TERMINAL_PROFILE ?? '';
+const terminalBinding = submitBindings[terminalProfile];
+const submitToolNames = new Set(Object.values(submitBindings).map(binding => binding[0]));
+let activeTools = requestedTools.filter(name => !submitToolNames.has(name) || (addonPath !== undefined && terminalBinding?.[0] === name));
+const terminalTool = activeTools.find(name => terminalBinding?.[0] === name);
 // Model real Pi's session store: a session file keyed by (sessionDir, sessionId)
 // is reopened when it already exists, and its retained messages become context.
 const sessionPath = `${{sessionDir}}/${{sessionId}}.jsonl`;
@@ -2545,7 +2550,7 @@ function emitCarrier(payload, model=observedModel, overrides={{}}) {{
   send({{type:'agent_settled'}});
 }}
 function emitCarrierResult(payload, model=observedModel, overrides={{}}) {{
-  const [boundary_id, result_contract, schema_digest] = submitBindings[terminalTool];
+  const [, boundary_id, result_contract, schema_digest] = terminalBinding;
   const profile_id = process.env.AUTOPILOT_TERMINAL_PROFILE ?? `${{boundary_id}}:${{terminalTool}}`;
   const details = {{profile_id,tool_name:terminalTool,boundary_id,result_contract,schema_digest,binding:process.env.AUTOPILOT_CARRIER_BINDING ?? '',payload:typeof payload === 'string' ? JSON.parse(payload) : payload,...overrides}};
   const resultTool = typeof overrideToolName === 'string' ? overrideToolName : terminalTool;
@@ -2577,9 +2582,9 @@ function emitReadTool(toolName='read') {{ const callId=`call_fake_${{toolName}}_
 function emitCapacityRefusal() {{ send({{type:'agent_start'}}); send({{type:'message_start'}}); send({{type:'message_end', message:{{role:'assistant', provider:'openai-codex', model:'gpt-5.5', content:[], stopReason:'error', errorMessage:'Codex error: Our servers are currently overloaded. Please try again later.', usage:{{input:0,output:0}}}}}}); send({{type:'agent_end', willRetry:false}}); send({{type:'agent_settled'}}); }}
 function statsData() {{ return {{ sessionId, contextUsage: {{ tokens: Math.round(contextPercent * 1000), contextWindow: 100000, percent: contextPercent }} }}; }}
 {setup}
-const receiptBoundary = submitBindings[terminalTool]?.[0] ?? '';
-const receiptResultContract = submitBindings[terminalTool]?.[1] ?? '';
-const receiptSchema = submitBindings[terminalTool]?.[2] ?? '';
+const receiptBoundary = terminalBinding?.[1] ?? '';
+const receiptResultContract = terminalBinding?.[2] ?? '';
+const receiptSchema = terminalBinding?.[3] ?? '';
 const receiptProfile = process.env.AUTOPILOT_TERMINAL_PROFILE ?? `${{receiptBoundary}}:${{terminalTool}}`;
 function addonDigest() {{ if (addonPath === undefined) return ''; const runtimePath = resolve(dirname(addonPath), '../../child-runtime/child-extension-runtime.ts'); return createHash('sha256').update(Buffer.concat([readFileSync(addonPath), Buffer.from([0]), readFileSync(runtimePath)])).digest('hex'); }}
 function sha256HexBytes(bytes) {{ return createHash('sha256').update(bytes).digest('hex'); }}
@@ -2637,14 +2642,15 @@ function handle(cmd) {{
 }
 
 fn submit_bindings_js() -> String {
-    let mut bindings = BTreeMap::<String, [String; 3]>::new();
+    let mut bindings = BTreeMap::<String, [String; 4]>::new();
     for (profile_id, tool_name, boundary_id, result_contract, digest) in
         kernel::generated::TERMINAL_PROFILES
     {
         if boundary_id.starts_with("planning.") || profile_id == "delivery-status.v2" {
             bindings.insert(
-                tool_name.to_owned(),
+                profile_id.to_owned(),
                 [
+                    tool_name.to_owned(),
                     boundary_id.to_owned(),
                     result_contract.to_owned(),
                     digest.to_owned(),

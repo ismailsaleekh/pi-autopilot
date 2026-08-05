@@ -22,6 +22,7 @@ Sources: `data/roles.kdl`, `roles/**`.
 | implementer | coding | high | lane-delivery | read, grep, find, ls, bash, edit, write, autopilot_emit_status | autopilot_emit_status |
 | validator | review | xhigh | forward-release, deep-closure, delta-revalidation, conflict-review, final-review | read, grep, find, ls, autopilot_request_test, autopilot_emit_status | autopilot_emit_status |
 | fixer-integrator | coding | high | forward-critical, closure-repair, failed-test, conflict-resolution | read, grep, find, ls, bash, edit, write, autopilot_emit_status | autopilot_emit_status |
+| recovery-engineer | reasoning | xhigh | planning-repair, forward-critical, closure-repair, failed-test, conflict-resolution | read, grep, find, ls, bash, edit, write, autopilot_emit_status | autopilot_emit_status |
 | bughunter | review | xhigh | final-bughunt | read, grep, find, ls, bash, autopilot_emit_status | autopilot_emit_status |
 
 ## Role files
@@ -73,5 +74,11 @@ Sources: `data/roles.kdl`, `roles/**`.
 | fixer-integrator | closure-repair | roles/fixer-integrator/modes/closure-repair.md | Mode objective |
 | fixer-integrator | failed-test | roles/fixer-integrator/modes/failed-test.md | Mode objective |
 | fixer-integrator | conflict-resolution | roles/fixer-integrator/modes/conflict-resolution.md | Mode objective |
+| recovery-engineer | base | roles/recovery-engineer/base.md | Role and objective |
+| recovery-engineer | planning-repair | roles/recovery-engineer/modes/planning-repair.md | Mode objective |
+| recovery-engineer | forward-critical | roles/recovery-engineer/modes/forward-critical.md | Mode objective |
+| recovery-engineer | closure-repair | roles/recovery-engineer/modes/closure-repair.md | Mode objective |
+| recovery-engineer | failed-test | roles/recovery-engineer/modes/failed-test.md | Mode objective |
+| recovery-engineer | conflict-resolution | roles/recovery-engineer/modes/conflict-resolution.md | Mode objective |
 | bughunter | base | roles/bughunter/base.md | Role and objective |
 | bughunter | final-bughunt | roles/bughunter/modes/final-bughunt.md | Mode objective |

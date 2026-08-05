@@ -46,6 +46,7 @@ export type CommandEffectHandling = "none" | "run-isolated" | "exact-cleanup-bef
 export type CommandReceiptKind = "final-command" | "full-suite" | "focused";
 export type ContextAnchorForm = "task" | "plan" | "dossier" | "run" | "version-control-lines" | "version-control-whole-file" | "json";
 export type CriterionVerdict = "PASS" | "FAIL" | "BLOCKED";
+export type DeliveryBlockerClass = "semantic-repairable" | "requires-new-authority" | "infrastructure" | "unsafe";
 export type DeliveryOutcome = "succeeded" | "blocked";
 export type EvidenceContentKind = "prompt" | "assignment" | "action" | "producer-binding" | "report" | "producer-sidecar" | "acceptance-receipt" | "failure-receipt" | "supersession-receipt" | "transcript" | "envelope-manifest";
 export type EvidenceErrorCode = "EVIDENCE_PRODUCER_UNAVAILABLE" | "EVIDENCE_ASSIGNMENT_CONFLICT" | "EVIDENCE_ACTION_NOT_ISSUED" | "EVIDENCE_ACTION_EXPIRED" | "EVIDENCE_ACTION_SUPERSEDED" | "EVIDENCE_TASK_BINDING_CONFLICT" | "EVIDENCE_TERMINAL_NOT_COMPLETED" | "EVIDENCE_SOURCE_PATH_INVALID" | "EVIDENCE_SOURCE_MISSING" | "EVIDENCE_SOURCE_NOT_REGULAR" | "EVIDENCE_SOURCE_SYMLINK" | "EVIDENCE_SCHEMA_UNSUPPORTED" | "EVIDENCE_PROSE_NOT_CONTRACT" | "EVIDENCE_HASH_MISMATCH" | "EVIDENCE_PRODUCER_REQUEST_MISMATCH" | "EVIDENCE_PROVIDER_MISMATCH" | "EVIDENCE_MODEL_MISMATCH" | "EVIDENCE_CHANNEL_FORBIDDEN" | "EVIDENCE_METERED_USAGE_OBSERVED" | "EVIDENCE_SESSION_CONFLICT" | "EVIDENCE_IDEMPOTENCY_CONFLICT" | "EVIDENCE_SUBJECT_STALE" | "EVIDENCE_BOUNDARY_REJECTED" | "EVIDENCE_SUPERSESSION_INVALID" | "EVIDENCE_EVENT_LOG_CORRUPT" | "EVIDENCE_STORE_IO" | "EVIDENCE_ENVELOPE_OPEN" | "EVIDENCE_ENVELOPE_MEMBER_MISMATCH" | "EVIDENCE_UNDECLARED_INPUT";
@@ -60,6 +61,7 @@ export type PlanningAtomKind = "work" | "decision" | "constraint" | "acceptance"
 export type PlanningQuestionClass = "invalidated-decision" | "missing-material-decision" | "material-underdetermination" | "dod-hole" | "unsafe-irreversible";
 export type PlanningReviewVerdict = "pass" | "blocker" | "advisory" | "fail" | "blocked" | "needs-fix";
 export type Producer = "Model" | "Git" | "Operator" | "Filesystem" | "Provider" | "BackgroundTask" | "Package" | "Host";
+export type RecoveryDisposition = "repaired" | "no-defect" | "requires-new-authority" | "infrastructure-blocked" | "unsafe-blocked";
 export type RosterSlot = "control" | "reasoning" | "extraction" | "coding" | "review";
 export type RunHealth = "healthy" | "degraded" | "paused" | "unsafe-halt";
 export type RunOutcome = "null" | "closed" | "aborted";
@@ -680,6 +682,8 @@ export interface DeliverySubmissionV2 {
   focused_evidence_refs: Ref[];
   terminal_status: DeliveryOutcome;
   hard_boundary_violations: string[];
+  blocker_class?: DeliveryBlockerClass | null;
+  recovery_disposition?: RecoveryDisposition | null;
 }
 
 export interface EventRow {
@@ -1122,6 +1126,7 @@ export interface CriterionResult {
 
 export interface WorkMap {
   units: PlanUnit[];
+  recovery?: WorkMapRecovery;
 }
 
 export interface PlanUnit {
@@ -1142,6 +1147,16 @@ export interface PlanUnitCommand {
   generated_paths: Path[];
   handling: CommandEffectHandling;
   scope_preservation: string;
+}
+
+export interface WorkMapRecovery {
+  disposition: RecoveryDisposition;
+  diagnosis_refs: Ref[];
+  root_cause: string;
+  affected_unit_ids: Id[];
+  actions: string[];
+  preserved_authority: string[];
+  repair_evidence_refs: Ref[];
 }
 
 export interface CoreToHostDonePayload {

@@ -10,6 +10,7 @@ This plan describes the current `pi-autopilot@1.3.1` package candidate and its r
 | Host API correctness | `npm run typecheck` and `npm run test:host`: strict frame validation, exact `bg_run` object preservation, no `ctx.bg_run`, supported `ctx.ui.notify`/`pi.sendMessage` operator routes, terminal handler draining, and malformed-frame fail-closed behavior. |
 | Core gates | `gate:host-thinness`, `gate:kernel-purity`, `gate:no-inference`, `gate:selftest`. These gates must not be weakened to pass. |
 | Rust behavior | Focused drivers tests plus `npm run test:rust`: four-file classification, no context-as-Work elevation, terminal binding, runner child validation, delivery acceptance, command routing, crash/resume, and kernel invariants. |
+| Bounded semantic recovery | Planning first-rejection → one Recovery Engineer → unchanged rereview, repaired and no-defect success, authority/infrastructure/unsafe fail-closed dispositions, separate create-new work-map projections, digest-bound single-subject promotion, subject-drift rejection, delivery/validation crash replay, exact authority preservation, source recovery under original lane scope, independent validation round two, exhaustion without looping, profile-specific tools, and fresh-child startup-bucket bounds. |
 | Runtime pair | `PI_BACKGROUND_TASKS_PACKAGE_ROOT=<candidate> npm run test:runtime-integration`: real Pi SDK loader, shared EventBus, real background service, fake local `pi`, exact descriptor metadata, terminal correlation, missing-service zero mutation, and historical/index no-spawn controls. |
 | Binaries | Rebuild all five shipped `autopilot-core` binaries from current Rust source and regenerate `binaries/MANIFEST.json`; `npm run gate:binary-parity` and `npm run gate:launch-entrypoint` must pass. |
 | Payload | `npm run payload:check` and `npm pack --dry-run --ignore-scripts`; payload must include both bin wrappers, shipped binaries, generated docs, Host source, and no tests/private runtime state. Packed-consumer release proof runs the current launch gate before the ignore-scripts pack and reuses its status-frame validator against the installed `.bin/autopilot-core` path. |
@@ -33,6 +34,11 @@ The paired background candidate must pass its default suite and prove the public
 - Render only the Layer 6 boundary id instead of package-generated admission authority: prompt authority tests should fail on missing WorkMap admits text.
 - Remove exact one-ID/no `atoms:`/range/comma/source wording: prompt and boundary coverage assertions should fail.
 - Remove external-temp/no-effect wording: prompt guidance assertions should fail.
+- Admit a second semantic recovery attempt or weaken same-gate policy: `semantic_recovery_rejects_loop_or_weakened_gate` and rereview exhaustion tests should fail.
+- Permit Recovery Engineer work-map scope expansion or omit typed evidence/disposition: planning recovery authority tests should fail.
+- Route infrastructure/unsafe blockers into semantic repair: delivery and validation inadmissible-recovery tests should fail.
+- Remove blocker-class/disposition cross-field checks or allow no-defect to hide dirty state: delivery admission and no-defect package tests should fail.
+- Collapse parallel child startup buckets: startup-stagger planning/lane distinctness tests should fail.
 
 ## Zero skip/todo policy
 

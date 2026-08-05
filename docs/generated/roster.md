@@ -9,7 +9,7 @@ The roster contains exactly five subscription-route slots.
 | Slot | Provider | Model | Thinking | Route | Roles |
 | --- | --- | --- | --- | --- | --- |
 | control | openai-codex | gpt-5.6-terra | high | subscription | orchestrator |
-| reasoning | openai-codex | gpt-5.6-sol | xhigh | subscription | onboard, contradiction-resolver, plan-compiler, context-synthesizer, plan-synthesizer, context-curator, execution-allocator |
+| reasoning | openai-codex | gpt-5.6-sol | xhigh | subscription | onboard, contradiction-resolver, plan-compiler, context-synthesizer, plan-synthesizer, context-curator, execution-allocator, recovery-engineer |
 | extraction | openai-codex | gpt-5.5 | high | subscription | task-extractor |
 | coding | openai-codex | gpt-5.5 | high | subscription | repository-scout, implementer, fixer-integrator |
 | review | openai-codex | gpt-5.5 | xhigh | subscription | plan-reviewer, validator, bughunter |

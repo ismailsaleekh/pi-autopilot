@@ -1168,6 +1168,11 @@ impl RpcAssignment {
                 });
             }
         }
+        let startup_stagger = SubscriptionStartupStaggerPolicy::parse()
+            .map_err(|error| format!("agent-run subscription startup policy: {error}"))?;
+        if let Some(delay) = subscription_startup_delay(startup_stagger, spec) {
+            std::thread::sleep(delay);
+        }
         let client = RpcClient::spawn(config).map_err(|error| error.to_string())?;
         let mut runner = Self {
             client,
@@ -2283,6 +2288,109 @@ fn context_budget_from_stats(
         _ => Err("agent-run context percent has wrong type".to_owned()),
     }?;
     Ok((session, budget))
+}
+
+/// Deterministic startup spread for fresh subscription-backed Pi children.
+///
+/// Pi loads OAuth independently in every process. Planning waves start within
+/// milliseconds, so spreading those reads avoids turning a short credential
+/// store lock into a false missing-credential result. The delay is derived from
+/// workstream plus the planning ordinal or package lane identity: siblings in
+/// one wave occupy distinct buckets while a replay remains deterministic.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) struct SubscriptionStartupStaggerPolicy {
+    pub buckets: u64,
+    pub step_ms: u64,
+    pub max_delay_ms: u64,
+}
+
+impl SubscriptionStartupStaggerPolicy {
+    pub(crate) fn parse() -> Result<Self, String> {
+        Self::parse_source(include_str!("../../../data/recovery.kdl"))
+    }
+
+    pub(crate) fn parse_source(source: &str) -> Result<Self, String> {
+        let line = source
+            .lines()
+            .map(str::trim)
+            .find_map(|line| line.strip_prefix("subscription_startup_stagger "))
+            .ok_or_else(|| "recovery policy missing subscription_startup_stagger".to_owned())?;
+        if !line.contains("scope=\"agent-run\"") {
+            return Err("subscription_startup_stagger has unsupported scope".to_owned());
+        }
+        let field = |key: &str| -> Result<u64, String> {
+            let start = line
+                .find(key)
+                .ok_or_else(|| format!("subscription_startup_stagger missing {key}"))?
+                + key.len();
+            let rest = &line[start..];
+            let end = rest
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(rest.len());
+            rest[..end]
+                .parse::<u64>()
+                .map_err(|_| format!("subscription_startup_stagger {key} is not a number"))
+        };
+        let policy = Self {
+            buckets: field("buckets=")?,
+            step_ms: field("step_ms=")?,
+            max_delay_ms: field("max_delay_ms=")?,
+        };
+        if policy.buckets < 2
+            || policy.step_ms == 0
+            || policy
+                .step_ms
+                .saturating_mul(policy.buckets.saturating_sub(1))
+                > policy.max_delay_ms
+        {
+            return Err("subscription_startup_stagger bounds are incoherent".to_owned());
+        }
+        Ok(policy)
+    }
+
+    pub(crate) fn delay(
+        self,
+        workstream: &str,
+        assignment_id: &str,
+        lane_id: Option<&str>,
+    ) -> Duration {
+        let ordinal_source = lane_id.unwrap_or(assignment_id);
+        let ordinal_digits = ordinal_source
+            .chars()
+            .rev()
+            .take_while(|character| character.is_ascii_digit())
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect::<String>();
+        let ordinal = ordinal_digits.parse::<u64>().unwrap_or_else(|_| {
+            let digest = Sha256::digest(ordinal_source.as_bytes());
+            let mut prefix = [0_u8; 8];
+            prefix.copy_from_slice(&digest[..8]);
+            u64::from_be_bytes(prefix)
+        });
+        let workstream_digest = Sha256::digest(workstream.as_bytes());
+        let mut workstream_prefix = [0_u8; 8];
+        workstream_prefix.copy_from_slice(&workstream_digest[..8]);
+        let offset = u64::from_be_bytes(workstream_prefix);
+        let bucket = offset.wrapping_add(ordinal.saturating_sub(1)) % self.buckets;
+        Duration::from_millis(self.step_ms.saturating_mul(bucket).min(self.max_delay_ms))
+    }
+}
+
+fn subscription_startup_delay(
+    policy: SubscriptionStartupStaggerPolicy,
+    spec: &AgentRunSpec,
+) -> Option<Duration> {
+    (spec.route == "subscription" && spec.session_continuity == SessionContinuity::Fresh).then(
+        || {
+            policy.delay(
+                &spec.workstream.0,
+                &spec.assignment_id.0,
+                spec.lane_id.as_ref().map(|lane| lane.0.as_str()),
+            )
+        },
+    )
 }
 
 /// Bounded retry policy for launch-side upstream capacity refusals.
@@ -4896,61 +5004,5 @@ fn sha256_hex(data: &[u8]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn offered_terminal_tool_new_rejects_unoffered_expected_tool() {
-        let spec = agent_run_spec_with_tools(["bash", "read"]);
-
-        let miss = OfferedTerminalTool::new(&spec).expect_err("missing terminal tool must fail");
-
-        assert_eq!(
-            miss,
-            TerminalMiss::TerminalToolNotOffered {
-                source: TerminalToolNotOfferedSource::OfferedTerminalToolGuard,
-                expected_tool: "autopilot_submit_atoms".to_owned(),
-                offered_tools: vec!["bash".to_owned(), "read".to_owned()],
-            }
-        );
-    }
-
-    fn agent_run_spec_with_tools(tools: impl IntoIterator<Item = &'static str>) -> AgentRunSpec {
-        let allowed_tools = tools.into_iter().collect::<Vec<_>>();
-        serde_json::from_value(serde_json::json!({
-            "schema": "autopilot.agent_run_spec.v4",
-            "assignment_kind": "planning-review",
-            "action_id": "action-planning-main-task-extractor-01",
-            "assignment_id": "planning-main-task-extractor-01",
-            "run_id": "run-01",
-            "run_revision": 1,
-            "workstream": "main",
-            "role_id": "task-extractor",
-            "mode": "inventory",
-            "provider": "openai-codex",
-            "model": "gpt-5.5",
-            "thinking": "high",
-            "route": "subscription",
-            "cwd": "/tmp/pi-autopilot-test",
-            "allowed_tools": allowed_tools,
-            "spec_path": "/tmp/pi-autopilot-test/spec.json",
-            "prompt_path": "/tmp/pi-autopilot-test/prompt.md",
-            "prompt_digest": "prompt-digest",
-            "boundary_id": "planning.task-atoms.v1",
-            "boundary_digest": "boundary-digest",
-            "result_contract": "planning.task-atoms.v1",
-            "result_contract_digest": "result-contract-digest",
-            "carrier_path": "/tmp/pi-autopilot-test/carrier.json",
-            "session_id": "session-01",
-            "session_dir": "/tmp/pi-autopilot-test/session",
-            "session_continuity": "fresh",
-            "settings_digest": "settings-digest",
-            "context_digest": "context-digest",
-            "skills_digest": "skills-digest",
-            "subscription_digest": "subscription-digest",
-            "terminal_profile_id": "planning.task-atoms.v1:autopilot_submit_atoms",
-            "unavailable_tools": []
-        }))
-        .expect("valid agent run spec")
-    }
-}
+#[path = "../../tests/unit/runner_child.rs"]
+mod tests;

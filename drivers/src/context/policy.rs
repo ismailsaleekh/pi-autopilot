@@ -5,7 +5,7 @@ use crate::roles::{ROLE_REGISTRY_KDL, RoleError, RoleRegistry};
 pub const CONTEXT_POLICY_KDL: &str = include_str!("../../../data/context-policy.kdl");
 
 const SCHEMA: &str = "autopilot.context_policy.v1";
-const REVISION: u32 = 2;
+const REVISION: u32 = 3;
 const TIERS: [&str; 4] = [
     "mandatory_inline",
     "required_reads",

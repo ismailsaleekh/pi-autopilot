@@ -4,6 +4,7 @@ version 1
 doc "D77 §3.4 closed failure taxonomy. Rows with variant=NotFailure intentionally have no Failure variant. Boundary docs keep D76 wording that kernel source must not spell."
 
 row "missing-malformed-planning-submission" variant="Recoverable" route="Tier1" doc="Missing/malformed planning submission."
+row "typed-model-rejection" variant="Recoverable" route="Tier1" doc="A structurally admitted model result is rejected by an independent semantic gate; one phase-bound Recovery Engineer may investigate and repair under original authority before the unchanged gate reruns."
 row "missing-pi-background-tasks" variant="Paused" needs="SupplyCapability" doc="Missing pi-background-tasks."
 row "child-crash-timeout-background-kill" variant="Transient" retry="Backoff" doc="Child crash / timeout / background kill."
 row "missing-invalid-terminal-output" variant="Recoverable" route="Tier1" doc="Missing/invalid terminal output."
@@ -16,6 +17,11 @@ row "provider-unavailable" variant="Transient" retry="Backoff" doc="Provider una
 row "controller-pi-restart" variant="Transient" retry="AfterRestart" doc="Controller / Pi restart."
 row "stale-superseded-result" variant="Recoverable" route="Tier1" doc="Stale superseded result."
 row "repair-budget-exhausted" variant="Paused" needs="ChooseAfterExhaustion" doc="Repair budget exhausted."
+row "semantic-recovery-exhausted" variant="Paused" needs="ChooseAfterExhaustion" doc="The unchanged independent gate rejected the one admitted semantic recovery attempt; preserve both attempts and require operator disposition."
+row "semantic-recovery-inadmissible" variant="Paused" needs="ReissueDecision" doc="Recovery lacks a complete typed diagnosis or cannot establish one admissible repair target; preserve evidence and require a new decision."
+row "semantic-recovery-new-authority" variant="Paused" needs="ReissueDecision" doc="The correct repair exceeds original authority; require explicit replacement authority rather than widening scope."
+row "semantic-recovery-infrastructure" variant="Paused" needs="SupplyCapability" doc="Recovery identified a provider/runtime/tooling boundary; repair capability outside the semantic loop."
+row "semantic-recovery-unsafe" variant="Unsafe" boundary="EvidenceThreateningMutation" doc="Recovery found unsafe residue or an unsafe operation; halt the exact recovery boundary without retry."
 row "sparse-materialization-path-escape" variant="Unsafe" boundary="OutOfScopeWrite" doc="Sparse materialization failure (path escape)."
 row "sparse-materialization-disk-io" variant="Transient" retry="Backoff" doc="Sparse materialization failure (disk/IO)."
 

@@ -30,7 +30,7 @@ pub struct RequiredCriterion {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum ForwardDecision {
     Release,
-    ConsolidatedFixer { blocker_ids: Vec<Id> },
+    ConsolidatedRecoveryEngineer { blocker_ids: Vec<Id> },
     Tier23 { blocker_ids: Vec<Id> },
 }
 
@@ -125,7 +125,7 @@ pub fn decide_forward_round(
             Err(ValidationError::OverallBlockedWithoutBlocker)
         }
         (ForwardVerdict::FORWARDBLOCKED | ForwardVerdict::BLOCKED, false) => match round {
-            ForwardRound::One => Ok(ForwardDecision::ConsolidatedFixer {
+            ForwardRound::One => Ok(ForwardDecision::ConsolidatedRecoveryEngineer {
                 blocker_ids: blockers,
             }),
             ForwardRound::Two => Ok(ForwardDecision::Tier23 {

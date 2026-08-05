@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import childExtension from "../../src/generated/child-extension.ts";
+import { registerSubmitTools } from "../../child-runtime/child-extension-runtime.ts";
 import { SUBMIT_TOOLS } from "../../src/generated/tool-schemas.ts";
 
 interface RegisteredTool {
@@ -30,6 +31,22 @@ const DELIVERY_ENV_KEYS = [
 ] as const;
 const DELIVERY_POLICY_VERSION = "autopilot.delivery_tool_policy.v1";
 const deliveryTempDirs: string[] = [];
+
+test("parent planning registration excludes the Recovery Engineer child-only terminal", () => {
+  const names: string[] = [];
+  registerSubmitTools(
+    { registerTool(tool: { name: string }) { names.push(tool.name); } } as never,
+    SUBMIT_TOOLS,
+    import.meta.url,
+  );
+  assert.deepEqual(
+    names,
+    SUBMIT_TOOLS
+      .filter((tool) => tool.boundary_id.startsWith("planning.") && tool.name !== "autopilot_emit_status")
+      .map((tool) => tool.name),
+  );
+  assert(!names.includes("autopilot_emit_status"));
+});
 
 function installDeliveryPolicyEnv(): { assignmentPath: string; assignmentDigest: string; policyDigest: string; worktree: string } {
   const root = mkdtempSync(join(realpathSync.native(tmpdir()), "autopilot-delivery-policy-"));
@@ -83,7 +100,7 @@ test("selected terminal profile registers exactly one same-name schema", { concu
     const wrapperDigest = createHash("sha256")
       .update(Buffer.concat([readFileSync(wrapperUrl), Buffer.from([0]), readFileSync(runtimeUrl)]))
       .digest("hex");
-    assert.equal(SUBMIT_TOOLS.length, 9);
+    assert.equal(SUBMIT_TOOLS.length, 10);
     for (const expected of SUBMIT_TOOLS) {
       process.env.AUTOPILOT_TERMINAL_PROFILE = expected.profile_id;
       process.env.AUTOPILOT_CARRIER_BINDING = "binding-test";

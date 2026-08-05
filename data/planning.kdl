@@ -1,7 +1,7 @@
 schema "autopilot.planning.v1"
 version 1
 
-assignment_cap default=25 reserved_resolution=3 scout_compiler_first_pass=10
+assignment_cap default=27 reserved_resolution=3 scout_compiler_first_pass=10
 planning_wave_cap default=7
 planning_launch_attempts max=1
 assignment_role "task-extractor" count=7 mode="inventory" boundary="planning.task-atoms.v1" atom_namespace="TE"
@@ -9,7 +9,8 @@ assignment_role "repository-scout" count=5 mode="initial-grounding" boundary="pl
 assignment_role "plan-compiler" count=5 mode="initial-plan" boundary="planning.work-map.v1"
 assignment_role "context-curator" count=1 mode="planning-context" boundary="planning.scout-dossier.v1"
 assignment_role "plan-synthesizer" count=2 mode="initial-plan" boundary="planning.work-map.v1"
-assignment_role "plan-reviewer" count=1 mode="full-review" boundary="planning.plan-review.v1"
+assignment_role "plan-reviewer" count=2 mode="full-review" boundary="planning.plan-review.v1"
+assignment_role "recovery-engineer" count=1 mode="planning-repair" boundary="planning.work-map.v1"
 assignment_role "contradiction-resolver" count=3 mode="fact-resolution" boundary="planning.questions.v1"
 planning_wave "P1.extract" role="task-extractor"
 planning_wave "P2.scout" role="repository-scout" depends="P1.extract"
@@ -18,8 +19,10 @@ planning_wave "P3.resolve" role="contradiction-resolver" depends="P2.curate" act
 planning_wave "P4.compile" role="plan-compiler" depends="P1.extract,P2.curate,P3.resolve"
 planning_wave "P4.synth-1" role="plan-synthesizer" ordinals="1" depends="P4.compile"
 planning_wave "P4.synth-2" role="plan-synthesizer" ordinals="2" depends="P4.compile,P4.synth-1" canonical_output=#true
-planning_wave "P5.review" role="plan-reviewer" depends="P4.synth-2"
-review full_passes=1 delta_passes=1 wording_style="advisory"
+planning_wave "P5.review" role="plan-reviewer" ordinals="1" depends="P4.synth-2"
+planning_wave "P5.repair" role="recovery-engineer" depends="P5.review" activation_ref="planning-recovery-required" canonical_output=#true
+planning_wave "P5.rereview" role="plan-reviewer" ordinals="2" depends="P5.repair" activation_ref="planning-rereview-required"
+review full_passes=2 delta_passes=0 wording_style="advisory"
 
 question_gate {
   class "invalidated-decision-premise"

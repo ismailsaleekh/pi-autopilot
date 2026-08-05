@@ -43,6 +43,10 @@ fallbacks, fake-green tests, fixture tampering, deferred consumers, or source-ch
 self-certification. If correct work needs more scope, Autopilot records and routes the
 exception instead of hiding it behind a green status.
 
+## Bounded semantic recovery
+
+Fail-closed detection does not require aborting on every correctable model-quality miss. A fresh Recovery Engineer may investigate one admitted semantic rejection using original authority, repository facts, upstream outputs, and the gate's typed diagnosis. The diagnosis is not trusted blindly. Planning recovery may change only objective/criteria/command details of exactly declared existing units; unit identity, ordering, dependencies, files, atom links, tests, and authority remain fixed mechanically. Source recovery uses the original approved unit file scope and normal delivery audit. A closed disposition records `repaired`, `no-defect`, `requires-new-authority`, `infrastructure-blocked`, or `unsafe-blocked`; only the first two return to the exact independent gate, once. The Recovery Engineer never self-certifies. Missing authority, infrastructure/provider faults, unsafe boundaries, or a second rejection remain loud terminal outcomes.
+
 ## Work-item lifecycle
 
 After transport, `nextAutopilotWorkItemStateAfterTransport` moves source-changing work to

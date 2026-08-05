@@ -946,12 +946,38 @@ else:
                     .join("accepted")
                     .join(format!("{category_id}.json"));
                 fs::create_dir_all(path.parent().unwrap()).unwrap();
-                let bytes = serde_json::to_vec_pretty(&json!({
-                    "category_id": category_id,
-                    "boundary_id": boundary_id,
-                    "assignment_id": assignment_id,
-                }))
-                .unwrap();
+                let artifact = if *category_id == "synthesized-work-map" {
+                    json!({
+                        "schema":"autopilot.planning_carrier.v1",
+                        "action_id":format!("action-{assignment_id}"),
+                        "assignment_id":assignment_id,
+                        "run_revision":1,
+                        "workstream":"ws",
+                        "role_id":role_id,
+                        "mode":"initial-plan",
+                        "boundary_id":boundary_id,
+                        "result_contract":boundary_id,
+                        "prompt_path":"fixture-prompt",
+                        "prompt_digest":"fixture-prompt-digest",
+                        "boundary_digest":"fixture-boundary-digest",
+                        "result_contract_digest":"fixture-contract-digest",
+                        "settings_digest":"fixture-settings-digest",
+                        "context_digest":"fixture-context-digest",
+                        "skills_digest":"fixture-skills-digest",
+                        "subscription_digest":"fixture-subscription-digest",
+                        "spec_digest":"fixture-spec-digest",
+                        "spec_path":"fixture-spec",
+                        "carrier_path":path.display().to_string(),
+                        "raw_output":work_map(&["TE01-W-001", "TE02-C-002"]),
+                    })
+                } else {
+                    json!({
+                        "category_id": category_id,
+                        "boundary_id": boundary_id,
+                        "assignment_id": assignment_id,
+                    })
+                };
+                let bytes = serde_json::to_vec_pretty(&artifact).unwrap();
                 fs::write(&path, &bytes).unwrap();
                 runner::AcceptedPlanningArtifactBinding {
                     category_id: (*category_id).to_owned(),

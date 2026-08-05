@@ -140,6 +140,72 @@ export const QUESTIONS_TOOL_SCHEMA_DIGEST = "d1e73a08666c761604e71b81b58116ba057
 export const WORK_MAP_TOOL_PARAMETERS = {
   "additionalProperties": true,
   "properties": {
+    "recovery": {
+      "additionalProperties": true,
+      "description": "Recovery Engineer diagnosis and surgical-change evidence; omitted by initial compilers and synthesizers.",
+      "properties": {
+        "actions": {
+          "description": "Surgical corrections performed, or the evidence-backed reason no correction is admissible.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "affected_unit_ids": {
+          "description": "Exact units changed; empty only for no-defect or a fail-closed disposition.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "diagnosis_refs": {
+          "description": "Exact rejected-review or runtime-diagnosis evidence inspected independently.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "disposition": {
+          "description": "Typed conclusion after independent diagnosis: repaired/no-defect may return to the same gate; authority, infrastructure, and unsafe outcomes fail closed.",
+          "enum": [
+            "repaired",
+            "no-defect",
+            "requires-new-authority",
+            "infrastructure-blocked",
+            "unsafe-blocked"
+          ],
+          "type": "string"
+        },
+        "preserved_authority": {
+          "description": "Original authority, scope, tests, gates, and unaffected behavior preserved.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "repair_evidence_refs": {
+          "description": "Evidence supporting the disposition and same-gate revalidation or fail-closed result.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "root_cause": {
+          "description": "Evidence-backed root cause; may correct rather than repeat the runtime diagnosis.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "disposition",
+        "diagnosis_refs",
+        "root_cause",
+        "affected_unit_ids",
+        "actions",
+        "preserved_authority",
+        "repair_evidence_refs"
+      ],
+      "type": "object"
+    },
     "units": {
       "description": "Executable implementation units only.",
       "items": {
@@ -260,7 +326,7 @@ export const WORK_MAP_TOOL_PARAMETERS = {
   ],
   "type": "object"
 } as TSchema;
-export const WORK_MAP_TOOL_SCHEMA_DIGEST = "9e34cb4e10cb2ef7061fe8d43973c849b0ec81b041d693506462ced5b4fa379e";
+export const WORK_MAP_TOOL_SCHEMA_DIGEST = "db32dc1be05c7596765772da822da82896ed5b261a79839ff4a5c03234f124a8";
 
 export const PLAN_REVIEW_TOOL_PARAMETERS = {
   "additionalProperties": true,
@@ -313,6 +379,23 @@ export const DELIVERY_SUBMISSION_V2_TOOL_PARAMETERS = {
       },
       "type": "array"
     },
+    "blocker_class": {
+      "anyOf": [
+        {
+          "enum": [
+            "semantic-repairable",
+            "requires-new-authority",
+            "infrastructure",
+            "unsafe"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Required for blocked delivery and forbidden for succeeded delivery; only semantic-repairable is eligible for Recovery Engineer."
+    },
     "execution_audit_ref": {
       "type": "string"
     },
@@ -327,6 +410,24 @@ export const DELIVERY_SUBMISSION_V2_TOOL_PARAMETERS = {
         "type": "string"
       },
       "type": "array"
+    },
+    "recovery_disposition": {
+      "anyOf": [
+        {
+          "enum": [
+            "repaired",
+            "no-defect",
+            "requires-new-authority",
+            "infrastructure-blocked",
+            "unsafe-blocked"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Required only for a package-issued Recovery Engineer assignment; forbidden for ordinary delivery."
     },
     "terminal_status": {
       "enum": [
@@ -345,7 +446,7 @@ export const DELIVERY_SUBMISSION_V2_TOOL_PARAMETERS = {
   ],
   "type": "object"
 } as TSchema;
-export const DELIVERY_SUBMISSION_V2_TOOL_SCHEMA_DIGEST = "e96282e3b70e4bde7deb2a122a505337052de8c3f187d164eb5cba430c7812dc";
+export const DELIVERY_SUBMISSION_V2_TOOL_SCHEMA_DIGEST = "7310576358c49cb8bd4d86a8a0df4a6738398a48190b7b8382e39adadf8e1d4b";
 
 export const VALIDATION_SUBMISSION_V2_TOOL_PARAMETERS = {
   "additionalProperties": false,
@@ -507,5 +608,6 @@ export const SUBMIT_TOOLS: readonly SubmitToolDescriptor[] = [
   { profile_id: "planning.task-atoms.v1:autopilot_submit_atoms", name: "autopilot_submit_atoms", label: "Submit task atoms", boundary_id: "planning.task-atoms.v1", result_contract: "planning.task-atoms.v1", schema_digest: TASK_ATOMS_TOOL_SCHEMA_DIGEST, parameters: TASK_ATOMS_TOOL_PARAMETERS },
   { profile_id: "planning.work-map.v1:autopilot_submit_plan_cluster", name: "autopilot_submit_plan_cluster", label: "Submit work map", boundary_id: "planning.work-map.v1", result_contract: "planning.work-map.v1", schema_digest: WORK_MAP_TOOL_SCHEMA_DIGEST, parameters: WORK_MAP_TOOL_PARAMETERS },
   { profile_id: "planning.work-map.v1:autopilot_submit_synthesis", name: "autopilot_submit_synthesis", label: "Submit synthesized work map", boundary_id: "planning.work-map.v1", result_contract: "planning.work-map.v1", schema_digest: WORK_MAP_TOOL_SCHEMA_DIGEST, parameters: WORK_MAP_TOOL_PARAMETERS },
+  { profile_id: "recovery-work-map.v1", name: "autopilot_emit_status", label: "Submit recovered work map", boundary_id: "planning.work-map.v1", result_contract: "planning.work-map.v1", schema_digest: WORK_MAP_TOOL_SCHEMA_DIGEST, parameters: WORK_MAP_TOOL_PARAMETERS },
   { profile_id: "validation-status.v2", name: "autopilot_emit_status", label: "Submit validation status", boundary_id: "autopilot.validation_submission.v2", result_contract: "autopilot.validation_result.v2", schema_digest: VALIDATION_SUBMISSION_V2_TOOL_SCHEMA_DIGEST, parameters: VALIDATION_SUBMISSION_V2_TOOL_PARAMETERS },
 ] as const;

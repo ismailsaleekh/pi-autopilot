@@ -7,8 +7,8 @@ mode "forward" {
     dedupe by="command+cwd+env_profile+commit"
 
     verdict_route round=1 overall="FORWARD_READY" action="release"
-    verdict_route round=1 overall="FORWARD_BLOCKED" action="one-consolidated-fixer"
-    verdict_route round=1 overall="BLOCKED" action="one-consolidated-fixer"
+    verdict_route round=1 overall="FORWARD_BLOCKED" action="one-consolidated-recovery-engineer"
+    verdict_route round=1 overall="BLOCKED" action="one-consolidated-recovery-engineer"
     verdict_route round=2 overall="FORWARD_READY" action="release"
     verdict_route round=2 overall="FORWARD_BLOCKED" action="tier-2-3-no-merge"
     verdict_route round=2 overall="BLOCKED" action="tier-2-3-no-merge"

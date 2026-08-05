@@ -462,6 +462,7 @@ Sources: `data/contracts.kdl`.
 | questions | field | planning_question.evidence | string | true |  |  |
 | questions | field | planning_question.consequence | string | true |  |  |
 | work_map | list | units | plan_unit | true |  | Executable implementation units only. |
+| work_map | field | recovery | work_map_recovery | false |  | Recovery Engineer diagnosis and surgical-change evidence; omitted by initial compilers and synthesizers. |
 | work_map | field | plan_unit.id | id | true |  |  |
 | work_map | field | plan_unit.kind | plan_unit_kind | true |  | Closed delivery disposition: the only legal value is implementation. Context gates belong in non-pass plan review evidence; verification belongs in criteria and commands. |
 | work_map | field | plan_unit.objective | string | true |  |  |
@@ -476,6 +477,13 @@ Sources: `data/contracts.kdl`.
 | work_map | list | plan_unit_command.generated_paths | path | true |  | Exact normalized repo-relative Git-visible persistent generated artifact paths only, empty unless effect is declared-predictable; external temporary paths are not generated_paths. |
 | work_map | field | plan_unit_command.handling | command_effect_handling | true |  | Closed handling authority for Git-visible generated artifacts; no-effect requires none, unknown-generated requires run-isolated. |
 | work_map | field | plan_unit_command.scope_preservation | string | true |  | Nonempty final-scope-check statement proving verification leaves final Git-visible state inside approved unit files. |
+| work_map | field | work_map_recovery.disposition | recovery-disposition | true |  | Typed conclusion after independent diagnosis: repaired/no-defect may return to the same gate; authority, infrastructure, and unsafe outcomes fail closed. |
+| work_map | list | work_map_recovery.diagnosis_refs | ref | true |  | Exact rejected-review or runtime-diagnosis evidence inspected independently. |
+| work_map | field | work_map_recovery.root_cause | string | true |  | Evidence-backed root cause; may correct rather than repeat the runtime diagnosis. |
+| work_map | list | work_map_recovery.affected_unit_ids | id | true |  | Exact units changed; empty only for no-defect or a fail-closed disposition. |
+| work_map | list | work_map_recovery.actions | string | true |  | Surgical corrections performed, or the evidence-backed reason no correction is admissible. |
+| work_map | list | work_map_recovery.preserved_authority | string | true |  | Original authority, scope, tests, gates, and unaffected behavior preserved. |
+| work_map | list | work_map_recovery.repair_evidence_refs | ref | true |  | Evidence supporting the disposition and same-gate revalidation or fail-closed result. |
 | plan_review | list | verdicts | plan_review_verdict | true |  | Criterion verdicts. |
 | plan_review | field | plan_review_verdict.criterion_id | id | true |  |  |
 | plan_review | field | plan_review_verdict.verdict | planning_review_verdict | true |  |  |
@@ -524,6 +532,8 @@ Sources: `data/contracts.kdl`.
 | delivery_submission_v2 | list | focused_evidence_refs | ref | true |  |  |
 | delivery_submission_v2 | field | terminal_status | delivery-outcome | true |  |  |
 | delivery_submission_v2 | list | hard_boundary_violations | string | true |  |  |
+| delivery_submission_v2 | field | blocker_class | delivery-blocker-class | false | true | Required for blocked delivery and forbidden for succeeded delivery; only semantic-repairable is eligible for Recovery Engineer. |
+| delivery_submission_v2 | field | recovery_disposition | recovery-disposition | false | true | Required only for a package-issued Recovery Engineer assignment; forbidden for ordinary delivery. |
 | delivery_result_v2 | field | schema | schema-id | true |  |  |
 | delivery_result_v2 | field | action_id | id | true |  |  |
 | delivery_result_v2 | field | assignment_id | id | true |  |  |
@@ -901,6 +911,7 @@ Sources: `data/contracts.kdl`.
 | questions | planning.questions.v1 | autopilot_submit_resolution | Submit planning questions |
 | work_map | planning.work-map.v1 | autopilot_submit_plan_cluster | Submit work map |
 | work_map | planning.work-map.v1 | autopilot_submit_synthesis | Submit synthesized work map |
+| work_map | planning.work-map.v1 | autopilot_emit_status | Submit recovered work map |
 | plan_review | planning.plan-review.v1 | autopilot_submit_review | Submit plan review |
 | delivery_submission_v2 | autopilot.delivery_submission.v2 | autopilot_emit_status | Submit delivery status |
 | validation_submission_v2 | autopilot.validation_submission.v2 | autopilot_emit_status | Submit validation status |
@@ -915,6 +926,8 @@ Sources: `data/contracts.kdl`.
 | plan_unit_kind | implementation |
 | command_effect | no-effect, declared-predictable, unknown-generated |
 | delivery-outcome | succeeded, blocked |
+| delivery-blocker-class | semantic-repairable, requires-new-authority, infrastructure, unsafe |
+| recovery-disposition | repaired, no-defect, requires-new-authority, infrastructure-blocked, unsafe-blocked |
 | command_effect_handling | none, run-isolated, exact-cleanup-before-scope-gate, block-if-created |
 | run_phase | planning, ready-to-execute, allocating, executing, final-verification, ready-to-close, terminal |
 | run_health | healthy, degraded, paused, unsafe-halt |

@@ -4,6 +4,49 @@ use kernel::failure::{Failure, HardBoundary};
 
 use crate::vcs::GitVcs;
 
+const RECOVERY_POLICY: &str = include_str!("../../../data/recovery.kdl");
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SemanticRecoveryPolicy {
+    pub max_attempts: u32,
+}
+
+impl SemanticRecoveryPolicy {
+    pub fn package() -> Result<Self, String> {
+        Self::parse(RECOVERY_POLICY)
+    }
+
+    pub fn parse(source: &str) -> Result<Self, String> {
+        let line = source
+            .lines()
+            .map(str::trim)
+            .find_map(|line| line.strip_prefix("semantic_recovery "))
+            .ok_or_else(|| "recovery policy missing semantic_recovery".to_owned())?;
+        if !line.contains("scope=\"typed-model-rejection\"")
+            || !line.contains("revalidation=\"same-gate\"")
+            || !line.contains("exhaustion=\"paused-operator-decision\"")
+            || !line.contains("session=\"fresh-recovery-assignment\"")
+        {
+            return Err("semantic_recovery posture is not fail-closed".to_owned());
+        }
+        let start = line
+            .find("max_attempts=")
+            .ok_or_else(|| "semantic_recovery missing max_attempts".to_owned())?
+            + "max_attempts=".len();
+        let rest = &line[start..];
+        let end = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        let max_attempts = rest[..end]
+            .parse::<u32>()
+            .map_err(|_| "semantic_recovery max_attempts is not a number".to_owned())?;
+        if max_attempts != 1 {
+            return Err("semantic_recovery must remain exactly one attempt".to_owned());
+        }
+        Ok(Self { max_attempts })
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct CommitId(pub String);
 
@@ -164,3 +207,7 @@ fn overlap(left: &[String], right: &[String]) -> bool {
     left.iter()
         .any(|item| right.iter().any(|other| item == other))
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/repair.rs"]
+mod tests;

@@ -64,6 +64,15 @@ slot_set "delivery-ledger" output_contract="autopilot.delivery_result.v2" ration
   slot "draft_delivery_status" type="string" required=#true max_bytes=512 doc="Preserves current terminal-status draft so resume cannot convert blocked work into DONE."
 }
 
+slot_set "recovery-ledger" output_contract="recovery-engineer.v1" rationale="Recovery Engineer spans phase-bound plan or source repair, so its checkpoint must preserve diagnosis, original authority, surgical edits, evidence, and the unchanged original gate without converting repair into new work." {
+  slot "recovery_identity" type="string" required=#true max_bytes=512 doc="Preserves trigger assignment, phase, attempt, repository identity, and original gate."
+  slot "diagnosis_ledger" type="array<string>" required=#true max_entries=128 max_bytes=2048 doc="Preserves runtime diagnosis, independently checked evidence, corrections to that diagnosis, and root cause."
+  slot "authority_boundaries" type="array<string>" required=#true max_entries=128 max_bytes=2048 doc="Preserves original authority, exact writable scope, protected tests/gates, and unaffected obligations."
+  slot "repair_ledger" type="array<string>" required=#true max_entries=256 max_bytes=4096 doc="Preserves precise plan/source changes and rejected alternatives so resume cannot expand into new work."
+  slot "evidence_refs" type="array<string>" required=#true max_entries=128 max_bytes=2048 doc="Preserves before/after evidence and the same-gate revalidation binding."
+  slot "terminal_disposition" type="string" required=#true max_bytes=512 doc="Preserves repaired, no-defect, new-authority, infrastructure, or blocked posture without manufacturing success."
+}
+
 role_policy "task-extractor" interruptible=#true slot_set="task-atom-ledger" reason="Long-running inventory can accumulate partial atoms that are safe only if the atom ledger and authority coverage survive."
 role_policy "repository-scout" interruptible=#true slot_set="evidence-selection-ledger" reason="Live probe proved scout findings can cross compaction; evidence and unvisited scope must survive."
 role_policy "context-curator" interruptible=#true slot_set="evidence-selection-ledger" reason="Curator accumulates selected/rejected sources and budget gaps; losing them silently degrades downstream context."
@@ -73,6 +82,7 @@ role_policy "plan-reviewer" interruptible=#true slot_set="plan-review-ledger" re
 role_policy "contradiction-resolver" interruptible=#true slot_set="question-ledger" reason="Resolver must preserve both sides of each contradiction and pending question nominations."
 role_policy "implementer" interruptible=#true slot_set="delivery-ledger" reason="Delivery work mutates a sparse worktree; edit, evidence, and boundary ledgers must survive."
 role_policy "fixer-integrator" interruptible=#true slot_set="delivery-ledger" reason="Fixer repair state extends delivery state with failure, root-cause, and unchanged-contract obligations."
+role_policy "recovery-engineer" interruptible=#true slot_set="recovery-ledger" reason="Cross-phase correction can resume only with root cause, original authority, exact edits, evidence, and original-gate identity intact."
 
 role_policy "onboard" interruptible=#false reason="Thin intake is short and operator-authority bound; interrupting it has no lossless Q1 handoff policy."
 role_policy "orchestrator" interruptible=#false reason="Control decisions mutate scheduling authority; checkpointing them as model state is unsafe."

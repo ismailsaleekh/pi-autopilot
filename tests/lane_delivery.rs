@@ -154,6 +154,37 @@ fn lane_delivery_launch_uses_recorded_tip_at_dispatch_and_package_owned_commit_d
 }
 
 #[test]
+fn no_defect_recovery_packages_only_a_mechanically_clean_unchanged_commit() {
+    let fixture = fixture("recovery-no-defect-package");
+    let vcs = GitVcs::new(&fixture.root);
+    let source = fixture.root.join("source");
+    let base = Sha(vcs.init_fixture(&source).expect("seed repo"));
+    let worktree = fixture.root.join("worktree");
+    vcs.prepare(&worktree, &source, &base.0, &["keep.txt"])
+        .expect("recovery worktree");
+    let worktree = fs::canonicalize(worktree).expect("canonical worktree");
+    let mut expected = expectation(&worktree, &base, 1);
+    expected.role_id = id("recovery-engineer");
+    expected.mode = ModeId("forward-critical".to_owned());
+    let mut result = delivery(&expected, None, None);
+    result.actual_changed_paths.clear();
+
+    let package =
+        establish_delivery_package(&result, &expected).expect("clean unchanged recovery package");
+    assert_eq!(package.package_commit, base);
+    let accepted = accept_delivery_with_package_facts(&[result.clone()], &expected, &package)
+        .expect("no-defect recovery accepted");
+    assert!(accepted.changed_paths.is_empty());
+
+    fs::write(worktree.join("keep.txt"), "undeclared residue\n").expect("dirty worktree");
+    assert_eq!(
+        establish_delivery_package(&result, &expected),
+        Err(DeliveryRejection::GitState),
+        "no-defect cannot hide dirty source state"
+    );
+}
+
+#[test]
 fn lane_delivery_rejects_tracked_dirty_runner_artifact_but_tolerates_untracked_residue() {
     let fixture = fixture("tracked-runner-residue");
     let vcs = GitVcs::new(&fixture.root);
@@ -322,6 +353,7 @@ fn lane_delivery_agent_git_mutation_and_incomplete_delivery_are_refused_without_
         session_file: fixture.root.join("session.json"),
         roster_assignment: "openai-codex/gpt-subscription".to_owned(),
         approved_units: vec![scoped_unit],
+        recovery: None,
     };
     let node = fixture.root.join("node");
     let wrapper = fixture.root.join("bin/autopilot-agent-run.mjs");
@@ -516,6 +548,7 @@ fn delivery_submission_admission_accepts_blocked_and_rejects_mixed_shapes() {
             files: vec![ContractPath("README.md".to_owned())],
             ..unit("U1", 1, &[])
         }],
+        recovery: None,
     };
     let mut submission = kernel::generated::DeliverySubmissionV2 {
         actual_changed_paths: vec![ContractPath("README.md".to_owned())],
@@ -523,6 +556,8 @@ fn delivery_submission_admission_accepts_blocked_and_rejects_mixed_shapes() {
         focused_evidence_refs: vec![Ref("evidence:0".to_owned()), Ref("evidence:1".to_owned())],
         terminal_status: kernel::generated::DeliveryOutcome::Succeeded,
         hard_boundary_violations: Vec::new(),
+        blocker_class: None,
+        recovery_disposition: None,
     };
     assert_eq!(
         runner::admit_delivery_submission_with_assignment(&submission, &assignment, 2),
@@ -533,6 +568,7 @@ fn delivery_submission_admission_accepts_blocked_and_rejects_mixed_shapes() {
     submission.hard_boundary_violations.push(
         "approved command expected planning checkout root, assigned worktree differed".to_owned(),
     );
+    submission.blocker_class = Some(kernel::generated::DeliveryBlockerClass::SemanticRepairable);
     assert_eq!(
         runner::admit_delivery_submission_with_assignment(&submission, &assignment, 2),
         Ok(runner::DeliverySubmissionOutcome::Blocked)
@@ -554,10 +590,52 @@ fn delivery_submission_admission_accepts_blocked_and_rejects_mixed_shapes() {
     let mut mixed = submission.clone();
     mixed.terminal_status = kernel::generated::DeliveryOutcome::Succeeded;
     assert!(runner::admit_delivery_submission_with_assignment(&mixed, &assignment, 2).is_err());
+
+    let mut recovery_assignment = assignment.clone();
+    recovery_assignment.recovery = Some(runner::RecoveryDirective {
+        schema: "autopilot.recovery_directive.v1".to_owned(),
+        trigger_phase: "validation".to_owned(),
+        repair_mode: ModeId("forward-critical".to_owned()),
+        trigger_assignment_id: id("validator-main-L1-r1"),
+        diagnosis_refs: vec![Ref("carrier:validator-main-L1-r1".to_owned())],
+        diagnosis_ids: vec![id("criterion:AC1")],
+        diagnosis_details: vec![
+            "The validator diagnosis must be independently checked.".to_owned(),
+        ],
+        original_gate: "validator:validator-main-L1-r1:semantic-round-1".to_owned(),
+        attempt_budget: 1,
+    });
+    let mut recovered = submission.clone();
+    recovered.recovery_disposition =
+        Some(kernel::generated::RecoveryDisposition::RequiresNewAuthority);
+    recovered.blocker_class = Some(kernel::generated::DeliveryBlockerClass::RequiresNewAuthority);
+    assert_eq!(
+        runner::admit_delivery_submission_with_assignment(&recovered, &recovery_assignment, 2,),
+        Ok(runner::DeliverySubmissionOutcome::Blocked)
+    );
+    recovered.terminal_status = kernel::generated::DeliveryOutcome::Succeeded;
+    recovered.hard_boundary_violations.clear();
+    recovered.blocker_class = None;
+    recovered.recovery_disposition = Some(kernel::generated::RecoveryDisposition::NoDefect);
+    assert_eq!(
+        runner::admit_delivery_submission_with_assignment(&recovered, &recovery_assignment, 2,),
+        Ok(runner::DeliverySubmissionOutcome::Succeeded)
+    );
+    recovered.recovery_disposition = Some(kernel::generated::RecoveryDisposition::Repaired);
+    assert!(
+        runner::admit_delivery_submission_with_assignment(&recovered, &recovery_assignment, 2,)
+            .is_err(),
+        "repaired must name an actual changed path"
+    );
+    recovered.recovery_disposition = Some(kernel::generated::RecoveryDisposition::NoDefect);
+    assert!(
+        runner::admit_delivery_submission_with_assignment(&recovered, &assignment, 2).is_err(),
+        "ordinary delivery cannot claim a recovery disposition"
+    );
 }
 
 #[test]
-fn lane_delivery_core_consumes_blocked_without_packaging() {
+fn lane_delivery_core_routes_blocked_to_one_recovery_engineer_without_packaging() {
     let (mut core, spawn, spec, carrier_path, worktree) =
         launched_core_delivery("blocked-delivery");
     fs::create_dir_all(carrier_path.parent().expect("carrier parent")).expect("carrier dir");
@@ -568,11 +646,13 @@ fn lane_delivery_core_consumes_blocked_without_packaging() {
     )
     .expect("carrier write");
 
-    let rejected = core.send_json(serde_json::json!({"v":1,"id":2,"kind":"task-completed","payload":{"task_id":"task-blocked-delivery","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}));
-    assert_eq!(rejected.kind, "done", "blocked response: {rejected:?}");
-    assert!(
-        done_status(&rejected).contains("rejection:delivery-blocked:assignment-main-L1"),
-        "blocked status was not visible: {rejected:?}"
+    let recovery = core.send_json(serde_json::json!({"v":1,"id":2,"kind":"task-completed","payload":{"task_id":"task-blocked-delivery","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}));
+    assert_eq!(recovery.kind, "spawn", "blocked response: {recovery:?}");
+    let recovery: CoreToHostSpawnPayload =
+        serde_json::from_value(recovery.payload).expect("recovery spawn payload");
+    assert_eq!(
+        recovery.action.assignment_id.0,
+        "recovery-assignment-main-L1-a1"
     );
     let head = git_stdout(&worktree, &["rev-parse", "--verify", "HEAD^{commit}"]);
     assert_eq!(
@@ -582,8 +662,205 @@ fn lane_delivery_core_consumes_blocked_without_packaging() {
     assert_eq!(git_stdout(&worktree, &["status", "--porcelain=v1"]), "");
     let events = fs::read_to_string(core.event_log()).expect("events");
     assert!(events.contains("agent:delivery-blocked"), "{events}");
+    assert!(events.contains("delivery:recovery-required"), "{events}");
+    assert!(
+        events.contains("module-wired:recovery-engineer"),
+        "{events}"
+    );
     assert!(!events.contains("agent:delivery-accepted"), "{events}");
     assert!(!events.contains("validation:required"), "{events}");
+    core.shutdown();
+}
+
+#[test]
+fn blocked_delivery_recovery_replays_after_crash_before_issue() {
+    let (mut core, spawn, spec, carrier_path, _worktree) =
+        launched_core_delivery("blocked-delivery-replay");
+    fs::create_dir_all(carrier_path.parent().expect("carrier parent")).expect("carrier dir");
+    fs::write(
+        &carrier_path,
+        serde_json::to_vec_pretty(&delivery_blocked_carrier_for_core(&spec, 2))
+            .expect("blocked carrier"),
+    )
+    .expect("carrier write");
+    let recovery = core.send_json(serde_json::json!({"v":1,"id":2,"kind":"task-completed","payload":{"task_id":"task-blocked-delivery-replay","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}));
+    let recovery: CoreToHostSpawnPayload =
+        serde_json::from_value(recovery.payload).expect("initial recovery spawn");
+    let event_log = core.event_log().to_path_buf();
+    let root = event_log
+        .ancestors()
+        .nth(4)
+        .expect("fixture root from event log")
+        .to_path_buf();
+    core.shutdown();
+
+    let events = fs::read_to_string(&event_log).expect("events before crash projection");
+    let lines = events.lines().collect::<Vec<_>>();
+    let blocked_index = lines
+        .iter()
+        .position(|line| line.contains("agent:delivery-blocked"))
+        .expect("durable blocked event");
+    let cutoff = lines
+        .iter()
+        .enumerate()
+        .skip(blocked_index + 1)
+        .find_map(|(index, line)| line.contains("transcript:recorded").then_some(index))
+        .expect("durable transcript event before recovery issue");
+    fs::write(&event_log, format!("{}\n", lines[..=cutoff].join("\n")))
+        .expect("project crash window");
+
+    let mut resumed = CoreProcess::spawn(&root);
+    let replayed = resumed.send_json(autopilot_command(3));
+    assert_eq!(replayed.kind, "spawn", "replay response: {replayed:?}");
+    let replayed: CoreToHostSpawnPayload =
+        serde_json::from_value(replayed.payload).expect("replayed recovery spawn");
+    assert_eq!(replayed.action.assignment_id, recovery.action.assignment_id);
+    assert_eq!(replayed.action.action_id, recovery.action.action_id);
+    let replayed_events = fs::read_to_string(&event_log).expect("replayed events");
+    assert_eq!(
+        replayed_events
+            .matches("delivery:recovery-required")
+            .count(),
+        1
+    );
+    assert!(
+        replayed_events.contains("recovery-issued:assignment-main-L1"),
+        "{replayed_events}"
+    );
+    resumed.shutdown();
+
+    let issued_events = fs::read_to_string(&event_log).expect("issued events");
+    let issued_lines = issued_events.lines().collect::<Vec<_>>();
+    let issued_cutoff = issued_lines
+        .iter()
+        .rposition(|line| line.contains("delivery:recovery-required"))
+        .expect("durable recovery issue event");
+    fs::write(
+        &event_log,
+        format!("{}\n", issued_lines[..=issued_cutoff].join("\n")),
+    )
+    .expect("project crash after issue before control frame");
+    let mut reemitter = CoreProcess::spawn(&root);
+    let reemitted = reemitter.send_json(autopilot_command(4));
+    assert_eq!(reemitted.kind, "spawn", "reemit response: {reemitted:?}");
+    let reemitted: CoreToHostSpawnPayload =
+        serde_json::from_value(reemitted.payload).expect("reemitted recovery spawn");
+    assert_eq!(
+        reemitted.action.assignment_id,
+        recovery.action.assignment_id
+    );
+    assert_eq!(reemitted.action.action_id, recovery.action.action_id);
+    assert!(
+        fs::read_to_string(&event_log)
+            .expect("reemission events")
+            .contains("recovery:resumed")
+    );
+    reemitter.shutdown();
+}
+
+#[test]
+fn blocked_recovery_engineer_fails_closed_without_a_second_recovery_loop() {
+    let (mut core, spawn, spec, carrier_path, worktree) =
+        launched_core_delivery("blocked-recovery-exhaustion");
+    fs::create_dir_all(carrier_path.parent().expect("carrier parent")).expect("carrier dir");
+    fs::write(
+        &carrier_path,
+        serde_json::to_vec_pretty(&delivery_blocked_carrier_for_core(&spec, 2))
+            .expect("blocked implementer carrier"),
+    )
+    .expect("blocked implementer carrier write");
+    let recovery = core.send_json(serde_json::json!({"v":1,"id":2,"kind":"task-completed","payload":{"task_id":"task-blocked-recovery-exhaustion","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}));
+    let recovery: CoreToHostSpawnPayload =
+        serde_json::from_value(recovery.payload).expect("recovery spawn");
+    let recovery_spec_path = worktree.join(format!(
+        ".pi/autopilot/runner/specs/{}.json",
+        recovery.action.assignment_id.0
+    ));
+    let recovery_spec: serde_json::Value =
+        serde_json::from_slice(&fs::read(recovery_spec_path).expect("recovery spec"))
+            .expect("recovery spec json");
+    let recovery_carrier_path = PathBuf::from(
+        recovery_spec["carrier_path"]
+            .as_str()
+            .expect("recovery carrier path"),
+    );
+    fs::write(
+        &recovery_carrier_path,
+        serde_json::to_vec_pretty(&delivery_blocked_carrier_for_core(&recovery_spec, 2))
+            .expect("blocked recovery carrier"),
+    )
+    .expect("blocked recovery carrier write");
+    let exhausted = core.send_json(serde_json::json!({"v":1,"id":3,"kind":"task-completed","payload":{"task_id":"task-recovery-blocked","action_id":recovery.action.action_id,"assignment_id":recovery.action.assignment_id,"status":"completed"}}));
+    assert_eq!(exhausted.kind, "done", "response: {exhausted:?}");
+    assert!(
+        done_status(&exhausted).contains("recovery-fail-closed:RequiresNewAuthority"),
+        "response: {exhausted:?}"
+    );
+    let events = fs::read_to_string(core.event_log()).expect("events");
+    assert!(events.contains("recovery:inadmissible"), "{events}");
+    assert_eq!(events.matches("delivery:recovery-required").count(), 1);
+    let replayed = core.send_json(autopilot_command(4));
+    assert_eq!(replayed.kind, "done", "replay response: {replayed:?}");
+    assert!(
+        done_status(&replayed).contains("dispatch-stuck"),
+        "blocked recovery lane redispatched: {replayed:?}"
+    );
+    core.shutdown();
+}
+
+#[test]
+fn infrastructure_blocked_delivery_fails_closed_without_semantic_recovery() {
+    let (mut core, spawn, spec, carrier_path, _worktree) =
+        launched_core_delivery("blocked-delivery-infrastructure");
+    fs::create_dir_all(carrier_path.parent().expect("carrier parent")).expect("carrier dir");
+    fs::write(
+        &carrier_path,
+        serde_json::to_vec_pretty(&delivery_blocked_carrier_for_core_with_class(
+            &spec,
+            2,
+            "infrastructure",
+        ))
+        .expect("blocked carrier"),
+    )
+    .expect("carrier write");
+
+    let rejected = core.send_json(serde_json::json!({"v":1,"id":2,"kind":"task-completed","payload":{"task_id":"task-blocked-delivery-infrastructure","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}));
+    assert_eq!(rejected.kind, "done", "response: {rejected:?}");
+    assert!(
+        done_status(&rejected).contains("delivery-recovery-inadmissible:Some(Infrastructure)"),
+        "response: {rejected:?}"
+    );
+    let events = fs::read_to_string(core.event_log()).expect("events");
+    assert!(events.contains("recovery:inadmissible"), "{events}");
+    assert!(!events.contains("delivery:recovery-required"), "{events}");
+    core.shutdown();
+}
+
+#[test]
+fn blocked_delivery_with_out_of_scope_residue_fails_closed_without_recovery() {
+    let (mut core, spawn, spec, carrier_path, worktree) =
+        launched_core_delivery("blocked-delivery-unsafe-scope");
+    fs::write(worktree.join("outside.txt"), "outside authority\n").expect("out-of-scope residue");
+    fs::create_dir_all(carrier_path.parent().expect("carrier parent")).expect("carrier dir");
+    fs::write(
+        &carrier_path,
+        serde_json::to_vec_pretty(&delivery_blocked_carrier_for_core(&spec, 2))
+            .expect("blocked carrier"),
+    )
+    .expect("carrier write");
+
+    let rejected = core.send_json(serde_json::json!({"v":1,"id":2,"kind":"task-completed","payload":{"task_id":"task-blocked-delivery-unsafe-scope","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}));
+    assert_eq!(rejected.kind, "done", "unsafe response: {rejected:?}");
+    assert!(
+        done_status(&rejected).contains("delivery-recovery-unsafe:HardBoundaryViolation"),
+        "unsafe response: {rejected:?}"
+    );
+    let events = fs::read_to_string(core.event_log()).expect("events");
+    assert!(!events.contains("delivery:recovery-required"), "{events}");
+    assert!(
+        !events.contains("module-wired:recovery-engineer"),
+        "{events}"
+    );
     core.shutdown();
 }
 
@@ -689,6 +966,10 @@ fn lane_delivery_core_rejects_captured_spec_bytes_digest_drift() {
     core.shutdown();
 }
 
+fn autopilot_command(id: u64) -> serde_json::Value {
+    serde_json::json!({"v":1,"id":id,"kind":"command","payload":{"raw":"autopilot main","background_capabilities":{"api_version":1,"run":true,"run_is_agent":true,"run_completion_trigger":true,"status":true,"logs":true,"logs_bounded":true,"kill":true}}})
+}
+
 fn launched_core_delivery(
     fixture_name: &str,
 ) -> (
@@ -723,7 +1004,7 @@ fn launched_core_delivery(
     .expect("approved plan");
 
     let mut core = CoreProcess::spawn(&root);
-    let launch = core.send_json(serde_json::json!({"v":1,"id":1,"kind":"command","payload":{"raw":"autopilot main","background_capabilities":{"api_version":1,"run":true,"run_is_agent":true,"run_completion_trigger":true,"status":true,"logs":true,"logs_bounded":true,"kill":true}}}));
+    let launch = core.send_json(autopilot_command(1));
     assert_eq!(launch.kind, "spawn", "launch response: {launch:?}");
     let spawn: CoreToHostSpawnPayload =
         serde_json::from_value(launch.payload).expect("delivery spawn payload");
@@ -945,7 +1226,7 @@ fn delivery_carrier_for_core_path(
         .iter()
         .find(|profile| profile.0 == "delivery-status.v2")
         .expect("delivery profile");
-    let submission = serde_json::json!({
+    let mut submission = serde_json::json!({
         "actual_changed_paths": [changed_path],
         "execution_audit_ref": "audit:delivery",
         "focused_evidence_refs": (0..evidence_count)
@@ -954,6 +1235,9 @@ fn delivery_carrier_for_core_path(
         "terminal_status": "succeeded",
         "hard_boundary_violations": []
     });
+    if spec["role_id"] == "recovery-engineer" {
+        submission["recovery_disposition"] = serde_json::json!("repaired");
+    }
     let submission_digest = sha256_hex(&serde_json::to_vec(&submission).expect("submission"));
     let tool_call_id = "delivery-tool-call-1";
     let binding = drivers::runner::child::carrier_binding(&typed);
@@ -1013,21 +1297,34 @@ fn delivery_blocked_carrier_for_core(
     spec: &serde_json::Value,
     evidence_count: usize,
 ) -> serde_json::Value {
+    delivery_blocked_carrier_for_core_with_class(spec, evidence_count, "semantic-repairable")
+}
+
+fn delivery_blocked_carrier_for_core_with_class(
+    spec: &serde_json::Value,
+    evidence_count: usize,
+    blocker_class: &str,
+) -> serde_json::Value {
     let typed: kernel::generated::AgentRunSpec =
         serde_json::from_value(spec.clone()).expect("typed runner spec");
     let profile = kernel::generated::TERMINAL_PROFILES
         .iter()
         .find(|profile| profile.0 == "delivery-status.v2")
         .expect("delivery profile");
-    let submission = serde_json::json!({
+    let mut submission = serde_json::json!({
         "actual_changed_paths": [],
         "execution_audit_ref": "audit:delivery-blocked",
         "focused_evidence_refs": (0..evidence_count)
             .map(|index| serde_json::json!(format!("evidence:{index}")))
             .collect::<Vec<_>>(),
         "terminal_status": "blocked",
-        "hard_boundary_violations": ["approved command expected a different checkout root; no mutation performed"]
+        "hard_boundary_violations": ["approved command expected a different checkout root; no mutation performed"],
+        "blocker_class": blocker_class
     });
+    if spec["role_id"] == "recovery-engineer" {
+        submission["blocker_class"] = serde_json::json!("requires-new-authority");
+        submission["recovery_disposition"] = serde_json::json!("requires-new-authority");
+    }
     let submission_digest = sha256_hex(&serde_json::to_vec(&submission).expect("submission"));
     let tool_call_id = "delivery-tool-call-blocked";
     let binding = drivers::runner::child::carrier_binding(&typed);

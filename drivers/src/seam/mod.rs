@@ -361,6 +361,12 @@ fn advance_run(
     workstream: &str,
     state: &mut CoreState,
 ) -> Result<AdvanceRunOutcome, AnyError> {
+    if let Some(envelope) = resume_pending_validation_recovery(id, workstream, state)? {
+        return Ok(AdvanceRunOutcome::Dispatched(envelope));
+    }
+    if let Some(envelope) = resume_pending_delivery_recovery(id, workstream, state)? {
+        return Ok(AdvanceRunOutcome::Dispatched(envelope));
+    }
     let approved_artifact = read_approved_plan_artifact(workstream)
         .map_err(|error| format!("CONTEXT_GAP:approved-plan:{error}"))?;
     let repository_authority = approved_artifact
@@ -428,6 +434,121 @@ fn advance_run(
     }
 }
 
+fn resume_pending_validation_recovery(
+    id: u64,
+    workstream: &str,
+    state: &mut CoreState,
+) -> Result<Option<SeamEnvelope>, AnyError> {
+    let mut validation_ids = state
+        .state
+        .refs
+        .keys()
+        .filter_map(|reference| reference.0.strip_prefix("recovery-validation-pending:"))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    validation_ids.sort();
+    validation_ids.dedup();
+    for validation_id in validation_ids {
+        let validation = issued_binding_for_assignment(state, &idv(&validation_id))
+            .ok_or_else(|| format!("recovery resume missing validation binding {validation_id}"))?;
+        if validation.workstream.0 != workstream
+            || validation.role_id.0 != "validator"
+            || !terminal_consumed(state, &validation)
+        {
+            continue;
+        }
+        let result = read_validation_result(&validation)?;
+        let producer_id = result
+            .producer_assignment_ids
+            .first()
+            .ok_or_else(|| "recovery resume validation missing producer".to_owned())?;
+        let recovery_id = idv(&format!("recovery-{}-a1", producer_id.0));
+        if let Some(recovery) = issued_binding_for_assignment(state, &recovery_id) {
+            if terminal_consumed(state, &recovery) || launch_ack_consumed(state, &recovery) {
+                continue;
+            }
+            let action = planning_action_from_binding(&recovery)?;
+            state.append(
+                EventKind("recovery:resumed".to_owned()),
+                vec![
+                    Ref(format!("recovery-issued:{}", producer_id.0)),
+                    Ref(recovery.assignment_id.0.clone()),
+                ],
+            )?;
+            return controlled_spawn(id, action, state, "validation-recovery-reemit").map(Some);
+        }
+        let blockers = validation_blockers(&result);
+        if result.submission.outcome == kernel::generated::ValidationOutcomeV2::FORWARDREADY
+            || blockers.is_empty()
+        {
+            return Err("recovery resume validation is not a blocked coherent verdict".into());
+        }
+        return repair_needed(id, &validation, &result, blockers, state).map(Some);
+    }
+    Ok(None)
+}
+
+fn resume_pending_delivery_recovery(
+    id: u64,
+    workstream: &str,
+    state: &mut CoreState,
+) -> Result<Option<SeamEnvelope>, AnyError> {
+    let mut source_ids = state
+        .state
+        .refs
+        .keys()
+        .filter_map(|reference| reference.0.strip_prefix("recovery-pending:"))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    source_ids.sort();
+    source_ids.dedup();
+    for source_id in source_ids {
+        let source = issued_binding_for_assignment(state, &idv(&source_id))
+            .ok_or_else(|| format!("recovery resume missing source binding {source_id}"))?;
+        if source.workstream.0 != workstream
+            || source.role_id.0 != "implementer"
+            || !terminal_consumed(state, &source)
+        {
+            continue;
+        }
+        let recovery_assignment_id = idv(&format!("recovery-{}-a1", source.assignment_id.0));
+        if let Some(recovery) = issued_binding_for_assignment(state, &recovery_assignment_id) {
+            if terminal_consumed(state, &recovery) || launch_ack_consumed(state, &recovery) {
+                continue;
+            }
+            let action = planning_action_from_binding(&recovery)?;
+            state.append(
+                EventKind("recovery:resumed".to_owned()),
+                vec![
+                    Ref(format!("recovery-issued:{}", source.assignment_id.0)),
+                    Ref(recovery.assignment_id.0.clone()),
+                ],
+            )?;
+            return controlled_spawn(id, action, state, "semantic-recovery-reemit").map(Some);
+        }
+        let carrier_text = read_bounded_utf8(
+            Path::new(&source.carrier_path),
+            MAX_TERMINAL_CARRIER_BYTES,
+            "recovery-resume-carrier",
+        )?;
+        let result: kernel::generated::DeliveryResultV2 = serde_json::from_str(&carrier_text)
+            .map_err(|error| format!("recovery resume carrier json:{error}"))?;
+        validate_delivery_result_v2(&result, &source)
+            .map_err(|error| format!("recovery resume carrier binding:{error}"))?;
+        if runner::delivery_submission_outcome(&result.submission)
+            != runner::DeliverySubmissionOutcome::Blocked
+            || result.submission.blocker_class
+                != Some(kernel::generated::DeliveryBlockerClass::SemanticRepairable)
+        {
+            return Err(
+                "recovery resume source is not semantic-repairable blocked delivery".into(),
+            );
+        }
+        return issue_delivery_recovery(id, &source, &result, state).map(Some);
+    }
+    Ok(None)
+}
+
 fn lane_has_live_delivery(state: &CoreState, lane_id: &Id) -> bool {
     state
         .state
@@ -435,8 +556,10 @@ fn lane_has_live_delivery(state: &CoreState, lane_id: &Id) -> bool {
         .keys()
         .filter_map(|reference| runner::decode_binding_ref(&reference.0))
         .any(|binding| {
-            binding.role_id.0 == "implementer"
-                && binding.lane_id.as_ref().is_some_and(|lane| lane == lane_id)
+            matches!(
+                binding.role_id.0.as_str(),
+                "implementer" | "recovery-engineer"
+            ) && binding.lane_id.as_ref().is_some_and(|lane| lane == lane_id)
                 && !terminal_consumed(state, &binding)
         })
 }
@@ -494,12 +617,13 @@ fn advance_diagnostics(
         .collect::<Vec<_>>();
     let blocked = blocked_lane_details(state, submission, approved, readiness, selected);
     format!(
-        "closed=[{}];ready_undispatched=[{}];blocked=[{}];active_implementers={};active_validators={};active_or_unknown={};queued_candidates={}",
+        "closed=[{}];ready_undispatched=[{}];blocked=[{}];active_implementers={};active_validators={};active_fixers={};active_or_unknown={};queued_candidates={}",
         closed.join(","),
         ready_undispatched.join(","),
         blocked.join(","),
         active_implementers(state),
         active_validators(state),
+        active_recovery_engineers(state),
         active_or_unknown_work(state),
         queued_candidates(state)
     )
@@ -646,24 +770,97 @@ fn accept_planning_carrier(
     if let Err(error) = validate_agent_output(&binding, &carrier.raw_output) {
         return done(id, boundary_status(&error));
     }
-    if carrier.boundary_id == "planning.plan-review.v1"
-        && let Err(error) = review_approves_execution(&carrier.raw_output)
+    let recovery_admission = match validate_recovery_work_map(&carrier, &binding) {
+        Ok(admission) => admission,
+        Err(error) => return done(id, rejection("planning-recovery", &error)),
+    };
+    let review_rejection = (carrier.boundary_id == "planning.plan-review.v1")
+        .then(|| review_approves_execution(&carrier.raw_output).err())
+        .flatten();
+    let first_review_requires_recovery = if review_rejection.is_some() {
+        planning_assignment_for(&carrier.workstream, &carrier.assignment_id)
+            .is_ok_and(|assignment| assignment.role == "plan-reviewer" && assignment.ordinal == 1)
+    } else {
+        false
+    };
+    if let Some(error) = review_rejection.as_ref()
+        && !first_review_requires_recovery
     {
+        let recovery_exhausted =
+            planning_assignment_for(&carrier.workstream, &carrier.assignment_id).is_ok_and(
+                |assignment| assignment.role == "plan-reviewer" && assignment.ordinal == 2,
+            );
         if let Some(payload) = terminal {
             append_terminal_event(state, payload, &binding)?;
             record_task_completion_control(state, payload)?;
+            if recovery_exhausted {
+                state.append(
+                    EventKind("recovery:exhausted".to_owned()),
+                    vec![
+                        Ref(carrier.assignment_id.clone()),
+                        Ref(carrier.carrier_path.clone()),
+                        Ref("planning.plan-review.v1".to_owned()),
+                        Ref("semantic-recovery-exhausted".to_owned()),
+                    ],
+                )?;
+            }
             return planning_blocked_or_summary(id, &carrier.workstream, state);
         }
-        return done(id, rejection("planning-postprocess", &error));
+        return done(id, rejection("planning-postprocess", error));
     }
-    if let Err(error) = apply_planning_side_effects(&carrier) {
+    if let PlanningRecoveryAdmission::FailClosed(disposition) = recovery_admission {
+        let Some(payload) = terminal else {
+            return done(
+                id,
+                rejection(
+                    "planning-recovery",
+                    "fail-closed recovery disposition requires durable terminal evidence",
+                ),
+            );
+        };
+        append_terminal_event(state, payload, &binding)?;
+        record_task_completion_control(state, payload)?;
+        state.append(
+            EventKind("recovery:inadmissible".to_owned()),
+            vec![
+                Ref(carrier.assignment_id.clone()),
+                Ref(carrier.carrier_path.clone()),
+                Ref(format!("recovery-disposition:{disposition:?}")),
+                recovery_disposition_failure_ref(&disposition),
+                Ref("semantic-recovery-fail-closed".to_owned()),
+            ],
+        )?;
+        return done(
+            id,
+            rejection("planning-recovery-fail-closed", &format!("{disposition:?}")),
+        );
+    }
+    if !first_review_requires_recovery
+        && let Err(error) = apply_planning_side_effects(&carrier, &binding)
+    {
         return done(id, rejection("planning-postprocess", &error));
     }
     if let Some(payload) = terminal {
         append_terminal_event(state, payload, &binding)?;
         record_task_completion_control(state, payload)?;
+    } else if first_review_requires_recovery {
+        return done(
+            id,
+            rejection(
+                "planning-recovery",
+                "blocked first review requires durable terminal evidence",
+            ),
+        );
     }
-    if carrier.boundary_id == "planning.plan-review.v1" {
+    if carrier.boundary_id == "planning.plan-review.v1" && !first_review_requires_recovery {
+        let subject_path = binding
+            .planning_subject_path
+            .as_ref()
+            .ok_or_else(|| "approved review missing bound subject path".to_owned())?;
+        let subject_digest = binding
+            .planning_subject_digest
+            .as_ref()
+            .ok_or_else(|| "approved review missing bound subject digest".to_owned())?;
         state.append(
             EventKind("planning:ready-to-execute".to_owned()),
             vec![
@@ -673,6 +870,8 @@ fn accept_planning_carrier(
                 Ref(carrier.action_id.clone()),
                 Ref(carrier.boundary_id.clone()),
                 Ref(carrier.spec_digest.clone()),
+                Ref(format!("review-subject-carrier:{subject_path}")),
+                Ref(format!("review-subject-sha256:{subject_digest}")),
                 planning_result_consumed_ref(&binding),
             ],
         )?;
@@ -685,17 +884,59 @@ fn accept_planning_carrier(
             ),
         );
     }
-    state.append(
-        EventKind("agent:result".to_owned()),
-        vec![
-            Ref(assignment_id.0.clone()),
-            Ref(carrier.action_id.clone()),
-            Ref(carrier.boundary_id.clone()),
-            Ref(carrier.workstream.clone()),
-            Ref(carrier.spec_digest.clone()),
-            planning_result_consumed_ref(&binding),
-        ],
-    )?;
+    let mut result_refs = vec![
+        Ref(assignment_id.0.clone()),
+        Ref(carrier.action_id.clone()),
+        Ref(carrier.boundary_id.clone()),
+        Ref(carrier.workstream.clone()),
+        Ref(carrier.spec_digest.clone()),
+        planning_result_consumed_ref(&binding),
+    ];
+    let event_kind = if first_review_requires_recovery {
+        let baseline_path = binding
+            .planning_subject_path
+            .as_ref()
+            .ok_or_else(|| "planning recovery baseline path missing".to_owned())?;
+        let baseline_digest = binding
+            .planning_subject_digest
+            .as_ref()
+            .ok_or_else(|| "planning recovery baseline digest missing".to_owned())?;
+        result_refs.push(Ref("planning-recovery-required".to_owned()));
+        result_refs.push(Ref(format!("recovery-baseline-carrier:{baseline_path}")));
+        result_refs.push(Ref(format!("recovery-baseline-sha256:{baseline_digest}")));
+        result_refs.push(Ref(format!(
+            "rejected-review-carrier:{}",
+            carrier.carrier_path
+        )));
+        result_refs.push(Ref(format!(
+            "rejected-review-diagnosis:{}",
+            review_rejection.as_deref().unwrap_or("unknown")
+        )));
+        "planning:recovery-required"
+    } else if carrier.role_id == "recovery-engineer"
+        && carrier.mode == "planning-repair"
+        && carrier.boundary_id == "planning.work-map.v1"
+    {
+        let baseline_path = binding
+            .planning_subject_path
+            .as_ref()
+            .ok_or_else(|| "planning recovery baseline path missing".to_owned())?;
+        let baseline_digest = binding
+            .planning_subject_digest
+            .as_ref()
+            .ok_or_else(|| "planning recovery baseline digest missing".to_owned())?;
+        result_refs.push(Ref("planning-rereview-required".to_owned()));
+        result_refs.push(Ref(format!("recovery-baseline-carrier:{baseline_path}")));
+        result_refs.push(Ref(format!("recovery-baseline-sha256:{baseline_digest}")));
+        result_refs.push(Ref(format!(
+            "recovery-output-sha256:{}",
+            sha256_hex_local(carrier.raw_output.as_bytes())
+        )));
+        "planning:recovery-completed"
+    } else {
+        "agent:result"
+    };
+    state.append(EventKind(event_kind.to_owned()), result_refs)?;
     if let Err(error) = ensure_atom_registry_after_task_atoms(&carrier.workstream, state) {
         return done(id, rejection("planning-postprocess", &error.to_string()));
     }
@@ -878,20 +1119,75 @@ fn route_task_completed(
             == runner::DeliverySubmissionOutcome::Blocked
         {
             append_terminal_event(state, &payload, &binding)?;
-            state.append(
-                EventKind("agent:delivery-blocked".to_owned()),
-                vec![
-                    Ref(binding.assignment_id.0.clone()),
-                    Ref(binding.action_id.0.clone()),
-                    result.execution_audit_ref.clone(),
-                    Ref(format!(
-                        "hard-boundary-violations:{}",
-                        result.hard_boundary_violations.len()
-                    )),
-                ],
-            )?;
+            let mut blocked_refs = vec![
+                Ref(binding.assignment_id.0.clone()),
+                Ref(binding.action_id.0.clone()),
+                result.execution_audit_ref.clone(),
+                Ref(format!(
+                    "hard-boundary-violations:{}",
+                    result.hard_boundary_violations.len()
+                )),
+                Ref(format!(
+                    "delivery-blocker-class:{:?}",
+                    result_v2.submission.blocker_class
+                )),
+            ];
+            if binding.role_id.0 != "recovery-engineer"
+                && result_v2.submission.blocker_class
+                    == Some(kernel::generated::DeliveryBlockerClass::SemanticRepairable)
+            {
+                blocked_refs.push(Ref(format!("recovery-pending:{}", binding.assignment_id.0)));
+            }
+            state.append(EventKind("agent:delivery-blocked".to_owned()), blocked_refs)?;
             record_delivery_transcript(&binding, &carrier_text, state)?;
-            return done(id, rejection("delivery-blocked", &binding.assignment_id.0));
+            if binding.role_id.0 == "recovery-engineer" {
+                let Some(disposition) = result_v2.submission.recovery_disposition.as_ref() else {
+                    return done(
+                        id,
+                        rejection(
+                            "recovery-disposition",
+                            "missing after admitted recovery result",
+                        ),
+                    );
+                };
+                state.append(
+                    EventKind("recovery:inadmissible".to_owned()),
+                    vec![
+                        Ref(binding.assignment_id.0.clone()),
+                        Ref(format!("recovery-disposition:{disposition:?}")),
+                        recovery_disposition_failure_ref(disposition),
+                        lane_blocker_ref(&binding)?,
+                    ],
+                )?;
+                return done(
+                    id,
+                    rejection("recovery-fail-closed", &format!("{disposition:?}")),
+                );
+            }
+            if result_v2.submission.blocker_class
+                != Some(kernel::generated::DeliveryBlockerClass::SemanticRepairable)
+            {
+                state.append(
+                    EventKind("recovery:inadmissible".to_owned()),
+                    vec![
+                        Ref(binding.assignment_id.0.clone()),
+                        Ref(format!(
+                            "delivery-blocker-class:{:?}",
+                            result_v2.submission.blocker_class
+                        )),
+                        delivery_blocker_failure_ref(result_v2.submission.blocker_class.as_ref()),
+                        lane_blocker_ref(&binding)?,
+                    ],
+                )?;
+                return done(
+                    id,
+                    rejection(
+                        "delivery-recovery-inadmissible",
+                        &format!("{:?}", result_v2.submission.blocker_class),
+                    ),
+                );
+            }
+            return issue_delivery_recovery(id, &binding, &result_v2, state);
         }
         let package = match runner::establish_delivery_package(&result, &expected) {
             Ok(value) => value,
@@ -1872,7 +2168,7 @@ fn controlled_spawn(
         counts: kernel::generated::ControlFrameCounts {
             implementers: active_implementers(state) as u32,
             validators: active_validators(state) as u32,
-            fixers: 0,
+            fixers: active_recovery_engineers(state) as u32,
             deterministic_jobs: 0,
             queued_candidates: queued_candidates(state) as u32,
         },
@@ -1930,7 +2226,7 @@ fn controlled_spawn_wave(
         counts: kernel::generated::ControlFrameCounts {
             implementers: active_implementers(state) as u32,
             validators: active_validators(state) as u32,
-            fixers: 0,
+            fixers: active_recovery_engineers(state) as u32,
             deterministic_jobs: 0,
             queued_candidates: queued_candidates(state) as u32,
         },
@@ -2195,23 +2491,22 @@ fn validate_validation_result_v2(
     Ok(())
 }
 
-fn validation_completed(
-    id: u64,
+fn read_validation_result(
     binding: &runner::IssuedRunnerBinding,
-    terminal: &HostToCoreTaskCompletedPayload,
-    state: &mut CoreState,
-) -> Result<SeamEnvelope, AnyError> {
+) -> Result<kernel::generated::ValidationResultV2, AnyError> {
     let text = read_bounded_utf8(
         Path::new(&binding.carrier_path),
         MAX_TERMINAL_CARRIER_BYTES,
         "validation-carrier-read",
     )?;
-    let result: kernel::generated::ValidationResultV2 = serde_json::from_str(&text)
+    let result = serde_json::from_str(&text)
         .map_err(|error| format!("validation-carrier:{}:{error}", binding.carrier_path))?;
     validate_validation_result_v2(&result, binding)?;
-    append_terminal_event(state, terminal, binding)?;
-    record_task_completion_control(state, terminal)?;
-    let blockers = result
+    Ok(result)
+}
+
+fn validation_blockers(result: &kernel::generated::ValidationResultV2) -> Vec<Id> {
+    result
         .submission
         .criterion_results
         .iter()
@@ -2229,7 +2524,19 @@ fn validation_completed(
         )
         .collect::<BTreeSet<_>>()
         .into_iter()
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+fn validation_completed(
+    id: u64,
+    binding: &runner::IssuedRunnerBinding,
+    terminal: &HostToCoreTaskCompletedPayload,
+    state: &mut CoreState,
+) -> Result<SeamEnvelope, AnyError> {
+    let result = read_validation_result(binding)?;
+    append_terminal_event(state, terminal, binding)?;
+    record_task_completion_control(state, terminal)?;
+    let blockers = validation_blockers(&result);
     if result.submission.outcome == kernel::generated::ValidationOutcomeV2::FORWARDREADY
         && blockers.is_empty()
     {
@@ -2237,7 +2544,7 @@ fn validation_completed(
     } else if result.submission.outcome != kernel::generated::ValidationOutcomeV2::FORWARDREADY
         && !blockers.is_empty()
     {
-        repair_needed(id, binding, blockers, state)
+        repair_needed(id, binding, &result, blockers, state)
     } else {
         done(
             id,
@@ -2442,51 +2749,360 @@ fn conflict_response(
     )
 }
 
+fn issued_binding_for_assignment(
+    state: &CoreState,
+    assignment_id: &Id,
+) -> Option<runner::IssuedRunnerBinding> {
+    state
+        .state
+        .refs
+        .keys()
+        .filter_map(|reference| runner::decode_binding_ref(&reference.0))
+        .filter(|binding| binding.assignment_id == *assignment_id)
+        .max_by_key(|binding| binding.run_revision)
+}
+
+fn lane_blocker_ref(binding: &runner::IssuedRunnerBinding) -> Result<Ref, String> {
+    binding
+        .lane_id
+        .as_ref()
+        .map(|lane| Ref(format!("blocker:{}", lane.0)))
+        .ok_or_else(|| format!("recovery binding {} missing lane", binding.assignment_id.0))
+}
+
+fn recovery_disposition_failure_ref(disposition: &kernel::generated::RecoveryDisposition) -> Ref {
+    use kernel::generated::RecoveryDisposition;
+    Ref(match disposition {
+        RecoveryDisposition::RequiresNewAuthority => "semantic-recovery-new-authority",
+        RecoveryDisposition::InfrastructureBlocked => "semantic-recovery-infrastructure",
+        RecoveryDisposition::UnsafeBlocked => "semantic-recovery-unsafe",
+        RecoveryDisposition::Repaired | RecoveryDisposition::NoDefect => {
+            "semantic-recovery-inadmissible"
+        }
+    }
+    .to_owned())
+}
+
+fn delivery_blocker_failure_ref(blocker: Option<&kernel::generated::DeliveryBlockerClass>) -> Ref {
+    use kernel::generated::DeliveryBlockerClass;
+    Ref(match blocker {
+        Some(DeliveryBlockerClass::RequiresNewAuthority) => "semantic-recovery-new-authority",
+        Some(DeliveryBlockerClass::Infrastructure) => "semantic-recovery-infrastructure",
+        Some(DeliveryBlockerClass::Unsafe) => "semantic-recovery-unsafe",
+        Some(DeliveryBlockerClass::SemanticRepairable) | None => "semantic-recovery-inadmissible",
+    }
+    .to_owned())
+}
+
+fn recovery_runner_assignment(
+    source: &runner::IssuedRunnerBinding,
+    base_commit: Sha,
+    approved_units: Vec<ApprovedUnit>,
+    directive: runner::RecoveryDirective,
+    run_revision: u64,
+) -> Result<RunnerAssignment, String> {
+    let policy = crate::repair::SemanticRecoveryPolicy::package()?;
+    if directive.attempt_budget != policy.max_attempts {
+        return Err("recovery directive attempt budget differs from package policy".to_owned());
+    }
+    let lane_id = source
+        .lane_id
+        .clone()
+        .ok_or_else(|| "recovery source binding missing lane_id".to_owned())?;
+    let worktree = PathBuf::from(
+        source
+            .worktree
+            .clone()
+            .ok_or_else(|| "recovery source binding missing worktree".to_owned())?,
+    );
+    let assignment_id = idv(&format!("recovery-{}-a1", source.assignment_id.0));
+    let session_file = PathBuf::from(format!(
+        ".pi/autopilot/{}/{}.session.json",
+        source.workstream.0, assignment_id.0
+    ));
+    Ok(RunnerAssignment {
+        workstream: source.workstream.clone(),
+        action_id: idv(&format!("action-{}", assignment_id.0)),
+        assignment_id,
+        role_id: idv("recovery-engineer"),
+        mode: directive.repair_mode.clone(),
+        run_revision,
+        lane_id,
+        attempt: 1,
+        base_commit,
+        worktree,
+        session_file,
+        roster_assignment: "package-roster/reasoning".to_owned(),
+        approved_units,
+        recovery: Some(directive),
+    })
+}
+
+fn spawn_recovery_assignment(
+    id: u64,
+    assignment: RunnerAssignment,
+    state: &mut CoreState,
+    event_kind: &str,
+) -> Result<SeamEnvelope, AnyError> {
+    let directive = assignment
+        .recovery
+        .as_ref()
+        .ok_or_else(|| "recovery spawn missing package directive".to_owned())?;
+    let trigger_assignment_id = directive.trigger_assignment_id.0.clone();
+    let attempt_budget = directive.attempt_budget;
+    let issue = runner::delivery_issue_with_facts(
+        &assignment,
+        &runner::RunnerTransportFacts::from_env().map_err(|error| error.to_string())?,
+    )?;
+    append_runner_invocation(state, &issue.binding)?;
+    state.append(
+        EventKind(event_kind.to_owned()),
+        vec![
+            Ref("module-wired:recovery-engineer".to_owned()),
+            Ref(issue.binding.assignment_id.0.clone()),
+            Ref(format!("recovery-trigger:{trigger_assignment_id}")),
+            Ref(format!("recovery-issued:{trigger_assignment_id}")),
+            Ref(format!("recovery-attempt:1-of-{attempt_budget}")),
+        ],
+    )?;
+    controlled_spawn(id, issue.action, state, "semantic-recovery")
+}
+
+fn issue_delivery_recovery(
+    id: u64,
+    binding: &runner::IssuedRunnerBinding,
+    result: &kernel::generated::DeliveryResultV2,
+    state: &mut CoreState,
+) -> Result<SeamEnvelope, AnyError> {
+    let approved_units = read_delivery_assignment_units(binding)?;
+    let base_commit = binding
+        .base_commit
+        .clone()
+        .ok_or_else(|| "delivery recovery missing base commit".to_owned())?;
+    let worktree = PathBuf::from(
+        binding
+            .worktree
+            .clone()
+            .ok_or_else(|| "delivery recovery missing worktree".to_owned())?,
+    );
+    let in_scope_dirty_paths = match runner::inspect_blocked_delivery_for_recovery(
+        &worktree,
+        &base_commit,
+        &approved_units,
+    ) {
+        Ok(paths) => paths,
+        Err(error) => {
+            state.append(
+                EventKind("recovery:inadmissible".to_owned()),
+                vec![
+                    Ref(binding.assignment_id.0.clone()),
+                    Ref(format!("delivery-recovery-unsafe:{error:?}")),
+                    Ref("semantic-recovery-unsafe".to_owned()),
+                    lane_blocker_ref(binding)?,
+                ],
+            )?;
+            return done(
+                id,
+                rejection("delivery-recovery-unsafe", &format!("{error:?}")),
+            );
+        }
+    };
+    let mut diagnosis_details = result.submission.hard_boundary_violations.clone();
+    diagnosis_details.push(format!(
+        "mechanical in-scope dirty paths: [{}]",
+        in_scope_dirty_paths.join(",")
+    ));
+    let directive = runner::RecoveryDirective {
+        schema: "autopilot.recovery_directive.v1".to_owned(),
+        trigger_phase: "execution".to_owned(),
+        repair_mode: ModeId("forward-critical".to_owned()),
+        trigger_assignment_id: binding.assignment_id.clone(),
+        diagnosis_refs: vec![
+            Ref(binding.carrier_path.clone()),
+            result.submission.execution_audit_ref.clone(),
+        ],
+        diagnosis_ids: vec![idv("delivery-blocked")],
+        diagnosis_details,
+        original_gate: "autopilot.delivery_submission.v2".to_owned(),
+        attempt_budget: crate::repair::SemanticRecoveryPolicy::package()?.max_attempts,
+    };
+    let assignment = recovery_runner_assignment(
+        binding,
+        base_commit,
+        approved_units,
+        directive,
+        state.state.revision,
+    )?;
+    spawn_recovery_assignment(id, assignment, state, "delivery:recovery-required")
+}
+
 fn repair_needed(
     id: u64,
     binding: &runner::IssuedRunnerBinding,
+    result: &kernel::generated::ValidationResultV2,
     blocker_ids: Vec<Id>,
     state: &mut CoreState,
 ) -> Result<SeamEnvelope, AnyError> {
-    let run_main = git_stdout(
-        &std::env::current_dir()?,
-        &[
-            "rev-parse",
-            "--verify",
-            &run_main_ref(&binding.workstream.0),
-        ],
-    )
-    .unwrap_or_else(|_| {
-        binding
-            .base_commit
-            .as_ref()
-            .map(|sha| sha.0.clone())
-            .unwrap_or_default()
-    });
-    let plan = crate::repair::plan_repair_merge(crate::repair::RepairMergeRequest {
-        run_main: crate::repair::CommitId(run_main.trim().to_owned()),
-        repair_base: crate::repair::CommitId(run_main.trim().to_owned()),
-        repair_commits: blocker_ids
+    let producer_id = result
+        .producer_assignment_ids
+        .first()
+        .ok_or_else(|| "validation recovery missing producer assignment".to_owned())?;
+    let producer = issued_binding_for_assignment(state, producer_id).ok_or_else(|| {
+        format!(
+            "validation recovery missing producer binding {}",
+            producer_id.0
+        )
+    })?;
+    let policy = crate::repair::SemanticRecoveryPolicy::package()?;
+    if producer.role_id.0 == "recovery-engineer" || result.semantic_round > policy.max_attempts {
+        state.append(
+            EventKind("recovery:exhausted".to_owned()),
+            vec![
+                Ref(binding.assignment_id.0.clone()),
+                Ref(format!("blockers={}", ids(&blocker_ids))),
+                Ref("semantic-recovery-exhausted".to_owned()),
+                lane_blocker_ref(binding)?,
+            ],
+        )?;
+        return done(
+            id,
+            rejection(
+                "recovery-exhausted",
+                &format!("blockers={}", ids(&blocker_ids)),
+            ),
+        );
+    }
+    let approved_units = read_delivery_assignment_units(&producer)?;
+    let findings = result
+        .submission
+        .findings
+        .iter()
+        .filter(|finding| {
+            blocker_ids
+                .iter()
+                .any(|id| finding.criterion_ids.contains(id))
+        })
+        .collect::<Vec<_>>();
+    let inadmissible_kinds = findings
+        .iter()
+        .filter(|finding| {
+            matches!(
+                &finding.kind,
+                kernel::generated::FindingKindV2::ContextGap
+                    | kernel::generated::FindingKindV2::UnsafeBoundary
+            )
+        })
+        .map(|finding| format!("{}:{:?}", finding.finding_id.0, finding.kind))
+        .collect::<Vec<_>>();
+    if findings.is_empty() || !inadmissible_kinds.is_empty() {
+        let detail = if findings.is_empty() {
+            "missing typed blocking finding".to_owned()
+        } else {
+            inadmissible_kinds.join(",")
+        };
+        let failure_ref = if findings
             .iter()
-            .map(|id| crate::repair::CommitId(format!("repair-required-for-{}", id.0)))
+            .any(|finding| finding.kind == kernel::generated::FindingKindV2::UnsafeBoundary)
+        {
+            Ref("semantic-recovery-unsafe".to_owned())
+        } else if findings
+            .iter()
+            .any(|finding| finding.kind == kernel::generated::FindingKindV2::ContextGap)
+        {
+            Ref("semantic-recovery-new-authority".to_owned())
+        } else {
+            Ref("semantic-recovery-inadmissible".to_owned())
+        };
+        state.append(
+            EventKind("recovery:inadmissible".to_owned()),
+            vec![
+                Ref(binding.assignment_id.0.clone()),
+                Ref(format!("validation-recovery-inadmissible:{detail}")),
+                failure_ref,
+                lane_blocker_ref(binding)?,
+            ],
+        )?;
+        return done(id, rejection("validation-recovery-inadmissible", &detail));
+    }
+    let mut diagnosis_refs = vec![Ref(binding.carrier_path.clone())];
+    diagnosis_refs.extend(
+        findings
+            .iter()
+            .flat_map(|finding| finding.evidence_refs.iter().cloned()),
+    );
+    let mut diagnosis_details = findings
+        .iter()
+        .map(|finding| {
+            format!(
+                "{}: {} — {}",
+                finding.finding_id.0, finding.summary, finding.detail
+            )
+        })
+        .collect::<Vec<_>>();
+    if diagnosis_details.is_empty() {
+        diagnosis_details.push(format!("blocked criteria: {}", ids(&blocker_ids)));
+    }
+    let repair_mode = if findings
+        .iter()
+        .any(|finding| finding.kind == kernel::generated::FindingKindV2::TestDefect)
+    {
+        "failed-test"
+    } else if findings
+        .iter()
+        .any(|finding| finding.kind == kernel::generated::FindingKindV2::ContractDefect)
+    {
+        "conflict-resolution"
+    } else if findings
+        .iter()
+        .any(|finding| finding.kind == kernel::generated::FindingKindV2::EvidenceGap)
+    {
+        "closure-repair"
+    } else {
+        "forward-critical"
+    };
+    let directive = runner::RecoveryDirective {
+        schema: "autopilot.recovery_directive.v1".to_owned(),
+        trigger_phase: "validation".to_owned(),
+        repair_mode: ModeId(repair_mode.to_owned()),
+        trigger_assignment_id: binding.assignment_id.clone(),
+        diagnosis_refs,
+        diagnosis_ids: findings
+            .iter()
+            .map(|finding| finding.finding_id.clone())
+            .chain(
+                blocker_ids
+                    .iter()
+                    .map(|id| idv(&format!("criterion:{}", id.0))),
+            )
+            .collect::<BTreeSet<_>>()
+            .into_iter()
             .collect(),
-        original_lane_commits: vec![crate::repair::CommitId(binding.assignment_id.0.clone())],
-    });
-    state.append(
-        EventKind("validation:repair-required".to_owned()),
-        vec![
-            Ref("module-wired:repair".to_owned()),
-            Ref(binding.assignment_id.0.clone()),
-            Ref(format!("repair-plan:{plan:?}")),
-        ],
+        diagnosis_details,
+        original_gate: format!("validator:{}:semantic-round-1", binding.assignment_id.0),
+        attempt_budget: policy.max_attempts,
+    };
+    let pending_ref = Ref(format!(
+        "recovery-validation-pending:{}",
+        binding.assignment_id.0
+    ));
+    if !state.state.refs.contains_key(&pending_ref) {
+        state.append(
+            EventKind("recovery:pending".to_owned()),
+            vec![
+                pending_ref,
+                Ref(binding.assignment_id.0.clone()),
+                Ref(producer.assignment_id.0.clone()),
+            ],
+        )?;
+    }
+    let assignment = recovery_runner_assignment(
+        &producer,
+        Sha(result.exact_commit.0.clone()),
+        approved_units,
+        directive,
+        state.state.revision,
     )?;
-    done(
-        id,
-        rejection(
-            "validation-blocked",
-            &format!("blockers={}", ids(&blocker_ids)),
-        ),
-    )
+    spawn_recovery_assignment(id, assignment, state, "validation:recovery-required")
 }
 
 fn validation_issue_for_delivery(
@@ -2531,6 +3147,16 @@ fn validation_issue_for_delivery(
             evidence_refs: accepted.focused_evidence_refs.clone(),
             lane_id,
             attempt,
+            validation_attempt: if binding.role_id.0 == "recovery-engineer" {
+                2
+            } else {
+                1
+            },
+            semantic_round: if binding.role_id.0 == "recovery-engineer" {
+                2
+            } else {
+                1
+            },
             base_commit,
             worktree,
             approved_units,
@@ -3351,7 +3977,9 @@ fn active_validators(state: &CoreState) -> usize {
         .count()
 }
 fn active_work(state: &CoreState) -> bool {
-    active_implementers(state) > 0 || active_validators(state) > 0
+    active_implementers(state) > 0
+        || active_recovery_engineers(state) > 0
+        || active_validators(state) > 0
 }
 fn delivery_execution_started(state: &CoreState) -> bool {
     state
@@ -3359,7 +3987,12 @@ fn delivery_execution_started(state: &CoreState) -> bool {
         .refs
         .keys()
         .filter_map(|reference| runner::decode_binding_ref(&reference.0))
-        .any(|binding| matches!(binding.role_id.0.as_str(), "implementer" | "validator"))
+        .any(|binding| {
+            matches!(
+                binding.role_id.0.as_str(),
+                "implementer" | "recovery-engineer" | "validator"
+            )
+        })
         || has_ref_prefix(state, "unit-closed:")
         || has_ref_prefix(state, "candidate-queued:")
         || has_ref_prefix(state, "integration:forward-integrated")

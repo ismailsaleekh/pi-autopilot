@@ -243,6 +243,24 @@ role "fixer-integrator" {
   terminal_path "autopilot_emit_status"
   boundary_prompts "delivery_result"
 }
+role "recovery-engineer" {
+  schema "autopilot.role.v1"
+  version 1
+  modes "planning-repair" "forward-critical" "closure-repair" "failed-test" "conflict-resolution"
+  model_slot "reasoning"
+  thinking "xhigh"
+  tools "read" "grep" "find" "ls" "bash" "edit" "write" "autopilot_emit_status"
+  repository "phase-bound repair target within original authority"
+  git "read-only"
+  network "denied"
+  package_state "denied"
+  operator_checkout "denied"
+  context_policy "recovery-engineer.v1"
+  result_contract "recovery-engineer.v1"
+  checkpoint_contract "agent-checkpoint.v1"
+  terminal_path "autopilot_emit_status"
+  boundary_prompts "work_map" "delivery_result"
+}
 role "bughunter" {
   schema "autopilot.role.v1"
   version 1

@@ -53,7 +53,7 @@ fn round_one_pass_releases() {
 }
 
 #[test]
-fn round_one_blocker_gets_one_consolidated_fixer_then_round_two() {
+fn round_one_blocker_gets_one_consolidated_recovery_engineer_then_round_two() {
     let first = decide_forward_round(
         ForwardRound::One,
         &[required("c1"), required("c2")],
@@ -66,7 +66,7 @@ fn round_one_blocker_gets_one_consolidated_fixer_then_round_two() {
     .expect("round one blocker routed");
     assert_eq!(
         first,
-        ForwardDecision::ConsolidatedFixer {
+        ForwardDecision::ConsolidatedRecoveryEngineer {
             blocker_ids: vec![Id("c1".to_owned()), Id("c2".to_owned())]
         }
     );

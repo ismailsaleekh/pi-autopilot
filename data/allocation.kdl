@@ -2,7 +2,7 @@ schema "autopilot.allocation.v1"
 version 1
 
 lane_target min=3 max=6 doc="D76 section 7 normal cohesive implementation lane count."
-resource_gate "parallel_cap" default=8 counts="active Implementers only" excludes="Validators, Fixers, Curators, Allocator, Bughunter, tests, merges, heartbeat, finalization"
+resource_gate "parallel_cap" default=8 counts="active Implementers only" excludes="Validators, Recovery Engineers, Fixers, Curators, Allocator, Bughunter, tests, merges, heartbeat, finalization"
 resource_gate "storage_pressure" floor="max(5GiB, projected_sparse_worktree_footprint*2)"
 resource_gate "memory_pressure" floor="max(2GiB, physical_ram/10)"
 

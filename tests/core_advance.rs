@@ -140,6 +140,247 @@ fn sequential_plan_reaches_closure_and_result_ref() {
 }
 
 #[test]
+fn forward_validator_blocker_launches_one_context_bound_recovery_engineer() {
+    let _guard = CWD_LOCK.lock().expect("cwd lock");
+    let fixture = AdvanceFixture::new("validator-recovery", 1, false);
+    let mut state = fixture.state();
+    let delivery_spawn = spawn_payload(send_command(&mut state, "autopilot main"));
+    let delivery_spec = fixture.delivery_spec(&delivery_spawn);
+    let worktree = PathBuf::from(delivery_spec["worktree"].as_str().expect("worktree"));
+    let changed_path = "l1.txt";
+    fs::write(
+        worktree.join(changed_path),
+        "candidate requiring one surgical validation repair\n",
+    )
+    .expect("worktree edit");
+    let delivery_carrier_path =
+        PathBuf::from(delivery_spec["carrier_path"].as_str().expect("carrier"));
+    fs::create_dir_all(delivery_carrier_path.parent().expect("carrier parent"))
+        .expect("carrier dir");
+    fs::write(
+        &delivery_carrier_path,
+        serde_json::to_vec_pretty(&delivery_carrier(&delivery_spec, changed_path))
+            .expect("delivery carrier"),
+    )
+    .expect("delivery carrier write");
+    let validation_spawn = spawn_payload(send_task_completed(
+        &mut state,
+        "task-delivery-validator-recovery",
+        &delivery_spawn.action.action_id.0,
+        &delivery_spawn.action.assignment_id.0,
+    ));
+    let validation_spec = fixture.validation_spec(&worktree, &validation_spawn);
+    let validation_carrier_path = PathBuf::from(
+        validation_spec["carrier_path"]
+            .as_str()
+            .expect("validation carrier"),
+    );
+    fs::create_dir_all(
+        validation_carrier_path
+            .parent()
+            .expect("validation carrier parent"),
+    )
+    .expect("validation carrier dir");
+    fs::write(
+        &validation_carrier_path,
+        serde_json::to_vec_pretty(&validation_blocked_carrier(&validation_spec))
+            .expect("blocked validation carrier"),
+    )
+    .expect("blocked validation carrier write");
+
+    let recovery_spawn = spawn_payload(send_task_completed(
+        &mut state,
+        "task-validation-validator-recovery",
+        &validation_spawn.action.action_id.0,
+        &validation_spawn.action.assignment_id.0,
+    ));
+    assert_eq!(
+        recovery_spawn.action.assignment_id.0,
+        "recovery-assignment-main-L1-a1"
+    );
+    let recovery_spec_path = worktree.join(format!(
+        ".pi/autopilot/runner/specs/{}.json",
+        recovery_spawn.action.assignment_id.0
+    ));
+    let recovery_spec: serde_json::Value =
+        serde_json::from_slice(&fs::read(recovery_spec_path).expect("recovery spec"))
+            .expect("recovery spec json");
+    assert_eq!(recovery_spec["role_id"], "recovery-engineer");
+    assert_eq!(recovery_spec["mode"], "forward-critical");
+    let assignment_path = PathBuf::from(
+        recovery_spec["assignment_path"]
+            .as_str()
+            .expect("assignment path"),
+    );
+    let assignment: serde_json::Value =
+        serde_json::from_slice(&fs::read(assignment_path).expect("recovery assignment"))
+            .expect("recovery assignment json");
+    assert_eq!(assignment["recovery"]["trigger_phase"], "validation");
+    assert_eq!(assignment["recovery"]["repair_mode"], "forward-critical");
+    assert_eq!(assignment["recovery"]["attempt_budget"], 1);
+    assert!(
+        assignment["recovery"]["diagnosis_details"][0]
+            .as_str()
+            .expect("diagnosis detail")
+            .contains("surgical source repair")
+    );
+
+    let events = fs::read_to_string(&fixture.event_path).expect("events before replay");
+    let lines = events.lines().collect::<Vec<_>>();
+    let pending = lines
+        .iter()
+        .rposition(|line| line.contains("recovery:pending"))
+        .expect("durable validation recovery pending event");
+    fs::write(
+        &fixture.event_path,
+        format!("{}\n", lines[..=pending].join("\n")),
+    )
+    .expect("project validation crash before recovery issue");
+    state = fixture.state();
+    let replayed_recovery = spawn_payload(send_command(&mut state, "autopilot main"));
+    assert_eq!(
+        replayed_recovery.action.assignment_id,
+        recovery_spawn.action.assignment_id
+    );
+    assert_eq!(
+        replayed_recovery.action.action_id,
+        recovery_spawn.action.action_id
+    );
+    let recovery_spawn = replayed_recovery;
+
+    fs::write(
+        worktree.join(changed_path),
+        "candidate repaired by recovery engineer\n",
+    )
+    .expect("recovery edit");
+    let recovery_carrier_path = PathBuf::from(
+        recovery_spec["carrier_path"]
+            .as_str()
+            .expect("recovery carrier"),
+    );
+    fs::create_dir_all(
+        recovery_carrier_path
+            .parent()
+            .expect("recovery carrier parent"),
+    )
+    .expect("recovery carrier dir");
+    fs::write(
+        &recovery_carrier_path,
+        serde_json::to_vec_pretty(&delivery_carrier(&recovery_spec, changed_path))
+            .expect("recovery carrier"),
+    )
+    .expect("recovery carrier write");
+    let revalidation_spawn = spawn_payload(send_task_completed(
+        &mut state,
+        "task-recovery-validator-recovery",
+        &recovery_spawn.action.action_id.0,
+        &recovery_spawn.action.assignment_id.0,
+    ));
+    let revalidation_spec = fixture.validation_spec(&worktree, &revalidation_spawn);
+    assert_eq!(revalidation_spec["semantic_round"], 2);
+    assert_eq!(revalidation_spec["validation_attempt"], 2);
+    let revalidation_carrier_path = PathBuf::from(
+        revalidation_spec["carrier_path"]
+            .as_str()
+            .expect("revalidation carrier"),
+    );
+    fs::create_dir_all(
+        revalidation_carrier_path
+            .parent()
+            .expect("revalidation carrier parent"),
+    )
+    .expect("revalidation carrier dir");
+    fs::write(
+        &revalidation_carrier_path,
+        serde_json::to_vec_pretty(&validation_carrier(&revalidation_spec))
+            .expect("revalidation carrier"),
+    )
+    .expect("revalidation carrier write");
+    let closed = send_task_completed(
+        &mut state,
+        "task-revalidation-validator-recovery",
+        &revalidation_spawn.action.action_id.0,
+        &revalidation_spawn.action.assignment_id.0,
+    );
+    assert_eq!(closed.kind, "done", "revalidation response: {closed:?}");
+    assert!(
+        done_status(&closed).contains("lifecycle:close:result_ref=refs/autopilot/results/main/"),
+        "status: {}",
+        done_status(&closed)
+    );
+    let events = fs::read_to_string(&fixture.event_path).expect("events");
+    assert!(events.contains("validation:recovery-required"), "{events}");
+    assert!(events.contains("agent:delivery-accepted"), "{events}");
+}
+
+#[test]
+fn unsafe_validator_blocker_fails_closed_without_recovery_engineer() {
+    let _guard = CWD_LOCK.lock().expect("cwd lock");
+    let fixture = AdvanceFixture::new("validator-unsafe-no-recovery", 1, false);
+    let mut state = fixture.state();
+    let delivery_spawn = spawn_payload(send_command(&mut state, "autopilot main"));
+    let delivery_spec = fixture.delivery_spec(&delivery_spawn);
+    let worktree = PathBuf::from(delivery_spec["worktree"].as_str().expect("worktree"));
+    fs::write(worktree.join("l1.txt"), "candidate\n").expect("worktree edit");
+    let delivery_carrier_path =
+        PathBuf::from(delivery_spec["carrier_path"].as_str().expect("carrier"));
+    fs::create_dir_all(delivery_carrier_path.parent().expect("carrier parent"))
+        .expect("carrier dir");
+    fs::write(
+        &delivery_carrier_path,
+        serde_json::to_vec_pretty(&delivery_carrier(&delivery_spec, "l1.txt"))
+            .expect("delivery carrier"),
+    )
+    .expect("delivery carrier write");
+    let validation_spawn = spawn_payload(send_task_completed(
+        &mut state,
+        "task-delivery-validator-unsafe",
+        &delivery_spawn.action.action_id.0,
+        &delivery_spawn.action.assignment_id.0,
+    ));
+    let validation_spec = fixture.validation_spec(&worktree, &validation_spawn);
+    let validation_carrier_path = PathBuf::from(
+        validation_spec["carrier_path"]
+            .as_str()
+            .expect("validation carrier"),
+    );
+    fs::create_dir_all(
+        validation_carrier_path
+            .parent()
+            .expect("validation carrier parent"),
+    )
+    .expect("validation carrier dir");
+    fs::write(
+        &validation_carrier_path,
+        serde_json::to_vec_pretty(&validation_blocked_carrier_with_kind(
+            &validation_spec,
+            "unsafe-boundary",
+        ))
+        .expect("unsafe validation carrier"),
+    )
+    .expect("unsafe validation carrier write");
+
+    let stopped = send_task_completed(
+        &mut state,
+        "task-validation-validator-unsafe",
+        &validation_spawn.action.action_id.0,
+        &validation_spawn.action.assignment_id.0,
+    );
+    assert_eq!(stopped.kind, "done", "response: {stopped:?}");
+    assert!(
+        done_status(&stopped).contains("validation-recovery-inadmissible"),
+        "response: {stopped:?}"
+    );
+    let events = fs::read_to_string(&fixture.event_path).expect("events");
+    assert!(events.contains("recovery:inadmissible"), "{events}");
+    assert!(!events.contains("validation:recovery-required"), "{events}");
+    assert!(
+        !events.contains("recovery-assignment-main-L1-a1"),
+        "{events}"
+    );
+}
+
+#[test]
 fn seven_unit_plan_advances_beyond_the_six_lane_window_and_closes() {
     let _guard = CWD_LOCK.lock().expect("cwd lock");
     let fixture = AdvanceFixture::new("seven-unit-closure", 7, true);
@@ -581,13 +822,16 @@ fn delivery_carrier(spec: &serde_json::Value, changed_path: &str) -> serde_json:
         .iter()
         .find(|row| row.0 == "delivery-status.v2")
         .expect("delivery profile");
-    let submission = serde_json::json!({
+    let mut submission = serde_json::json!({
         "actual_changed_paths": [changed_path],
         "execution_audit_ref": "audit:delivery",
         "focused_evidence_refs": ["evidence:0", "evidence:1"],
         "terminal_status": "succeeded",
         "hard_boundary_violations": []
     });
+    if spec["role_id"] == "recovery-engineer" {
+        submission["recovery_disposition"] = serde_json::json!("repaired");
+    }
     let submission_digest = sha256_hex(&serde_json::to_vec(&submission).expect("submission"));
     let binding = drivers::runner::child::carrier_binding(&typed);
     let tool_call_id = "delivery-tool-call-advance";
@@ -638,6 +882,25 @@ fn delivery_carrier(spec: &serde_json::Value, changed_path: &str) -> serde_json:
 }
 
 fn validation_carrier(spec: &serde_json::Value) -> serde_json::Value {
+    validation_carrier_with_outcome(spec, false, "source-defect")
+}
+
+fn validation_blocked_carrier(spec: &serde_json::Value) -> serde_json::Value {
+    validation_carrier_with_outcome(spec, true, "source-defect")
+}
+
+fn validation_blocked_carrier_with_kind(
+    spec: &serde_json::Value,
+    finding_kind: &str,
+) -> serde_json::Value {
+    validation_carrier_with_outcome(spec, true, finding_kind)
+}
+
+fn validation_carrier_with_outcome(
+    spec: &serde_json::Value,
+    blocked: bool,
+    finding_kind: &str,
+) -> serde_json::Value {
     let typed: kernel::generated::AgentRunSpec =
         serde_json::from_value(spec.clone()).expect("validation spec");
     let assignment_path = PathBuf::from(spec["assignment_path"].as_str().expect("assignment"));
@@ -662,18 +925,36 @@ fn validation_carrier(spec: &serde_json::Value) -> serde_json::Value {
     let criterion_results = context
         .criteria
         .iter()
-        .map(|criterion| {
+        .enumerate()
+        .map(|(index, criterion)| {
             serde_json::json!({
                 "criterion_id": criterion.criterion_id,
-                "verdict": "PASS",
+                "verdict": if blocked && index == 0 { "FAIL" } else { "PASS" },
                 "evidence_refs": [evidence_ref],
-                "finding_ids": [],
+                "finding_ids": if blocked && index == 0 { vec!["finding-validation-1"] } else { Vec::<&str>::new() },
                 "covered_paths": criterion.covered_paths,
                 "semantic_surface_ids": criterion.semantic_surface_ids,
                 "forward_edge_ids": criterion.forward_edge_ids
             })
         })
         .collect::<Vec<_>>();
+    let findings = if blocked {
+        let criterion = context.criteria.first().expect("blocked criterion");
+        vec![serde_json::json!({
+            "finding_id":"finding-validation-1",
+            "kind":finding_kind,
+            "effect":"forward-blocking",
+            "summary":"issued scope defect",
+            "detail":"the exact issued criterion requires a surgical source repair",
+            "criterion_ids":[criterion.criterion_id],
+            "edge_ids":criterion.forward_edge_ids,
+            "evidence_refs":[evidence_ref],
+            "covered_paths":criterion.covered_paths,
+            "semantic_surface_ids":criterion.semantic_surface_ids
+        })]
+    } else {
+        Vec::new()
+    };
     let submission = serde_json::json!({
         "schema":"autopilot.validation_submission.v2",
         "validation_id": assignment.validation_id,
@@ -681,9 +962,9 @@ fn validation_carrier(spec: &serde_json::Value) -> serde_json::Value {
         "scope": assignment.scope,
         "exact_commit": assignment.exact_commit,
         "exact_tree": assignment.exact_tree,
-        "outcome":"FORWARD_READY",
+        "outcome":if blocked { "BLOCKED" } else { "FORWARD_READY" },
         "criterion_results": criterion_results,
-        "findings": []
+        "findings": findings
     });
     let typed_submission: kernel::generated::ValidationSubmissionV2 =
         serde_json::from_value(submission.clone()).expect("typed submission");

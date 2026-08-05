@@ -83,6 +83,12 @@ const FRAME_VALIDATION_DESCRIPTORS = {
       "FAIL",
       "BLOCKED"
     ],
+    "delivery-blocker-class": [
+      "semantic-repairable",
+      "requires-new-authority",
+      "infrastructure",
+      "unsafe"
+    ],
     "delivery-outcome": [
       "succeeded",
       "blocked"
@@ -223,6 +229,13 @@ const FRAME_VALIDATION_DESCRIPTORS = {
       "BackgroundTask",
       "Package",
       "Host"
+    ],
+    "recovery-disposition": [
+      "repaired",
+      "no-defect",
+      "requires-new-authority",
+      "infrastructure-blocked",
+      "unsafe-blocked"
     ],
     "roster_slot": [
       "control",

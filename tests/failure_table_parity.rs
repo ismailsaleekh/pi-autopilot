@@ -41,6 +41,23 @@ fn failure_rows_are_exactly_mapped() {
         ("provider-unavailable".to_owned(), "Transient".to_owned()),
         ("repair-budget-exhausted".to_owned(), "Paused".to_owned()),
         (
+            "semantic-recovery-exhausted".to_owned(),
+            "Paused".to_owned(),
+        ),
+        (
+            "semantic-recovery-inadmissible".to_owned(),
+            "Paused".to_owned(),
+        ),
+        (
+            "semantic-recovery-infrastructure".to_owned(),
+            "Paused".to_owned(),
+        ),
+        (
+            "semantic-recovery-new-authority".to_owned(),
+            "Paused".to_owned(),
+        ),
+        ("semantic-recovery-unsafe".to_owned(), "Unsafe".to_owned()),
+        (
             "sparse-materialization-disk-io".to_owned(),
             "Transient".to_owned(),
         ),
@@ -52,10 +69,11 @@ fn failure_rows_are_exactly_mapped() {
             "stale-superseded-result".to_owned(),
             "Recoverable".to_owned(),
         ),
+        ("typed-model-rejection".to_owned(), "Recoverable".to_owned()),
     ]);
 
     assert_eq!(rows, expected);
-    assert_eq!(rows.len(), 15);
+    assert_eq!(rows.len(), 21);
     assert_eq!(
         rows.get("context-85-percent").map(String::as_str),
         Some("NotFailure")

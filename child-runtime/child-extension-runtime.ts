@@ -162,7 +162,7 @@ export function runAutopilotChild(
 
 export function registerSubmitTools(pi: ExtensionAPI, tools: SubmitTools, _wrapperUrl: string): void {
   for (const tool of tools) {
-    if (tool.boundary_id.startsWith("planning.")) registerTool(pi, tool);
+    if (tool.boundary_id.startsWith("planning.") && tool.name !== "autopilot_emit_status") registerTool(pi, tool);
   }
 }
 

@@ -258,7 +258,7 @@ fn record_recovered_planning_control_actions(state: &mut CoreState, actions: &[B
         run_revision: actions[0].run_revision,
         trigger_kind: kernel::generated::TriggerKind("planning-reemit".to_owned()),
         trigger_refs: actions.iter().map(|action| Ref(action.action_id.0.clone())).collect(),
-        counts: kernel::generated::ControlFrameCounts { implementers: active_implementers(state) as u32, validators: active_validators(state) as u32, fixers: 0, deterministic_jobs: 0, queued_candidates: queued_candidates(state) as u32 },
+        counts: kernel::generated::ControlFrameCounts { implementers: active_implementers(state) as u32, validators: active_validators(state) as u32, fixers: active_recovery_engineers(state) as u32, deterministic_jobs: 0, queued_candidates: queued_candidates(state) as u32 },
         observations: Vec::new(),
         actions: actions.to_vec(),
         next_watchdog_at: kernel::generated::Nullable(None),
@@ -333,6 +333,13 @@ fn manifest_assignments(workstream: &str) -> Result<Vec<AgentAssignment>, String
     Ok(read_planning_schedule_manifest(workstream)?.assignments)
 }
 
+fn planning_assignment_for(workstream: &str, assignment_id: &str) -> Result<AgentAssignment, String> {
+    manifest_assignments(workstream)?
+        .into_iter()
+        .find(|assignment| assignment.assignment_id == assignment_id)
+        .ok_or_else(|| format!("planning manifest missing assignment {assignment_id}"))
+}
+
 fn read_planning_schedule_manifest(workstream: &str) -> Result<planning::PlanningManifest, String> {
     let value = read_planning_manifest_value(workstream)?;
     let items = value["assignments"].as_array().ok_or_else(|| "manifest missing assignments".to_owned())?;
@@ -373,8 +380,14 @@ fn planning_refs_from_state(workstream: &str, state: &CoreState) -> planning::Pl
         }
     }
     for reference in state.state.refs.keys() {
-        if reference.0 == "planning-resolution-required" || reference.0.starts_with("planning-resolution-required:") {
-            refs.activation_refs.insert("planning-resolution-required".to_owned());
+        for activation in [
+            "planning-resolution-required",
+            "planning-recovery-required",
+            "planning-rereview-required",
+        ] {
+            if reference.0 == activation || reference.0.starts_with(&format!("{activation}:")) {
+                refs.activation_refs.insert(activation.to_owned());
+            }
         }
     }
     refs
@@ -498,6 +511,14 @@ fn accepted_planning_artifacts_for_issue(workstream: &str, state: &CoreState) ->
         }
     }
     rows.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+    let latest_synthesized = rows
+        .iter()
+        .filter(|(category, _, _)| category == "synthesized-work-map")
+        .map(|(_, order, _)| *order)
+        .max();
+    rows.retain(|(category, order, _)| {
+        category != "synthesized-work-map" || Some(*order) == latest_synthesized
+    });
     Ok(rows.into_iter().map(|(_, _, artifact)| artifact).collect())
 }
 
@@ -507,6 +528,7 @@ fn accepted_artifact_categories_for_role(role: &str, boundary_id: &str) -> Resul
         ("repository-scout" | "context-curator", "planning.scout-dossier.v1") => &["scout-findings"][..],
         ("plan-compiler", "planning.work-map.v1") => &["compiler-work-maps"][..],
         ("plan-synthesizer", "planning.work-map.v1") => &["synthesized-work-map"][..],
+        ("recovery-engineer", "planning.work-map.v1") => &["synthesized-work-map", "recovery-work-map"][..],
         ("plan-reviewer", "planning.plan-review.v1") => &["review-verdicts"][..],
         ("contradiction-resolver", "planning.questions.v1") => &["contradiction-bundle"][..],
         _ if boundary_id.starts_with("planning.") => {
@@ -517,8 +539,19 @@ fn accepted_artifact_categories_for_role(role: &str, boundary_id: &str) -> Resul
     Ok(categories)
 }
 
-fn write_work_map(workstream: &str, raw: &str) -> Result<(), AnyError> { let path = work_map_path(workstream); if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; } fs::write(path, raw)?; Ok(()) }
-fn read_work_map(workstream: &str) -> Result<String, String> { fs::read_to_string(work_map_path(workstream)).map_err(|error| error.to_string()) }
+fn write_immutable_work_map(path: &Path, raw: &str, label: &str) -> Result<(), AnyError> {
+    if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
+    match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(mut file) => { file.write_all(raw.as_bytes())?; file.sync_all()?; Ok(()) }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let existing = fs::read(path)?;
+            if existing == raw.as_bytes() { Ok(()) } else { Err(format!("CONTEXT_GAP:{label}:digest drift").into()) }
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+fn write_work_map(workstream: &str, raw: &str) -> Result<(), AnyError> { write_immutable_work_map(&work_map_path(workstream), raw, "work-map") }
+fn write_recovery_work_map(workstream: &str, raw: &str) -> Result<(), AnyError> { write_immutable_work_map(&recovery_work_map_path(workstream), raw, "recovery-work-map") }
 fn write_approved_plan(workstream: &str, repository_authority: ApprovedRepositoryAuthority, units: &[ApprovedUnit]) -> Result<(), AnyError> {
     validate_approved_units(units)?;
     let artifact = ApprovedPlanArtifact { repository_authority: Some(repository_authority), units: units.to_vec() };
@@ -556,11 +589,147 @@ fn approved_repository_authority_for_carrier(carrier: &AgentCarrier) -> Result<A
     }
     Ok(ApprovedRepositoryAuthority { manifest_path: binding.path, manifest_digest: binding.digest, head_commit: Sha(binding.manifest.head_commit), head_tree: Sha(binding.manifest.head_tree) })
 }
-fn apply_planning_side_effects(carrier: &AgentCarrier) -> Result<(), String> {
-    if carrier.boundary_id == "planning.work-map.v1" && is_canonical_output_assignment(&carrier.workstream, &carrier.assignment_id, &carrier.boundary_id)? { write_work_map(&carrier.workstream, &carrier.raw_output).map_err(|error| format!("CONTEXT_GAP:work-map:{error}"))?; }
+#[derive(Debug)]
+enum PlanningRecoveryAdmission {
+    Continue,
+    FailClosed(kernel::generated::RecoveryDisposition),
+}
+
+fn planning_subject_raw(binding: &runner::IssuedRunnerBinding) -> Result<String, String> {
+    let expected_assignment = binding
+        .planning_subject_assignment_id
+        .as_ref()
+        .ok_or_else(|| format!("planning subject missing assignment for {}", binding.assignment_id.0))?;
+    let path = binding
+        .planning_subject_path
+        .as_ref()
+        .ok_or_else(|| format!("planning subject missing path for {}", binding.assignment_id.0))?;
+    let expected_digest = binding
+        .planning_subject_digest
+        .as_ref()
+        .ok_or_else(|| format!("planning subject missing digest for {}", binding.assignment_id.0))?;
+    let text = read_bounded_utf8(
+        Path::new(path),
+        MAX_TERMINAL_CARRIER_BYTES,
+        "planning-subject-carrier",
+    )?;
+    let actual_digest = sha256_hex_local(text.as_bytes());
+    if &actual_digest != expected_digest {
+        return Err(format!("planning subject digest drift expected={expected_digest} got={actual_digest}"));
+    }
+    let subject: AgentCarrier = serde_json::from_str(&text)
+        .map_err(|error| format!("planning subject carrier json:{error}"))?;
+    if subject.assignment_id != expected_assignment.0
+        || subject.boundary_id != "planning.work-map.v1"
+        || subject.result_contract != "planning.work-map.v1"
+    {
+        return Err("planning subject carrier boundary drift".to_owned());
+    }
+    Ok(subject.raw_output)
+}
+
+fn validate_recovery_work_map(carrier: &AgentCarrier, binding: &runner::IssuedRunnerBinding) -> Result<PlanningRecoveryAdmission, String> {
+    if carrier.boundary_id != "planning.work-map.v1" {
+        return Ok(PlanningRecoveryAdmission::Continue);
+    }
+    let candidate: kernel::generated::WorkMap = serde_json::from_str(&carrier.raw_output)
+        .map_err(|error| format!("recovery-work-map-json:{error}"))?;
+    if carrier.role_id != "recovery-engineer" {
+        return if candidate.recovery.is_none() {
+            Ok(PlanningRecoveryAdmission::Continue)
+        } else {
+            Err("non-recovery planning role submitted recovery evidence".to_owned())
+        };
+    }
+    if carrier.mode != "planning-repair" {
+        return Err(format!("recovery work map used unsupported mode {}", carrier.mode));
+    }
+    let recovery = candidate
+        .recovery
+        .as_ref()
+        .ok_or_else(|| "recovery work map missing recovery evidence".to_owned())?;
+    if recovery.diagnosis_refs.is_empty()
+        || recovery.root_cause.trim().is_empty()
+        || recovery.actions.is_empty()
+        || recovery.actions.iter().any(|item| item.trim().is_empty())
+        || recovery.preserved_authority.is_empty()
+        || recovery
+            .preserved_authority
+            .iter()
+            .any(|item| item.trim().is_empty())
+        || recovery.repair_evidence_refs.is_empty()
+    {
+        return Err("recovery work map has incomplete diagnosis/action/preservation evidence".to_owned());
+    }
+    let original: kernel::generated::WorkMap = serde_json::from_str(
+        &planning_subject_raw(binding)
+            .map_err(|error| format!("recovery original work map:{error}"))?,
+    )
+    .map_err(|error| format!("recovery original work map json:{error}"))?;
+    if original.units.len() != candidate.units.len() {
+        return Err("recovery work map changed the unit count".to_owned());
+    }
+    let declared = recovery
+        .affected_unit_ids
+        .iter()
+        .map(|id| id.0.as_str())
+        .collect::<BTreeSet<_>>();
+    if declared.len() != recovery.affected_unit_ids.len() {
+        return Err("recovery work map duplicates affected unit ids".to_owned());
+    }
+    let mut changed = BTreeSet::new();
+    for (before, after) in original.units.iter().zip(&candidate.units) {
+        if before.id != after.id {
+            return Err("recovery work map reordered or replaced unit identity".to_owned());
+        }
+        if before != after {
+            changed.insert(before.id.0.as_str());
+            if before.kind != after.kind
+                || before.depends_on != after.depends_on
+                || before.files != after.files
+                || before.links != after.links
+            {
+                return Err(format!(
+                    "recovery work map expanded authority for unit {}",
+                    before.id.0
+                ));
+            }
+        }
+    }
+    use kernel::generated::RecoveryDisposition;
+    match &recovery.disposition {
+        RecoveryDisposition::Repaired if !changed.is_empty() && changed == declared => {
+            Ok(PlanningRecoveryAdmission::Continue)
+        }
+        RecoveryDisposition::NoDefect if changed.is_empty() && declared.is_empty() => {
+            Ok(PlanningRecoveryAdmission::Continue)
+        }
+        RecoveryDisposition::RequiresNewAuthority
+        | RecoveryDisposition::InfrastructureBlocked
+        | RecoveryDisposition::UnsafeBlocked
+            if changed.is_empty() && declared.is_empty() =>
+        {
+            Ok(PlanningRecoveryAdmission::FailClosed(recovery.disposition.clone()))
+        }
+        _ => Err(format!(
+            "recovery disposition {:?} changed units {:?} but declared {:?}",
+            recovery.disposition, changed, declared
+        )),
+    }
+}
+
+fn apply_planning_side_effects(carrier: &AgentCarrier, binding: &runner::IssuedRunnerBinding) -> Result<(), String> {
+    if carrier.boundary_id == "planning.work-map.v1" && is_canonical_output_assignment(&carrier.workstream, &carrier.assignment_id, &carrier.boundary_id)? {
+        if carrier.role_id == "recovery-engineer" {
+            write_recovery_work_map(&carrier.workstream, &carrier.raw_output).map_err(|error| format!("CONTEXT_GAP:recovery-work-map:{error}"))?;
+        } else {
+            write_work_map(&carrier.workstream, &carrier.raw_output).map_err(|error| format!("CONTEXT_GAP:work-map:{error}"))?;
+        }
+    }
     if carrier.boundary_id == "planning.plan-review.v1" {
         review_approves_execution(&carrier.raw_output)?;
-        let work_map = read_work_map(&carrier.workstream).map_err(|error| format!("CONTEXT_GAP:approved-plan:{error}"))?;
+        let work_map = planning_subject_raw(binding)
+            .map_err(|error| format!("CONTEXT_GAP:approved-plan:subject:{error}"))?;
         let units = parse_approved_units(&work_map).map_err(|error| format!("CONTEXT_GAP:approved-plan:{error}"))?;
         let repository_authority = approved_repository_authority_for_carrier(carrier).map_err(|error| format!("CONTEXT_GAP:approved-plan:repository-authority:{error}"))?;
         write_approved_plan(&carrier.workstream, repository_authority, &units).map_err(|error| format!("CONTEXT_GAP:approved-plan:{error}"))?;
@@ -714,6 +883,7 @@ fn lane_readiness_from_events(lanes: &[AllocationLaneProposal], approved: &[Appr
     lanes.iter().map(|lane| { let units = lane.ordered_unit_ids.iter().filter_map(|id| approved.iter().find(|unit| unit.id == *id)).collect::<Vec<_>>(); LaneReadiness { lane_id: lane.lane_id.clone(), predecessor_gates_met: units.iter().flat_map(|unit| &unit.predecessor_forward_criteria).all(|gate| state.state.refs.contains_key(&Ref(format!("gate:{}", gate.0)))), blockers_clear: !state.state.refs.contains_key(&Ref(format!("blocker:{}", lane.lane_id.0))), unit_free: lane.ordered_unit_ids.iter().all(|unit| !state.state.refs.contains_key(&Ref(format!("unit-active:{}", unit.0)))), route_ready: true, preflight_passed: git_stdout(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")), &["rev-parse", "--verify", "HEAD"]).is_ok(), pressure_delay: false } }).collect()
 }
 fn active_implementers(state: &CoreState) -> usize { state.state.refs.keys().filter_map(|reference| runner::decode_binding_ref(&reference.0)).filter(|binding| binding.role_id.0 == "implementer" && !terminal_consumed(state, binding)).count() }
+fn active_recovery_engineers(state: &CoreState) -> usize { state.state.refs.keys().filter_map(|reference| runner::decode_binding_ref(&reference.0)).filter(|binding| binding.role_id.0 == "recovery-engineer" && !terminal_consumed(state, binding)).count() }
 fn assignment(workstream: &str, lane_id: &Id, approved: &[ApprovedUnit], submission: &AllocationSubmission) -> Result<RunnerAssignment, AnyError> {
     let cwd = fs::canonicalize(std::env::current_dir()?)?;
     let base = selected_delivery_base(&cwd, workstream).map_err(|error| format!("CONTEXT_GAP:base-commit:{error}"))?;
@@ -734,6 +904,7 @@ fn assignment(workstream: &str, lane_id: &Id, approved: &[ApprovedUnit], submiss
         session_file: PathBuf::from(format!(".pi/autopilot/{workstream}/session.json")),
         roster_assignment: "openai-codex/gpt-subscription".to_owned(),
         approved_units,
+        recovery: None,
     })
 }
 fn selected_delivery_base(repo: &Path, workstream: &str) -> Result<Sha, String> {
@@ -795,6 +966,7 @@ fn available_memory_bytes() -> Result<u64, String> { if let Ok(text) = fs::read_
 fn git_stdout(repo: &Path, args: &[&str]) -> Result<String, String> { let output = Command::new("git").current_dir(repo).args(args).output().map_err(|error| error.to_string())?; if !output.status.success() { return Err(format!("git {:?} failed", args)); } String::from_utf8(output.stdout).map_err(|error| error.to_string()) }
 fn workstream_dir(workstream: &str) -> PathBuf { PathBuf::from(".pi/autopilot").join(workstream) }
 fn work_map_path(workstream: &str) -> PathBuf { workstream_dir(workstream).join("work-map.md") }
+fn recovery_work_map_path(workstream: &str) -> PathBuf { workstream_dir(workstream).join("recovery-work-map.md") }
 fn atom_registry_path(workstream: &str) -> PathBuf { workstream_dir(workstream).join("planning/atom-registry.json") }
 fn plan_path(workstream: &str) -> PathBuf { workstream_dir(workstream).join("approved-plan.json") }
 fn context_status(scope: &str, error: planning::PlanningError) -> String { match error { planning::PlanningError::ContextGap(detail) => format!("CONTEXT_GAP:{scope}:{detail}"), other => format!("{scope}:{other:?}") } }

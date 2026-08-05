@@ -34,6 +34,7 @@ fn checkpoint_policy_resolves_declared_roles_and_rejects_unknown() {
         ("contradiction-resolver", (true, Some("question-ledger"))),
         ("implementer", (true, Some("delivery-ledger"))),
         ("fixer-integrator", (true, Some("delivery-ledger"))),
+        ("recovery-engineer", (true, Some("recovery-ledger"))),
         ("onboard", (false, None)),
         ("orchestrator", (false, None)),
         ("context-synthesizer", (false, None)),
@@ -120,6 +121,17 @@ fn checkpoint_policy_resolves_declared_roles_and_rejects_unknown() {
                 "boundary_violations",
                 "repair_decisions",
                 "draft_delivery_status",
+            ],
+        ),
+        (
+            "recovery-ledger",
+            vec![
+                "recovery_identity",
+                "diagnosis_ledger",
+                "authority_boundaries",
+                "repair_ledger",
+                "evidence_refs",
+                "terminal_disposition",
             ],
         ),
     ]);

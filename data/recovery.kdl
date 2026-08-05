@@ -6,6 +6,16 @@ recovery version="v1" {
 
   value_repair scope="agent-run" max_attempts=3 retry_prompt="typed-diff" exhaustion="paused-operator-decision" session="same-session-id"
 
+  // Semantic recovery is one capable, fresh corrective investigation followed
+  // by the unchanged independent gate. A second rejection is preserved and
+  // escalated rather than fed into an unbounded self-repair loop.
+  semantic_recovery scope="typed-model-rejection" max_attempts=1 revalidation="same-gate" exhaustion="paused-operator-decision" session="fresh-recovery-assignment"
+
+  // Pi subscription OAuth is loaded independently by each child process. A
+  // deterministic per-assignment startup spread prevents a planning wave from
+  // turning a transient credential-file lock into a false missing-key result.
+  subscription_startup_stagger scope="agent-run" buckets=7 step_ms=750 max_delay_ms=4500
+
   // Launch-side upstream refusals (provider capacity exhausted) produce no
   // content and bill no tokens, so value repair cannot apply: the identical
   // prompt must simply be re-sent later on the same session. Jitter is

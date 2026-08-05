@@ -476,7 +476,7 @@ fn one_unit_work_map_reaches_ready_and_dispatches_one_lane() {
 }
 
 #[test]
-fn failed_plan_review_projection_is_loud_unconsumed_and_retryable() {
+fn approved_plan_promotion_uses_digest_bound_subject_not_mutable_projection() {
     let root = temp_dir("plan-review-retry");
     let repo = root.join("repo");
     let vcs = GitVcs::new(&root);
@@ -502,34 +502,41 @@ fn failed_plan_review_projection_is_loud_unconsumed_and_retryable() {
         "{\"units\":[]}",
     )
     .expect("poison work map");
-    let failed = send_planning_completion(&spawn_payload, &event_log, &repo, 900);
-    let failed_status = done_status(&failed);
+    let promoted = send_planning_completion(&spawn_payload, &event_log, &repo, 900);
     assert!(
-        failed_status.contains("rejection:planning-postprocess:CONTEXT_GAP:approved-plan:expected at least 1 approved unit, got 0"),
-        "unexpected status: {failed_status}"
+        done_status(&promoted).contains("ready-to-execute:workstream=main"),
+        "unexpected status: {}",
+        done_status(&promoted)
     );
-    assert!(!repo.join(".pi/autopilot/main/approved-plan.json").exists());
-    assert!(!fs::read_to_string(&event_log)
-        .expect("event log")
-        .contains("planning-result-consumed:action-planning-main-plan-reviewer-01:planning-main-plan-reviewer-01"));
-
-    fs::write(
-        repo.join(".pi/autopilot/main/work-map.md"),
-        one_unit_work_map(),
+    let approved: serde_json::Value = serde_json::from_slice(
+        &fs::read(repo.join(".pi/autopilot/main/approved-plan.json"))
+            .expect("approved plan from bound subject"),
     )
-    .expect("repair work map");
-    let retried = send_planning_completion(&spawn_payload, &event_log, &repo, 901);
-    assert!(done_status(&retried).contains("ready-to-execute:workstream=main"));
-    assert!(repo.join(".pi/autopilot/main/approved-plan.json").exists());
+    .expect("approved plan json");
+    assert!(
+        !approved["units"]
+            .as_array()
+            .expect("approved units")
+            .is_empty(),
+        "bound synthesized subject must win over the poisoned empty projection"
+    );
+    assert_eq!(
+        fs::read_to_string(repo.join(".pi/autopilot/main/work-map.md"))
+            .expect("poisoned derived projection remains separate"),
+        "{\"units\":[]}"
+    );
+    let events = fs::read_to_string(&event_log).expect("event log");
+    assert!(events.contains("review-subject-carrier:"), "{events}");
+    assert!(events.contains("review-subject-sha256:"), "{events}");
 }
 
 #[test]
-fn blocked_plan_review_is_terminal_non_ready_and_not_retryable() {
-    let root = temp_dir("blocked-plan-review");
+fn blocked_first_plan_review_gets_one_recovery_then_same_gate_reapproves() {
+    let root = temp_dir("blocked-plan-review-recovery");
     let repo = root.join("repo");
     let vcs = GitVcs::new(&root);
     vcs.init_fixture(&repo).expect("fixture repo");
-    let task_paths = write_task_pack(&repo, "set-blocked-plan-review");
+    let task_paths = write_task_pack(&repo, "set-blocked-plan-review-recovery");
     vcs.stage_all(&repo).expect("stage task");
     vcs.snapshot(&repo, "task commit").expect("task commit");
     let event_log = root.join("events.jsonl");
@@ -547,21 +554,184 @@ fn blocked_plan_review_is_terminal_non_ready_and_not_retryable() {
     );
     let blocked_raw = serde_json::json!({"verdicts": drivers::seam::REQUIRED_PLAN_REVIEW_CRITERIA.iter().map(|criterion| {
         let verdict = if matches!(*criterion, "review.context-sufficiency" | "review.forward-validation") { "blocked" } else { "pass" };
-        serde_json::json!({"criterion_id": criterion, "verdict": verdict})
+        serde_json::json!({"criterion_id": criterion, "verdict": verdict, "finding":"The canonical work map needs a surgical semantic correction."})
     }).collect::<Vec<_>>()}).to_string();
-    let blocked =
-        send_planning_completion_with_raw(&reviewer, &event_log, &repo, 910, &blocked_raw);
+    let recovery_wave = planning_wave_payload(send_planning_completion_with_raw(
+        &reviewer,
+        &event_log,
+        &repo,
+        910,
+        &blocked_raw,
+    ));
+    assert_eq!(recovery_wave.actions.len(), 1);
+    let recovery = &recovery_wave.actions[0];
+    assert_eq!(
+        recovery.assignment_id.0,
+        "planning-main-recovery-engineer-01"
+    );
+    let mut next_id = 920;
+    acknowledge_spawn_wave(&recovery_wave, &event_log, &repo, &mut next_id);
+    let original_work_map =
+        fs::read(repo.join(".pi/autopilot/main/work-map.md")).expect("original work map");
+    let recovered_work_map = no_defect_recovery_work_map(&repo);
+    fs::write(
+        repo.join(".pi/autopilot/main/recovery-work-map.md"),
+        &recovered_work_map,
+    )
+    .expect("simulate recovery artifact written before its event");
+    let rereview_wave = planning_wave_payload(send_planning_completion_with_raw(
+        recovery,
+        &event_log,
+        &repo,
+        next_id,
+        &recovered_work_map,
+    ));
+    next_id += 2;
+    assert_eq!(rereview_wave.actions.len(), 1);
+    let rereviewer = &rereview_wave.actions[0];
+    assert_eq!(rereviewer.assignment_id.0, "planning-main-plan-reviewer-02");
+    assert_eq!(
+        fs::read(repo.join(".pi/autopilot/main/work-map.md")).expect("immutable original"),
+        original_work_map
+    );
+    assert_eq!(
+        fs::read(repo.join(".pi/autopilot/main/recovery-work-map.md"))
+            .expect("immutable recovery output"),
+        recovered_work_map.as_bytes()
+    );
+    let rereviewer_prompt = fs::read_to_string(
+        runner::planning_paths(&repo, "main", &rereviewer.assignment_id).prompt_path,
+    )
+    .expect("rereviewer prompt");
+    assert!(
+        rereviewer_prompt.contains("planning-main-recovery-engineer-01"),
+        "rereviewer lacks recovered canonical map"
+    );
+    assert!(
+        !rereviewer_prompt.contains("planning-main-plan-synthesizer-02"),
+        "rereviewer received the rejected canonical map alongside its recovery"
+    );
+    acknowledge_spawn_wave(&rereview_wave, &event_log, &repo, &mut next_id);
+    let ready = send_planning_completion(rereviewer, &event_log, &repo, next_id);
+    assert!(done_status(&ready).contains("ready-to-execute:workstream=main"));
+    assert!(repo.join(".pi/autopilot/main/approved-plan.json").exists());
+    let events = fs::read_to_string(&event_log).expect("events");
+    assert!(events.contains("planning:recovery-required"));
+    assert!(events.contains("planning:recovery-completed"));
+    assert!(events.contains("planning:ready-to-execute"));
+}
+
+#[test]
+fn planning_recovery_rejects_drifted_bound_original_carrier() {
+    let root = temp_dir("plan-recovery-subject-drift");
+    let repo = root.join("repo");
+    let vcs = GitVcs::new(&root);
+    vcs.init_fixture(&repo).expect("fixture repo");
+    let task_paths = write_task_pack(&repo, "set-plan-recovery-subject-drift");
+    vcs.stage_all(&repo).expect("stage task");
+    vcs.snapshot(&repo, "task commit").expect("task commit");
+    let event_log = root.join("events.jsonl");
+    let reviewer = complete_planning_until_assignment(
+        planning_wave_payload(send_with_log(
+            &format!("autopilot-plan main {}", task_paths.join(" ")),
+            &event_log,
+            Some(&repo),
+        )),
+        &event_log,
+        &repo,
+        "planning-main-plan-reviewer-01",
+    );
+    let blocked_raw = serde_json::json!({"verdicts": drivers::seam::REQUIRED_PLAN_REVIEW_CRITERIA.iter().map(|criterion| {
+        serde_json::json!({"criterion_id": criterion, "verdict": if *criterion == "review.forward-validation" { "blocked" } else { "pass" }, "finding":"Bound subject drift probe."})
+    }).collect::<Vec<_>>()}).to_string();
+    let recovery_wave = planning_wave_payload(send_planning_completion_with_raw(
+        &reviewer,
+        &event_log,
+        &repo,
+        910,
+        &blocked_raw,
+    ));
+    let mut next_id = 920;
+    acknowledge_spawn_wave(&recovery_wave, &event_log, &repo, &mut next_id);
+    let subject_path = runner::planning_paths(
+        &repo,
+        "main",
+        &Id("planning-main-plan-synthesizer-02".to_owned()),
+    )
+    .carrier_path;
+    let mut drifted = fs::read(&subject_path).expect("bound subject carrier");
+    drifted.extend_from_slice(b"\n");
+    fs::write(&subject_path, drifted).expect("drift bound subject carrier");
+    let rejected = send_planning_completion_with_raw(
+        &recovery_wave.actions[0],
+        &event_log,
+        &repo,
+        next_id,
+        &recovered_work_map(&repo),
+    );
+    assert!(
+        done_status(&rejected).contains("planning subject digest drift"),
+        "response: {rejected:?}"
+    );
+    assert!(
+        !fs::read_to_string(&event_log)
+            .expect("events")
+            .contains("planning-main-plan-reviewer-02")
+    );
+}
+
+#[test]
+fn blocked_second_plan_review_exhausts_semantic_recovery_without_looping() {
+    let root = temp_dir("blocked-plan-rereview");
+    let repo = root.join("repo");
+    let vcs = GitVcs::new(&root);
+    vcs.init_fixture(&repo).expect("fixture repo");
+    let task_paths = write_task_pack(&repo, "set-blocked-plan-rereview");
+    vcs.stage_all(&repo).expect("stage task");
+    vcs.snapshot(&repo, "task commit").expect("task commit");
+    let event_log = root.join("events.jsonl");
+    let blocked_raw = serde_json::json!({"verdicts": drivers::seam::REQUIRED_PLAN_REVIEW_CRITERIA.iter().map(|criterion| {
+        let verdict = if *criterion == "review.forward-validation" { "blocked" } else { "pass" };
+        serde_json::json!({"criterion_id": criterion, "verdict": verdict, "finding":"Still blocked after recovery."})
+    }).collect::<Vec<_>>()}).to_string();
+
+    let first = complete_planning_until_assignment(
+        planning_wave_payload(send_with_log(
+            &format!("autopilot-plan main {}", task_paths.join(" ")),
+            &event_log,
+            Some(&repo),
+        )),
+        &event_log,
+        &repo,
+        "planning-main-plan-reviewer-01",
+    );
+    let recovery_wave = planning_wave_payload(send_planning_completion_with_raw(
+        &first,
+        &event_log,
+        &repo,
+        910,
+        &blocked_raw,
+    ));
+    let mut next_id = 920;
+    acknowledge_spawn_wave(&recovery_wave, &event_log, &repo, &mut next_id);
+    let rereview_wave = planning_wave_payload(send_planning_completion_with_raw(
+        &recovery_wave.actions[0],
+        &event_log,
+        &repo,
+        next_id,
+        &recovered_work_map(&repo),
+    ));
+    next_id += 2;
+    acknowledge_spawn_wave(&rereview_wave, &event_log, &repo, &mut next_id);
+    let blocked = send_planning_completion_with_raw(
+        &rereview_wave.actions[0],
+        &event_log,
+        &repo,
+        next_id,
+        &blocked_raw,
+    );
     let status = done_status(&blocked);
     assert!(status.contains("planning:blocked:"), "{status}");
-    assert!(!repo.join(".pi/autopilot/main/approved-plan.json").exists());
-    let events = fs::read_to_string(&event_log).expect("events");
-    assert!(!events.contains("planning:ready-to-execute"));
-    assert!(events.contains(
-        "terminal-consumed:action-planning-main-plan-reviewer-01:planning-main-plan-reviewer-01"
-    ));
-
-    let retried = send_planning_completion(&reviewer, &event_log, &repo, 920);
-    assert!(done_status(&retried).contains("rejection:terminal-binding:already-consumed"));
     assert!(!repo.join(".pi/autopilot/main/approved-plan.json").exists());
     let replayed = send_with_log(
         &format!("autopilot-plan main {}", task_paths.join(" ")),
@@ -569,6 +739,125 @@ fn blocked_plan_review_is_terminal_non_ready_and_not_retryable() {
         Some(&repo),
     );
     assert!(done_status(&replayed).contains("planning:blocked:"));
+    let events = fs::read_to_string(&event_log).expect("events");
+    assert!(events.contains("recovery:exhausted"), "{events}");
+    assert!(events.contains("semantic-recovery-exhausted"), "{events}");
+    assert_eq!(
+        events.matches("planning:recovery-required").count(),
+        1,
+        "{events}"
+    );
+}
+
+#[test]
+fn planning_recovery_requiring_new_authority_fails_closed_without_rereview() {
+    let root = temp_dir("plan-recovery-new-authority");
+    let repo = root.join("repo");
+    let vcs = GitVcs::new(&root);
+    vcs.init_fixture(&repo).expect("fixture repo");
+    let task_paths = write_task_pack(&repo, "set-plan-recovery-new-authority");
+    vcs.stage_all(&repo).expect("stage task");
+    vcs.snapshot(&repo, "task commit").expect("task commit");
+    let event_log = root.join("events.jsonl");
+    let reviewer = complete_planning_until_assignment(
+        planning_wave_payload(send_with_log(
+            &format!("autopilot-plan main {}", task_paths.join(" ")),
+            &event_log,
+            Some(&repo),
+        )),
+        &event_log,
+        &repo,
+        "planning-main-plan-reviewer-01",
+    );
+    let blocked_raw = serde_json::json!({"verdicts": drivers::seam::REQUIRED_PLAN_REVIEW_CRITERIA.iter().map(|criterion| {
+        serde_json::json!({"criterion_id": criterion, "verdict": if *criterion == "review.authority-fidelity" { "blocked" } else { "pass" }})
+    }).collect::<Vec<_>>()}).to_string();
+    let recovery_wave = planning_wave_payload(send_planning_completion_with_raw(
+        &reviewer,
+        &event_log,
+        &repo,
+        910,
+        &blocked_raw,
+    ));
+    let mut next_id = 920;
+    acknowledge_spawn_wave(&recovery_wave, &event_log, &repo, &mut next_id);
+    let stopped = send_planning_completion_with_raw(
+        &recovery_wave.actions[0],
+        &event_log,
+        &repo,
+        next_id,
+        &new_authority_recovery_work_map(&repo),
+    );
+    assert!(
+        done_status(&stopped).contains("planning-recovery-fail-closed:RequiresNewAuthority"),
+        "response: {stopped:?}"
+    );
+    let events = fs::read_to_string(&event_log).expect("events");
+    assert!(events.contains("recovery:inadmissible"), "{events}");
+    assert!(
+        !events.contains("planning-main-plan-reviewer-02"),
+        "{events}"
+    );
+    assert!(!repo.join(".pi/autopilot/main/approved-plan.json").exists());
+    let replayed = send_with_log(
+        &format!("autopilot-plan main {}", task_paths.join(" ")),
+        &event_log,
+        Some(&repo),
+    );
+    assert!(done_status(&replayed).contains("planning:blocked:"));
+}
+
+#[test]
+fn planning_recovery_cannot_omit_evidence_or_expand_original_unit_scope() {
+    let root = temp_dir("plan-recovery-authority");
+    let repo = root.join("repo");
+    let vcs = GitVcs::new(&root);
+    vcs.init_fixture(&repo).expect("fixture repo");
+    let task_paths = write_task_pack(&repo, "set-plan-recovery-authority");
+    vcs.stage_all(&repo).expect("stage task");
+    vcs.snapshot(&repo, "task commit").expect("task commit");
+    let event_log = root.join("events.jsonl");
+    let reviewer = complete_planning_until_assignment(
+        planning_wave_payload(send_with_log(
+            &format!("autopilot-plan main {}", task_paths.join(" ")),
+            &event_log,
+            Some(&repo),
+        )),
+        &event_log,
+        &repo,
+        "planning-main-plan-reviewer-01",
+    );
+    let blocked_raw = serde_json::json!({"verdicts": drivers::seam::REQUIRED_PLAN_REVIEW_CRITERIA.iter().map(|criterion| {
+        serde_json::json!({"criterion_id": criterion, "verdict": if *criterion == "review.forward-validation" { "blocked" } else { "pass" }})
+    }).collect::<Vec<_>>()}).to_string();
+    let recovery_wave = planning_wave_payload(send_planning_completion_with_raw(
+        &reviewer,
+        &event_log,
+        &repo,
+        910,
+        &blocked_raw,
+    ));
+    let mut next_id = 920;
+    acknowledge_spawn_wave(&recovery_wave, &event_log, &repo, &mut next_id);
+    let recovery = &recovery_wave.actions[0];
+    let missing_evidence = fs::read_to_string(repo.join(".pi/autopilot/main/work-map.md"))
+        .expect("canonical work map");
+    let rejected =
+        send_planning_completion_with_raw(recovery, &event_log, &repo, next_id, &missing_evidence);
+    assert!(done_status(&rejected).contains("recovery work map missing recovery evidence"));
+    next_id += 2;
+    let rejected = send_planning_completion_with_raw(
+        recovery,
+        &event_log,
+        &repo,
+        next_id,
+        &recovered_work_map_with_scope_expansion(&repo),
+    );
+    assert!(
+        done_status(&rejected).contains("recovery work map expanded authority"),
+        "response: {rejected:?}"
+    );
+    assert!(!repo.join(".pi/autopilot/main/approved-plan.json").exists());
 }
 
 #[test]
@@ -1139,6 +1428,68 @@ fn one_unit_work_map() -> String {
     serde_json::json!({"units":[{"id":"U1","kind":"implementation","objective":"Deliver the one accepted work unit.","criteria":["The focused acceptance path passes."],"depends_on":[],"files":["src/lib.rs"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"links":["W1"]}]}).to_string()
 }
 
+fn recovered_work_map(repo: &Path) -> String {
+    let path = repo.join(".pi/autopilot/main/work-map.md");
+    let mut value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(path).expect("canonical work map"))
+            .expect("canonical work map json");
+    let unit = value["units"]
+        .as_array_mut()
+        .and_then(|units| units.first_mut())
+        .expect("canonical work map unit");
+    let unit_id = unit["id"].as_str().expect("unit id").to_owned();
+    let objective = unit["objective"].as_str().expect("unit objective");
+    unit["objective"] = serde_json::Value::String(format!(
+        "{objective} Preserve original authority explicitly during recovery."
+    ));
+    value["recovery"] = serde_json::json!({
+        "disposition":"repaired",
+        "diagnosis_refs":["review:planning-main-plan-reviewer-01"],
+        "root_cause":"The rejected work map needed explicit evidence without new authority.",
+        "affected_unit_ids":[unit_id],
+        "actions":["Made the existing authority-preservation objective explicit."],
+        "preserved_authority":["Task authority, unit identity, scope, tests, and gate remain unchanged."],
+        "repair_evidence_refs":["work-map:recovered"]
+    });
+    value.to_string()
+}
+
+fn no_defect_recovery_work_map(repo: &Path) -> String {
+    let path = repo.join(".pi/autopilot/main/work-map.md");
+    let mut value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(path).expect("canonical work map"))
+            .expect("canonical work map json");
+    value["recovery"] = serde_json::json!({
+        "disposition":"no-defect",
+        "diagnosis_refs":["review:planning-main-plan-reviewer-01"],
+        "root_cause":"Repository and authority evidence disprove the review diagnosis.",
+        "affected_unit_ids":[],
+        "actions":["Preserved the canonical work map unchanged and requested the same gate."],
+        "preserved_authority":["All unit semantics and original authority remain unchanged."],
+        "repair_evidence_refs":["work-map:no-defect"]
+    });
+    value.to_string()
+}
+
+fn new_authority_recovery_work_map(repo: &Path) -> String {
+    let mut value: serde_json::Value =
+        serde_json::from_str(&no_defect_recovery_work_map(repo)).expect("recovery work map");
+    value["recovery"]["disposition"] = serde_json::json!("requires-new-authority");
+    value["recovery"]["root_cause"] = serde_json::json!(
+        "The correct plan requires file authority absent from the original task."
+    );
+    value["recovery"]["actions"] =
+        serde_json::json!(["Preserved the plan and requested explicit new authority."]);
+    value.to_string()
+}
+
+fn recovered_work_map_with_scope_expansion(repo: &Path) -> String {
+    let mut value: serde_json::Value =
+        serde_json::from_str(&recovered_work_map(repo)).expect("recovery work map");
+    value["units"][0]["files"] = serde_json::json!(["outside-authority.rs"]);
+    value.to_string()
+}
+
 fn sha256_hex(data: &[u8]) -> String {
     let digest = Sha256::digest(data);
     let mut out = String::with_capacity(digest.len() * 2);
@@ -1358,6 +1709,9 @@ fn append_active_binding(event_log: &Path, repo: &Path, workstream: &str) {
         repository_head_commit: None,
         repository_head_tree: None,
         mode_parameter: None,
+        planning_subject_assignment_id: None,
+        planning_subject_path: None,
+        planning_subject_digest: None,
         lane_id: Some(Id("L1".to_owned())),
         attempt: Some(1),
         base_commit: Some(Sha(git_stdout(repo, &["rev-parse", "--verify", "HEAD"])

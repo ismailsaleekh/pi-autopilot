@@ -1,10 +1,11 @@
-context_policy schema="autopilot.context_policy.v1" revision=2 {
+context_policy schema="autopilot.context_policy.v1" revision=3 {
   category id="task-authority" source="task-document" class="authority"
   category id="repository-context" source="task-document" class="context/non-authority"
   category id="task-atoms" source="accepted-planning-artifact" boundary="planning.task-atoms.v1" class="planning-artifact"
   category id="scout-findings" source="accepted-planning-artifact" boundary="planning.scout-dossier.v1" class="planning-artifact"
   category id="compiler-work-maps" source="accepted-planning-artifact" boundary="planning.work-map.v1" class="planning-artifact"
   category id="synthesized-work-map" source="accepted-planning-artifact" boundary="planning.work-map.v1" class="planning-artifact"
+  category id="recovery-work-map" source="accepted-planning-artifact" boundary="planning.work-map.v1" class="planning-artifact"
   category id="review-verdicts" source="accepted-planning-artifact" boundary="planning.plan-review.v1" class="planning-artifact"
   category id="contradiction-bundle" source="accepted-planning-artifact" boundary="planning.questions.v1" class="planning-artifact"
   category id="authority-index" source="package-generated" class="index"
@@ -168,6 +169,7 @@ context_policy schema="autopilot.context_policy.v1" revision=2 {
       required_reads "compiler-work-maps"
       on_demand "repository-context"
       on_demand "source-anchor"
+      on_demand "recovery-work-map"
     }
     mode id="delta-review" {
       mandatory_inline "synthesized-work-map"
@@ -228,6 +230,51 @@ context_policy schema="autopilot.context_policy.v1" revision=2 {
       required_reads "dossier-findings"
       required_reads "runtime-identity"
       on_demand "source-anchor"
+    }
+  }
+  policy id="recovery-engineer.v1" role="recovery-engineer" {
+    mode id="planning-repair" {
+      mandatory_inline "synthesized-work-map"
+      mandatory_inline "review-verdicts"
+      mandatory_inline "criterion-trace-index"
+      required_reads "task-authority"
+      required_reads "task-atoms"
+      required_reads "scout-findings"
+      required_reads "compiler-work-maps"
+      on_demand "repository-context"
+      on_demand "source-anchor"
+    }
+    mode id="forward-critical" {
+      mandatory_inline "blocking-finding"
+      mandatory_inline "approved-plan-unit"
+      mandatory_inline "acceptance-criteria"
+      required_reads "delivery-evidence"
+      required_reads "source-anchor"
+      on_demand "dossier-findings"
+    }
+    mode id="closure-repair" {
+      mandatory_inline "blocking-finding"
+      mandatory_inline "approved-plan-unit"
+      mandatory_inline "acceptance-criteria"
+      required_reads "delivery-evidence"
+      required_reads "source-anchor"
+      on_demand "dossier-findings"
+    }
+    mode id="failed-test" {
+      mandatory_inline "blocking-finding"
+      mandatory_inline "approved-plan-unit"
+      mandatory_inline "acceptance-criteria"
+      required_reads "delivery-evidence"
+      required_reads "source-anchor"
+      on_demand "dossier-findings"
+    }
+    mode id="conflict-resolution" {
+      mandatory_inline "blocking-finding"
+      mandatory_inline "approved-plan-unit"
+      mandatory_inline "acceptance-criteria"
+      required_reads "delivery-evidence"
+      required_reads "source-anchor"
+      on_demand "dossier-findings"
     }
   }
   policy id="validator.v1" role="validator" {

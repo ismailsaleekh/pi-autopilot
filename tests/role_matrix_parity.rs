@@ -120,6 +120,14 @@ fn role_matrix_matches_d76_section_2_3_exactly() {
             "autopilot_submit_synthesis",
         ),
         row(
+            "recovery-engineer",
+            "planning-repair, forward-critical, closure-repair, failed-test, conflict-resolution",
+            "reasoning",
+            "xhigh",
+            "phase-bound repair target within original authority",
+            "autopilot_emit_status",
+        ),
+        row(
             "repository-scout",
             "initial-grounding, targeted-followup",
             "coding",
@@ -251,6 +259,21 @@ fn live_delivery_and_validation_profiles_are_exact_and_capability_backed() {
                 .any(|tool| tool == "autopilot_emit_status")
         );
         assert_eq!(resolved.unavailable, unavailable);
+    }
+}
+
+#[test]
+fn recovery_engineer_planning_profile_is_mechanically_read_only_but_delivery_can_repair() {
+    let planning = drivers::runner::resolve_role_tools("recovery-engineer", "recovery-work-map.v1")
+        .expect("planning recovery tools");
+    assert_eq!(
+        planning.active,
+        ["read", "grep", "find", "ls", "autopilot_emit_status"]
+    );
+    let delivery = drivers::runner::resolve_role_tools("recovery-engineer", "delivery-status.v2")
+        .expect("delivery recovery tools");
+    for required in ["bash", "edit", "write", "autopilot_emit_status"] {
+        assert!(delivery.active.iter().any(|tool| tool == required));
     }
 }
 
