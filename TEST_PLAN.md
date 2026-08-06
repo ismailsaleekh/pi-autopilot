@@ -46,6 +46,7 @@ The paired background candidate must pass its default suite and prove the public
 - Collapse parallel child startup buckets: startup-stagger planning/lane distinctness tests should fail.
 - Enable `triggerOnCompletion` or disable `notifyOnCompletion` in the normal runner, planning replay/re-emission, or watchdog producer: producer assertions and the central exact-command guard must fail before spawn.
 - Remove typed Host terminal failure publication: terminal transport regression must fail on the missing `rejection:host-terminal:` status or wrong status/prose order.
+- Inject terminal-continuation metadata into a closed planning/delivery/validation carrier, or stop writing its durable attempt-event evidence: continued-carrier contract and continuation-event tests must fail.
 - Collapse a named artifact reference in a terminal JSON schema to the scalar-string fallback, admit string findings, or permit an incomplete/extra-field `FindingV2`: codegen and Pi 0.84 TypeBox parity tests must fail before a LIVE Validator can encounter an unwinnable tool/Rust contract.
 
 ## Zero skip/todo policy

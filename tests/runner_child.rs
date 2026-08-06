@@ -663,6 +663,44 @@ fn delivery_child_first_terminal_blocked_attempt_writes_blocked_carrier_without_
 }
 
 #[test]
+fn delivery_continuation_preserves_closed_carrier_and_records_attempt_provenance() {
+    let root = temp_root("runner-delivery-terminal-continuation");
+    let worktree = delivery_worktree(&root, "continuation");
+    let blocked = delivery_blocked_payload();
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            "",
+            &format!("if (promptCount === 1) emitAssistant(''); else emitCarrier({blocked:?});"),
+        ),
+    );
+    let spec = write_delivery_spec(&root, &worktree, |value| value);
+
+    with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect("continued delivery writes one contract-exact carrier");
+
+    let carrier_bytes = fs::read(delivery_carrier_path(&worktree)).expect("delivery carrier");
+    let carrier: Value = serde_json::from_slice(&carrier_bytes).expect("carrier json");
+    serde_json::from_slice::<kernel::generated::DeliveryResultV2>(&carrier_bytes)
+        .expect("continued carrier remains the closed generated contract");
+    assert!(carrier.get("continuation_provenance").is_none());
+    assert!(carrier.get("continuation_provenance_digest").is_none());
+    assert_eq!(
+        attempt_events(&worktree, "assignment-main-L1"),
+        [
+            "started",
+            "terminal-continuation",
+            "continuation-prepared",
+            "continuation-dispatched",
+            "terminal-continuation-carrier-produced",
+            "accepted"
+        ]
+    );
+}
+
+#[test]
 fn delivery_terminal_denial_ledger_is_required_closed_and_pre_effect_only() {
     for (label, ledger, expected) in [
         (
@@ -3116,6 +3154,11 @@ fn success_after_continuation_is_distinguishable_from_clean_run() {
         terminalmiss_attempt_events(&root)
             .contains(&"terminal-continuation-carrier-produced".to_owned())
     );
+    let carrier: Value =
+        serde_json::from_slice(&fs::read(carrier_path(&root)).expect("planning carrier"))
+            .expect("planning carrier json");
+    assert!(carrier.get("continuation_provenance").is_none());
+    assert!(carrier.get("continuation_provenance_digest").is_none());
 }
 
 #[test]

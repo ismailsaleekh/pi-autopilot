@@ -54,7 +54,6 @@ struct ToolTerminal {
     tool_call_id: String,
     details: ToolCarrierDetails,
     details_value: Value,
-    continuation_provenance: Option<ContinuationProvenance>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -218,16 +217,6 @@ fn is_sha256_hex(value: &str) -> bool {
 #[derive(Debug, Clone, PartialEq)]
 enum CarrierSource {
     Tool(ToolTerminal),
-}
-
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-struct ContinuationProvenance {
-    attempts_made: u32,
-    classes: Vec<TerminalMissClass>,
-    directive_digests: Vec<String>,
-    session_digest: String,
-    dispatch_receipts: Vec<DirectiveReceipt>,
-    terminal_call_id: String,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -721,13 +710,12 @@ fn run_prompt_with_terminal_continuation(
             value_attempt,
             directive.as_ref(),
         ) {
-            Ok(mut source) => {
+            Ok(source) => {
                 if directive.is_some() {
                     trace.continuations_dispatched =
                         trace.continuations_dispatched.saturating_add(1);
                 }
                 if trace.continuations_dispatched > 0 {
-                    attach_continuation_provenance(&mut source, &trace);
                     append_terminal_event_or_error(
                         spec,
                         value_attempt,
@@ -1503,7 +1491,6 @@ impl RpcAssignment {
                         tool_call_id,
                         details: parsed,
                         details_value,
-                        continuation_provenance: None,
                     });
                 }
                 self.request_stats(state)
@@ -2774,30 +2761,6 @@ fn parse_session_continuity_lost(message: &str) -> Option<(String, String)> {
     let rest = message.strip_prefix("agent-run session continuity lost: expected ")?;
     let (expected, actual) = rest.split_once(", got ")?;
     Some((expected.to_owned(), actual.to_owned()))
-}
-
-fn attach_continuation_provenance(source: &mut CarrierSource, trace: &TerminalTrace) {
-    let CarrierSource::Tool(terminal) = source;
-    if terminal.continuation_provenance.is_some() {
-        return;
-    }
-    let session_digest = trace
-        .directives
-        .last()
-        .map(|directive| directive.session_digest.clone())
-        .unwrap_or_default();
-    terminal.continuation_provenance = Some(ContinuationProvenance {
-        attempts_made: trace.attempts_made.saturating_add(1),
-        classes: trace.classes.clone(),
-        directive_digests: trace
-            .directives
-            .iter()
-            .map(|directive| directive.sha256.clone())
-            .collect(),
-        session_digest,
-        dispatch_receipts: trace.directives.clone(),
-        terminal_call_id: terminal.tool_call_id.clone(),
-    });
 }
 
 fn expected_terminal_tool_and_offered(
@@ -4418,22 +4381,6 @@ fn write_carrier(
         "carrier_binding": terminal.details.binding,
         "raw_output": raw_output,
     });
-    let mut carrier = carrier;
-    if let Some(provenance) = &terminal.continuation_provenance {
-        let object = carrier
-            .as_object_mut()
-            .expect("planning carrier is an object");
-        object.insert(
-            "continuation_provenance".to_owned(),
-            serde_json::to_value(provenance).expect("provenance serializes"),
-        );
-        object.insert(
-            "continuation_provenance_digest".to_owned(),
-            serde_json::json!(sha256_hex(
-                &serde_json::to_vec(provenance).expect("provenance serializes")
-            )),
-        );
-    }
     write_json_new(&spec.carrier_path.0, &carrier)
         .map_err(|error| {
             value_rejection("carrier_path", "create-once writable carrier path", error)
@@ -5179,21 +5126,6 @@ fn package_tool_result(
         "submission_digest": submission_digest,
         "submission": submission,
     });
-    if let Some(provenance) = &terminal.continuation_provenance {
-        let object = carrier
-            .as_object_mut()
-            .expect("package tool result is an object");
-        object.insert(
-            "continuation_provenance".to_owned(),
-            serde_json::to_value(provenance).expect("provenance serializes"),
-        );
-        object.insert(
-            "continuation_provenance_digest".to_owned(),
-            serde_json::json!(sha256_hex(
-                &serde_json::to_vec(provenance).expect("provenance serializes")
-            )),
-        );
-    }
     let object = carrier
         .as_object_mut()
         .expect("package tool result is an object");
