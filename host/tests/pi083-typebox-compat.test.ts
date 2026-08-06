@@ -66,6 +66,12 @@ const validSamples: Record<string, Record<string, unknown>> = {
         handling: "run-isolated",
         scope_preservation: "Verification runs outside the candidate repository and preserves approved final scope.",
       }],
+      package_checks: [{
+        check_id: "PKG-unit-1-TIP",
+        kind: "clean-exact-package-tip",
+        criterion_ordinals: [1],
+        expected: "Core proves the exact clean package tip.",
+      }],
       links: ["atom-1"],
     }],
   },
