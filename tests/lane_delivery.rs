@@ -433,6 +433,15 @@ fn lane_delivery_agent_git_mutation_and_incomplete_delivery_are_refused_without_
             "expected":"Core proves a clean exact package tip after delivery."
         }])
     );
+    fs::write(worktree.join("keep.txt"), "validated package tip\n").expect("package edit");
+    git_run(&worktree, &["add", "keep.txt"]);
+    git_run(&worktree, &["commit", "-m", "validated package tip"]);
+    let package_commit = git_stdout(&worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    let package_tree = git_stdout(&worktree, &["rev-parse", "HEAD^{tree}"])
+        .trim()
+        .to_owned();
     let validation = validation_issue(
         &ValidationRunnerRequest {
             workstream: runner.workstream.clone(),
@@ -440,8 +449,8 @@ fn lane_delivery_agent_git_mutation_and_incomplete_delivery_are_refused_without_
             assignment_id: runner.assignment_id.clone(),
             run_revision: runner.run_revision,
             producer_assignment_ids: vec![runner.assignment_id.clone()],
-            exact_commit: "1111111111111111111111111111111111111111".to_owned(),
-            exact_tree: "2222222222222222222222222222222222222222".to_owned(),
+            exact_commit: package_commit,
+            exact_tree: package_tree,
             candidate_root: runner.worktree.clone(),
             changed_paths: vec!["keep.txt".to_owned()],
             execution_audit_ref: Ref("audit:l1".to_owned()),
@@ -508,7 +517,6 @@ fn lane_delivery_core_stdout_stays_json_when_runtime_packages_uncommitted_change
         "delivery terminal fixture changed\n",
     )
     .expect("worktree edit");
-    fs::write(worktree.join("Cargo.lock"), "# untracked residue\n").expect("residue");
     fs::create_dir_all(carrier_path.parent().expect("carrier parent")).expect("carrier dir");
     fs::write(
         &carrier_path,
@@ -546,6 +554,32 @@ fn lane_delivery_core_stdout_stays_json_when_runtime_packages_uncommitted_change
                     && item["kind"] == "delivery-package-check"
             })
     );
+    core.shutdown();
+}
+
+#[test]
+fn declared_package_check_rejects_untracked_residue_before_acceptance() {
+    let (mut core, spawn, spec, carrier_path, worktree) =
+        launched_core_delivery("strict-package-check");
+    fs::write(worktree.join("README.md"), "package candidate\n").expect("worktree edit");
+    fs::write(worktree.join("Cargo.lock"), "# untracked residue\n").expect("residue");
+    fs::create_dir_all(carrier_path.parent().expect("carrier parent")).expect("carrier dir");
+    fs::write(
+        &carrier_path,
+        serde_json::to_vec_pretty(&delivery_carrier_without_package_for_core(&spec, 2))
+            .expect("delivery carrier"),
+    )
+    .expect("carrier write");
+
+    let rejected = core.send_json(serde_json::json!({"v":1,"id":2,"kind":"task-completed","payload":{"task_id":"task-strict-package-check","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}));
+    assert_eq!(rejected.kind, "done", "response: {rejected:?}");
+    assert!(
+        done_status(&rejected).contains("delivery-package-check"),
+        "response: {rejected:?}"
+    );
+    let events = fs::read_to_string(core.event_log()).expect("events");
+    assert!(!events.contains("agent:delivery-accepted"), "{events}");
+    assert!(!events.contains("validation:required"), "{events}");
     core.shutdown();
 }
 

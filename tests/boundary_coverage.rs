@@ -743,6 +743,27 @@ fn validation_package_check_receipts_are_exactly_bound_and_cannot_duplicate() {
     )
     .expect("package check receipt is admitted");
 
+    let mut unrelated_context = context.clone();
+    let mut unrelated_criterion = unrelated_context.criteria[0].clone();
+    unrelated_criterion.criterion_id = Id("criterion-without-package-check".to_owned());
+    unrelated_criterion.package_checks.clear();
+    unrelated_context.criteria.push(unrelated_criterion);
+    let mut unrelated_submission = submission.clone();
+    let mut unrelated_result = unrelated_submission.criterion_results[0].clone();
+    unrelated_result.criterion_id = Id("criterion-without-package-check".to_owned());
+    unrelated_submission
+        .criterion_results
+        .push(unrelated_result);
+    assert!(
+        drivers::runner::child::admit_validation_submission_with_authority(
+            &unrelated_submission,
+            &assignment,
+            &unrelated_context,
+        )
+        .is_err(),
+        "unrelated criterion substituted a package-check receipt"
+    );
+
     let mut drifted = context.clone();
     drifted
         .evidence

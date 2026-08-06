@@ -213,7 +213,7 @@ test("delivery package checks fail closed on every executable-boundary shape def
         worktree: fixture.worktree,
         cwd: fixture.worktree,
       });
-      assert.throws(() => loadDeliveryPolicyFromEnv(env as never, fixture.worktree), /package check|package_checks|missing string expected/, label);
+      assert.throws(() => loadDeliveryPolicyFromEnv(env as never, fixture.worktree), /package check|package_checks|missing string expected|invalid check ordinals/, label);
     } finally {
       cleanup();
     }

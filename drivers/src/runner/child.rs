@@ -4661,6 +4661,12 @@ fn validate_validation_submission_against(
         .iter()
         .map(|item| item.evidence_ref.clone())
         .collect::<BTreeSet<_>>();
+    let package_evidence = context
+        .evidence
+        .iter()
+        .filter(|item| item.package_check_id.is_some())
+        .map(|item| &item.evidence_ref)
+        .collect::<BTreeSet<_>>();
     let mut blocked = false;
     for result in &submission.criterion_results {
         if result.evidence_refs.is_empty()
@@ -4686,10 +4692,14 @@ fn validate_validation_submission_against(
             .iter()
             .map(|check| &check.evidence_ref)
             .collect::<BTreeSet<_>>();
-        if !required_package_evidence.is_subset(&cited_evidence) {
+        let cited_package_evidence = cited_evidence
+            .intersection(&package_evidence)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if cited_package_evidence != required_package_evidence {
             return Err(value_rejection(
                 "criterion_results.evidence_refs",
-                "all Core-owned package-check receipts for the criterion",
+                "exact Core-owned package-check receipts assigned to the criterion",
                 result.criterion_id.0.clone(),
             ));
         }

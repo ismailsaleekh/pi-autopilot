@@ -879,10 +879,42 @@ pub fn delivery_issue_with_facts(
     Ok(IssuedRunnerAction { action, binding })
 }
 
+fn verify_validation_package_checks(request: &ValidationRunnerRequest) -> Result<(), RunnerError> {
+    for unit in &request.approved_units {
+        validate_approved_unit_for_runner(unit)?;
+    }
+    if !request
+        .approved_units
+        .iter()
+        .any(|unit| !unit.package_checks.is_empty())
+    {
+        return Ok(());
+    }
+    let candidate_root = absolute_path(&request.candidate_root)?;
+    let worktree = absolute_path(&request.worktree)?;
+    if candidate_root != worktree {
+        return Err(RunnerError::InvalidSpec(
+            "package check candidate/worktree identity drift".to_owned(),
+        ));
+    }
+    verify_package_git_state(
+        &worktree,
+        &request.base_commit,
+        &Sha(request.exact_commit.clone()),
+        &Sha(request.exact_tree.clone()),
+        &request.changed_paths,
+        true,
+    )
+    .map_err(|error| {
+        RunnerError::InvalidSpec(format!("clean-exact-package-tip check failed: {error:?}"))
+    })
+}
+
 pub fn validation_issue(
     request: &ValidationRunnerRequest,
     facts: &RunnerTransportFacts,
 ) -> Result<IssuedRunnerAction, RunnerError> {
+    verify_validation_package_checks(request)?;
     let role_id = Id("validator".to_owned());
     let mode = ModeId("forward-release".to_owned());
     let boundary = ContractId("autopilot.validation_submission.v2".to_owned());
@@ -2834,7 +2866,7 @@ fn delivery_prompt(
         )
     });
     Ok(format!(
-        "Autopilot delivery child assignment.\nassignment_id: {}\naction_id: {}\nworkstream: {}\nlane_id: {}\nattempt: {}\nrole: {}\nmode: {}\nrun_revision: {}\nbase_commit: {}\nworktree: {}\nprovider: {}\nmodel: {}\nthinking: {}\nroute: subscription\nrequired_focused_evidence: {}\nassignment_path: {}\nassignment_digest: {}\n\nYou are limited to the ordered approved units in the package-owned artifact. Do not implement other units or the whole mission. Verification command effect authority is binding: commands are pre-package child evidence only, while package_checks are Core-owned committed-tip checks that you must not execute or block on. Core verifies package_checks after an admitted succeeded submission and forwards their receipts to the unchanged independent Validator. Final Git-visible state must remain inside approved unit files; declared predictable generated paths must be run isolated, exactly cleaned before the scope gate even on command failure, or blocked if created as stated by each command.\n{}\n{}\n\nCall autopilot_emit_status exactly once with one autopilot.delivery_submission.v2 payload. Assignment identity is package-owned; do not return it in assistant prose.",
+        "Autopilot delivery child assignment.\nassignment_id: {}\naction_id: {}\nworkstream: {}\nlane_id: {}\nattempt: {}\nrole: {}\nmode: {}\nrun_revision: {}\nbase_commit: {}\nworktree: {}\nprovider: {}\nmodel: {}\nthinking: {}\nroute: subscription\nrequired_focused_evidence: {}\nassignment_path: {}\nassignment_digest: {}\n\nYou are limited to the ordered approved units in the package-owned artifact. Do not implement other units or the whole mission. Verification command effect authority is binding: commands are pre-package child evidence only, while package_checks are Core-owned committed-tip checks that you must not execute or block on. Core verifies package_checks after an admitted succeeded submission and forwards their receipts to the unchanged independent Validator. Final Git-visible state must remain inside approved unit files; declared predictable generated paths must be run isolated, exactly cleaned before the scope gate even on command failure, or blocked if materialized as stated by each command.\n{}\n{}\n\nCall autopilot_emit_status exactly once with one autopilot.delivery_submission.v2 payload. Assignment identity is package-owned; do not return it in assistant prose.",
         assignment.assignment_id.0,
         assignment.action_id.0,
         assignment.workstream.0,
@@ -3746,13 +3778,10 @@ fn blocked_delivery_snapshot_digest(
         digest.update([0]);
         let absolute = worktree.join(path);
         reject_link_components_for_path(&absolute).map_err(|_| DeliveryRejection::GitState)?;
-        match fs::symlink_metadata(&absolute) {
-            Ok(metadata) if metadata.file_type().is_file() => {
+        match fs::File::open(&absolute) {
+            Ok(mut file) => {
                 digest.update(b"file\0");
-                digest.update(metadata.len().to_le_bytes());
-                digest.update(delivery_executable_bits(&metadata).to_le_bytes());
-                let mut file =
-                    fs::File::open(&absolute).map_err(|_| DeliveryRejection::GitState)?;
+                digest.update(delivery_mode_fingerprint(worktree, &absolute)?);
                 let mut file_digest = Sha256::new();
                 let mut buffer = [0_u8; 64 * 1024];
                 loop {
@@ -3781,15 +3810,22 @@ fn blocked_delivery_snapshot_digest(
     Ok(out)
 }
 
-#[cfg(unix)]
-fn delivery_executable_bits(metadata: &fs::Metadata) -> u32 {
-    use std::os::unix::fs::PermissionsExt;
-    metadata.permissions().mode() & 0o111
-}
-
-#[cfg(not(unix))]
-fn delivery_executable_bits(_metadata: &fs::Metadata) -> u32 {
-    0
+fn delivery_mode_fingerprint(worktree: &Path, path: &Path) -> Result<Vec<u8>, DeliveryRejection> {
+    let output = Command::new("git")
+        .current_dir(worktree)
+        .args(["diff", "--no-index", "--summary", "--"])
+        .arg("/dev/null")
+        .arg(path)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|_| DeliveryRejection::GitState)?;
+    if !matches!(output.status.code(), Some(0 | 1))
+        || !output.stderr.is_empty()
+        || output.stdout.len() > 4 * 1024
+    {
+        return Err(DeliveryRejection::GitState);
+    }
+    Ok(output.stdout)
 }
 
 pub fn establish_delivery_package(
@@ -4096,58 +4132,74 @@ fn verify_delivery_git_state(
     package_tree: &Sha,
 ) -> Result<(), DeliveryRejection> {
     let actual_worktree = canonical_delivery_worktree(result, expected)?;
-    verify_distinct_git_worktree(&actual_worktree, &expected.base_commit)
-        .map_err(|_| DeliveryRejection::GitState)?;
-    let head = git_stdout_checked(
+    let claimed_paths = result
+        .actual_changed_paths
+        .iter()
+        .map(|path| path.0.clone())
+        .collect::<Vec<_>>();
+    verify_package_git_state(
         &actual_worktree,
-        &["rev-parse", "--verify", "HEAD^{commit}"],
+        &expected.base_commit,
+        package_commit,
+        package_tree,
+        &claimed_paths,
+        false,
     )
-    .map_err(|_| DeliveryRejection::GitState)?;
+}
+
+fn verify_package_git_state(
+    worktree: &Path,
+    base_commit: &Sha,
+    package_commit: &Sha,
+    package_tree: &Sha,
+    claimed_paths: &[String],
+    require_strict_clean: bool,
+) -> Result<(), DeliveryRejection> {
+    verify_distinct_git_worktree(worktree, base_commit).map_err(|_| DeliveryRejection::GitState)?;
+    let head = git_stdout_checked(worktree, &["rev-parse", "--verify", "HEAD^{commit}"])
+        .map_err(|_| DeliveryRejection::GitState)?;
     if head.trim() != package_commit.0 {
         return Err(DeliveryRejection::GitState);
     }
-    let tree = git_stdout_checked(&actual_worktree, &["rev-parse", "--verify", "HEAD^{tree}"])
+    let tree = git_stdout_checked(worktree, &["rev-parse", "--verify", "HEAD^{tree}"])
         .map_err(|_| DeliveryRejection::GitState)?;
     if tree.trim() != package_tree.0 {
         return Err(DeliveryRejection::GitState);
     }
     git_status_checked(
-        &actual_worktree,
+        worktree,
         &[
             "merge-base",
             "--is-ancestor",
-            &expected.base_commit.0,
+            &base_commit.0,
             &package_commit.0,
         ],
     )
     .map_err(|_| DeliveryRejection::GitState)?;
     let status = git_stdout_bytes_checked(
-        &actual_worktree,
+        worktree,
         &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
     )
     .map_err(|_| DeliveryRejection::GitState)?;
-    if status_records_block_delivery(&status) {
+    if (require_strict_clean && status_records_block_strict_package(&status))
+        || (!require_strict_clean && status_records_block_delivery(&status))
+    {
         return Err(DeliveryRejection::GitState);
     }
     let diff = git_stdout_bytes_checked(
-        &actual_worktree,
+        worktree,
         &[
             "diff",
             "--name-only",
             "-z",
-            &expected.base_commit.0,
+            &base_commit.0,
             &package_commit.0,
             "--",
         ],
     )
     .map_err(|_| DeliveryRejection::GitState)?;
     let mut actual = git_nul_paths(&diff);
-    let claimed_paths = result
-        .actual_changed_paths
-        .iter()
-        .map(|path| path.0.clone())
-        .collect::<Vec<_>>();
-    let mut claimed = path_bytes(&claimed_paths);
+    let mut claimed = path_bytes(claimed_paths);
     actual.sort();
     claimed.sort();
     if actual != claimed {
@@ -4160,6 +4212,13 @@ fn status_records_block_delivery(status: &[u8]) -> bool {
     git_nul_paths(status)
         .iter()
         .any(|record| record.get(..2) != Some(b"??"))
+}
+
+fn status_records_block_strict_package(status: &[u8]) -> bool {
+    git_nul_paths(status).iter().any(|record| {
+        record.strip_prefix(b"?? .pi/autopilot/").is_none()
+            && record.strip_prefix(b"?? .pi/tasks/").is_none()
+    })
 }
 
 fn path_bytes(paths: &[String]) -> Vec<Vec<u8>> {

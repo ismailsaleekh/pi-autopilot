@@ -1244,6 +1244,11 @@ fn route_task_completed(
                 return done(id, rejection("delivery-rejected", &format!("{error:?}")));
             }
         };
+        let validation_issue =
+            match validation_issue_for_delivery(&binding, &accepted, state.state.revision) {
+                Ok(value) => value,
+                Err(error) => return done(id, rejection("delivery-package-check", &error)),
+            };
         append_terminal_event(state, &payload, &binding)?;
         record_task_completion_control(state, &payload)?;
         state.append(
@@ -1257,7 +1262,7 @@ fn route_task_completed(
             ],
         )?;
         record_delivery_transcript(&binding, &carrier_text, state)?;
-        return delivery_accepted(id, &binding, &accepted, state);
+        return delivery_accepted(id, &binding, &accepted, validation_issue, state);
     }
     if binding.result_contract.0 == "autopilot.validation_result.v2" {
         return validation_completed(id, &binding, &payload, state);
@@ -2419,9 +2424,9 @@ fn delivery_accepted(
     id: u64,
     binding: &runner::IssuedRunnerBinding,
     accepted: &runner::AcceptedDelivery,
+    issue: runner::IssuedRunnerAction,
     state: &mut CoreState,
 ) -> Result<SeamEnvelope, AnyError> {
-    let issue = validation_issue_for_delivery(binding, accepted, state.state.revision)?;
     append_runner_invocation(state, &issue.binding)?;
     state.append(
         EventKind("validation:required".to_owned()),

@@ -53,12 +53,12 @@ type DeliveryAssignmentArtifact = {
   ordered_units: DeliveryUnit[];
 };
 
+type DeliveryPackageCheck = { check_id: string; kind: "clean-exact-package-tip";
+  criterion_ordinals: number[]; expected: string };
 type DeliveryUnit = {
-  id: string;
-  kind: string;
-  files: string[];
-  commands: Array<{ command: string }>;
-  package_checks: Array<{ check_id: string; kind: "clean-exact-package-tip"; criterion_ordinals: number[]; expected: string }>;
+  id: string; kind: string;
+  files: string[]; commands: Array<{ command: string }>;
+  package_checks: DeliveryPackageCheck[];
 };
 
 type DeliveryPolicyDenial = {
@@ -615,9 +615,9 @@ function parseDeliveryUnit(value: unknown, index: number): DeliveryUnit {
         throw new Error(`autopilot delivery unit ${index} has unknown package check kind ${kind}`);
       }
       const ordinals = check["criterion_ordinals"];
-      if (!Array.isArray(ordinals) || ordinals.length === 0 || new Set(ordinals).size !== ordinals.length || ordinals.some((ordinal) => !Number.isInteger(ordinal) || ordinal < 1)) {
-        throw new Error(`autopilot delivery unit ${index} has invalid package check criterion ordinals`);
-      }
+      const validCount = Array.isArray(ordinals) && ordinals.length > 0 && new Set(ordinals).size === ordinals.length;
+      const validItems = Array.isArray(ordinals) && ordinals.every((item) => Number.isInteger(item) && item > 0);
+      if (!validCount || !validItems) throw new Error("autopilot delivery invalid check ordinals");
       return {
         check_id: checkId,
         kind,
