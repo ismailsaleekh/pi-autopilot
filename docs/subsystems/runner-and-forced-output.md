@@ -13,9 +13,9 @@ covers_sources:
   - drivers/src/watchdog/mod.rs
   - src/extension.ts
   - src/resolve-core.ts
-signature_hash: 'sha256:3c050effcbb84d587bcdf366630b7b847070fd1efc7c18533e59fd9f83f2a07c'
-body_hash: 'sha256:6a4f813d84d805f3d7f308a534cb7283e072be61e9f0de42acb629d469cf7656'
-semantic_attestation: 'sha256:6a4f813d84d805f3d7f308a534cb7283e072be61e9f0de42acb629d469cf7656'
+signature_hash: 'sha256:dee31bae579c810d95a2dad8a6aa46e350d5962563fa129159df122c7d586c9f'
+body_hash: 'sha256:328874aaa9b3c1d553b29d71893637929454949fc91f05924def1e04a70a9348'
+semantic_attestation: 'sha256:328874aaa9b3c1d553b29d71893637929454949fc91f05924def1e04a70a9348'
 stability: stable
 ---
 
