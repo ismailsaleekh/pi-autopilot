@@ -3,45 +3,45 @@
     "darwin-arm64": {
       "buildMethod": "native cargo build --release --target aarch64-apple-darwin -p drivers --bin autopilot-core",
       "path": "binaries/darwin-arm64/autopilot-core",
-      "sha256": "e3d1a5ae75d19222fbb99fcc4bdc63bdcce953334272bfaf0e8c3c979bdb4870",
-      "sizeBytes": 5635936,
-      "sourceHash": "4acc2e8fa56d275730ecfd86386137ba6a275735e7afbf06bba15d954a427f92",
+      "sha256": "6e86ccc4611212f181f1ac8431232399103776f9b67734b9c154d09a38c95a74",
+      "sizeBytes": 5619328,
+      "sourceHash": "ff0dfa9a5892a0aa63389675d725dafa4374f8774a3b108691ea24a72924636d",
       "target": "aarch64-apple-darwin"
     },
     "darwin-x64": {
       "buildMethod": "native cargo build --release --target x86_64-apple-darwin -p drivers --bin autopilot-core",
       "path": "binaries/darwin-x64/autopilot-core",
-      "sha256": "cbe7a70ebf8530e0b15406476741c576955bd230a47783bd170c02f694fd44fb",
-      "sizeBytes": 6209664,
-      "sourceHash": "4acc2e8fa56d275730ecfd86386137ba6a275735e7afbf06bba15d954a427f92",
+      "sha256": "f9616b5692215aafff023ce1d7b439b084c8c55e89f353aa4c4955751f126bc0",
+      "sizeBytes": 6197320,
+      "sourceHash": "ff0dfa9a5892a0aa63389675d725dafa4374f8774a3b108691ea24a72924636d",
       "target": "x86_64-apple-darwin"
     },
     "linux-arm64": {
       "buildMethod": "cargo build --release --target aarch64-unknown-linux-musl -p drivers --bin autopilot-core with rust-lld",
       "path": "binaries/linux-arm64/autopilot-core",
-      "sha256": "197cf13d8dc4d0266c0cfa18c9a8c56e9b42d76b84fbeac3117bb18ea628f420",
-      "sizeBytes": 6300880,
-      "sourceHash": "4acc2e8fa56d275730ecfd86386137ba6a275735e7afbf06bba15d954a427f92",
+      "sha256": "9c21348ffe729e62c643ac9cc21a3f6c5154afafdc63b6f18ce4892b96372b89",
+      "sizeBytes": 6284688,
+      "sourceHash": "ff0dfa9a5892a0aa63389675d725dafa4374f8774a3b108691ea24a72924636d",
       "target": "aarch64-unknown-linux-musl"
     },
     "linux-x64": {
       "buildMethod": "cargo build --release --target x86_64-unknown-linux-musl -p drivers --bin autopilot-core with rust-lld",
       "path": "binaries/linux-x64/autopilot-core",
-      "sha256": "9e87e3b8554919ea7be0e2d9fac60290780f28badcf39fb4210be60394fc0559",
-      "sizeBytes": 6943016,
-      "sourceHash": "4acc2e8fa56d275730ecfd86386137ba6a275735e7afbf06bba15d954a427f92",
+      "sha256": "8ac2204c16559b708c58c62abd43642461a6f1e9759cccc1f36d54eeb7046899",
+      "sizeBytes": 6925304,
+      "sourceHash": "ff0dfa9a5892a0aa63389675d725dafa4374f8774a3b108691ea24a72924636d",
       "target": "x86_64-unknown-linux-musl"
     },
     "win32-x64": {
       "buildMethod": "cargo build --release --target x86_64-pc-windows-gnu -p drivers --bin autopilot-core with x86_64-w64-mingw32-gcc",
       "path": "binaries/win32-x64/autopilot-core.exe",
-      "sha256": "49c844987789ca1138a57fc6aaa0e127cbac32fbd642b38dc2e7609075756f88",
-      "sizeBytes": 8959833,
-      "sourceHash": "4acc2e8fa56d275730ecfd86386137ba6a275735e7afbf06bba15d954a427f92",
+      "sha256": "d3459626c7ad6c7d56ee03d65eaf30668d85e23ee226ca7d627024225000baeb",
+      "sizeBytes": 8939886,
+      "sourceHash": "ff0dfa9a5892a0aa63389675d725dafa4374f8774a3b108691ea24a72924636d",
       "target": "x86_64-pc-windows-gnu"
     }
   },
-  "generatedAt": "2026-08-06T17:45:00Z",
+  "generatedAt": "2026-08-06T19:02:37Z",
   "schema": 1,
   "source": {
     "directories": [
@@ -57,7 +57,7 @@
       "Cargo.lock",
       "rust-toolchain.toml"
     ],
-    "hash": "4acc2e8fa56d275730ecfd86386137ba6a275735e7afbf06bba15d954a427f92",
+    "hash": "ff0dfa9a5892a0aa63389675d725dafa4374f8774a3b108691ea24a72924636d",
     "hashAlgorithm": "sha256(path-nul-content-nul over build-affecting tracked and untracked inputs)"
   }
 }
