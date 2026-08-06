@@ -758,6 +758,21 @@ fn validation_package_check_receipts_are_exactly_bound_and_cannot_duplicate() {
         .is_err(),
         "tree-drifted package receipt was admitted"
     );
+    let mut digest_drifted = context.clone();
+    digest_drifted
+        .evidence
+        .last_mut()
+        .expect("package evidence")
+        .digest = kernel::generated::Digest("b".repeat(64));
+    assert!(
+        drivers::runner::child::admit_validation_submission_with_authority(
+            &submission,
+            &assignment,
+            &digest_drifted,
+        )
+        .is_err(),
+        "digest-drifted package receipt was admitted"
+    );
     let mut duplicated = context.clone();
     duplicated.evidence.push(
         duplicated

@@ -4565,9 +4565,14 @@ fn validate_validation_context_command_authority(
                     criterion.criterion_id.0, check.check_id.0
                 ));
             };
+            let expected_evidence_ref = format!(
+                "package-check-receipt:{}:{}",
+                check.check_id.0, receipt.digest.0
+            );
             if receipt.package_check_id.as_ref() != Some(&check.check_id)
                 || receipt.command_id.is_some()
                 || receipt.kind != "delivery-package-check"
+                || receipt.evidence_ref.0 != expected_evidence_ref
                 || receipt.exact_commit != context.exact_commit
                 || receipt.exact_tree != context.exact_tree
             {
