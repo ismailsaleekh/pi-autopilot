@@ -4,7 +4,7 @@
 
 # pi-autopilot
 
-`pi-autopilot@1.3.1` is a Pi extension package that keeps the Host thin and moves planning/run authority into the shipped Rust `autopilot-core` binary. It is certified as a lockstep pair with `pi-background-tasks@2.1.1`; Host background work uses that package's documented `pi.events` request/response/terminal protocol, never a fictional `ctx.bg_run` API.
+`pi-autopilot@1.3.1` is a Pi extension package that keeps the Host thin and moves planning/run authority into the shipped Rust `autopilot-core` binary. It is certified as a lockstep pair with `pi-background-tasks@2.1.2`; Host background work uses that package's documented `pi.events` request/response/terminal protocol, never a fictional `ctx.bg_run` API.
 
 ## Runtime surfaces
 

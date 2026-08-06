@@ -1,6 +1,6 @@
 # Autopilot Test Plan
 
-This plan describes the current `pi-autopilot@1.3.1` package candidate and its required `pi-background-tasks@2.1.1` pair. All checks are offline/no-network unless explicitly stated otherwise; no paid or metered provider/API route is part of package certification.
+This plan describes the current `pi-autopilot@1.3.1` package candidate and its required `pi-background-tasks@2.1.2` pair. All checks are offline/no-network unless explicitly stated otherwise; no paid or metered provider/API route is part of package certification.
 
 ## Required package-local coverage
 

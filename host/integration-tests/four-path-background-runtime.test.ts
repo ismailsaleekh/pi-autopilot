@@ -684,8 +684,8 @@ function assertPackageCandidate(root, name) {
 function assertBackgroundCandidate(root) {
   const metadata = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   assert.equal(metadata.name, "pi-background-tasks");
-  assert.equal(metadata.version, "2.1.1");
-  assert.ok(existsSync(join(root, "src", "core", "extension-api.ts")), "background candidate must expose the 2.1.1 extension API source");
+  assert.equal(metadata.version, "2.1.2");
+  assert.ok(existsSync(join(root, "src", "core", "extension-api.ts")), "background candidate must expose the 2.1.2 extension API source");
 }
 
 function assertCoreBinaryPresent(packageRoot) {
