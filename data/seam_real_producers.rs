@@ -780,6 +780,9 @@ fn parse_approved_units(raw: &str) -> Result<Vec<ApprovedUnit>, String> {
 }
 fn approved_units_from_work_map(work_map: &kernel::generated::WorkMap) -> Result<Vec<ApprovedUnit>, String> {
     validate_work_map_graph(work_map)?;
+    allocation::validate_package_check_closure_authority(work_map.units.iter().map(|unit| {
+        (&unit.id, unit.files.as_slice(), !unit.package_checks.is_empty())
+    }))?;
     work_map.units.iter().enumerate().map(|(index, unit)| {
         if unit.id.0.trim().is_empty() || unit.objective.trim().is_empty() || unit.criteria.is_empty() { return Err(format!("unit {} missing criteria/objective", unit.id.0)); }
         if unit.files.is_empty() { return Err(format!("unit {} missing files", unit.id.0)); }
@@ -841,6 +844,9 @@ fn validate_approved_units(units: &[ApprovedUnit]) -> Result<(), AnyError> {
         for command in &unit.commands { allocation::validate_plan_unit_command_effect_authority(command).map_err(|error| -> AnyError { format!("approved unit {} has malformed command authority: {error}", unit.id.0).into() })?; }
         allocation::validate_plan_unit_package_checks(&unit.package_checks, unit.criteria.len()).map_err(|error| -> AnyError { format!("approved unit {} has malformed package-check authority: {error}", unit.id.0).into() })?;
     }
+    allocation::validate_package_check_closure_authority(units.iter().map(|unit| {
+        (&unit.id, unit.files.as_slice(), !unit.package_checks.is_empty())
+    })).map_err(|error| -> AnyError { error.into() })?;
     for unit in units { for dep in &unit.dependencies { if !ids.contains(dep) { return Err(format!("approved unit {} depends on unknown unit {}", unit.id.0, dep.0).into()); } } }
     let by_id = units.iter().map(|unit| (unit.id.clone(), unit)).collect::<BTreeMap<_, _>>();
     let mut visiting = BTreeSet::new();

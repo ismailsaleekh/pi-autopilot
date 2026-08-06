@@ -55,6 +55,7 @@ All Autopilot failures are loud and typed. Match the symptom, then follow the po
 | Provider/auth/timeout/disk failure | Infrastructure rather than prior-agent semantic output | Never route to Recovery Engineer; use the existing typed transient/paused/unsafe lane. |
 | Child requests a shell diagnostic or cannot find a command id | Delivery interface/assignment drift, or the requested operation was never approved | Delivery roles have no Bash. Use read/grep/find/ls for inspection and only listed ids with `autopilot_run_approved_command`; unknown ids are denied pre-effect. Never whitelist diagnostics. |
 | Child tries to execute a committed-tip check before Core packages | Plan encoded Core-owned state as child shell instead of `package_checks` | Treat as a planning authority defect. Fresh plans must use `clean-exact-package-tip`; legacy/missing package-check fields fail closed rather than defaulting. |
+| Final integrated check fails on a predecessor-owned path | Package-check closure unit omitted part of the work-map file union | Reject the work map before execution. Closure units must mechanically own every declared plan file; never widen a blocked delivery after launch. |
 
 ## Close / abort
 

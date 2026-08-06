@@ -1,6 +1,6 @@
 use drivers::allocation::{
     AllocationError, AllocationPolicy, AllocationSubmission, ApprovedUnit, BOUNDARY_ID, FutureUnit,
-    accept_lane_proposal, validate_allocation,
+    accept_lane_proposal, validate_allocation, validate_package_check_closure_authority,
 };
 use kernel::boundary::{BoundaryMode, Producer, boundary_by_id};
 use kernel::generated::{
@@ -71,6 +71,30 @@ fn totality_requires_exact_assignment_or_future_reason() {
         validate_allocation(&four_units, &partial, policy()).expect_err("blank future rejected"),
         AllocationError::FutureWithoutReason(id("u4"))
     );
+}
+
+#[test]
+fn package_check_closure_authority_covers_the_complete_plan_file_union() {
+    let first = vec![ContractPath("src/lib.rs".to_owned())];
+    let incomplete = vec![ContractPath("tests/final.rs".to_owned())];
+    assert_eq!(
+        validate_package_check_closure_authority([
+            (&id("u1"), first.as_slice(), false),
+            (&id("u2"), incomplete.as_slice(), true),
+        ])
+        .expect_err("incomplete closure authority rejected"),
+        "package-check closure unit u2 lacks plan file authority: src/lib.rs"
+    );
+
+    let complete = vec![
+        ContractPath("src/lib.rs".to_owned()),
+        ContractPath("tests/final.rs".to_owned()),
+    ];
+    validate_package_check_closure_authority([
+        (&id("u1"), first.as_slice(), false),
+        (&id("u2"), complete.as_slice(), true),
+    ])
+    .expect("complete closure authority accepted");
 }
 
 #[test]

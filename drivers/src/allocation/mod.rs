@@ -157,6 +157,37 @@ pub fn validate_plan_unit_package_checks(
     Ok(())
 }
 
+pub fn validate_package_check_closure_authority<'a>(
+    units: impl IntoIterator<Item = (&'a Id, &'a [ContractPath], bool)>,
+) -> Result<(), String> {
+    let units = units.into_iter().collect::<Vec<_>>();
+    let all_files = units
+        .iter()
+        .flat_map(|(_, files, _)| files.iter().map(|path| path.0.as_str()))
+        .collect::<BTreeSet<_>>();
+    for (unit_id, files, owns_package_check) in units {
+        if !owns_package_check {
+            continue;
+        }
+        let unit_files = files
+            .iter()
+            .map(|path| path.0.as_str())
+            .collect::<BTreeSet<_>>();
+        let missing = all_files
+            .difference(&unit_files)
+            .copied()
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(format!(
+                "package-check closure unit {} lacks plan file authority: {}",
+                unit_id.0,
+                missing.join(",")
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn validate_validation_context_command_effect_authority(
     command: &ValidationContextCommand,
 ) -> Result<(), String> {

@@ -476,6 +476,25 @@ fn work_map_package_checks_are_closed_explicit_and_fail_closed_without_defaults(
     }]}).to_string();
     accept_work_map(&valid, &runtime).expect("closed package check accepted");
 
+    let closure_check = serde_json::json!({
+        "check_id":"PKG-U2-TIP","kind":"clean-exact-package-tip",
+        "criterion_ordinals":[1],"expected":"Core proves the exact clean package tip."
+    });
+    let mut incomplete_closure = serde_json::json!({"units":[
+        {"id":"U1","kind":"implementation","objective":"foundation","criteria":["foundation passes"],
+         "depends_on":[],"files":["src/lib.rs"],"commands":[command.clone()],"package_checks":[],"links":["W1"]},
+        {"id":"U2","kind":"implementation","objective":"close package","criteria":["clean committed tip"],
+         "depends_on":["U1"],"files":["tests/final.rs"],"commands":[command.clone()],
+         "package_checks":[closure_check],"links":["W2"]}
+    ]});
+    assert!(
+        accept_work_map(&incomplete_closure.to_string(), &runtime).is_err(),
+        "package-check closure unit omitted predecessor file authority"
+    );
+    incomplete_closure["units"][1]["files"] = serde_json::json!(["src/lib.rs", "tests/final.rs"]);
+    accept_work_map(&incomplete_closure.to_string(), &runtime)
+        .expect("closure unit with complete plan file authority accepted");
+
     for (label, package_checks) in [
         (
             "duplicate ids",

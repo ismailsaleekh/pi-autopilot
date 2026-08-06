@@ -2340,6 +2340,24 @@ fn validate_work_map_shape(work_map: &WorkMap, runtime: &BoundaryRuntime) -> Res
             )?;
         }
     }
+    if let Err(error) = crate::allocation::validate_package_check_closure_authority(
+        work_map.units.iter().map(|unit| {
+            (
+                &unit.id,
+                unit.files.as_slice(),
+                !unit.package_checks.is_empty(),
+            )
+        }),
+    ) {
+        reject_value(
+            runtime,
+            "planning.work-map.v1",
+            "units.files",
+            "each package-check closure unit owns the complete work-map file union",
+            &error,
+            "Put every declared plan path in the closure unit so final repair never needs new authority.",
+        )?;
+    }
     Ok(())
 }
 
