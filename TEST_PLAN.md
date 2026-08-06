@@ -6,7 +6,7 @@ This plan describes the current `pi-autopilot@1.3.1` package candidate and its r
 
 | Area | Required proof |
 |---|---|
-| Codegen | `npm run codegen:check` after `cargo run -p codegen --` when `data/*.kdl` changes. Generated Rust, TypeScript, and `docs/generated/*` must match current source. |
+| Codegen | `npm run codegen:check` after `cargo run -p codegen --` when `data/*.kdl` changes. Generated Rust, TypeScript, and `docs/generated/*` must match current source. Terminal JSON schemas must expand referenced artifact shapes rather than silently treating them as strings; the Validation `findings[]` schema and Rust carrier must both require the same closed `FindingV2` object. |
 | Host API correctness | `npm run typecheck` and `npm run test:host`: strict frame validation, exact `bg_run` object preservation, no `ctx.bg_run`, supported `ctx.ui.notify`/`pi.sendMessage` operator routes, immediate and concurrent terminal handling, typed terminal-failure status before rethrow, and malformed-frame fail-closed behavior. |
 | Core gates | `gate:host-thinness`, `gate:kernel-purity`, `gate:no-inference`, `gate:selftest`. These gates must not be weakened to pass. |
 | Rust behavior | Focused drivers tests plus `npm run test:rust`: four-file classification, no context-as-Work elevation, terminal binding, runner child validation, delivery acceptance, command routing, crash/resume, and kernel invariants. |
@@ -46,6 +46,7 @@ The paired background candidate must pass its default suite and prove the public
 - Collapse parallel child startup buckets: startup-stagger planning/lane distinctness tests should fail.
 - Enable `triggerOnCompletion` or disable `notifyOnCompletion` in the normal runner, planning replay/re-emission, or watchdog producer: producer assertions and the central exact-command guard must fail before spawn.
 - Remove typed Host terminal failure publication: terminal transport regression must fail on the missing `rejection:host-terminal:` status or wrong status/prose order.
+- Collapse a named artifact reference in a terminal JSON schema to the scalar-string fallback, admit string findings, or permit an incomplete/extra-field `FindingV2`: codegen and Pi 0.84 TypeBox parity tests must fail before a LIVE Validator can encounter an unwinnable tool/Rust contract.
 
 ## Zero skip/todo policy
 

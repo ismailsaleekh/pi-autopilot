@@ -209,6 +209,59 @@ fn child_extension_output_is_wrapper_and_drift_checked() {
 }
 
 #[test]
+fn validation_tool_schema_embeds_named_finding_shape() {
+    let temp = fixture();
+    codegen_command()
+        .current_dir(temp.path())
+        .assert()
+        .success();
+    let generated = fs::read_to_string(temp.path().join("src/generated/tool-schemas.ts"))
+        .expect("read generated tool schemas");
+    let schema_json = generated
+        .split_once("export const VALIDATION_SUBMISSION_V2_TOOL_PARAMETERS = ")
+        .expect("validation schema declaration")
+        .1
+        .split_once(" as TSchema;")
+        .expect("validation schema terminator")
+        .0;
+    let schema: serde_json::Value =
+        serde_json::from_str(schema_json).expect("validation schema JSON");
+    let finding = &schema["properties"]["findings"]["items"];
+    assert_eq!(finding["type"], "object");
+    assert_eq!(finding["additionalProperties"], false);
+    assert_eq!(finding["properties"]["finding_id"]["type"], "string");
+    assert_eq!(finding["properties"]["kind"]["type"], "string");
+    assert!(
+        finding["required"]
+            .as_array()
+            .expect("finding required fields")
+            .iter()
+            .any(|field| field == "detail")
+    );
+    let digest = generated
+        .split_once("export const VALIDATION_SUBMISSION_V2_TOOL_SCHEMA_DIGEST = \"")
+        .expect("validation schema digest declaration")
+        .1
+        .split_once('"')
+        .expect("validation schema digest terminator")
+        .0;
+    let kernel = fs::read_to_string(temp.path().join("kernel/src/generated/mod.rs"))
+        .expect("read generated kernel contracts");
+    let profile = kernel
+        .split_once("\"validation-status.v2\"")
+        .expect("validation terminal profile")
+        .1
+        .lines()
+        .take(6)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        profile.contains(digest),
+        "Rust and TypeBox schema digests must match"
+    );
+}
+
+#[test]
 fn host_runtime_generation_and_mutations_fail_loudly() {
     let temp = fixture();
     codegen_command()

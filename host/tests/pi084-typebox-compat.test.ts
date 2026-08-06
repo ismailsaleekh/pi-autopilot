@@ -93,18 +93,29 @@ const validSamples: Record<string, Record<string, unknown>> = {
     scope: "final",
     exact_commit: "HEAD",
     exact_tree: "tree",
-    outcome: "PASS",
+    outcome: "NEEDS_FIX",
     criterion_results: [{
       criterion_id: "criterion-1",
-      verdict: "PASS",
+      verdict: "FAIL",
       evidence_refs: ["evidence#1"],
-      finding_ids: [],
+      finding_ids: ["finding-validation-1"],
       covered_paths: ["package.json"],
-      semantic_surface_ids: [],
-      forward_edge_ids: [],
+      semantic_surface_ids: ["surface-1"],
+      forward_edge_ids: ["edge-1"],
       blocker_kind: "missing-evidence",
     }],
-    findings: [],
+    findings: [{
+      finding_id: "finding-validation-1",
+      kind: "source-defect",
+      effect: "forward-blocking",
+      summary: "Exact criterion is not satisfied",
+      detail: "The issued evidence demonstrates a material source defect.",
+      criterion_ids: ["criterion-1"],
+      edge_ids: ["edge-1"],
+      evidence_refs: ["evidence#1"],
+      covered_paths: ["package.json"],
+      semantic_surface_ids: ["surface-1"],
+    }],
   },
 };
 
@@ -246,4 +257,16 @@ test("TypeBox 1.3.7 under Pi 0.84 compiles every terminal schema with strict nul
   const nullBlockerKind = clone(validSamples["autopilot.validation_submission.v2"]);
   ((nullBlockerKind.criterion_results as Record<string, unknown>[])[0]!).blocker_kind = null;
   assert.equal(validation.Check(nullBlockerKind), false, "optional blocker_kind null must fail");
+
+  const stringFinding = clone(validSamples["autopilot.validation_submission.v2"]);
+  stringFinding.findings = ["finding text cannot substitute for FindingV2"];
+  assert.equal(validation.Check(stringFinding), false, "string findings must fail before Rust admission");
+
+  const missingFindingField = clone(validSamples["autopilot.validation_submission.v2"]);
+  delete ((missingFindingField.findings as Record<string, unknown>[])[0]!).detail;
+  assert.equal(validation.Check(missingFindingField), false, "FindingV2 required fields must remain closed");
+
+  const extraFindingField = clone(validSamples["autopilot.validation_submission.v2"]);
+  ((extraFindingField.findings as Record<string, unknown>[])[0]!).unexpected = true;
+  assert.equal(validation.Check(extraFindingField), false, "FindingV2 must reject undeclared nested fields");
 });

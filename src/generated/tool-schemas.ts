@@ -571,7 +571,81 @@ export const VALIDATION_SUBMISSION_V2_TOOL_PARAMETERS = {
     },
     "findings": {
       "items": {
-        "type": "string"
+        "additionalProperties": false,
+        "properties": {
+          "covered_paths": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "criterion_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "edge_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "effect": {
+            "enum": [
+              "forward-blocking",
+              "closure-blocking-forward-safe",
+              "advisory"
+            ],
+            "type": "string"
+          },
+          "evidence_refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "finding_id": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "source-defect",
+              "test-defect",
+              "contract-defect",
+              "evidence-gap",
+              "context-gap",
+              "unsafe-boundary",
+              "advisory"
+            ],
+            "type": "string"
+          },
+          "semantic_surface_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "summary": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "finding_id",
+          "kind",
+          "effect",
+          "summary",
+          "detail",
+          "criterion_ids",
+          "edge_ids",
+          "evidence_refs",
+          "covered_paths",
+          "semantic_surface_ids"
+        ],
+        "type": "object"
       },
       "type": "array"
     },
@@ -615,7 +689,7 @@ export const VALIDATION_SUBMISSION_V2_TOOL_PARAMETERS = {
   ],
   "type": "object"
 } as TSchema;
-export const VALIDATION_SUBMISSION_V2_TOOL_SCHEMA_DIGEST = "3fb76a96ab8ea6c3bce27fb7fc9cbe4f4f0b411717f7805ea32ba4d8f9514c15";
+export const VALIDATION_SUBMISSION_V2_TOOL_SCHEMA_DIGEST = "0eb7655083ed7e8c707965ecb094134c1241f0d4355c271750fdde0300899674";
 
 export const TERMINAL_TOOL_SCHEMAS = {
   "planning.task-atoms.v1": { boundary_id: "planning.task-atoms.v1", schema_digest: TASK_ATOMS_TOOL_SCHEMA_DIGEST, parameters: TASK_ATOMS_TOOL_PARAMETERS },

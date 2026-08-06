@@ -3475,6 +3475,6 @@ pub const TERMINAL_PROFILES: [(&str, &str, &str, &str, &str); 10] = [
         "autopilot_emit_status",
         "autopilot.validation_submission.v2",
         "autopilot.validation_result.v2",
-        "3fb76a96ab8ea6c3bce27fb7fc9cbe4f4f0b411717f7805ea32ba4d8f9514c15",
+        "0eb7655083ed7e8c707965ecb094134c1241f0d4355c271750fdde0300899674",
     ),
 ];

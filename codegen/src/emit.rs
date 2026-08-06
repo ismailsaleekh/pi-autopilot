@@ -445,11 +445,14 @@ fn emit_constants(rust: &mut String, contracts: &Contracts, child: &str) {
 
 fn emit_submit_rows(rust: &mut String, contracts: &Contracts) -> Result<()> {
     let enums = enum_map(contracts);
-    let records = record_items_by_name(contracts);
+    let shapes = schema_items_by_name(contracts);
     let mut submit_rows = Vec::new();
     let mut profile_rows = Vec::new();
     for artifact in &contracts.artifacts {
-        let schema = json_schema_for_items(&artifact.items, &records, &enums, false)?;
+        if artifact.submit_tools.is_empty() {
+            continue;
+        }
+        let schema = json_schema_for_items(&artifact.items, &shapes, &enums, false)?;
         let digest = sha256_hex(json_string(&schema, "tool schema digest")?.as_bytes());
         for tool in &artifact.submit_tools {
             if artifact.schema.starts_with("planning.") {
@@ -460,7 +463,7 @@ fn emit_submit_rows(rust: &mut String, contracts: &Contracts) -> Result<()> {
                     digest
                 ));
             }
-            let parameters = json_schema_for_items(&artifact.items, &records, &enums, tool.closed)?;
+            let parameters = json_schema_for_items(&artifact.items, &shapes, &enums, tool.closed)?;
             let pdigest =
                 sha256_hex(json_string(&parameters, "terminal profile digest")?.as_bytes());
             profile_rows.push(format!("    (\n        \"{}\",\n        \"{}\",\n        \"{}\",\n        \"{}\",\n        \"{}\",\n    ),", escape_rust_string(&tool.profile), escape_rust_string(&tool.name), escape_rust_string(&artifact.schema), escape_rust_string(&tool.result_contract), pdigest));
@@ -603,7 +606,7 @@ pub fn emit_tool_schemas(contracts: &Contracts) -> Result<String> {
         "// {GENERATED_MARKER}\n\nimport type {{ TSchema }} from \"typebox\";\n\nexport interface ToolSchemaDescriptor {{\n  boundary_id: string;\n  schema_digest: string;\n  parameters: TSchema;\n}}\n\n"
     );
     let enum_values = enum_map(contracts);
-    let records = record_items_by_name(contracts);
+    let shapes = schema_items_by_name(contracts);
     let mut descriptors = Vec::new();
     for artifact in contracts
         .artifacts
@@ -614,7 +617,7 @@ pub fn emit_tool_schemas(contracts: &Contracts) -> Result<String> {
             .submit_tools
             .first()
             .is_some_and(|tool| tool.closed);
-        let schema = json_schema_for_items(&artifact.items, &records, &enum_values, closed)?;
+        let schema = json_schema_for_items(&artifact.items, &shapes, &enum_values, closed)?;
         let schema_json = serde_json::to_string_pretty(&schema)
             .map_err(|error| Error::input(format!("json schema emit failed: {error}")))?;
         let digest = sha256_hex(json_string(&schema, "json schema digest")?.as_bytes());

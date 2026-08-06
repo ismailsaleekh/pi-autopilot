@@ -409,6 +409,19 @@ pub fn record_items_by_name(contracts: &Contracts) -> BTreeMap<String, Vec<Item>
     }
     records
 }
+
+/// Returns nested records plus top-level artifacts for JSON-schema expansion.
+pub fn schema_items_by_name(contracts: &Contracts) -> BTreeMap<String, Vec<Item>> {
+    let mut shapes = record_items_by_name(contracts);
+    shapes.extend(
+        contracts
+            .artifacts
+            .iter()
+            .map(|artifact| (artifact.name.clone(), artifact.items.clone())),
+    );
+    shapes
+}
+
 fn collect_records(
     items: &[Item],
     known: &mut BTreeSet<String>,
@@ -427,7 +440,7 @@ fn collect_records(
 
 pub fn json_schema_for_items(
     items: &[Item],
-    records: &BTreeMap<String, Vec<Item>>,
+    shapes: &BTreeMap<String, Vec<Item>>,
     enums: &BTreeMap<&str, Vec<String>>,
     closed: bool,
 ) -> Result<JsonValue> {
@@ -436,10 +449,10 @@ pub fn json_schema_for_items(
     for item in items {
         let mut value = match item.kind {
             ItemKind::Field => {
-                json_schema_for_type(&item.type_id, records, enums, item.nullable, closed)?
+                json_schema_for_type(&item.type_id, shapes, enums, item.nullable, closed)?
             }
-            ItemKind::List => list_schema(item, records, enums, closed)?,
-            ItemKind::Group => json_schema_for_items(&item.items, records, enums, closed)?,
+            ItemKind::List => list_schema(item, shapes, enums, closed)?,
+            ItemKind::Group => json_schema_for_items(&item.items, shapes, enums, closed)?,
             ItemKind::Record => continue,
         };
         if let Some(doc) = &item.doc {
@@ -466,11 +479,11 @@ fn add_schema_description(schema: &mut JsonValue, doc: &str) -> Result<()> {
 
 fn list_schema(
     item: &Item,
-    records: &BTreeMap<String, Vec<Item>>,
+    shapes: &BTreeMap<String, Vec<Item>>,
     enums: &BTreeMap<&str, Vec<String>>,
     closed: bool,
 ) -> Result<JsonValue> {
-    let value = json!({ "type": "array", "items": json_schema_for_type(&item.type_id, records, enums, false, closed)? });
+    let value = json!({ "type": "array", "items": json_schema_for_type(&item.type_id, shapes, enums, false, closed)? });
     Ok(if item.nullable {
         json!({ "anyOf": [value, { "type": "null" }] })
     } else {
@@ -479,15 +492,15 @@ fn list_schema(
 }
 fn json_schema_for_type(
     type_id: &str,
-    records: &BTreeMap<String, Vec<Item>>,
+    shapes: &BTreeMap<String, Vec<Item>>,
     enums: &BTreeMap<&str, Vec<String>>,
     nullable: bool,
     closed: bool,
 ) -> Result<JsonValue> {
     let mut schema = if let Some(values) = enums.get(type_id) {
         json!({ "type": "string", "enum": values })
-    } else if let Some(items) = records.get(type_id) {
-        json_schema_for_items(items, records, enums, closed)?
+    } else if let Some(items) = shapes.get(type_id) {
+        json_schema_for_items(items, shapes, enums, closed)?
     } else {
         match type_id {
             "bool" => json!({ "type": "boolean" }),
