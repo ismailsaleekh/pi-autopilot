@@ -791,7 +791,8 @@ fn write_approved_plan(root: &Path, units: usize, block_after_first: bool) {
                 "predecessor_forward_criteria": predecessor_forward_criteria,
                 "downstream_release_edges": [format!("EDGE{index}")],
                 "files": [format!("l{index}.txt")],
-                "commands": [{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}]
+                "commands": [{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],
+                "package_checks": []
             })
         })
         .collect::<Vec<_>>();
@@ -835,7 +836,7 @@ fn delivery_carrier(spec: &serde_json::Value, changed_path: &str) -> serde_json:
     let submission_digest = sha256_hex(&serde_json::to_vec(&submission).expect("submission"));
     let binding = drivers::runner::child::carrier_binding(&typed);
     let tool_call_id = "delivery-tool-call-advance";
-    let audit = serde_json::json!({"schema":"autopilot.tool_audit.v1","tool_call_id":tool_call_id,"profile_id":profile.0,"tool_name":profile.1,"boundary_id":profile.2,"result_contract":profile.3,"schema_digest":profile.4,"binding":binding,"submission_digest":submission_digest,"delivery_policy":{"version":drivers::runner::DELIVERY_POLICY_VERSION,"assignment_path":typed.assignment_path.as_ref().expect("assignment path").0.clone(),"assignment_digest":typed.assignment_digest.as_ref().expect("assignment digest").0.clone(),"worktree":typed.worktree.as_ref().expect("worktree").0.clone(),"cwd":typed.cwd.0.clone(),"policy_digest":drivers::runner::delivery_policy_digest(&typed.assignment_path.as_ref().expect("assignment path").0,&typed.assignment_digest.as_ref().expect("assignment digest").0,&typed.worktree.as_ref().expect("worktree").0,&typed.cwd.0),"active_overrides":["bash","edit","write"]}});
+    let audit = serde_json::json!({"schema":"autopilot.tool_audit.v1","tool_call_id":tool_call_id,"profile_id":profile.0,"tool_name":profile.1,"boundary_id":profile.2,"result_contract":profile.3,"schema_digest":profile.4,"binding":binding,"submission_digest":submission_digest,"delivery_policy":{"version":drivers::runner::DELIVERY_POLICY_VERSION,"assignment_path":typed.assignment_path.as_ref().expect("assignment path").0.clone(),"assignment_digest":typed.assignment_digest.as_ref().expect("assignment digest").0.clone(),"worktree":typed.worktree.as_ref().expect("worktree").0.clone(),"cwd":typed.cwd.0.clone(),"policy_digest":drivers::runner::delivery_policy_digest(&typed.assignment_path.as_ref().expect("assignment path").0,&typed.assignment_digest.as_ref().expect("assignment digest").0,&typed.worktree.as_ref().expect("worktree").0,&typed.cwd.0),"active_overrides":["bash","edit","write"],"denials":{"schema":"autopilot.delivery_policy_denials.v1","overflowed":false,"entries":[]}}});
     let audit_bytes = serde_json::to_vec_pretty(&audit).expect("audit");
     let audit_path = PathBuf::from(spec["carrier_path"].as_str().expect("carrier"))
         .with_extension("tool-audit.json");

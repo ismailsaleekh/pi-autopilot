@@ -212,7 +212,7 @@ export const WORK_MAP_TOOL_PARAMETERS = {
         "additionalProperties": true,
         "properties": {
           "commands": {
-            "description": "Nonempty focused verification commands/tests tied to this unit.",
+            "description": "Nonempty pre-package child verification commands/tests tied to this unit; commands may not require or create the Core-owned package commit.",
             "items": {
               "additionalProperties": true,
               "properties": {
@@ -304,6 +304,45 @@ export const WORK_MAP_TOOL_PARAMETERS = {
           },
           "objective": {
             "type": "string"
+          },
+          "package_checks": {
+            "description": "Explicit Core-owned post-package checks tied to this unit; [] is valid when no criterion names package state.",
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "check_id": {
+                  "description": "Stable unit-local package-check identity.",
+                  "type": "string"
+                },
+                "criterion_ordinals": {
+                  "description": "Nonempty unique 1-based ordinals of this unit's criteria proved by the package check.",
+                  "items": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "type": "array"
+                },
+                "expected": {
+                  "description": "Nonempty criterion-facing expectation proved by the package check receipt.",
+                  "type": "string"
+                },
+                "kind": {
+                  "description": "Closed Core-owned package invariant; arbitrary model-authored post-commit shell is forbidden.",
+                  "enum": [
+                    "clean-exact-package-tip"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "check_id",
+                "kind",
+                "criterion_ordinals",
+                "expected"
+              ],
+              "type": "object"
+            },
+            "type": "array"
           }
         },
         "required": [
@@ -314,6 +353,7 @@ export const WORK_MAP_TOOL_PARAMETERS = {
           "depends_on",
           "files",
           "commands",
+          "package_checks",
           "links"
         ],
         "type": "object"
@@ -326,7 +366,7 @@ export const WORK_MAP_TOOL_PARAMETERS = {
   ],
   "type": "object"
 } as TSchema;
-export const WORK_MAP_TOOL_SCHEMA_DIGEST = "db32dc1be05c7596765772da822da82896ed5b261a79839ff4a5c03234f124a8";
+export const WORK_MAP_TOOL_SCHEMA_DIGEST = "21befdaeb971231d9745babef8203da8a0e6fca63f74c91c3068627aae0748cf";
 
 export const PLAN_REVIEW_TOOL_PARAMETERS = {
   "additionalProperties": true,
@@ -394,7 +434,7 @@ export const DELIVERY_SUBMISSION_V2_TOOL_PARAMETERS = {
           "type": "null"
         }
       ],
-      "description": "Required for blocked delivery and forbidden for succeeded delivery; only semantic-repairable is eligible for Recovery Engineer."
+      "description": "Required for blocked delivery and forbidden for succeeded delivery; Core combines this advisory class with immutable audit/Git facts before recovery admission."
     },
     "execution_audit_ref": {
       "type": "string"
@@ -446,7 +486,7 @@ export const DELIVERY_SUBMISSION_V2_TOOL_PARAMETERS = {
   ],
   "type": "object"
 } as TSchema;
-export const DELIVERY_SUBMISSION_V2_TOOL_SCHEMA_DIGEST = "7310576358c49cb8bd4d86a8a0df4a6738398a48190b7b8382e39adadf8e1d4b";
+export const DELIVERY_SUBMISSION_V2_TOOL_SCHEMA_DIGEST = "3ee75a8d7294cddd2f22261dedccc7a59f2403df9b0de761a6cdcd39ef986ab8";
 
 export const VALIDATION_SUBMISSION_V2_TOOL_PARAMETERS = {
   "additionalProperties": false,

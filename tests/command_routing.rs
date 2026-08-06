@@ -1425,7 +1425,7 @@ fn send_planning_completion_inner(
 }
 
 fn one_unit_work_map() -> String {
-    serde_json::json!({"units":[{"id":"U1","kind":"implementation","objective":"Deliver the one accepted work unit.","criteria":["The focused acceptance path passes."],"depends_on":[],"files":["src/lib.rs"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"links":["W1"]}]}).to_string()
+    serde_json::json!({"units":[{"id":"U1","kind":"implementation","objective":"Deliver the one accepted work unit.","criteria":["The focused acceptance path passes."],"depends_on":[],"files":["src/lib.rs"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"package_checks":[],"links":["W1"]}]}).to_string()
 }
 
 fn recovered_work_map(repo: &Path) -> String {
@@ -1639,7 +1639,8 @@ fn complete_run_repo(root: &Path, workstream: &str, units: usize, _closed: &[&st
                 "predecessor_forward_criteria": [],
                 "downstream_release_edges": [format!("EDGE{index}")],
                 "files": ["src/lib.rs"],
-                "commands": [{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}]
+                "commands": [{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],
+                "package_checks": []
             })
         })
         .collect::<Vec<_>>();

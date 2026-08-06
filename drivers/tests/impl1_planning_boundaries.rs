@@ -1433,7 +1433,7 @@ fn planning_doc(path: &str, class: TaskDocumentClass, body: &str) -> TaskDocumen
 }
 
 fn work_map(links: &[&str]) -> String {
-    json!({"units":[{"id":"U1","kind":"implementation","objective":"Implement unit","criteria":["done"],"depends_on":[],"files":["src/lib.rs"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"links":links}]})
+    json!({"units":[{"id":"U1","kind":"implementation","objective":"Implement unit","criteria":["done"],"depends_on":[],"files":["src/lib.rs"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"package_checks":[],"links":links}]})
         .to_string()
 }
 

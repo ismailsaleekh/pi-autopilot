@@ -100,6 +100,65 @@ struct ChildDeliveryPolicyReceipt {
     active_overrides: Vec<String>,
 }
 
+pub(crate) const MAX_DELIVERY_POLICY_DENIALS: usize = 32;
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum DeliveryPolicyDenialKind {
+    UnapprovedCommand,
+    CwdMismatch,
+    MalformedMutation,
+    UnapprovedMutationPath,
+    UnapprovedParentDirectory,
+    OutsideWorktree,
+    ReservedPath,
+    TopologyRefusal,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DeliveryPolicyDenial {
+    pub denial_id: String,
+    pub kind: DeliveryPolicyDenialKind,
+    pub tool: String,
+    pub request_digest: String,
+    pub effected: bool,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DeliveryPolicyDenialLedger {
+    pub schema: String,
+    pub overflowed: bool,
+    pub entries: Vec<DeliveryPolicyDenial>,
+}
+
+pub(crate) fn validate_delivery_policy_denial_ledger(
+    ledger: &DeliveryPolicyDenialLedger,
+) -> Result<(), String> {
+    if ledger.schema != "autopilot.delivery_policy_denials.v1"
+        || ledger.entries.len() > MAX_DELIVERY_POLICY_DENIALS
+        || (ledger.overflowed && ledger.entries.len() != MAX_DELIVERY_POLICY_DENIALS)
+    {
+        return Err("delivery policy denial ledger shape drift".to_owned());
+    }
+    for (index, entry) in ledger.entries.iter().enumerate() {
+        let expected_id = format!("denial-{}", index + 1);
+        if entry.denial_id != expected_id
+            || !matches!(entry.tool.as_str(), "bash" | "edit" | "write")
+            || entry.request_digest.len() != 64
+            || !entry
+                .request_digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            || entry.effected
+        {
+            return Err("delivery policy denial ledger entry drift".to_owned());
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum CarrierSource {
     Tool(ToolTerminal),
@@ -3250,7 +3309,7 @@ fn validate_delivery_assignment_artifact(
     base_commit: &kernel::generated::Sha,
     worktree: &kernel::generated::Path,
 ) -> Result<(), String> {
-    if artifact.schema != "autopilot.delivery_assignment.v1"
+    if artifact.schema != "autopilot.delivery_assignment.v2"
         || artifact.workstream != strict.workstream
         || artifact.assignment_id != strict.assignment_id
         || artifact.lane_id != *lane_id
@@ -3331,6 +3390,16 @@ fn validate_delivery_assignment_artifact(
                 },
             )?;
         }
+        crate::allocation::validate_plan_unit_package_checks(
+            &unit.package_checks,
+            unit.criteria.len(),
+        )
+        .map_err(|error| {
+            format!(
+                "agent-run delivery malformed package-check authority: {}: {error}",
+                unit.id.0
+            )
+        })?;
         previous.insert(unit.id.clone());
     }
     Ok(())
@@ -4458,6 +4527,15 @@ fn validate_validation_submission(
 fn validate_validation_context_command_authority(
     context: &kernel::generated::ValidationContextV2,
 ) -> Result<(), String> {
+    let evidence = context
+        .evidence
+        .iter()
+        .map(|item| (item.evidence_ref.clone(), item))
+        .collect::<BTreeMap<_, _>>();
+    if evidence.len() != context.evidence.len() {
+        return Err("validation context duplicates evidence refs".to_owned());
+    }
+    let mut package_check_ids = BTreeSet::new();
     for criterion in &context.criteria {
         for command in &criterion.commands {
             crate::allocation::validate_validation_context_command_effect_authority(command)
@@ -4468,6 +4546,59 @@ fn validate_validation_context_command_authority(
                     )
                 })?;
         }
+        for check in &criterion.package_checks {
+            if check.check_id.0.trim().is_empty()
+                || check.expected.trim().is_empty()
+                || check.evidence_ref.0.trim().is_empty()
+            {
+                return Err(format!(
+                    "criterion {} has incomplete package check",
+                    criterion.criterion_id.0
+                ));
+            }
+            match check.kind {
+                kernel::generated::PackageCheckKind::CleanExactPackageTip => {}
+            }
+            let Some(receipt) = evidence.get(&check.evidence_ref) else {
+                return Err(format!(
+                    "criterion {} package check {} has no issued evidence",
+                    criterion.criterion_id.0, check.check_id.0
+                ));
+            };
+            if receipt.package_check_id.as_ref() != Some(&check.check_id)
+                || receipt.command_id.is_some()
+                || receipt.kind != "delivery-package-check"
+                || receipt.exact_commit != context.exact_commit
+                || receipt.exact_tree != context.exact_tree
+            {
+                return Err(format!(
+                    "criterion {} package check {} evidence drift",
+                    criterion.criterion_id.0, check.check_id.0
+                ));
+            }
+            package_check_ids.insert(check.check_id.clone());
+        }
+    }
+    if context
+        .evidence
+        .iter()
+        .any(|item| (item.kind == "delivery-package-check") != item.package_check_id.is_some())
+    {
+        return Err("validation package-check evidence kind/id drift".to_owned());
+    }
+    let evidence_check_id_list = context
+        .evidence
+        .iter()
+        .filter_map(|item| item.package_check_id.clone())
+        .collect::<Vec<_>>();
+    let evidence_check_ids = evidence_check_id_list
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if evidence_check_ids.len() != evidence_check_id_list.len()
+        || evidence_check_ids != package_check_ids
+    {
+        return Err("validation package-check evidence set drift".to_owned());
     }
     Ok(())
 }
@@ -4544,6 +4675,19 @@ fn validate_validation_submission_against(
             .iter()
             .find(|criterion| criterion.criterion_id == result.criterion_id)
             .expect("criterion sets were proven equal");
+        let cited_evidence = result.evidence_refs.iter().collect::<BTreeSet<_>>();
+        let required_package_evidence = criterion
+            .package_checks
+            .iter()
+            .map(|check| &check.evidence_ref)
+            .collect::<BTreeSet<_>>();
+        if !required_package_evidence.is_subset(&cited_evidence) {
+            return Err(value_rejection(
+                "criterion_results.evidence_refs",
+                "all Core-owned package-check receipts for the criterion",
+                result.criterion_id.0.clone(),
+            ));
+        }
         let issued_paths = criterion.covered_paths.iter().collect::<BTreeSet<_>>();
         let actual_paths = result.covered_paths.iter().collect::<BTreeSet<_>>();
         let issued_surfaces = criterion
@@ -4692,6 +4836,47 @@ fn validate_validation_submission_against(
     Ok(())
 }
 
+fn terminal_delivery_denial_ledger(
+    spec: &AgentRunSpec,
+    terminal: &ToolTerminal,
+) -> Result<Option<DeliveryPolicyDenialLedger>, ValueRejection> {
+    let is_delivery = matches!(
+        spec.assignment_kind,
+        kernel::generated::ValidationAssignmentKind::Delivery
+    );
+    match (&terminal.details.delivery_policy_denials, is_delivery) {
+        (Some(value), true) => {
+            let ledger: DeliveryPolicyDenialLedger = serde_json::from_value(value.clone())
+                .map_err(|error| {
+                    value_rejection(
+                        "delivery_policy_denials",
+                        "closed package policy denial ledger",
+                        error.to_string(),
+                    )
+                })?;
+            validate_delivery_policy_denial_ledger(&ledger).map_err(|error| {
+                value_rejection(
+                    "delivery_policy_denials",
+                    "valid pre-effect denial ledger",
+                    error,
+                )
+            })?;
+            Ok(Some(ledger))
+        }
+        (None, true) => Err(value_rejection(
+            "delivery_policy_denials",
+            "required delivery policy denial ledger",
+            "missing",
+        )),
+        (Some(_), false) => Err(value_rejection(
+            "delivery_policy_denials",
+            "absent outside delivery",
+            "present",
+        )),
+        (None, false) => Ok(None),
+    }
+}
+
 fn package_tool_result(
     spec_path: &Path,
     spec_bytes: &str,
@@ -4703,6 +4888,7 @@ fn package_tool_result(
 ) -> Result<Value, ValueRejection> {
     let (_, runtime_digest) = runtime_addon(spec)
         .ok_or_else(|| value_rejection(RUNTIME_ADDON_DIGEST_FIELD, "digest", "missing"))?;
+    let denial_ledger = terminal_delivery_denial_ledger(spec, terminal)?;
     let submission_bytes = serde_json::to_vec(&submission)
         .map_err(|error| value_rejection("submission", "serializable", error.to_string()))?;
     let submission_digest = sha256_hex(&submission_bytes);
@@ -4764,6 +4950,7 @@ fn package_tool_result(
                     &spec.cwd.0,
                 ),
                 "active_overrides": ["bash", "edit", "write"],
+                "denials": denial_ledger.expect("validated delivery denial ledger"),
             }),
         );
     }

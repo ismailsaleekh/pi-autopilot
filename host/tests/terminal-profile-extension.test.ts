@@ -29,7 +29,7 @@ const DELIVERY_ENV_KEYS = [
   "AUTOPILOT_DELIVERY_BASE_COMMIT",
   "AUTOPILOT_DELIVERY_POLICY_DIGEST",
 ] as const;
-const DELIVERY_POLICY_VERSION = "autopilot.delivery_tool_policy.v1";
+const DELIVERY_POLICY_VERSION = "autopilot.delivery_tool_policy.v2";
 const deliveryTempDirs: string[] = [];
 
 test("parent planning registration excludes the Recovery Engineer child-only terminal", () => {
@@ -56,7 +56,7 @@ function installDeliveryPolicyEnv(): { assignmentPath: string; assignmentDigest:
   mkdirSync(worktree);
   writeFileSync(join(worktree, "README.md"), "fixture\n");
   const assignment = {
-    schema: "autopilot.delivery_assignment.v1",
+    schema: "autopilot.delivery_assignment.v2",
     workstream: "main",
     assignment_id: "assignment-main-L1",
     lane_id: "L1",
@@ -64,7 +64,7 @@ function installDeliveryPolicyEnv(): { assignmentPath: string; assignmentDigest:
     base_commit: "0123456789abcdef0123456789abcdef01234567",
     worktree,
     ordered_units: [
-      { id: "U1", kind: "implementation", files: ["README.md"], commands: [{ command: "true" }] },
+      { id: "U1", kind: "implementation", files: ["README.md"], commands: [{ command: "true" }], package_checks: [{ check_id: "PKG-U1-TIP", kind: "clean-exact-package-tip", criterion_ordinals: [1], expected: "Core proves the exact clean package tip." }] },
     ],
   };
   const assignmentBytes = Buffer.from(JSON.stringify(assignment, null, 2));
@@ -154,6 +154,15 @@ test("selected terminal profile registers exactly one same-name schema", { concu
       assert.equal(result.details.boundary_id, expected.boundary_id);
       assert.equal(result.details.result_contract, expected.result_contract);
       assert.equal(result.details.binding, "binding-test");
+      if (deliveryEnv) {
+        assert.deepEqual(result.details.delivery_policy_denials, {
+          schema: "autopilot.delivery_policy_denials.v1",
+          overflowed: false,
+          entries: [],
+        });
+      } else {
+        assert.equal(result.details.delivery_policy_denials, undefined);
+      }
     }
   } finally {
     if (previousProfile === undefined) delete process.env.AUTOPILOT_TERMINAL_PROFILE;

@@ -9,14 +9,15 @@ use std::{
 };
 
 use drivers::allocation::{
-    AllocationPolicy, AllocationSubmission, ApprovedUnit, validate_allocation,
+    AllocationPolicy, AllocationSubmission, ApprovedCriterion, ApprovedUnit, validate_allocation,
 };
 use drivers::dispatch::{DispatchInput, LaneReadiness, launch_lanes, select_ready_lanes};
 use drivers::runner::{
     self, DeliveryExpectation, DeliveryRejection, PackageFacts, RunnerAssignment,
-    RunnerTransportFacts, accept_delivery, accept_delivery_with_package_facts,
-    delivery_bg_action_with_facts, delivery_issue_with_facts, establish_delivery_package,
-    package_delivery_commit, refuse_agent_git_mutation,
+    RunnerTransportFacts, ValidationRunnerRequest, accept_delivery,
+    accept_delivery_with_package_facts, delivery_bg_action_with_facts, delivery_issue_with_facts,
+    establish_delivery_package, package_delivery_commit, refuse_agent_git_mutation,
+    validation_issue,
 };
 use drivers::{sim::SimPlatform, vcs::GitVcs};
 use kernel::generated::{
@@ -339,6 +340,17 @@ fn lane_delivery_agent_git_mutation_and_incomplete_delivery_are_refused_without_
     let worktree = fs::canonicalize(&worktree).expect("canonical runner worktree");
     let mut scoped_unit = unit("l1", 1, &[]);
     scoped_unit.objective = "deliver literal `````` backtick text safely".to_owned();
+    scoped_unit.criteria.push(id("AC-l1-2"));
+    scoped_unit.criterion_text.push(ApprovedCriterion {
+        id: id("AC-l1-2"),
+        text: "Core proves the exact packaged tip.".to_owned(),
+    });
+    scoped_unit.package_checks = vec![kernel::generated::PlanUnitPackageCheck {
+        check_id: id("PKG-l1-TIP"),
+        kind: kernel::generated::PackageCheckKind::CleanExactPackageTip,
+        criterion_ordinals: vec![2],
+        expected: "Core proves a clean exact package tip after delivery.".to_owned(),
+    }];
     let runner = RunnerAssignment {
         workstream: id("main"),
         action_id: id("action-main-l1"),
@@ -397,7 +409,7 @@ fn lane_delivery_agent_git_mutation_and_incomplete_delivery_are_refused_without_
         serde_json::from_slice(&assignment_bytes).expect("assignment json");
     assert_eq!(
         assignment_json["schema"],
-        "autopilot.delivery_assignment.v1"
+        "autopilot.delivery_assignment.v2"
     );
     assert_eq!(
         assignment_json["ordered_units"][0]["files"],
@@ -412,13 +424,69 @@ fn lane_delivery_agent_git_mutation_and_incomplete_delivery_are_refused_without_
         delivered_command["scope_preservation"],
         "Final Git-visible state remains limited to the approved unit files."
     );
+    assert_eq!(
+        assignment_json["ordered_units"][0]["package_checks"],
+        serde_json::json!([{
+            "check_id":"PKG-l1-TIP",
+            "kind":"clean-exact-package-tip",
+            "criterion_ordinals":[2],
+            "expected":"Core proves a clean exact package tip after delivery."
+        }])
+    );
+    let validation = validation_issue(
+        &ValidationRunnerRequest {
+            workstream: runner.workstream.clone(),
+            action_id: id("action-validate-main-l1"),
+            assignment_id: runner.assignment_id.clone(),
+            run_revision: runner.run_revision,
+            producer_assignment_ids: vec![runner.assignment_id.clone()],
+            exact_commit: "1111111111111111111111111111111111111111".to_owned(),
+            exact_tree: "2222222222222222222222222222222222222222".to_owned(),
+            candidate_root: runner.worktree.clone(),
+            changed_paths: vec!["keep.txt".to_owned()],
+            execution_audit_ref: Ref("audit:l1".to_owned()),
+            evidence_refs: vec![Ref("evidence:l1".to_owned())],
+            lane_id: runner.lane_id.clone(),
+            attempt: runner.attempt,
+            validation_attempt: 1,
+            semantic_round: 1,
+            base_commit: runner.base_commit.clone(),
+            worktree: runner.worktree.clone(),
+            approved_units: runner.approved_units.clone(),
+        },
+        &facts,
+    )
+    .expect("validation issue");
+    let validation_context: serde_json::Value = serde_json::from_slice(
+        &fs::read(
+            Path::new(&validation.binding.spec_path)
+                .parent()
+                .expect("validation spec parent")
+                .join("context.json"),
+        )
+        .expect("validation context"),
+    )
+    .expect("validation context json");
+    assert_eq!(
+        validation_context["criteria"][0]["package_checks"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        validation_context["criteria"][1]["package_checks"][0]["check_id"],
+        "PKG-l1-TIP"
+    );
+
     let prompt = fs::read_to_string(spec["prompt_path"].as_str().expect("prompt")).expect("prompt");
     assert!(
-        prompt.contains("```````json autopilot.delivery_assignment.v1"),
+        prompt.contains("```````json autopilot.delivery_assignment.v2"),
         "{prompt}"
     );
     assert!(
         prompt.contains("Verification command effect authority is binding"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("package_checks are Core-owned committed-tip checks that you must not execute or block on"),
         "{prompt}"
     );
     fs::write(assignment_path, b"{\"schema\":\"drift\"}").expect("assignment tamper");
@@ -451,6 +519,33 @@ fn lane_delivery_core_stdout_stays_json_when_runtime_packages_uncommitted_change
 
     let accepted = core.send_json(serde_json::json!({"v":1,"id":2,"kind":"task-completed","payload":{"task_id":"task-stdout-purity","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}));
     assert_eq!(accepted.kind, "spawn", "accepted response: {accepted:?}");
+    let context_path =
+        worktree.join(".pi/autopilot/main/validation/validator-assignment-main-L1/context.json");
+    let context: serde_json::Value = serde_json::from_slice(
+        &fs::read(&context_path).expect("validator context with package receipt"),
+    )
+    .expect("validator context json");
+    let check = &context["criteria"][0]["package_checks"][0];
+    assert_eq!(check["check_id"], "PKG-U1-TIP");
+    assert_eq!(check["kind"], "clean-exact-package-tip");
+    let evidence_ref = check["evidence_ref"]
+        .as_str()
+        .expect("package evidence ref");
+    assert!(
+        evidence_ref.starts_with("package-check-receipt:PKG-U1-TIP:"),
+        "{evidence_ref}"
+    );
+    assert!(
+        context["evidence"]
+            .as_array()
+            .expect("evidence")
+            .iter()
+            .any(|item| {
+                item["evidence_ref"] == evidence_ref
+                    && item["package_check_id"] == "PKG-U1-TIP"
+                    && item["kind"] == "delivery-package-check"
+            })
+    );
     core.shutdown();
 }
 
@@ -537,7 +632,7 @@ fn lane_delivery_core_rejects_changed_path_outside_approved_unit_scope() {
 #[test]
 fn delivery_submission_admission_accepts_blocked_and_rejects_mixed_shapes() {
     let assignment = runner::DeliveryAssignmentArtifact {
-        schema: "autopilot.delivery_assignment.v1".to_owned(),
+        schema: "autopilot.delivery_assignment.v2".to_owned(),
         workstream: id("main"),
         assignment_id: id("assignment-main-L1"),
         lane_id: id("L1"),
@@ -635,6 +730,34 @@ fn delivery_submission_admission_accepts_blocked_and_rejects_mixed_shapes() {
 }
 
 #[test]
+fn recovery_assessment_uses_only_typed_audit_git_and_binding_facts() {
+    let source = include_str!("../drivers/src/seam/mod.rs");
+    let start = source
+        .find("fn assess_blocked_delivery_recovery(")
+        .expect("assessment function");
+    let end = source[start..]
+        .find("fn recovery_assessment_refs(")
+        .map(|offset| start + offset)
+        .expect("assessment function end");
+    let body = &source[start..end];
+    assert!(body.contains("denial_ledger"), "{body}");
+    assert!(body.contains("inspect_blocked_delivery_snapshot"), "{body}");
+    assert!(body.contains("UnapprovedCommand"), "{body}");
+    for forbidden in [
+        "hard_boundary_violations",
+        ".contains(",
+        "regex",
+        "root_cause",
+        "diagnosis_details",
+    ] {
+        assert!(
+            !body.contains(forbidden),
+            "assessment inferred from {forbidden}: {body}"
+        );
+    }
+}
+
+#[test]
 fn lane_delivery_core_routes_blocked_to_one_recovery_engineer_without_packaging() {
     let (mut core, spawn, spec, carrier_path, worktree) =
         launched_core_delivery("blocked-delivery");
@@ -669,6 +792,215 @@ fn lane_delivery_core_routes_blocked_to_one_recovery_engineer_without_packaging(
     );
     assert!(!events.contains("agent:delivery-accepted"), "{events}");
     assert!(!events.contains("validation:required"), "{events}");
+    core.shutdown();
+}
+
+#[test]
+fn requires_new_authority_with_pre_effect_command_denial_routes_one_recovery_engineer() {
+    let (mut core, spawn, spec, carrier_path, worktree) =
+        launched_core_delivery("policy-denial-recovery");
+    fs::write(
+        worktree.join("README.md"),
+        "delivery terminal fixture changed in scope\n",
+    )
+    .expect("in-scope edit");
+    let denials = serde_json::json!([{
+        "denial_id":"denial-1",
+        "kind":"unapproved-command",
+        "tool":"bash",
+        "request_digest":"a".repeat(64),
+        "effected":false
+    }]);
+    let carrier = delivery_blocked_carrier_for_core_with_class_and_denials(
+        &spec,
+        2,
+        "requires-new-authority",
+        denials,
+    );
+    fs::create_dir_all(carrier_path.parent().expect("carrier parent")).expect("carrier dir");
+    fs::write(
+        &carrier_path,
+        serde_json::to_vec_pretty(&carrier).expect("blocked carrier"),
+    )
+    .expect("carrier write");
+
+    let recovery = core.send_json(serde_json::json!({"v":1,"id":2,"kind":"task-completed","payload":{"task_id":"task-policy-denial-recovery","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}));
+    assert_eq!(recovery.kind, "spawn", "response: {recovery:?}");
+    let recovery: CoreToHostSpawnPayload =
+        serde_json::from_value(recovery.payload).expect("recovery spawn");
+    assert_eq!(
+        recovery.action.assignment_id.0,
+        "recovery-assignment-main-L1-a1"
+    );
+    assert_eq!(
+        git_stdout(&worktree, &["rev-parse", "--verify", "HEAD^{commit}"]).trim(),
+        spec["base_commit"].as_str().expect("base commit")
+    );
+    assert!(
+        git_stdout(&worktree, &["status", "--porcelain=v1"]).contains("README.md"),
+        "blocked work must not be auto-packaged"
+    );
+    let events = fs::read_to_string(core.event_log()).expect("events");
+    assert!(
+        events.contains("recovery-admission:assignment-main-L1:policy-denial-repairable"),
+        "{events}"
+    );
+    assert!(
+        events.contains("delivery-policy-denial-reconciliation"),
+        "{events}"
+    );
+    assert_eq!(events.matches("delivery:recovery-required").count(), 1);
+    assert!(!events.contains("agent:delivery-accepted"), "{events}");
+    assert!(!events.contains("validation:required"), "{events}");
+    core.shutdown();
+}
+
+#[test]
+fn requires_new_authority_without_qualifying_denial_stays_terminal() {
+    let (mut core, spawn, spec, carrier_path, worktree) =
+        launched_core_delivery("authority-without-denial");
+    fs::write(worktree.join("README.md"), "safe but not reconcilable\n").expect("in-scope edit");
+    fs::create_dir_all(carrier_path.parent().expect("carrier parent")).expect("carrier dir");
+    fs::write(
+        &carrier_path,
+        serde_json::to_vec_pretty(&delivery_blocked_carrier_for_core_with_class(
+            &spec,
+            2,
+            "requires-new-authority",
+        ))
+        .expect("blocked carrier"),
+    )
+    .expect("carrier write");
+    let rejected = core.send_json(serde_json::json!({"v":1,"id":2,"kind":"task-completed","payload":{"task_id":"task-authority-without-denial","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}));
+    assert_eq!(rejected.kind, "done", "response: {rejected:?}");
+    assert!(
+        done_status(&rejected)
+            .contains("delivery-recovery-inadmissible:Some(RequiresNewAuthority)"),
+        "response: {rejected:?}"
+    );
+    let events = fs::read_to_string(core.event_log()).expect("events");
+    assert!(
+        events.contains("delivery-recovery-reason:requires-new-authority"),
+        "{events}"
+    );
+    assert!(!events.contains("delivery:recovery-required"), "{events}");
+    core.shutdown();
+}
+
+#[test]
+fn denied_path_request_does_not_reclassify_new_authority() {
+    let (mut core, spawn, spec, carrier_path, worktree) =
+        launched_core_delivery("path-denial-authority");
+    fs::write(
+        worktree.join("README.md"),
+        "safe but path denial is authority\n",
+    )
+    .expect("in-scope edit");
+    let denials = serde_json::json!([{
+        "denial_id":"denial-1",
+        "kind":"unapproved-mutation-path",
+        "tool":"write",
+        "request_digest":"b".repeat(64),
+        "effected":false
+    }]);
+    let carrier = delivery_blocked_carrier_for_core_with_class_and_denials(
+        &spec,
+        2,
+        "requires-new-authority",
+        denials,
+    );
+    fs::create_dir_all(carrier_path.parent().expect("carrier parent")).expect("carrier dir");
+    fs::write(
+        &carrier_path,
+        serde_json::to_vec_pretty(&carrier).expect("carrier"),
+    )
+    .expect("carrier write");
+    let rejected = core.send_json(serde_json::json!({"v":1,"id":2,"kind":"task-completed","payload":{"task_id":"task-path-denial-authority","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}));
+    assert_eq!(rejected.kind, "done", "response: {rejected:?}");
+    assert!(
+        !fs::read_to_string(core.event_log())
+            .expect("events")
+            .contains("delivery:recovery-required")
+    );
+    core.shutdown();
+}
+
+#[test]
+fn pre_effect_denial_with_clean_worktree_does_not_auto_succeed_or_recover() {
+    let (mut core, spawn, spec, carrier_path, _worktree) =
+        launched_core_delivery("clean-policy-denial");
+    let carrier = delivery_blocked_carrier_for_core_with_class_and_denials(
+        &spec,
+        2,
+        "requires-new-authority",
+        serde_json::json!([{
+            "denial_id":"denial-1",
+            "kind":"unapproved-command",
+            "tool":"bash",
+            "request_digest":"9".repeat(64),
+            "effected":false
+        }]),
+    );
+    fs::create_dir_all(carrier_path.parent().expect("carrier parent")).expect("carrier dir");
+    fs::write(
+        &carrier_path,
+        serde_json::to_vec_pretty(&carrier).expect("carrier"),
+    )
+    .expect("carrier write");
+    let rejected = core.send_json(serde_json::json!({"v":1,"id":2,"kind":"task-completed","payload":{"task_id":"task-clean-policy-denial","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}));
+    assert_eq!(rejected.kind, "done", "response: {rejected:?}");
+    let events = fs::read_to_string(core.event_log()).expect("events");
+    assert!(
+        events.contains("delivery-recovery-reason:no-in-scope-work"),
+        "{events}"
+    );
+    assert!(!events.contains("delivery:recovery-required"), "{events}");
+    assert!(!events.contains("agent:delivery-accepted"), "{events}");
+    core.shutdown();
+}
+
+#[test]
+fn overflowed_denial_ledger_cannot_open_recovery() {
+    let (mut core, spawn, spec, carrier_path, worktree) =
+        launched_core_delivery("overflowed-denial-authority");
+    fs::write(worktree.join("README.md"), "safe but overflowed audit\n").expect("edit");
+    let entries = (1..=32)
+        .map(|index| {
+            serde_json::json!({
+                "denial_id":format!("denial-{index}"),
+                "kind":"unapproved-command",
+                "tool":"bash",
+                "request_digest":"e".repeat(64),
+                "effected":false
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut carrier = delivery_blocked_carrier_for_core_with_class_and_denials(
+        &spec,
+        2,
+        "requires-new-authority",
+        serde_json::Value::Array(entries),
+    );
+    let audit_path = PathBuf::from(carrier["tool_audit_ref"].as_str().expect("audit path"));
+    let mut audit: serde_json::Value =
+        serde_json::from_slice(&fs::read(&audit_path).expect("audit")).expect("audit json");
+    audit["delivery_policy"]["denials"]["overflowed"] = serde_json::json!(true);
+    let audit_bytes = serde_json::to_vec_pretty(&audit).expect("audit bytes");
+    fs::write(&audit_path, &audit_bytes).expect("audit rewrite");
+    carrier["tool_audit_digest"] = serde_json::json!(sha256_hex(&audit_bytes));
+    fs::create_dir_all(carrier_path.parent().expect("carrier parent")).expect("carrier dir");
+    fs::write(
+        &carrier_path,
+        serde_json::to_vec_pretty(&carrier).expect("carrier"),
+    )
+    .expect("carrier write");
+    let rejected = core.send_json(serde_json::json!({"v":1,"id":2,"kind":"task-completed","payload":{"task_id":"task-overflowed-denial","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}));
+    assert_eq!(rejected.kind, "done", "response: {rejected:?}");
+    assert!(
+        !fs::read_to_string(core.event_log())
+            .expect("events")
+            .contains("delivery:recovery-required")
+    );
     core.shutdown();
 }
 
@@ -759,6 +1091,106 @@ fn blocked_delivery_recovery_replays_after_crash_before_issue() {
 }
 
 #[test]
+fn effected_git_mutation_stays_unsafe_despite_pre_effect_denial_evidence() {
+    let (mut core, spawn, spec, carrier_path, worktree) =
+        launched_core_delivery("policy-denial-agent-commit");
+    fs::write(worktree.join("README.md"), "agent committed mutation\n").expect("edit");
+    git_run(&worktree, &["add", "README.md"]);
+    git_run(&worktree, &["commit", "-m", "agent mutation"]);
+    let carrier = delivery_blocked_carrier_for_core_with_class_and_denials(
+        &spec,
+        2,
+        "requires-new-authority",
+        serde_json::json!([{
+            "denial_id":"denial-1",
+            "kind":"unapproved-command",
+            "tool":"bash",
+            "request_digest":"d".repeat(64),
+            "effected":false
+        }]),
+    );
+    fs::create_dir_all(carrier_path.parent().expect("carrier parent")).expect("carrier dir");
+    fs::write(
+        &carrier_path,
+        serde_json::to_vec_pretty(&carrier).expect("carrier"),
+    )
+    .expect("carrier write");
+    let rejected = core.send_json(serde_json::json!({"v":1,"id":2,"kind":"task-completed","payload":{"task_id":"task-policy-denial-agent-commit","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}));
+    assert_eq!(rejected.kind, "done", "response: {rejected:?}");
+    assert!(
+        done_status(&rejected).contains("delivery-recovery-unsafe:AgentGitMutation"),
+        "response: {rejected:?}"
+    );
+    assert!(
+        !fs::read_to_string(core.event_log())
+            .expect("events")
+            .contains("delivery:recovery-required")
+    );
+    core.shutdown();
+}
+
+#[test]
+fn recovery_resume_fails_closed_when_blocked_worktree_snapshot_drifts() {
+    let (mut core, spawn, spec, carrier_path, worktree) =
+        launched_core_delivery("policy-denial-replay-drift");
+    fs::write(worktree.join("README.md"), "snapshot one\n").expect("first edit");
+    let carrier = delivery_blocked_carrier_for_core_with_class_and_denials(
+        &spec,
+        2,
+        "requires-new-authority",
+        serde_json::json!([{
+            "denial_id":"denial-1",
+            "kind":"unapproved-command",
+            "tool":"bash",
+            "request_digest":"f".repeat(64),
+            "effected":false
+        }]),
+    );
+    fs::create_dir_all(carrier_path.parent().expect("carrier parent")).expect("carrier dir");
+    fs::write(
+        &carrier_path,
+        serde_json::to_vec_pretty(&carrier).expect("carrier"),
+    )
+    .expect("carrier write");
+    let recovery = core.send_json(serde_json::json!({"v":1,"id":2,"kind":"task-completed","payload":{"task_id":"task-policy-denial-replay-drift","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}));
+    assert_eq!(recovery.kind, "spawn", "response: {recovery:?}");
+    let event_log = core.event_log().to_path_buf();
+    let root = event_log
+        .ancestors()
+        .nth(4)
+        .expect("fixture root from event log")
+        .to_path_buf();
+    core.shutdown();
+
+    let events = fs::read_to_string(&event_log).expect("events");
+    let lines = events.lines().collect::<Vec<_>>();
+    let cutoff = lines
+        .iter()
+        .position(|line| line.contains("transcript:recorded"))
+        .expect("transcript before issue");
+    fs::write(&event_log, format!("{}\n", lines[..=cutoff].join("\n")))
+        .expect("project crash window");
+    fs::write(worktree.join("README.md"), "snapshot two\n").expect("drift edit");
+
+    let mut resumed = CoreProcess::spawn(&root);
+    let rejected = resumed.send_json(autopilot_command(3));
+    assert_eq!(rejected.kind, "done", "drift response: {rejected:?}");
+    assert!(
+        done_status(&rejected).contains("recovery resume assessment drift"),
+        "drift response: {rejected:?}"
+    );
+    resumed.shutdown();
+    let replayed_events = fs::read_to_string(&event_log).expect("events after drift");
+    assert_eq!(
+        replayed_events
+            .matches("delivery:recovery-required")
+            .count(),
+        0,
+        "drifted snapshot issued recovery: {replayed_events}"
+    );
+}
+
+#[test]
 fn blocked_recovery_engineer_fails_closed_without_a_second_recovery_loop() {
     let (mut core, spawn, spec, carrier_path, worktree) =
         launched_core_delivery("blocked-recovery-exhaustion");
@@ -844,8 +1276,19 @@ fn blocked_delivery_with_out_of_scope_residue_fails_closed_without_recovery() {
     fs::create_dir_all(carrier_path.parent().expect("carrier parent")).expect("carrier dir");
     fs::write(
         &carrier_path,
-        serde_json::to_vec_pretty(&delivery_blocked_carrier_for_core(&spec, 2))
-            .expect("blocked carrier"),
+        serde_json::to_vec_pretty(&delivery_blocked_carrier_for_core_with_class_and_denials(
+            &spec,
+            2,
+            "requires-new-authority",
+            serde_json::json!([{
+                "denial_id":"denial-1",
+                "kind":"unapproved-command",
+                "tool":"bash",
+                "request_digest":"c".repeat(64),
+                "effected":false
+            }]),
+        ))
+        .expect("blocked carrier"),
     )
     .expect("carrier write");
 
@@ -996,7 +1439,7 @@ fn launched_core_delivery(
                 "head_tree": repo_authority.manifest.head_tree,
             },
             "units":[
-                {"id":"U1","kind":"implementation","objective":"deliver U1","operator_order":1,"decisions":[],"criteria":["AC1"],"criterion_text":[{"id":"AC1","text":"criterion text AC1"}],"dependencies":[],"predecessor_forward_criteria":[],"downstream_release_edges":["EDGE1"],"files":["README.md"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}]}
+                {"id":"U1","kind":"implementation","objective":"deliver U1","operator_order":1,"decisions":[],"criteria":["AC1"],"criterion_text":[{"id":"AC1","text":"criterion text AC1"}],"dependencies":[],"predecessor_forward_criteria":[],"downstream_release_edges":["EDGE1"],"files":["README.md"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"package_checks":[{"check_id":"PKG-U1-TIP","kind":"clean-exact-package-tip","criterion_ordinals":[1],"expected":"Core proves a clean exact package tip after delivery."}]}
             ]
         }))
         .expect("approved json"),
@@ -1145,6 +1588,12 @@ fn unit(name: &str, order: u32, deps: &[&str]) -> ApprovedUnit {
             scope_preservation:
                 "Final Git-visible state remains limited to the approved unit files.".to_owned(),
         }],
+        package_checks: vec![kernel::generated::PlanUnitPackageCheck {
+            check_id: id(&format!("PKG-{name}-TIP")),
+            kind: kernel::generated::PackageCheckKind::CleanExactPackageTip,
+            criterion_ordinals: vec![1],
+            expected: "Core proves a clean exact package tip after delivery.".to_owned(),
+        }],
     }
 }
 
@@ -1264,6 +1713,7 @@ fn delivery_carrier_for_core_path(
                 &typed.cwd.0,
             ),
             "active_overrides":["bash","edit","write"],
+            "denials":{"schema":"autopilot.delivery_policy_denials.v1","overflowed":false,"entries":[]},
         },
     });
     let spec_bytes =
@@ -1304,6 +1754,20 @@ fn delivery_blocked_carrier_for_core_with_class(
     spec: &serde_json::Value,
     evidence_count: usize,
     blocker_class: &str,
+) -> serde_json::Value {
+    delivery_blocked_carrier_for_core_with_class_and_denials(
+        spec,
+        evidence_count,
+        blocker_class,
+        serde_json::json!([]),
+    )
+}
+
+fn delivery_blocked_carrier_for_core_with_class_and_denials(
+    spec: &serde_json::Value,
+    evidence_count: usize,
+    blocker_class: &str,
+    denials: serde_json::Value,
 ) -> serde_json::Value {
     let typed: kernel::generated::AgentRunSpec =
         serde_json::from_value(spec.clone()).expect("typed runner spec");
@@ -1351,6 +1815,7 @@ fn delivery_blocked_carrier_for_core_with_class(
                 &typed.cwd.0,
             ),
             "active_overrides":["bash","edit","write"],
+            "denials":{"schema":"autopilot.delivery_policy_denials.v1","overflowed":false,"entries":denials},
         },
     });
     let spec_bytes =

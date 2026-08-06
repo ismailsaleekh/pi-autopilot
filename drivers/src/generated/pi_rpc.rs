@@ -517,6 +517,7 @@ pub struct AppendedEntry {
     pub data: Value,
 }
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolCarrierDetails {
     pub profile_id: String,
     pub tool_name: String,
@@ -525,6 +526,8 @@ pub struct ToolCarrierDetails {
     pub schema_digest: String,
     pub binding: String,
     pub payload: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_policy_denials: Option<Value>,
 }
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct TerminalMessage {

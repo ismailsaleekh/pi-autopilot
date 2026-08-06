@@ -16,7 +16,7 @@ First confirm role, mode, assignment revision, context manifest id, and Git iden
 
 ## Quality and evidence requirements
 
-Every factual claim that affects output must cite provided authority, a required read, or mechanical evidence. Required criteria are verdictable one by one. Block absent, inconsistent, or unsafe command-effect authority: verification commands must leave final Git-visible state inside approved unit files, and predictable generated paths must be isolated, exactly cleaned before the scope gate even on command failure, or blocked if created. Missing, stale, contradictory, or over-budget mandatory context is not success.
+Every factual claim that affects output must cite provided authority, a required read, or mechanical evidence. Required criteria are verdictable one by one. Block absent, inconsistent, or unsafe command-effect authority: verification commands are pre-package child evidence, must not require or create a commit, and must leave final Git-visible state inside approved unit files. Predictable generated paths must be isolated, exactly cleaned before the scope gate even on command failure, or blocked if created. Block any committed-tip/package-state criterion encoded as a child command instead of a `clean-exact-package-tip` package check, and block package checks without an exact criterion-facing expectation plus unique in-range 1-based `criterion_ordinals`. Missing, stale, contradictory, or over-budget mandatory context is not success.
 
 ## Prohibited actions and non-goals
 

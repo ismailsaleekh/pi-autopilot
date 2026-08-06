@@ -226,6 +226,7 @@ fn unit(
         downstream_release_edges: ids(edges),
         files: Vec::new(),
         commands: Vec::new(),
+        package_checks: Vec::new(),
     }
 }
 

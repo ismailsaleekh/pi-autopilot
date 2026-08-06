@@ -193,6 +193,9 @@ const FRAME_VALIDATION_DESCRIPTORS = {
       "repair-queued",
       "closed"
     ],
+    "package-check-kind": [
+      "clean-exact-package-tip"
+    ],
     "plan_unit_kind": [
       "implementation"
     ],

@@ -19,11 +19,12 @@ import {
 import type { SubmitToolDescriptor } from "../src/generated/tool-schemas.ts";
 
 export const CHILD_RECEIPT_ENTRY = "pi-autopilot:child-tools";
-export const DELIVERY_POLICY_VERSION = "autopilot.delivery_tool_policy.v1";
+export const DELIVERY_POLICY_VERSION = "autopilot.delivery_tool_policy.v2";
 export const DELIVERY_POLICY_OVERRIDES = ["bash", "edit", "write"] as const;
 
 const DELIVERY_PROFILE_ID = "delivery-status.v2";
 const MAX_DELIVERY_ASSIGNMENT_BYTES = 256 * 1024;
+const MAX_DELIVERY_POLICY_DENIALS = 32;
 const DELIVERY_ENV_KEYS = [
   "AUTOPILOT_DELIVERY_ASSIGNMENT_PATH",
   "AUTOPILOT_DELIVERY_ASSIGNMENT_DIGEST",
@@ -57,6 +58,21 @@ type DeliveryUnit = {
   kind: string;
   files: string[];
   commands: Array<{ command: string }>;
+  package_checks: Array<{ check_id: string; kind: "clean-exact-package-tip"; criterion_ordinals: number[]; expected: string }>;
+};
+
+type DeliveryPolicyDenial = {
+  denial_id: string;
+  kind: "unapproved-command";
+  tool: "bash";
+  request_digest: string;
+  effected: false;
+};
+
+type DeliveryPolicyDenialLedger = {
+  schema: "autopilot.delivery_policy_denials.v1";
+  overflowed: boolean;
+  entries: DeliveryPolicyDenial[];
 };
 
 type DeliveryPolicyReceipt = {
@@ -95,6 +111,8 @@ export class DeliveryPolicy {
   readonly allowedParentDirectories: Set<string>;
   readonly approvedCommands: Set<string>;
   readonly queue = new SerialPolicyQueue();
+  readonly denialEntries: DeliveryPolicyDenial[] = [];
+  denialOverflowed = false;
 
   constructor(input: {
     assignmentPath: string;
@@ -133,6 +151,28 @@ export class DeliveryPolicy {
       active_overrides: [...DELIVERY_POLICY_OVERRIDES],
     };
   }
+
+  recordUnapprovedCommand(request: { command: string; cwd: string }): void {
+    if (this.denialEntries.length >= MAX_DELIVERY_POLICY_DENIALS) {
+      this.denialOverflowed = true;
+      return;
+    }
+    this.denialEntries.push({
+      denial_id: `denial-${this.denialEntries.length + 1}`,
+      kind: "unapproved-command",
+      tool: "bash",
+      request_digest: sha256Hex(Buffer.from(canonicalJson(request), "utf8")),
+      effected: false,
+    });
+  }
+
+  denialLedger(): DeliveryPolicyDenialLedger {
+    return {
+      schema: "autopilot.delivery_policy_denials.v1",
+      overflowed: this.denialOverflowed,
+      entries: this.denialEntries.map((entry) => ({ ...entry })),
+    };
+  }
 }
 
 export function runAutopilotChild(
@@ -143,7 +183,7 @@ export function runAutopilotChild(
   const tool = selectedTerminalTool(tools);
   const deliveryPolicy = loadDeliveryPolicyForProfile(tool.profile_id);
   if (deliveryPolicy) registerDeliveryPolicyTools(pi, deliveryPolicy);
-  registerTool(pi, tool);
+  registerTool(pi, tool, deliveryPolicy);
   pi.on("session_start", async () => {
     const receipt: Record<string, unknown> = {
       self_digest: selfDigest(wrapperUrl),
@@ -205,7 +245,11 @@ function selectedTerminalTool(tools: SubmitTools): SubmitToolDescriptor {
   return match;
 }
 
-function registerTool(pi: ExtensionAPI, tool: SubmitToolDescriptor): void {
+function registerTool(
+  pi: ExtensionAPI,
+  tool: SubmitToolDescriptor,
+  deliveryPolicy?: DeliveryPolicy,
+): void {
   const computed = createHash("sha256").update(canonicalJson(tool.parameters)).digest("hex");
   if (computed !== tool.schema_digest) {
     throw new Error(
@@ -234,6 +278,9 @@ function registerTool(pi: ExtensionAPI, tool: SubmitToolDescriptor): void {
           schema_digest: tool.schema_digest,
           binding: process.env["AUTOPILOT_CARRIER_BINDING"] ?? "",
           payload: params as Record<string, unknown>,
+          ...(deliveryPolicy === undefined
+            ? {}
+            : { delivery_policy_denials: deliveryPolicy.denialLedger() }),
         },
         terminate: true,
       };
@@ -343,6 +390,7 @@ function createDeliveryBashOperations(policy: DeliveryPolicy): BashOperations {
   return {
     async exec(command, cwd, options) {
       if (!policy.approvedCommands.has(command)) {
+        policy.recordUnapprovedCommand({ command, cwd });
         throw new Error("Delivery policy blocked unapproved bash command");
       }
       const actualCwd = canonicalDirectory("bash cwd", cwd);
@@ -534,8 +582,11 @@ function parseDeliveryUnit(value: unknown, index: number): DeliveryUnit {
   const object = value as Record<string, unknown>;
   const files = object["files"];
   const commands = object["commands"];
+  const packageChecks = object["package_checks"];
   if (!Array.isArray(files) || files.length === 0) throw new Error(`autopilot delivery unit ${index} has no files`);
   if (!Array.isArray(commands) || commands.length === 0) throw new Error(`autopilot delivery unit ${index} has no commands`);
+  if (!Array.isArray(packageChecks)) throw new Error(`autopilot delivery unit ${index} has no package_checks`);
+  const packageCheckIds = new Set<string>();
   return {
     id: requiredString(object, "id"),
     kind: requiredString(object, "kind"),
@@ -549,11 +600,36 @@ function parseDeliveryUnit(value: unknown, index: number): DeliveryUnit {
       }
       return { command: requiredString(item as Record<string, unknown>, "command") };
     }),
+    package_checks: packageChecks.map((item, checkIndex) => {
+      if (item === null || typeof item !== "object") {
+        throw new Error(`autopilot delivery unit ${index} package check ${checkIndex} is not an object`);
+      }
+      const check = item as Record<string, unknown>;
+      const checkId = requiredString(check, "check_id");
+      if (packageCheckIds.has(checkId)) {
+        throw new Error(`autopilot delivery unit ${index} has duplicate package check ${checkId}`);
+      }
+      packageCheckIds.add(checkId);
+      const kind = requiredString(check, "kind");
+      if (kind !== "clean-exact-package-tip") {
+        throw new Error(`autopilot delivery unit ${index} has unknown package check kind ${kind}`);
+      }
+      const ordinals = check["criterion_ordinals"];
+      if (!Array.isArray(ordinals) || ordinals.length === 0 || new Set(ordinals).size !== ordinals.length || ordinals.some((ordinal) => !Number.isInteger(ordinal) || ordinal < 1)) {
+        throw new Error(`autopilot delivery unit ${index} has invalid package check criterion ordinals`);
+      }
+      return {
+        check_id: checkId,
+        kind,
+        criterion_ordinals: ordinals as number[],
+        expected: requiredString(check, "expected"),
+      };
+    }),
   };
 }
 
 function assertAssignmentIdentity(artifact: DeliveryAssignmentArtifact, env: DeliveryEnv, worktree: string): void {
-  if (artifact.schema !== "autopilot.delivery_assignment.v1") throw new Error("autopilot delivery assignment schema drift");
+  if (artifact.schema !== "autopilot.delivery_assignment.v2") throw new Error("autopilot delivery assignment schema drift");
   if (
     artifact.assignment_id !== env.AUTOPILOT_DELIVERY_ASSIGNMENT_ID ||
     artifact.workstream !== env.AUTOPILOT_DELIVERY_WORKSTREAM ||

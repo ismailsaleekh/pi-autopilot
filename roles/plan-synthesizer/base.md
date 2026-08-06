@@ -16,7 +16,7 @@ First confirm role, mode, assignment revision, context manifest id, and Git iden
 
 ## Quality and evidence requirements
 
-Every factual claim that affects output must cite provided authority, a required read, or mechanical evidence. Required criteria are verdictable one by one. Verification commands must declare closed command-effect authority and leave final Git-visible state inside approved unit files; predictable generated paths must be isolated, exactly cleaned before the scope gate even on command failure, or blocked if created. Missing, stale, contradictory, or over-budget mandatory context is not success.
+Every factual claim that affects output must cite provided authority, a required read, or mechanical evidence. Required criteria are verdictable one by one. Verification commands are pre-package child evidence: they must declare closed command-effect authority, must not require or create a commit, and must leave final Git-visible state inside approved unit files; predictable generated paths must be isolated, exactly cleaned before the scope gate even on command failure, or blocked if created. Represent committed-tip, package-tree, ancestry, clean-worktree, or exact base-to-package path criteria only as `package_checks` with kind `clean-exact-package-tip`; name the exact unique 1-based `criterion_ordinals` each check proves. Core verifies those after delivery and forwards a receipt only to those criteria for the independent Validator. Missing, stale, contradictory, or over-budget mandatory context is not success.
 
 ## Prohibited actions and non-goals
 

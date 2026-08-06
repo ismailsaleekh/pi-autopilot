@@ -56,6 +56,7 @@ export type FindingEffect = "forward-blocking" | "closure-blocking-forward-safe"
 export type FindingKindV2 = "source-defect" | "test-defect" | "contract-defect" | "evidence-gap" | "context-gap" | "unsafe-boundary" | "advisory";
 export type ForwardVerdict = "FORWARD_READY" | "FORWARD_BLOCKED" | "BLOCKED";
 export type LaneState = "allocated" | "implementing" | "forward-validating-1" | "forward-fixing" | "forward-validating-2" | "forward-ready" | "release-queued" | "forward-integrated" | "deep-validating" | "closure-needs-fix" | "repair-queued" | "closed";
+export type PackageCheckKind = "clean-exact-package-tip";
 export type PlanUnitKind = "implementation";
 export type PlanningAtomKind = "work" | "decision" | "constraint" | "acceptance" | "premise" | "question" | "reference";
 export type PlanningQuestionClass = "invalidated-decision" | "missing-material-decision" | "material-underdetermination" | "dod-hole" | "unsafe-irreversible";
@@ -1009,6 +1010,7 @@ export interface ValidationContextCriterion {
   semantic_surface_ids: Id[];
   forward_edge_ids: Id[];
   commands: ValidationContextCommand[];
+  package_checks: ValidationContextPackageCheck[];
   witness_ids: Id[];
 }
 
@@ -1022,6 +1024,13 @@ export interface ValidationContextCommand {
   scope_preservation: string;
 }
 
+export interface ValidationContextPackageCheck {
+  check_id: Id;
+  kind: PackageCheckKind;
+  expected: string;
+  evidence_ref: Ref;
+}
+
 export interface ValidationContextEvidence {
   evidence_ref: Ref;
   digest: Digest;
@@ -1029,6 +1038,7 @@ export interface ValidationContextEvidence {
   exact_commit: GitOid;
   exact_tree: GitOid;
   command_id?: Id;
+  package_check_id?: Id;
 }
 
 export interface ValidationExcludedRef {
@@ -1137,6 +1147,7 @@ export interface PlanUnit {
   depends_on: Id[];
   files: Path[];
   commands: PlanUnitCommand[];
+  package_checks: PlanUnitPackageCheck[];
   links: Id[];
 }
 
@@ -1147,6 +1158,13 @@ export interface PlanUnitCommand {
   generated_paths: Path[];
   handling: CommandEffectHandling;
   scope_preservation: string;
+}
+
+export interface PlanUnitPackageCheck {
+  check_id: Id;
+  kind: PackageCheckKind;
+  criterion_ordinals: number[];
+  expected: string;
 }
 
 export interface WorkMapRecovery {

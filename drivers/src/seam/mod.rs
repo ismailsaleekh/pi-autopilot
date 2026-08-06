@@ -533,18 +533,28 @@ fn resume_pending_delivery_recovery(
         )?;
         let result: kernel::generated::DeliveryResultV2 = serde_json::from_str(&carrier_text)
             .map_err(|error| format!("recovery resume carrier json:{error}"))?;
-        validate_delivery_result_v2(&result, &source)
+        let facts = validate_delivery_result_v2(&result, &source)
             .map_err(|error| format!("recovery resume carrier binding:{error}"))?;
         if runner::delivery_submission_outcome(&result.submission)
             != runner::DeliverySubmissionOutcome::Blocked
-            || result.submission.blocker_class
-                != Some(kernel::generated::DeliveryBlockerClass::SemanticRepairable)
         {
-            return Err(
-                "recovery resume source is not semantic-repairable blocked delivery".into(),
-            );
+            return Err("recovery resume source is not a blocked delivery".into());
         }
-        return issue_delivery_recovery(id, &source, &result, state).map(Some);
+        let DeliveryRecoveryDecision::Admit(assessment) =
+            assess_blocked_delivery_recovery(&source, &result, &facts)?
+        else {
+            return Err("recovery resume source is no longer mechanically admissible".into());
+        };
+        for reference in recovery_assessment_refs(&source, &assessment) {
+            if !state.state.refs.contains_key(&reference) {
+                return Err(format!(
+                    "recovery resume assessment drift for {}: {}",
+                    source.assignment_id.0, reference.0
+                )
+                .into());
+            }
+        }
+        return issue_delivery_recovery(id, &source, &result, &assessment, state).map(Some);
     }
     Ok(None)
 }
@@ -1107,9 +1117,10 @@ fn route_task_completed(
                     );
                 }
             };
-        if let Err(error) = validate_delivery_result_v2(&result_v2, &binding) {
-            return done(id, rejection("delivery-carrier-binding", &error));
-        }
+        let validated = match validate_delivery_result_v2(&result_v2, &binding) {
+            Ok(value) => value,
+            Err(error) => return done(id, rejection("delivery-carrier-binding", &error)),
+        };
         let result = delivery_v1_projection(&result_v2);
         let expected = match delivery_expectation_from_binding(&binding) {
             Ok(value) => value,
@@ -1131,16 +1142,14 @@ fn route_task_completed(
                     "delivery-blocker-class:{:?}",
                     result_v2.submission.blocker_class
                 )),
+                Ref(format!(
+                    "policy-denials:{}",
+                    validated.denial_ledger.entries.len()
+                )),
             ];
-            if binding.role_id.0 != "recovery-engineer"
-                && result_v2.submission.blocker_class
-                    == Some(kernel::generated::DeliveryBlockerClass::SemanticRepairable)
-            {
-                blocked_refs.push(Ref(format!("recovery-pending:{}", binding.assignment_id.0)));
-            }
-            state.append(EventKind("agent:delivery-blocked".to_owned()), blocked_refs)?;
-            record_delivery_transcript(&binding, &carrier_text, state)?;
             if binding.role_id.0 == "recovery-engineer" {
+                state.append(EventKind("agent:delivery-blocked".to_owned()), blocked_refs)?;
+                record_delivery_transcript(&binding, &carrier_text, state)?;
                 let Some(disposition) = result_v2.submission.recovery_disposition.as_ref() else {
                     return done(
                         id,
@@ -1164,30 +1173,60 @@ fn route_task_completed(
                     rejection("recovery-fail-closed", &format!("{disposition:?}")),
                 );
             }
-            if result_v2.submission.blocker_class
-                != Some(kernel::generated::DeliveryBlockerClass::SemanticRepairable)
-            {
-                state.append(
-                    EventKind("recovery:inadmissible".to_owned()),
-                    vec![
-                        Ref(binding.assignment_id.0.clone()),
-                        Ref(format!(
-                            "delivery-blocker-class:{:?}",
-                            result_v2.submission.blocker_class
-                        )),
-                        delivery_blocker_failure_ref(result_v2.submission.blocker_class.as_ref()),
-                        lane_blocker_ref(&binding)?,
-                    ],
-                )?;
-                return done(
-                    id,
-                    rejection(
-                        "delivery-recovery-inadmissible",
-                        &format!("{:?}", result_v2.submission.blocker_class),
-                    ),
-                );
+            let decision = assess_blocked_delivery_recovery(&binding, &result_v2, &validated)?;
+            if let DeliveryRecoveryDecision::Admit(assessment) = &decision {
+                blocked_refs.extend(recovery_assessment_refs(&binding, assessment));
+                if assessment.admission == DeliveryRecoveryAdmission::PolicyDenialRepairable {
+                    blocked_refs.push(Ref("delivery-policy-denial-reconciliation".to_owned()));
+                }
+                blocked_refs.push(Ref(format!("recovery-pending:{}", binding.assignment_id.0)));
             }
-            return issue_delivery_recovery(id, &binding, &result_v2, state);
+            state.append(EventKind("agent:delivery-blocked".to_owned()), blocked_refs)?;
+            record_delivery_transcript(&binding, &carrier_text, state)?;
+            match decision {
+                DeliveryRecoveryDecision::Admit(assessment) => {
+                    return issue_delivery_recovery(id, &binding, &result_v2, &assessment, state);
+                }
+                DeliveryRecoveryDecision::Unsafe(error) => {
+                    state.append(
+                        EventKind("recovery:inadmissible".to_owned()),
+                        vec![
+                            Ref(binding.assignment_id.0.clone()),
+                            Ref(format!("delivery-recovery-unsafe:{error:?}")),
+                            Ref("semantic-recovery-unsafe".to_owned()),
+                            lane_blocker_ref(&binding)?,
+                        ],
+                    )?;
+                    return done(
+                        id,
+                        rejection("delivery-recovery-unsafe", &format!("{error:?}")),
+                    );
+                }
+                DeliveryRecoveryDecision::Inadmissible(reason) => {
+                    state.append(
+                        EventKind("recovery:inadmissible".to_owned()),
+                        vec![
+                            Ref(binding.assignment_id.0.clone()),
+                            Ref(format!(
+                                "delivery-blocker-class:{:?}",
+                                result_v2.submission.blocker_class
+                            )),
+                            Ref(format!("delivery-recovery-reason:{reason}")),
+                            delivery_blocker_failure_ref(
+                                result_v2.submission.blocker_class.as_ref(),
+                            ),
+                            lane_blocker_ref(&binding)?,
+                        ],
+                    )?;
+                    return done(
+                        id,
+                        rejection(
+                            "delivery-recovery-inadmissible",
+                            &format!("{:?}", result_v2.submission.blocker_class),
+                        ),
+                    );
+                }
+            }
         }
         let package = match runner::establish_delivery_package(&result, &expected) {
             Ok(value) => value,
@@ -1455,7 +1494,7 @@ fn validate_delivery_assignment_binding(
     }
     let artifact: runner::DeliveryAssignmentArtifact = serde_json::from_slice(&bytes)
         .map_err(|error| format!("delivery assignment json:{error}"))?;
-    if artifact.schema != "autopilot.delivery_assignment.v1"
+    if artifact.schema != "autopilot.delivery_assignment.v2"
         || artifact.workstream != binding.workstream
         || artifact.assignment_id != binding.assignment_id
         || Some(&artifact.lane_id) != binding.lane_id.as_ref()
@@ -1544,15 +1583,43 @@ fn validate_delivery_artifact_units(units: &[ApprovedUnit]) -> Result<(), String
                 },
             )?;
         }
+        crate::allocation::validate_plan_unit_package_checks(
+            &unit.package_checks,
+            unit.criteria.len(),
+        )
+        .map_err(|error| {
+            format!(
+                "delivery assignment unit {} malformed package-check authority: {error}",
+                unit.id.0
+            )
+        })?;
         previous.insert(unit.id.clone());
     }
     Ok(())
 }
 
+struct ValidatedDeliveryFacts {
+    assignment: runner::DeliveryAssignmentArtifact,
+    denial_ledger: runner::child::DeliveryPolicyDenialLedger,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeliveryToolAuditPolicy {
+    version: String,
+    assignment_path: String,
+    assignment_digest: String,
+    worktree: String,
+    cwd: String,
+    policy_digest: String,
+    active_overrides: Vec<String>,
+    denials: runner::child::DeliveryPolicyDenialLedger,
+}
+
 fn validate_delivery_result_v2(
     result: &kernel::generated::DeliveryResultV2,
     binding: &runner::IssuedRunnerBinding,
-) -> Result<(), String> {
+) -> Result<ValidatedDeliveryFacts, String> {
     if result.schema.0 != "autopilot.delivery_result.v2"
         || result.action_id != binding.action_id
         || result.assignment_id != binding.assignment_id
@@ -1633,7 +1700,7 @@ fn validate_delivery_result_v2(
     if sha256_hex_local(&audit) != result.tool_audit_digest.0 {
         return Err("delivery tool audit digest drift".to_owned());
     }
-    validate_delivery_tool_audit_policy(&audit, &spec)?;
+    let denial_ledger = validate_delivery_tool_audit_policy(&audit, &spec)?;
     let submission = serde_json::to_vec(
         &serde_json::to_value(&result.submission).map_err(|error| error.to_string())?,
     )
@@ -1641,18 +1708,25 @@ fn validate_delivery_result_v2(
     if sha256_hex_local(&submission) != result.submission_digest.0 {
         return Err("delivery submission digest drift".to_owned());
     }
-    Ok(())
+    Ok(ValidatedDeliveryFacts {
+        assignment,
+        denial_ledger,
+    })
 }
 
 fn validate_delivery_tool_audit_policy(
     audit: &[u8],
     spec: &kernel::generated::AgentRunSpec,
-) -> Result<(), String> {
+) -> Result<runner::child::DeliveryPolicyDenialLedger, String> {
     let value: serde_json::Value = serde_json::from_slice(audit)
         .map_err(|error| format!("delivery tool audit json:{error}"))?;
-    let policy = value
-        .get("delivery_policy")
-        .ok_or_else(|| "delivery tool audit missing policy authority".to_owned())?;
+    let policy: DeliveryToolAuditPolicy = serde_json::from_value(
+        value
+            .get("delivery_policy")
+            .cloned()
+            .ok_or_else(|| "delivery tool audit missing policy authority".to_owned())?,
+    )
+    .map_err(|error| format!("delivery tool audit policy shape:{error}"))?;
     let assignment_path = spec
         .assignment_path
         .as_ref()
@@ -1671,19 +1745,18 @@ fn validate_delivery_tool_audit_policy(
         &worktree.0,
         &spec.cwd.0,
     );
-    let expected = serde_json::json!({
-        "version": runner::DELIVERY_POLICY_VERSION,
-        "assignment_path": assignment_path.0,
-        "assignment_digest": assignment_digest.0,
-        "worktree": worktree.0,
-        "cwd": spec.cwd.0,
-        "policy_digest": expected_policy_digest,
-        "active_overrides": ["bash", "edit", "write"],
-    });
-    if policy != &expected {
+    if policy.version != runner::DELIVERY_POLICY_VERSION
+        || policy.assignment_path != assignment_path.0
+        || policy.assignment_digest != assignment_digest.0
+        || policy.worktree != worktree.0
+        || policy.cwd != spec.cwd.0
+        || policy.policy_digest != expected_policy_digest
+        || policy.active_overrides != ["bash", "edit", "write"]
+    {
         return Err("delivery tool audit policy authority drift".to_owned());
     }
-    Ok(())
+    runner::child::validate_delivery_policy_denial_ledger(&policy.denials)?;
+    Ok(policy.denials)
 }
 
 fn delivery_v1_projection(result: &kernel::generated::DeliveryResultV2) -> DeliveryResult {
@@ -2783,6 +2856,117 @@ fn recovery_disposition_failure_ref(disposition: &kernel::generated::RecoveryDis
     .to_owned())
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum DeliveryRecoveryAdmission {
+    SemanticRepairable,
+    PolicyDenialRepairable,
+}
+
+impl DeliveryRecoveryAdmission {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SemanticRepairable => "semantic-repairable",
+            Self::PolicyDenialRepairable => "policy-denial-repairable",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct DeliveryRecoveryAssessment {
+    admission: DeliveryRecoveryAdmission,
+    snapshot: runner::BlockedDeliverySnapshot,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+enum DeliveryRecoveryDecision {
+    Admit(DeliveryRecoveryAssessment),
+    Inadmissible(&'static str),
+    Unsafe(runner::DeliveryRejection),
+}
+
+fn assess_blocked_delivery_recovery(
+    binding: &runner::IssuedRunnerBinding,
+    result: &kernel::generated::DeliveryResultV2,
+    facts: &ValidatedDeliveryFacts,
+) -> Result<DeliveryRecoveryDecision, String> {
+    use kernel::generated::DeliveryBlockerClass;
+    if binding.role_id.0 == "recovery-engineer" {
+        return Ok(DeliveryRecoveryDecision::Inadmissible("recovery-result"));
+    }
+    let admission = match result.submission.blocker_class.as_ref() {
+        Some(DeliveryBlockerClass::SemanticRepairable) => {
+            DeliveryRecoveryAdmission::SemanticRepairable
+        }
+        Some(DeliveryBlockerClass::RequiresNewAuthority) => {
+            let denials = &facts.denial_ledger;
+            let bounded_pre_effect_command_denials = !denials.overflowed
+                && !denials.entries.is_empty()
+                && denials.entries.iter().all(|entry| {
+                    entry.kind == runner::child::DeliveryPolicyDenialKind::UnapprovedCommand
+                        && entry.tool == "bash"
+                        && !entry.effected
+                });
+            if !bounded_pre_effect_command_denials {
+                return Ok(DeliveryRecoveryDecision::Inadmissible(
+                    "requires-new-authority",
+                ));
+            }
+            DeliveryRecoveryAdmission::PolicyDenialRepairable
+        }
+        Some(DeliveryBlockerClass::Infrastructure) => {
+            return Ok(DeliveryRecoveryDecision::Inadmissible("infrastructure"));
+        }
+        Some(DeliveryBlockerClass::Unsafe) => {
+            return Ok(DeliveryRecoveryDecision::Inadmissible("unsafe"));
+        }
+        None => return Ok(DeliveryRecoveryDecision::Inadmissible("missing-class")),
+    };
+    let base_commit = binding
+        .base_commit
+        .as_ref()
+        .ok_or_else(|| "delivery recovery assessment missing base commit".to_owned())?;
+    let worktree = binding
+        .worktree
+        .as_ref()
+        .ok_or_else(|| "delivery recovery assessment missing worktree".to_owned())?;
+    let snapshot = match runner::inspect_blocked_delivery_snapshot(
+        Path::new(worktree),
+        base_commit,
+        &facts.assignment.ordered_units,
+    ) {
+        Ok(snapshot) => snapshot,
+        Err(error) => return Ok(DeliveryRecoveryDecision::Unsafe(error)),
+    };
+    if admission == DeliveryRecoveryAdmission::PolicyDenialRepairable
+        && snapshot.in_scope_dirty_paths.is_empty()
+    {
+        return Ok(DeliveryRecoveryDecision::Inadmissible("no-in-scope-work"));
+    }
+    Ok(DeliveryRecoveryDecision::Admit(
+        DeliveryRecoveryAssessment {
+            admission,
+            snapshot,
+        },
+    ))
+}
+
+fn recovery_assessment_refs(
+    binding: &runner::IssuedRunnerBinding,
+    assessment: &DeliveryRecoveryAssessment,
+) -> [Ref; 2] {
+    [
+        Ref(format!(
+            "recovery-admission:{}:{}",
+            binding.assignment_id.0,
+            assessment.admission.as_str()
+        )),
+        Ref(format!(
+            "recovery-assessment:{}:{}",
+            binding.assignment_id.0, assessment.snapshot.snapshot_digest
+        )),
+    ]
+}
+
 fn delivery_blocker_failure_ref(blocker: Option<&kernel::generated::DeliveryBlockerClass>) -> Ref {
     use kernel::generated::DeliveryBlockerClass;
     Ref(match blocker {
@@ -2872,6 +3056,7 @@ fn issue_delivery_recovery(
     id: u64,
     binding: &runner::IssuedRunnerBinding,
     result: &kernel::generated::DeliveryResultV2,
+    assessment: &DeliveryRecoveryAssessment,
     state: &mut CoreState,
 ) -> Result<SeamEnvelope, AnyError> {
     let approved_units = read_delivery_assignment_units(binding)?;
@@ -2879,49 +3064,33 @@ fn issue_delivery_recovery(
         .base_commit
         .clone()
         .ok_or_else(|| "delivery recovery missing base commit".to_owned())?;
-    let worktree = PathBuf::from(
-        binding
-            .worktree
-            .clone()
-            .ok_or_else(|| "delivery recovery missing worktree".to_owned())?,
-    );
-    let in_scope_dirty_paths = match runner::inspect_blocked_delivery_for_recovery(
-        &worktree,
-        &base_commit,
-        &approved_units,
-    ) {
-        Ok(paths) => paths,
-        Err(error) => {
-            state.append(
-                EventKind("recovery:inadmissible".to_owned()),
-                vec![
-                    Ref(binding.assignment_id.0.clone()),
-                    Ref(format!("delivery-recovery-unsafe:{error:?}")),
-                    Ref("semantic-recovery-unsafe".to_owned()),
-                    lane_blocker_ref(binding)?,
-                ],
-            )?;
-            return done(
-                id,
-                rejection("delivery-recovery-unsafe", &format!("{error:?}")),
-            );
-        }
-    };
     let mut diagnosis_details = result.submission.hard_boundary_violations.clone();
     diagnosis_details.push(format!(
         "mechanical in-scope dirty paths: [{}]",
-        in_scope_dirty_paths.join(",")
+        assessment.snapshot.in_scope_dirty_paths.join(",")
     ));
+    diagnosis_details.push(format!(
+        "package recovery admission: {}; snapshot={}",
+        assessment.admission.as_str(),
+        assessment.snapshot.snapshot_digest
+    ));
+    let [admission_ref, assessment_ref] = recovery_assessment_refs(binding, assessment);
+    let mut diagnosis_refs = vec![
+        Ref(binding.carrier_path.clone()),
+        result.submission.execution_audit_ref.clone(),
+        admission_ref,
+        assessment_ref,
+    ];
+    if assessment.admission == DeliveryRecoveryAdmission::PolicyDenialRepairable {
+        diagnosis_refs.push(Ref("delivery-policy-denial-reconciliation".to_owned()));
+    }
     let directive = runner::RecoveryDirective {
         schema: "autopilot.recovery_directive.v1".to_owned(),
         trigger_phase: "execution".to_owned(),
         repair_mode: ModeId("forward-critical".to_owned()),
         trigger_assignment_id: binding.assignment_id.clone(),
-        diagnosis_refs: vec![
-            Ref(binding.carrier_path.clone()),
-            result.submission.execution_audit_ref.clone(),
-        ],
-        diagnosis_ids: vec![idv("delivery-blocked")],
+        diagnosis_refs,
+        diagnosis_ids: vec![idv("delivery-blocked"), idv(assessment.admission.as_str())],
         diagnosis_details,
         original_gate: "autopilot.delivery_submission.v2".to_owned(),
         attempt_budget: crate::repair::SemanticRecoveryPolicy::package()?.max_attempts,

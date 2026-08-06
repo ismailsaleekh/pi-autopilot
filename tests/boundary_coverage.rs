@@ -245,7 +245,7 @@ fn work_map_atom_registry_links_admit_only_exact_ids_without_expansion() {
         .into_iter()
         .map(|id| Id(id.to_owned()))
         .collect::<BTreeSet<_>>();
-    let valid = serde_json::json!({"units":[{"id":"U1","kind":"implementation","objective":"impl","criteria":["c"],"depends_on":[],"files":["src/lib.rs"],"commands":[command_authority("no-effect", vec![], "none", "No final Git-visible state remains outside approved files.")],"links":["TE01-001","TE01-003"]}]}).to_string();
+    let valid = serde_json::json!({"units":[{"id":"U1","kind":"implementation","objective":"impl","criteria":["c"],"depends_on":[],"files":["src/lib.rs"],"commands":[command_authority("no-effect", vec![], "none", "No final Git-visible state remains outside approved files.")],"package_checks":[],"links":["TE01-001","TE01-003"]}]}).to_string();
     accept_work_map_for_atoms(&valid, &runtime, &atom_ids, "registry-digest")
         .expect("exact atom ids are admitted");
 
@@ -260,7 +260,7 @@ fn work_map_atom_registry_links_admit_only_exact_ids_without_expansion() {
         ("artifact-ref", vec!["artifact://work-map"]),
         ("empty-artifact", vec![""]),
     ] {
-        let raw = serde_json::json!({"units":[{"id":"U1","kind":"implementation","objective":"impl","criteria":["c"],"depends_on":[],"files":["src/lib.rs"],"commands":[command_authority("no-effect", vec![], "none", "No final Git-visible state remains outside approved files.")],"links":links}]}).to_string();
+        let raw = serde_json::json!({"units":[{"id":"U1","kind":"implementation","objective":"impl","criteria":["c"],"depends_on":[],"files":["src/lib.rs"],"commands":[command_authority("no-effect", vec![], "none", "No final Git-visible state remains outside approved files.")],"package_checks":[],"links":links}]}).to_string();
         assert!(
             accept_work_map_for_atoms(&raw, &runtime, &atom_ids, "registry-digest").is_err(),
             "{label} pseudo-link was rewritten or admitted"
@@ -459,6 +459,80 @@ fn work_map_command_effect_authority_rejects_cross_field_and_path_defects() {
 }
 
 #[test]
+fn work_map_package_checks_are_closed_explicit_and_fail_closed_without_defaults() {
+    let mut runtime = boundary_runtime("planning.work-map.v1");
+    runtime.flip_to_enforce();
+    let command = command_authority(
+        "no-effect",
+        vec![],
+        "none",
+        "No final Git-visible state remains outside approved files.",
+    );
+    let valid = serde_json::json!({"units":[{
+        "id":"U1","kind":"implementation","objective":"impl","criteria":["clean committed tip"],
+        "depends_on":[],"files":["src/lib.rs"],"commands":[command.clone()],
+        "package_checks":[{"check_id":"PKG-U1-TIP","kind":"clean-exact-package-tip","criterion_ordinals":[1],"expected":"Core proves the exact clean package tip."}],
+        "links":["W1"]
+    }]}).to_string();
+    accept_work_map(&valid, &runtime).expect("closed package check accepted");
+
+    for (label, package_checks) in [
+        (
+            "duplicate ids",
+            serde_json::json!([
+                {"check_id":"PKG-U1-TIP","kind":"clean-exact-package-tip","criterion_ordinals":[1],"expected":"one"},
+                {"check_id":"PKG-U1-TIP","kind":"clean-exact-package-tip","criterion_ordinals":[1],"expected":"two"}
+            ]),
+        ),
+        (
+            "blank expectation",
+            serde_json::json!([{"check_id":"PKG-U1-TIP","kind":"clean-exact-package-tip","criterion_ordinals":[1],"expected":" "}]),
+        ),
+        (
+            "empty criterion ordinals",
+            serde_json::json!([{"check_id":"PKG-U1-TIP","kind":"clean-exact-package-tip","criterion_ordinals":[],"expected":"bad"}]),
+        ),
+        (
+            "duplicate criterion ordinals",
+            serde_json::json!([{"check_id":"PKG-U1-TIP","kind":"clean-exact-package-tip","criterion_ordinals":[1,1],"expected":"bad"}]),
+        ),
+        (
+            "zero criterion ordinal",
+            serde_json::json!([{"check_id":"PKG-U1-TIP","kind":"clean-exact-package-tip","criterion_ordinals":[0],"expected":"bad"}]),
+        ),
+        (
+            "out-of-range criterion ordinal",
+            serde_json::json!([{"check_id":"PKG-U1-TIP","kind":"clean-exact-package-tip","criterion_ordinals":[2],"expected":"bad"}]),
+        ),
+        (
+            "unknown kind",
+            serde_json::json!([{"check_id":"PKG-U1-TIP","kind":"model-shell","criterion_ordinals":[1],"expected":"bad"}]),
+        ),
+    ] {
+        let raw = serde_json::json!({"units":[{
+            "id":"U1","kind":"implementation","objective":"impl","criteria":["clean committed tip"],
+            "depends_on":[],"files":["src/lib.rs"],"commands":[command.clone()],
+            "package_checks":package_checks,"links":["W1"]
+        }]})
+        .to_string();
+        assert!(
+            accept_work_map(&raw, &runtime).is_err(),
+            "{label} was admitted"
+        );
+    }
+
+    let missing = serde_json::json!({"units":[{
+        "id":"U1","kind":"implementation","objective":"impl","criteria":["criterion"],
+        "depends_on":[],"files":["src/lib.rs"],"commands":[command],"links":["W1"]
+    }]})
+    .to_string();
+    assert!(
+        accept_work_map(&missing, &runtime).is_err(),
+        "legacy omission was defaulted"
+    );
+}
+
+#[test]
 fn work_map_command_only_payloads_fail_loudly_without_backfill() {
     let mut runtime = boundary_runtime("planning.work-map.v1");
     runtime.flip_to_enforce();
@@ -617,6 +691,92 @@ fn malformed_validation_context_command_authority_is_rejected_at_submission_admi
     }
 }
 
+#[test]
+fn validation_package_check_receipts_are_exactly_bound_and_cannot_duplicate() {
+    let command = validation_context_command_authority(
+        "verify assigned unit",
+        "pass",
+        "no-effect",
+        vec![],
+        "none",
+        "scope kept",
+    );
+    let (assignment, mut context, mut submission) = validation_authority_bundle(command);
+    let check_id = Id("PKG-U1-TIP".to_owned());
+    let evidence_ref = kernel::generated::Ref(
+        "package-check-receipt:PKG-U1-TIP:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            .to_owned(),
+    );
+    context.criteria[0]
+        .package_checks
+        .push(kernel::generated::ValidationContextPackageCheck {
+            check_id: check_id.clone(),
+            kind: kernel::generated::PackageCheckKind::CleanExactPackageTip,
+            expected: "Core proves the clean exact package tip.".to_owned(),
+            evidence_ref: evidence_ref.clone(),
+        });
+    context
+        .evidence
+        .push(kernel::generated::ValidationContextEvidence {
+            evidence_ref: evidence_ref.clone(),
+            digest: kernel::generated::Digest("a".repeat(64)),
+            kind: "delivery-package-check".to_owned(),
+            exact_commit: context.exact_commit.clone(),
+            exact_tree: context.exact_tree.clone(),
+            command_id: None,
+            package_check_id: Some(check_id),
+        });
+    assert!(
+        drivers::runner::child::admit_validation_submission_with_authority(
+            &submission,
+            &assignment,
+            &context,
+        )
+        .is_err(),
+        "criterion omitted its required Core-owned package-check receipt"
+    );
+    submission.criterion_results[0].evidence_refs = vec![evidence_ref];
+    drivers::runner::child::admit_validation_submission_with_authority(
+        &submission,
+        &assignment,
+        &context,
+    )
+    .expect("package check receipt is admitted");
+
+    let mut drifted = context.clone();
+    drifted
+        .evidence
+        .last_mut()
+        .expect("package evidence")
+        .exact_tree = kernel::generated::GitOid("f".repeat(40));
+    assert!(
+        drivers::runner::child::admit_validation_submission_with_authority(
+            &submission,
+            &assignment,
+            &drifted,
+        )
+        .is_err(),
+        "tree-drifted package receipt was admitted"
+    );
+    let mut duplicated = context.clone();
+    duplicated.evidence.push(
+        duplicated
+            .evidence
+            .last()
+            .expect("package evidence")
+            .clone(),
+    );
+    assert!(
+        drivers::runner::child::admit_validation_submission_with_authority(
+            &submission,
+            &assignment,
+            &duplicated,
+        )
+        .is_err(),
+        "duplicate package receipt was admitted"
+    );
+}
+
 fn validation_context_command_authority(
     command: &str,
     expected: &str,
@@ -701,6 +861,7 @@ fn validation_authority_bundle(
             "semantic_surface_ids":["surface-1"],
             "forward_edge_ids":["edge-1"],
             "commands":[command],
+            "package_checks":[],
             "witness_ids":["witness-1"]
         }],
         "evidence":[{
@@ -755,6 +916,15 @@ fn prompt_guidance_names_command_effect_authority() {
     assert!(admits.contains("declared-predictable"), "{admits}");
     assert!(admits.contains("run-isolated"), "{admits}");
     assert!(admits.contains("final-scope preservation"), "{admits}");
+    assert!(
+        admits.contains("strictly pre-package child evidence"),
+        "{admits}"
+    );
+    assert!(admits.contains("clean-exact-package-tip"), "{admits}");
+    assert!(
+        admits.contains("must never be represented as a child command"),
+        "{admits}"
+    );
 }
 
 fn command_authority(
@@ -782,6 +952,7 @@ fn work_map_with_command(command: serde_json::Value) -> serde_json::Value {
         "depends_on":[],
         "files":["src/unit.txt"],
         "commands":[command],
+        "package_checks":[],
         "links":["W1"]
     }]})
 }

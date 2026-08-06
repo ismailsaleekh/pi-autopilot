@@ -613,7 +613,7 @@ fn raw_output_for_spec(spec: &serde_json::Value) -> String {
             json!({"atoms":[{"id":format!("{prefix}W-001"),"kind":"work","text":"Do the work","sources":["task.md"]}]}).to_string()
         }
         "planning.scout-dossier.v1" => json!({"findings":[{"path":"task.md","observation":"task authority exists","evidence_ref":"task.md"}]}).to_string(),
-        "planning.work-map.v1" => json!({"units":[{"id":"U1","kind":"implementation","objective":"Implement unit","criteria":["done"],"depends_on":[],"files":["src/lib.rs"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"links":["TE01-W-001"]}]}).to_string(),
+        "planning.work-map.v1" => json!({"units":[{"id":"U1","kind":"implementation","objective":"Implement unit","criteria":["done"],"depends_on":[],"files":["src/lib.rs"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"package_checks":[],"links":["TE01-W-001"]}]}).to_string(),
         "planning.plan-review.v1" => json!({"verdicts": seam::REQUIRED_PLAN_REVIEW_CRITERIA.iter().map(|criterion| json!({"criterion_id": criterion, "verdict": "pass"})).collect::<Vec<_>>()}).to_string(),
         other => panic!("unsupported boundary in test: {other}"),
     }

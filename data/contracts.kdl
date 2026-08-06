@@ -583,7 +583,7 @@ artifact "questions" schema="planning.questions.v1" producer="Model" model_produ
 
 artifact "work_map" schema="planning.work-map.v1" producer="Model" model_produced=#true {
     doc "Model-facing work map. Link values are checked against the accepted atom registry by the planning driver."
-    admits "Plan compiler, synthesizer, and Recovery Engineer output must contain one or more executable implementation units only. Each unit kind must be exactly implementation. Never emit context-gate or verification units: unresolved context must be recorded as review-blocking evidence, and independent verification must be folded into exact criteria plus nonempty focused commands on the owning implementation unit. Each units[].links element must equal exactly one bound atom registry atoms[].id byte-for-byte: no `atoms:` prefix, ranges, comma groups, task/source/scout/context/artifact refs, placeholders, or inferred expansion. Each command must declare closed Git-visible effect authority: no-effect with empty generated_paths and none handling; declared-predictable with nonempty exact normalized repo-relative Git-visible persistent generated_paths and isolation, exact cleanup before the scope gate, or block-if-created handling; or unknown-generated with empty generated_paths and run-isolated handling. External temporary paths are not generated_paths; commands leaving no persistent Git-visible repo state use no-effect + [] + none even if they temporarily write outside the repo and clean up. Approved commands execute later inside a package-assigned delivery worktree/candidate root; the planning checkout absolute identity/path is not future execution authority. Command, expected, and scope_preservation text must use repository-relative facts plus typed base commit/tree/worktree authority and must not bake the planning checkout root as expected delivery identity. Exact command strings are transported unchanged; allocation and delivery must not rewrite them. If an approved command conflicts with the later assigned worktree, the implementer must submit the typed blocked outcome and stop rather than seeking another checkout. Every command must include a nonempty final-scope preservation statement proving verification leaves Git-visible state inside approved unit files. Each unit must have a nonempty objective, criteria, depends_on array, files array, commands array, and traceable links by real atom id. A Recovery Engineer must preserve all unaffected units and authority links and include recovery evidence that verifies the runtime diagnosis rather than blindly accepting it. Call the parent-selected terminal tool exactly once: autopilot_submit_plan_cluster for a compiler, autopilot_submit_synthesis for a synthesizer, or autopilot_emit_status for a Recovery Engineer."
+    admits "Plan compiler, synthesizer, and Recovery Engineer output must contain one or more executable implementation units only. Each unit kind must be exactly implementation. Never emit context-gate or verification units: unresolved context must be recorded as review-blocking evidence, and independent verification must be folded into exact criteria plus nonempty focused commands on the owning implementation unit. Each units[].links element must equal exactly one bound atom registry atoms[].id byte-for-byte: no `atoms:` prefix, ranges, comma groups, task/source/scout/context/artifact refs, placeholders, or inferred expansion. Commands are strictly pre-package child evidence and must be executable without creating or requiring a commit. A criterion about the Core-created committed tip, exact package tree, base ancestry, clean package worktree, or exact base-to-package changed paths must use units[].package_checks with kind clean-exact-package-tip and must never be represented as a child command. Package checks are closed Core-owned obligations, are verified after an admitted child submission, and are forwarded as package evidence to the unchanged independent Validator. Each command must declare closed Git-visible effect authority: no-effect with empty generated_paths and none handling; declared-predictable with nonempty exact normalized repo-relative Git-visible persistent generated_paths and isolation, exact cleanup before the scope gate, or block-if-created handling; or unknown-generated with empty generated_paths and run-isolated handling. External temporary paths are not generated_paths; commands leaving no persistent Git-visible repo state use no-effect + [] + none even if they temporarily write outside the repo and clean up. Approved commands execute later inside a package-assigned delivery worktree/candidate root; the planning checkout absolute identity/path is not future execution authority. Command, expected, and scope_preservation text must use repository-relative facts plus typed base commit/tree/worktree authority and must not bake the planning checkout root as expected delivery identity. Exact command strings are transported unchanged; allocation and delivery must not rewrite them. If an approved command conflicts with the later assigned worktree, the implementer must submit the typed blocked outcome and stop rather than seeking another checkout. Every command must include a nonempty final-scope preservation statement proving verification leaves Git-visible state inside approved unit files. Each unit must have a nonempty objective, criteria, depends_on array, files array, commands array, an explicit package_checks array (which may be empty), and traceable links by real atom id. Every package check must name the exact unique 1-based criterion_ordinals it proves. A Recovery Engineer must preserve all unaffected units and authority links and include recovery evidence that verifies the runtime diagnosis rather than blindly accepting it. Call the parent-selected terminal tool exactly once: autopilot_submit_plan_cluster for a compiler, autopilot_submit_synthesis for a synthesizer, or autopilot_emit_status for a Recovery Engineer."
     submit_tool "autopilot_submit_plan_cluster" label="Submit work map"
     submit_tool "autopilot_submit_synthesis" label="Submit synthesized work map"
     submit_tool "autopilot_emit_status" label="Submit recovered work map" profile="recovery-work-map.v1" result_contract="planning.work-map.v1" closed=#true
@@ -596,7 +596,8 @@ artifact "work_map" schema="planning.work-map.v1" producer="Model" model_produce
         list "criteria" item="string" required=#true
         list "depends_on" item="id" required=#true doc="Exact declared predecessor unit ids; package must never invent positional dependencies."
         list "files" item="path" required=#true doc="Nonempty declared relevant path scope for this executable delivery unit."
-        list "commands" item="plan_unit_command" required=#true doc="Nonempty focused verification commands/tests tied to this unit."
+        list "commands" item="plan_unit_command" required=#true doc="Nonempty pre-package child verification commands/tests tied to this unit; commands may not require or create the Core-owned package commit."
+        list "package_checks" item="plan_unit_package_check" required=#true doc="Explicit Core-owned post-package checks tied to this unit; [] is valid when no criterion names package state."
         list "links" item="id" required=#true doc="Each item must equal exactly one bound atom registry atoms[].id byte-for-byte; no `atoms:` prefix, range, comma group, task/source/scout/context/artifact ref, placeholder, or inferred expansion."
     }
     record "plan_unit_command" {
@@ -606,6 +607,12 @@ artifact "work_map" schema="planning.work-map.v1" producer="Model" model_produce
         list "generated_paths" item="path" required=#true doc="Exact normalized repo-relative Git-visible persistent generated artifact paths only, empty unless effect is declared-predictable; external temporary paths are not generated_paths."
         field "handling" type="command_effect_handling" required=#true doc="Closed handling authority for Git-visible generated artifacts; no-effect requires none, unknown-generated requires run-isolated."
         field "scope_preservation" type="string" required=#true doc="Nonempty final-scope-check statement proving verification leaves final Git-visible state inside approved unit files."
+    }
+    record "plan_unit_package_check" {
+        field "check_id" type="id" required=#true doc="Stable unit-local package-check identity."
+        field "kind" type="package-check-kind" required=#true doc="Closed Core-owned package invariant; arbitrary model-authored post-commit shell is forbidden."
+        list "criterion_ordinals" item="u32" required=#true doc="Nonempty unique 1-based ordinals of this unit's criteria proved by the package check."
+        field "expected" type="string" required=#true doc="Nonempty criterion-facing expectation proved by the package check receipt."
     }
     record "work_map_recovery" {
         field "disposition" type="recovery-disposition" required=#true doc="Typed conclusion after independent diagnosis: repaired/no-defect may return to the same gate; authority, infrastructure, and unsafe outcomes fail closed."
@@ -681,14 +688,14 @@ artifact "delivery_result" schema="autopilot.delivery_result.v1" producer="Model
 
 artifact "delivery_submission_v2" schema="autopilot.delivery_submission.v2" producer="Model" model_produced=#true {
     doc "Model-owned delivery status payload. Package and assignment identity are supplied only by Core and are not model parameters."
-    admits "Call autopilot_emit_status exactly once with the actual changed paths, execution audit reference, focused evidence references, terminal status, and every hard-boundary violation. terminal_status must be exactly succeeded or blocked. Ordinary delivery omits recovery_disposition and remains closed and cross-field: succeeded requires nonempty safe actual_changed_paths, a nonempty execution_audit_ref, at least the required focused_evidence_refs, empty hard_boundary_violations, and no blocker_class; blocked requires empty actual_changed_paths, a nonempty execution_audit_ref, at least the required focused_evidence_refs, nonempty bounded hard_boundary_violations, and one blocker_class. Only semantic-repairable can dispatch Recovery Engineer; requires-new-authority, infrastructure, and unsafe fail closed without semantic repair. A package-issued Recovery Engineer assignment requires exactly one typed recovery_disposition: repaired requires succeeded with nonempty changes; no-defect requires succeeded with exact in-scope changes or a mechanically clean unchanged commit; requires-new-authority, infrastructure-blocked, and unsafe-blocked require blocked with no changed-path claim and bounded violations. Mixed or unknown shapes are rejected. If execution is blocked or authority conflicts, report blocked and stop; value repair may correct terminal carrier fields only and must not mutate files, seek another checkout, or manufacture success. Do not include assignment or package identity."
+    admits "Call autopilot_emit_status exactly once with the actual changed paths, execution audit reference, focused evidence references, terminal status, and every hard-boundary violation. terminal_status must be exactly succeeded or blocked. Ordinary delivery omits recovery_disposition and remains closed and cross-field: succeeded requires nonempty safe actual_changed_paths, a nonempty execution_audit_ref, at least the required focused_evidence_refs, empty hard_boundary_violations, and no blocker_class; blocked requires empty actual_changed_paths, a nonempty execution_audit_ref, at least the required focused_evidence_refs, nonempty bounded hard_boundary_violations, and one blocker_class. Semantic-repairable can dispatch Recovery Engineer. requires-new-authority remains fail closed unless Core independently verifies a bounded pre-effect unapproved-command denial, exact unchanged base HEAD, and nonempty dirty paths wholly inside original unit scope; only that mechanically reconciled case receives the same single Recovery Engineer attempt. infrastructure and unsafe remain recovery-ineligible. A package-issued Recovery Engineer assignment requires exactly one typed recovery_disposition: repaired requires succeeded with nonempty changes; no-defect requires succeeded with exact in-scope changes or a mechanically clean unchanged commit; requires-new-authority, infrastructure-blocked, and unsafe-blocked require blocked with no changed-path claim and bounded violations. Mixed or unknown shapes are rejected. If execution is blocked or authority conflicts, report blocked and stop; value repair may correct terminal carrier fields only and must not mutate files, seek another checkout, or manufacture success. Do not include assignment or package identity."
     submit_tool "autopilot_emit_status" label="Submit delivery status" profile="delivery-status.v2" result_contract="autopilot.delivery_result.v2" closed=#true
     list "actual_changed_paths" item="path" required=#true
     field "execution_audit_ref" type="ref" required=#true
     list "focused_evidence_refs" item="ref" required=#true
     field "terminal_status" type="delivery-outcome" required=#true
     list "hard_boundary_violations" item="string" required=#true
-    field "blocker_class" type="delivery-blocker-class" required=#false nullable=#true doc="Required for blocked delivery and forbidden for succeeded delivery; only semantic-repairable is eligible for Recovery Engineer."
+    field "blocker_class" type="delivery-blocker-class" required=#false nullable=#true doc="Required for blocked delivery and forbidden for succeeded delivery; Core combines this advisory class with immutable audit/Git facts before recovery admission."
     field "recovery_disposition" type="recovery-disposition" required=#false nullable=#true doc="Required only for a package-issued Recovery Engineer assignment; forbidden for ordinary delivery."
 }
 
@@ -850,7 +857,8 @@ artifact "validation_context_v2" schema="autopilot.validation_context.v1" produc
         list "covered_paths" item="path" required=#true
         list "semantic_surface_ids" item="id" required=#true
         list "forward_edge_ids" item="id" required=#true
-        list "commands" item="validation_context_command" required=#true doc="Exact focused command obligations inherited from the owning approved unit."
+        list "commands" item="validation_context_command" required=#true doc="Exact pre-package child command obligations inherited from the owning approved unit."
+        list "package_checks" item="validation_context_package_check" required=#true doc="Core-owned package checks with digest-bound package evidence."
         list "witness_ids" item="id" required=#true
     }
     record "validation_context_command" {
@@ -862,6 +870,12 @@ artifact "validation_context_v2" schema="autopilot.validation_context.v1" produc
         field "handling" type="command_effect_handling" required=#true
         field "scope_preservation" type="string" required=#true
     }
+    record "validation_context_package_check" {
+        field "check_id" type="id" required=#true
+        field "kind" type="package-check-kind" required=#true
+        field "expected" type="string" required=#true
+        field "evidence_ref" type="ref" required=#true
+    }
     record "validation_context_evidence" {
         field "evidence_ref" type="ref" required=#true
         field "digest" type="digest" required=#true
@@ -869,6 +883,7 @@ artifact "validation_context_v2" schema="autopilot.validation_context.v1" produc
         field "exact_commit" type="git-oid" required=#true
         field "exact_tree" type="git-oid" required=#true
         field "command_id" type="id" required=#false
+        field "package_check_id" type="id" required=#false
     }
     record "validation_excluded_ref" {
         field "ref" type="ref" required=#true
@@ -1227,6 +1242,11 @@ enum "planning_review_verdict" {
 enum "plan_unit_kind" {
     doc "Closed work-map unit disposition. Only implementation units are executable delivery work. Context gates are review blockers and verification is carried as criteria plus commands on implementation units."
     value "implementation"
+}
+
+enum "package-check-kind" {
+    doc "Closed Core-owned post-package invariant. The package verifies this without executing model-authored shell."
+    value "clean-exact-package-tip"
 }
 
 enum "command_effect" {

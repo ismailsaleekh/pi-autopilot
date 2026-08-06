@@ -3,8 +3,9 @@ use std::path::{Component, Path};
 
 use kernel::boundary::Rejection;
 use kernel::generated::{
-    AllocationLaneProposal, CommandEffect, CommandEffectHandling, Id, Path as ContractPath,
-    PlanUnitCommand, PlanUnitKind, ValidationContextCommand,
+    AllocationLaneProposal, CommandEffect, CommandEffectHandling, Id, PackageCheckKind,
+    Path as ContractPath, PlanUnitCommand, PlanUnitKind, PlanUnitPackageCheck,
+    ValidationContextCommand,
 };
 use kernel_macros::acceptance_boundary;
 use serde::{Deserialize, Serialize};
@@ -28,6 +29,7 @@ pub struct ApprovedUnit {
     pub downstream_release_edges: Vec<Id>,
     pub files: Vec<ContractPath>,
     pub commands: Vec<PlanUnitCommand>,
+    pub package_checks: Vec<PlanUnitPackageCheck>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
@@ -121,6 +123,38 @@ pub fn validate_plan_unit_command_effect_authority(
         &command.generated_paths,
         &command.handling,
     )
+}
+
+pub fn validate_plan_unit_package_checks(
+    checks: &[PlanUnitPackageCheck],
+    criterion_count: usize,
+) -> Result<(), String> {
+    let mut ids = BTreeSet::new();
+    for check in checks {
+        let ordinals = check
+            .criterion_ordinals
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if check.check_id.0.trim().is_empty()
+            || check.expected.trim().is_empty()
+            || !ids.insert(check.check_id.0.as_str())
+            || ordinals.is_empty()
+            || ordinals.len() != check.criterion_ordinals.len()
+            || ordinals
+                .iter()
+                .any(|ordinal| *ordinal == 0 || *ordinal as usize > criterion_count)
+        {
+            return Err(
+                "package checks require unique nonempty ids, expectations, and in-range 1-based criterion ordinals"
+                    .to_owned(),
+            );
+        }
+        match check.kind {
+            PackageCheckKind::CleanExactPackageTip => {}
+        }
+    }
+    Ok(())
 }
 
 pub fn validate_validation_context_command_effect_authority(

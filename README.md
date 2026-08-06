@@ -20,8 +20,9 @@
 3. `autopilot-agent-run` is only a package-contained wrapper: it resolves sibling `bin/autopilot-core.mjs` and invokes `agent-run --spec <absolute-spec.json>`. Installed packages never fall back to PATH, cwd, source trees, `dist/`, or unrelated binaries.
 4. Child `agent-run` validates `autopilot.agent_run_spec.v4`, launches Pi RPC with a run-owned session, `--no-extensions`, and one explicit codegen-anchored child add-on, and strips metered API-key overrides.
 5. Every model assignment receives one parent-selected generated terminal profile. Core accepts only correlated terminating tool-result details, validates profile/tool/boundary/schema/binding identity, and writes a package-owned carrier; assistant terminal text is never a carrier.
-6. A typed, fresh `recovery-engineer` may investigate one semantically rejected plan or in-scope delivery/validation result. It preserves original authority, emits a closed disposition, and can return only `repaired`/`no-defect` to the unchanged independent gate once; authority, infrastructure, unsafe, or second-rejection outcomes fail closed.
-7. Fresh subscription children use bounded deterministic startup buckets keyed by planning ordinal or lane identity to avoid parallel OAuth credential-read bursts. No credential injection, API-key fallback, or route substitution is permitted.
+6. A typed, fresh `recovery-engineer` may investigate one semantically rejected plan/result or one mechanically proven pre-effect command denial with nonempty in-scope work. It preserves original authority, emits a closed disposition, and can return only `repaired`/`no-defect` to the unchanged independent gate once; Core never auto-adopts blocked work, and real authority, infrastructure, unsafe, stale-snapshot, or second-rejection outcomes fail closed.
+7. Delivery `commands` are pre-package child evidence only. Committed-tip criteria use the closed `clean-exact-package-tip` package check, which Core proves after its exclusive package commit and forwards to the independent Validator as digest-bound evidence.
+8. Fresh subscription children use bounded deterministic startup buckets keyed by planning ordinal or lane identity to avoid parallel OAuth credential-read bursts. No credential injection, API-key fallback, or route substitution is permitted.
 
 ## Four-file planning input
 

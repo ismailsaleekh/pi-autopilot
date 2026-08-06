@@ -787,10 +787,11 @@ fn approved_units_from_work_map(work_map: &kernel::generated::WorkMap) -> Result
         if unit.files.iter().any(|path| !allocation::approved_path_is_safe(path) || !file_paths.insert(path.0.as_str())) { return Err(format!("unit {} has unsafe or duplicate files", unit.id.0)); }
         if unit.commands.is_empty() { return Err(format!("unit {} missing commands", unit.id.0)); }
         for command in &unit.commands { allocation::validate_plan_unit_command_effect_authority(command).map_err(|error| format!("unit {} has incomplete command authority: {error}", unit.id.0))?; }
+        allocation::validate_plan_unit_package_checks(&unit.package_checks, unit.criteria.len()).map_err(|error| format!("unit {} has incomplete package-check authority: {error}", unit.id.0))?;
         let order = index as u32 + 1;
         let criteria = unit.criteria.iter().enumerate().map(|(criterion_index, _)| idv(&format!("AC-{}-{}", unit.id.0, criterion_index + 1))).collect::<Vec<_>>();
         let criterion_text = criteria.iter().cloned().zip(unit.criteria.iter().cloned()).map(|(id, text)| allocation::ApprovedCriterion { id, text }).collect::<Vec<_>>();
-        Ok(ApprovedUnit { id: unit.id.clone(), kind: unit.kind.clone(), objective: unit.objective.clone(), operator_order: order, decisions: unit.links.clone(), criteria, criterion_text, dependencies: unit.depends_on.clone(), predecessor_forward_criteria: unit.depends_on.iter().map(|dep| idv(&format!("unit-complete:{}", dep.0))).collect(), downstream_release_edges: vec![idv(&format!("unit:{}", unit.id.0))], files: unit.files.clone(), commands: unit.commands.clone() })
+        Ok(ApprovedUnit { id: unit.id.clone(), kind: unit.kind.clone(), objective: unit.objective.clone(), operator_order: order, decisions: unit.links.clone(), criteria, criterion_text, dependencies: unit.depends_on.clone(), predecessor_forward_criteria: unit.depends_on.iter().map(|dep| idv(&format!("unit-complete:{}", dep.0))).collect(), downstream_release_edges: vec![idv(&format!("unit:{}", unit.id.0))], files: unit.files.clone(), commands: unit.commands.clone(), package_checks: unit.package_checks.clone() })
     }).collect()
 }
 fn validate_work_map_graph(work_map: &kernel::generated::WorkMap) -> Result<(), String> {
@@ -838,6 +839,7 @@ fn validate_approved_units(units: &[ApprovedUnit]) -> Result<(), AnyError> {
         }
         for dep in &unit.dependencies { if dep == &unit.id { return Err(format!("approved unit {} self dependency", unit.id.0).into()); } }
         for command in &unit.commands { allocation::validate_plan_unit_command_effect_authority(command).map_err(|error| -> AnyError { format!("approved unit {} has malformed command authority: {error}", unit.id.0).into() })?; }
+        allocation::validate_plan_unit_package_checks(&unit.package_checks, unit.criteria.len()).map_err(|error| -> AnyError { format!("approved unit {} has malformed package-check authority: {error}", unit.id.0).into() })?;
     }
     for unit in units { for dep in &unit.dependencies { if !ids.contains(dep) { return Err(format!("approved unit {} depends on unknown unit {}", unit.id.0, dep.0).into()); } } }
     let by_id = units.iter().map(|unit| (unit.id.clone(), unit)).collect::<BTreeMap<_, _>>();

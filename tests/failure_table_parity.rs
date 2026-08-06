@@ -23,6 +23,10 @@ fn failure_rows_are_exactly_mapped() {
             "Recoverable".to_owned(),
         ),
         (
+            "delivery-policy-denial-reconciliation".to_owned(),
+            "Recoverable".to_owned(),
+        ),
+        (
             "merge-conflict-semantic-overlap".to_owned(),
             "Recoverable".to_owned(),
         ),
@@ -73,7 +77,7 @@ fn failure_rows_are_exactly_mapped() {
     ]);
 
     assert_eq!(rows, expected);
-    assert_eq!(rows.len(), 21);
+    assert_eq!(rows.len(), 22);
     assert_eq!(
         rows.get("context-85-percent").map(String::as_str),
         Some("NotFailure")

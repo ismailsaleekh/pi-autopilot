@@ -469,7 +469,8 @@ Sources: `data/contracts.kdl`.
 | work_map | list | plan_unit.criteria | string | true |  |  |
 | work_map | list | plan_unit.depends_on | id | true |  | Exact declared predecessor unit ids; package must never invent positional dependencies. |
 | work_map | list | plan_unit.files | path | true |  | Nonempty declared relevant path scope for this executable delivery unit. |
-| work_map | list | plan_unit.commands | plan_unit_command | true |  | Nonempty focused verification commands/tests tied to this unit. |
+| work_map | list | plan_unit.commands | plan_unit_command | true |  | Nonempty pre-package child verification commands/tests tied to this unit; commands may not require or create the Core-owned package commit. |
+| work_map | list | plan_unit.package_checks | plan_unit_package_check | true |  | Explicit Core-owned post-package checks tied to this unit; [] is valid when no criterion names package state. |
 | work_map | list | plan_unit.links | id | true |  | Each item must equal exactly one bound atom registry atoms[].id byte-for-byte; no `atoms:` prefix, range, comma group, task/source/scout/context/artifact ref, placeholder, or inferred expansion. |
 | work_map | field | plan_unit_command.command | string | true |  |  |
 | work_map | field | plan_unit_command.expected | string | true |  |  |
@@ -477,6 +478,10 @@ Sources: `data/contracts.kdl`.
 | work_map | list | plan_unit_command.generated_paths | path | true |  | Exact normalized repo-relative Git-visible persistent generated artifact paths only, empty unless effect is declared-predictable; external temporary paths are not generated_paths. |
 | work_map | field | plan_unit_command.handling | command_effect_handling | true |  | Closed handling authority for Git-visible generated artifacts; no-effect requires none, unknown-generated requires run-isolated. |
 | work_map | field | plan_unit_command.scope_preservation | string | true |  | Nonempty final-scope-check statement proving verification leaves final Git-visible state inside approved unit files. |
+| work_map | field | plan_unit_package_check.check_id | id | true |  | Stable unit-local package-check identity. |
+| work_map | field | plan_unit_package_check.kind | package-check-kind | true |  | Closed Core-owned package invariant; arbitrary model-authored post-commit shell is forbidden. |
+| work_map | list | plan_unit_package_check.criterion_ordinals | u32 | true |  | Nonempty unique 1-based ordinals of this unit's criteria proved by the package check. |
+| work_map | field | plan_unit_package_check.expected | string | true |  | Nonempty criterion-facing expectation proved by the package check receipt. |
 | work_map | field | work_map_recovery.disposition | recovery-disposition | true |  | Typed conclusion after independent diagnosis: repaired/no-defect may return to the same gate; authority, infrastructure, and unsafe outcomes fail closed. |
 | work_map | list | work_map_recovery.diagnosis_refs | ref | true |  | Exact rejected-review or runtime-diagnosis evidence inspected independently. |
 | work_map | field | work_map_recovery.root_cause | string | true |  | Evidence-backed root cause; may correct rather than repeat the runtime diagnosis. |
@@ -532,7 +537,7 @@ Sources: `data/contracts.kdl`.
 | delivery_submission_v2 | list | focused_evidence_refs | ref | true |  |  |
 | delivery_submission_v2 | field | terminal_status | delivery-outcome | true |  |  |
 | delivery_submission_v2 | list | hard_boundary_violations | string | true |  |  |
-| delivery_submission_v2 | field | blocker_class | delivery-blocker-class | false | true | Required for blocked delivery and forbidden for succeeded delivery; only semantic-repairable is eligible for Recovery Engineer. |
+| delivery_submission_v2 | field | blocker_class | delivery-blocker-class | false | true | Required for blocked delivery and forbidden for succeeded delivery; Core combines this advisory class with immutable audit/Git facts before recovery admission. |
 | delivery_submission_v2 | field | recovery_disposition | recovery-disposition | false | true | Required only for a package-issued Recovery Engineer assignment; forbidden for ordinary delivery. |
 | delivery_result_v2 | field | schema | schema-id | true |  |  |
 | delivery_result_v2 | field | action_id | id | true |  |  |
@@ -662,7 +667,8 @@ Sources: `data/contracts.kdl`.
 | validation_context_v2 | list | validation_context_criterion.covered_paths | path | true |  |  |
 | validation_context_v2 | list | validation_context_criterion.semantic_surface_ids | id | true |  |  |
 | validation_context_v2 | list | validation_context_criterion.forward_edge_ids | id | true |  |  |
-| validation_context_v2 | list | validation_context_criterion.commands | validation_context_command | true |  | Exact focused command obligations inherited from the owning approved unit. |
+| validation_context_v2 | list | validation_context_criterion.commands | validation_context_command | true |  | Exact pre-package child command obligations inherited from the owning approved unit. |
+| validation_context_v2 | list | validation_context_criterion.package_checks | validation_context_package_check | true |  | Core-owned package checks with digest-bound package evidence. |
 | validation_context_v2 | list | validation_context_criterion.witness_ids | id | true |  |  |
 | validation_context_v2 | field | validation_context_command.command_id | id | true |  |  |
 | validation_context_v2 | field | validation_context_command.command | string | true |  |  |
@@ -671,12 +677,17 @@ Sources: `data/contracts.kdl`.
 | validation_context_v2 | list | validation_context_command.generated_paths | path | true |  |  |
 | validation_context_v2 | field | validation_context_command.handling | command_effect_handling | true |  |  |
 | validation_context_v2 | field | validation_context_command.scope_preservation | string | true |  |  |
+| validation_context_v2 | field | validation_context_package_check.check_id | id | true |  |  |
+| validation_context_v2 | field | validation_context_package_check.kind | package-check-kind | true |  |  |
+| validation_context_v2 | field | validation_context_package_check.expected | string | true |  |  |
+| validation_context_v2 | field | validation_context_package_check.evidence_ref | ref | true |  |  |
 | validation_context_v2 | field | validation_context_evidence.evidence_ref | ref | true |  |  |
 | validation_context_v2 | field | validation_context_evidence.digest | digest | true |  |  |
 | validation_context_v2 | field | validation_context_evidence.kind | string | true |  |  |
 | validation_context_v2 | field | validation_context_evidence.exact_commit | git-oid | true |  |  |
 | validation_context_v2 | field | validation_context_evidence.exact_tree | git-oid | true |  |  |
 | validation_context_v2 | field | validation_context_evidence.command_id | id | false |  |  |
+| validation_context_v2 | field | validation_context_evidence.package_check_id | id | false |  |  |
 | validation_context_v2 | field | validation_excluded_ref.ref | ref | true |  |  |
 | validation_context_v2 | field | validation_excluded_ref.reason | string | true |  |  |
 | validation_submission_v2 | field | schema | schema-id | true |  |  |
@@ -924,6 +935,7 @@ Sources: `data/contracts.kdl`.
 | planning_question_class | invalidated-decision, missing-material-decision, material-underdetermination, dod-hole, unsafe-irreversible |
 | planning_review_verdict | pass, blocker, advisory, fail, blocked, needs-fix |
 | plan_unit_kind | implementation |
+| package-check-kind | clean-exact-package-tip |
 | command_effect | no-effect, declared-predictable, unknown-generated |
 | delivery-outcome | succeeded, blocked |
 | delivery-blocker-class | semantic-repairable, requires-new-authority, infrastructure, unsafe |

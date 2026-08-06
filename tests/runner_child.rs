@@ -640,6 +640,10 @@ fn delivery_child_first_terminal_blocked_attempt_writes_blocked_carrier_without_
         audit["delivery_policy"]["active_overrides"],
         json!(["bash", "edit", "write"])
     );
+    assert_eq!(
+        audit["delivery_policy"]["denials"],
+        json!({"schema":"autopilot.delivery_policy_denials.v1","overflowed":false,"entries":[]})
+    );
     assert!(
         !attempt_events(&worktree, "assignment-main-L1").contains(&"value-rejected".to_owned())
     );
@@ -652,6 +656,67 @@ fn delivery_child_first_terminal_blocked_attempt_writes_blocked_carrier_without_
         before_readme
     );
     assert_eq!(git_stdout(&worktree, &["status", "--porcelain=v1"]), "");
+}
+
+#[test]
+fn delivery_terminal_denial_ledger_is_required_closed_and_pre_effect_only() {
+    for (label, ledger, expected) in [
+        (
+            "missing",
+            serde_json::Value::Null,
+            "required delivery policy denial ledger",
+        ),
+        (
+            "effected",
+            json!({
+                "schema":"autopilot.delivery_policy_denials.v1",
+                "overflowed":false,
+                "entries":[{
+                    "denial_id":"denial-1",
+                    "kind":"unapproved-command",
+                    "tool":"bash",
+                    "request_digest":"a".repeat(64),
+                    "effected":true
+                }]
+            }),
+            "valid pre-effect denial ledger",
+        ),
+        (
+            "unknown-kind",
+            json!({
+                "schema":"autopilot.delivery_policy_denials.v1",
+                "overflowed":false,
+                "entries":[{
+                    "denial_id":"denial-1",
+                    "kind":"semantic-guess",
+                    "tool":"bash",
+                    "request_digest":"a".repeat(64),
+                    "effected":false
+                }]
+            }),
+            "closed package policy denial ledger",
+        ),
+    ] {
+        let root = temp_root(&format!("runner-delivery-denials-{label}"));
+        let worktree = delivery_worktree(&root, label);
+        let blocked = delivery_blocked_payload();
+        write_fake_pi(
+            &root,
+            &rpc_fake_pi(
+                &format!("const terminalDenials = {};", ledger),
+                &format!(
+                    "emitCarrier({blocked:?}, observedModel, {{delivery_policy_denials:terminalDenials}});"
+                ),
+            ),
+        );
+        let spec = write_delivery_spec(&root, &worktree, |value| value);
+        let error = with_fake_path(&root, || {
+            child::main(&["--spec".to_owned(), spec.display().to_string()])
+        })
+        .expect_err("invalid denial ledger must fail before carrier packaging");
+        assert!(error.contains(expected), "{label}: {error}");
+        assert!(!delivery_carrier_path(&worktree).exists(), "{label}");
+    }
 }
 
 #[test]
@@ -2105,6 +2170,7 @@ fn delivery_approved_unit(id: &str, files: &[&str], commands: &[&str]) -> Approv
                             .to_owned(),
                 })
                 .collect(),
+        package_checks: Vec::new(),
     }
 }
 
@@ -2403,7 +2469,7 @@ fn work_map_payload(
     handling: &str,
     links: Vec<&str>,
 ) -> String {
-    json!({"units":[{"id":"U1","kind":"implementation","objective":"Deliver the accepted work unit.","criteria":["The focused acceptance path passes."],"depends_on":[],"files":["src/lib.rs"],"commands":[{"command":"cargo test -q","expected":"pass","effect":effect,"generated_paths":generated_paths,"handling":handling,"scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"links":links}]}).to_string()
+    json!({"units":[{"id":"U1","kind":"implementation","objective":"Deliver the accepted work unit.","criteria":["The focused acceptance path passes."],"depends_on":[],"files":["src/lib.rs"],"commands":[{"command":"cargo test -q","expected":"pass","effect":effect,"generated_paths":generated_paths,"handling":handling,"scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"package_checks":[],"links":links}]}).to_string()
 }
 
 fn extract_work_map_authority_and_manifest(prompt: &str) -> String {
@@ -2553,6 +2619,7 @@ function emitCarrierResult(payload, model=observedModel, overrides={{}}) {{
   const [, boundary_id, result_contract, schema_digest] = terminalBinding;
   const profile_id = process.env.AUTOPILOT_TERMINAL_PROFILE ?? `${{boundary_id}}:${{terminalTool}}`;
   const details = {{profile_id,tool_name:terminalTool,boundary_id,result_contract,schema_digest,binding:process.env.AUTOPILOT_CARRIER_BINDING ?? '',payload:typeof payload === 'string' ? JSON.parse(payload) : payload,...overrides}};
+  if (profile_id === 'delivery-status.v2' && details.delivery_policy_denials === undefined) details.delivery_policy_denials = {{schema:'autopilot.delivery_policy_denials.v1',overflowed:false,entries:[]}};
   const resultTool = typeof overrideToolName === 'string' ? overrideToolName : terminalTool;
   const callId = 'call_fake_submit_' + promptCount;
   send({{type:'message_start'}});
@@ -2598,12 +2665,12 @@ function deliveryPolicyReceipt() {{
   const bytes = readFileSync(assignmentPath);
   const artifact = JSON.parse(bytes.toString('utf8'));
   const receipt = {{
-    version:'autopilot.delivery_tool_policy.v1',
+    version:'autopilot.delivery_tool_policy.v2',
     assignment_path:assignmentPath,
     assignment_digest:assignmentDigest,
     worktree,
     cwd,
-    policy_digest:sha256HexBytes(Buffer.from(`autopilot.delivery_tool_policy.v1\0${{assignmentPath}}\0${{assignmentDigest}}\0${{worktree}}\0${{cwd}}`, 'utf8')),
+    policy_digest:sha256HexBytes(Buffer.from(`autopilot.delivery_tool_policy.v2\0${{assignmentPath}}\0${{assignmentDigest}}\0${{worktree}}\0${{cwd}}`, 'utf8')),
     allowed_unit_file_count:new Set(artifact.ordered_units.flatMap(unit => unit.files)).size,
     approved_command_count:new Set(artifact.ordered_units.flatMap(unit => unit.commands.map(command => command.command))).size,
     active_overrides:['bash','edit','write'],

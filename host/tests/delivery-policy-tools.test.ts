@@ -60,6 +60,14 @@ test("delivery policy confines edit/write/bash at production tool overrides", { 
     const bashResult = await bash.execute("bash-ok", { command: "printf approved" }) as { content: Array<{ text: string }> };
     assert.equal(bashResult.content[0]!.text, "approved");
     await assert.rejects(() => bash.execute("bash-diff", { command: "printf approvee" }), /unapproved bash command/);
+    const denial = fixture.policy.denialLedger();
+    assert.equal(denial.schema, "autopilot.delivery_policy_denials.v1");
+    assert.equal(denial.overflowed, false);
+    assert.deepEqual(
+      denial.entries.map(({ denial_id, kind, tool, effected }) => ({ denial_id, kind, tool, effected })),
+      [{ denial_id: "denial-1", kind: "unapproved-command", tool: "bash", effected: false }],
+    );
+    assert.match(denial.entries[0]!.request_digest, /^[0-9a-f]{64}$/);
 
     await write.execute("write-approved-new-file", { path: "new/allowed.txt", content: "new approved\n" });
     assert.equal(readFileSync(join(fixture.worktree, "new/allowed.txt"), "utf8"), "new approved\n");
@@ -90,6 +98,8 @@ test("delivery policy confines edit/write/bash at production tool overrides", { 
       await assert.rejects(() => edit.execute(`blocked-edit-${label}`, params), /Delivery policy blocked/);
       assert.equal(readFileSync(foreignFile, "utf8"), beforeForeign, `edit ${label}`);
     }
+    assert.equal(fixture.policy.denialLedger().entries.every((entry) => entry.effected === false), true);
+    assert.equal(fixture.policy.denialLedger().overflowed, false);
 
     for (const reserved of [".git/config", ".pi/config"]) {
       assert.throws(
@@ -98,6 +108,26 @@ test("delivery policy confines edit/write/bash at production tool overrides", { 
         reserved,
       );
     }
+  } finally {
+    cleanup();
+  }
+});
+
+test("delivery policy denial ledger is bounded and reports overflow", { concurrency: false }, async () => {
+  const fixture = makeFixture();
+  try {
+    const bash = fixture.tools.get("bash")!;
+    for (let index = 0; index < 33; index += 1) {
+      await assert.rejects(
+        () => bash.execute(`denial-${index}`, { command: `printf denied-${index}` }),
+        /unapproved bash command/,
+      );
+    }
+    const ledger = fixture.policy.denialLedger();
+    assert.equal(ledger.entries.length, 32);
+    assert.equal(ledger.overflowed, true);
+    assert.equal(ledger.entries[31]!.denial_id, "denial-32");
+    assert.equal(ledger.entries.every((entry) => entry.kind === "unapproved-command"), true);
   } finally {
     cleanup();
   }
@@ -152,6 +182,35 @@ test("delivery policy rejects duplicate unit file authority but permits repeated
     assert.equal(result.content[0]!.text, "repeat");
   } finally {
     cleanup();
+  }
+});
+
+test("delivery package checks require unique positive integer criterion ordinals", { concurrency: false }, () => {
+  for (const ordinals of [[], [1, 1], [0], [1.5]]) {
+    const fixture = makeFixture(false);
+    try {
+      const assignment = JSON.parse(readFileSync(fixture.assignmentPath, "utf8")) as Record<string, unknown>;
+      const units = assignment["ordered_units"] as Array<Record<string, unknown>>;
+      const checks = units[0]!["package_checks"] as Array<Record<string, unknown>>;
+      checks[0]!["criterion_ordinals"] = ordinals;
+      const bytes = Buffer.from(JSON.stringify(assignment, null, 2));
+      writeFileSync(fixture.assignmentPath, bytes);
+      const assignmentDigest = createHash("sha256").update(bytes).digest("hex");
+      const env = { ...fixture.env, AUTOPILOT_DELIVERY_ASSIGNMENT_DIGEST: assignmentDigest };
+      env.AUTOPILOT_DELIVERY_POLICY_DIGEST = deliveryPolicyDigest({
+        assignmentPath: fixture.assignmentPath,
+        assignmentDigest,
+        worktree: fixture.worktree,
+        cwd: fixture.worktree,
+      });
+      assert.throws(
+        () => loadDeliveryPolicyFromEnv(env as never, fixture.worktree),
+        /invalid package check criterion ordinals/,
+        JSON.stringify(ordinals),
+      );
+    } finally {
+      cleanup();
+    }
   }
 });
 
@@ -357,14 +416,14 @@ function makeFixture(registerTools = true): Fixture {
 function makeEnv(input: { root: string; worktree: string; files: string[]; commands?: string[] }): { env: Record<string, string>; assignmentPath: string } {
   const assignmentPath = join(input.root, `assignment-${createHash("sha1").update(input.files.join("|")).digest("hex")}.json`);
   const assignment = {
-    schema: "autopilot.delivery_assignment.v1",
+    schema: "autopilot.delivery_assignment.v2",
     workstream: "main",
     assignment_id: "assignment-main-L1",
     lane_id: "L1",
     attempt: 1,
     base_commit: "0123456789abcdef0123456789abcdef01234567",
     worktree: input.worktree,
-    ordered_units: [{ id: "U1", kind: "implementation", files: input.files, commands: (input.commands ?? ["printf approved"]).map((command) => ({ command })) }],
+    ordered_units: [{ id: "U1", kind: "implementation", files: input.files, commands: (input.commands ?? ["printf approved"]).map((command) => ({ command })), package_checks: [{ check_id: "PKG-U1-TIP", kind: "clean-exact-package-tip", criterion_ordinals: [1], expected: "Core proves the exact clean package tip." }] }],
   };
   const bytes = Buffer.from(JSON.stringify(assignment, null, 2));
   writeFileSync(assignmentPath, bytes);
@@ -381,7 +440,7 @@ function makeEnv(input: { root: string; worktree: string; files: string[]; comma
     AUTOPILOT_DELIVERY_BASE_COMMIT: assignment.base_commit,
     AUTOPILOT_DELIVERY_POLICY_DIGEST: deliveryPolicyDigest({ assignmentPath, assignmentDigest, worktree: input.worktree, cwd: input.worktree }),
   };
-  assert.equal(DELIVERY_POLICY_VERSION, "autopilot.delivery_tool_policy.v1");
+  assert.equal(DELIVERY_POLICY_VERSION, "autopilot.delivery_tool_policy.v2");
   return { env, assignmentPath };
 }
 
