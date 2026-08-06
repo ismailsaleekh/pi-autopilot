@@ -29,7 +29,7 @@ const DELIVERY_ENV_KEYS = [
   "AUTOPILOT_DELIVERY_BASE_COMMIT",
   "AUTOPILOT_DELIVERY_POLICY_DIGEST",
 ] as const;
-const DELIVERY_POLICY_VERSION = "autopilot.delivery_tool_policy.v2";
+const DELIVERY_POLICY_VERSION = "autopilot.delivery_tool_policy.v3";
 const deliveryTempDirs: string[] = [];
 
 test("parent planning registration excludes the Recovery Engineer child-only terminal", () => {
@@ -55,8 +55,9 @@ function installDeliveryPolicyEnv(): { assignmentPath: string; assignmentDigest:
   const assignmentPath = join(root, "assignment.json");
   mkdirSync(worktree);
   writeFileSync(join(worktree, "README.md"), "fixture\n");
+  const command = "true";
   const assignment = {
-    schema: "autopilot.delivery_assignment.v2",
+    schema: "autopilot.delivery_assignment.v3",
     workstream: "main",
     assignment_id: "assignment-main-L1",
     lane_id: "L1",
@@ -64,8 +65,16 @@ function installDeliveryPolicyEnv(): { assignmentPath: string; assignmentDigest:
     base_commit: "0123456789abcdef0123456789abcdef01234567",
     worktree,
     ordered_units: [
-      { id: "U1", kind: "implementation", files: ["README.md"], commands: [{ command: "true" }], package_checks: [{ check_id: "PKG-U1-TIP", kind: "clean-exact-package-tip", criterion_ordinals: [1], expected: "Core proves the exact clean package tip." }] },
+      { id: "U1", kind: "implementation", files: ["README.md"], commands: [{ command, expected: "Command exits successfully." }], package_checks: [{ check_id: "PKG-U1-TIP", kind: "clean-exact-package-tip", criterion_ordinals: [1], expected: "Core proves the exact clean package tip." }] },
     ],
+    approved_commands: [{
+      command_id: "CMD-U1-1",
+      unit_id: "U1",
+      command_ordinal: 1,
+      command_digest: createHash("sha256")
+        .update(`autopilot.approved_command.v1\0U1\0${1}\0${command}`, "utf8")
+        .digest("hex"),
+    }],
   };
   const assignmentBytes = Buffer.from(JSON.stringify(assignment, null, 2));
   writeFileSync(assignmentPath, assignmentBytes);
@@ -135,7 +144,7 @@ test("selected terminal profile registers exactly one same-name schema", { concu
       assert.equal(entries[0]!.data.boundary_id, expected.boundary_id);
       assert.equal(entries[0]!.data.result_contract, expected.result_contract);
       if (deliveryEnv) {
-        assert.deepEqual(entries[0]!.data.active_tools, ["autopilot_emit_status", "bash", "edit", "read", "write"]);
+        assert.deepEqual(entries[0]!.data.active_tools, ["autopilot_emit_status", "autopilot_run_approved_command", "edit", "read", "write"]);
         assert.deepEqual(entries[0]!.data.delivery_policy, {
           version: DELIVERY_POLICY_VERSION,
           assignment_path: deliveryEnv.assignmentPath,
@@ -145,7 +154,7 @@ test("selected terminal profile registers exactly one same-name schema", { concu
           policy_digest: deliveryEnv.policyDigest,
           allowed_unit_file_count: 1,
           approved_command_count: 1,
-          active_overrides: ["bash", "edit", "write"],
+          active_overrides: ["autopilot_run_approved_command", "edit", "write"],
         });
       }
       const result = await submitTool.execute("opaque-call", {});
@@ -156,12 +165,18 @@ test("selected terminal profile registers exactly one same-name schema", { concu
       assert.equal(result.details.binding, "binding-test");
       if (deliveryEnv) {
         assert.deepEqual(result.details.delivery_policy_denials, {
-          schema: "autopilot.delivery_policy_denials.v1",
+          schema: "autopilot.delivery_policy_denials.v2",
+          overflowed: false,
+          entries: [],
+        });
+        assert.deepEqual(result.details.approved_command_executions, {
+          schema: "autopilot.approved_command_executions.v1",
           overflowed: false,
           entries: [],
         });
       } else {
         assert.equal(result.details.delivery_policy_denials, undefined);
+        assert.equal(result.details.approved_command_executions, undefined);
       }
     }
   } finally {

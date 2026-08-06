@@ -638,11 +638,15 @@ fn delivery_child_first_terminal_blocked_attempt_writes_blocked_carrier_without_
     assert_eq!(audit["delivery_policy"]["cwd"], spec_json["cwd"]);
     assert_eq!(
         audit["delivery_policy"]["active_overrides"],
-        json!(["bash", "edit", "write"])
+        json!(["autopilot_run_approved_command", "edit", "write"])
     );
     assert_eq!(
         audit["delivery_policy"]["denials"],
-        json!({"schema":"autopilot.delivery_policy_denials.v1","overflowed":false,"entries":[]})
+        json!({"schema":"autopilot.delivery_policy_denials.v2","overflowed":false,"entries":[]})
+    );
+    assert_eq!(
+        audit["delivery_policy"]["command_executions"],
+        json!({"schema":"autopilot.approved_command_executions.v1","overflowed":false,"entries":[]})
     );
     assert!(
         !attempt_events(&worktree, "assignment-main-L1").contains(&"value-rejected".to_owned())
@@ -669,12 +673,12 @@ fn delivery_terminal_denial_ledger_is_required_closed_and_pre_effect_only() {
         (
             "effected",
             json!({
-                "schema":"autopilot.delivery_policy_denials.v1",
+                "schema":"autopilot.delivery_policy_denials.v2",
                 "overflowed":false,
                 "entries":[{
                     "denial_id":"denial-1",
                     "kind":"unapproved-command",
-                    "tool":"bash",
+                    "tool":"autopilot_run_approved_command",
                     "request_digest":"a".repeat(64),
                     "effected":true
                 }]
@@ -684,12 +688,12 @@ fn delivery_terminal_denial_ledger_is_required_closed_and_pre_effect_only() {
         (
             "unknown-kind",
             json!({
-                "schema":"autopilot.delivery_policy_denials.v1",
+                "schema":"autopilot.delivery_policy_denials.v2",
                 "overflowed":false,
                 "entries":[{
                     "denial_id":"denial-1",
                     "kind":"semantic-guess",
-                    "tool":"bash",
+                    "tool":"autopilot_run_approved_command",
                     "request_digest":"a".repeat(64),
                     "effected":false
                 }]
@@ -714,6 +718,63 @@ fn delivery_terminal_denial_ledger_is_required_closed_and_pre_effect_only() {
             child::main(&["--spec".to_owned(), spec.display().to_string()])
         })
         .expect_err("invalid denial ledger must fail before carrier packaging");
+        assert!(error.contains(expected), "{label}: {error}");
+        assert!(!delivery_carrier_path(&worktree).exists(), "{label}");
+    }
+}
+
+#[test]
+fn delivery_terminal_command_execution_ledger_is_required_and_closed() {
+    for (label, ledger, expected) in [
+        (
+            "null",
+            serde_json::Value::Null,
+            "required delivery command execution ledger",
+        ),
+        (
+            "unknown-field",
+            json!({
+                "schema":"autopilot.approved_command_executions.v1",
+                "overflowed":false,
+                "entries":[],
+                "unexpected":true
+            }),
+            "closed package command execution ledger",
+        ),
+        (
+            "bad-execution-id",
+            json!({
+                "schema":"autopilot.approved_command_executions.v1",
+                "overflowed":false,
+                "entries":[{
+                    "execution_id":"execution-2",
+                    "command_id":"CMD-U1-1",
+                    "command_digest":"a".repeat(64),
+                    "outcome":"succeeded",
+                    "result_digest":"b".repeat(64),
+                    "scope_snapshot_digest":"c".repeat(64)
+                }]
+            }),
+            "valid bounded command execution ledger",
+        ),
+    ] {
+        let root = temp_root(&format!("runner-delivery-command-ledger-{label}"));
+        let worktree = delivery_worktree(&root, label);
+        let blocked = delivery_blocked_payload();
+        write_fake_pi(
+            &root,
+            &rpc_fake_pi(
+                &format!("const terminalExecutions = {};", ledger),
+                &format!(
+                    "emitCarrier({blocked:?}, observedModel, {{approved_command_executions:terminalExecutions}});"
+                ),
+            ),
+        );
+        let spec = write_delivery_spec(&root, &worktree, |value| value);
+        let error = with_fake_path(&root, || {
+            child::main(&["--spec".to_owned(), spec.display().to_string()])
+        })
+        .expect_err("invalid execution ledger must fail before carrier packaging");
         assert!(error.contains(expected), "{label}: {error}");
         assert!(!delivery_carrier_path(&worktree).exists(), "{label}");
     }
@@ -2619,7 +2680,8 @@ function emitCarrierResult(payload, model=observedModel, overrides={{}}) {{
   const [, boundary_id, result_contract, schema_digest] = terminalBinding;
   const profile_id = process.env.AUTOPILOT_TERMINAL_PROFILE ?? `${{boundary_id}}:${{terminalTool}}`;
   const details = {{profile_id,tool_name:terminalTool,boundary_id,result_contract,schema_digest,binding:process.env.AUTOPILOT_CARRIER_BINDING ?? '',payload:typeof payload === 'string' ? JSON.parse(payload) : payload,...overrides}};
-  if (profile_id === 'delivery-status.v2' && details.delivery_policy_denials === undefined) details.delivery_policy_denials = {{schema:'autopilot.delivery_policy_denials.v1',overflowed:false,entries:[]}};
+  if (profile_id === 'delivery-status.v2' && details.delivery_policy_denials === undefined) details.delivery_policy_denials = {{schema:'autopilot.delivery_policy_denials.v2',overflowed:false,entries:[]}};
+  if (profile_id === 'delivery-status.v2' && details.approved_command_executions === undefined) details.approved_command_executions = {{schema:'autopilot.approved_command_executions.v1',overflowed:false,entries:[]}};
   const resultTool = typeof overrideToolName === 'string' ? overrideToolName : terminalTool;
   const callId = 'call_fake_submit_' + promptCount;
   send({{type:'message_start'}});
@@ -2665,15 +2727,15 @@ function deliveryPolicyReceipt() {{
   const bytes = readFileSync(assignmentPath);
   const artifact = JSON.parse(bytes.toString('utf8'));
   const receipt = {{
-    version:'autopilot.delivery_tool_policy.v2',
+    version:'autopilot.delivery_tool_policy.v3',
     assignment_path:assignmentPath,
     assignment_digest:assignmentDigest,
     worktree,
     cwd,
-    policy_digest:sha256HexBytes(Buffer.from(`autopilot.delivery_tool_policy.v2\0${{assignmentPath}}\0${{assignmentDigest}}\0${{worktree}}\0${{cwd}}`, 'utf8')),
+    policy_digest:sha256HexBytes(Buffer.from(`autopilot.delivery_tool_policy.v3\0${{assignmentPath}}\0${{assignmentDigest}}\0${{worktree}}\0${{cwd}}`, 'utf8')),
     allowed_unit_file_count:new Set(artifact.ordered_units.flatMap(unit => unit.files)).size,
-    approved_command_count:new Set(artifact.ordered_units.flatMap(unit => unit.commands.map(command => command.command))).size,
-    active_overrides:['bash','edit','write'],
+    approved_command_count:artifact.approved_commands.length,
+    active_overrides:['autopilot_run_approved_command','edit','write'],
   }};
   if (typeof driftDeliveryPolicyReceiptAuthority !== 'undefined' && driftDeliveryPolicyReceiptAuthority) receipt.assignment_digest = `drift-${{assignmentDigest}}`;
   return receipt;

@@ -16,9 +16,12 @@ const reviewedInstallScripts = {
   'node_modules/fsevents': ['2.3.3', 'sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw=='],
 };
 const reviewedIntegrityExceptions = new Set([
-  'node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-agent-core@0.83.0',
-  'node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai@0.83.0',
-  'node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui@0.83.0',
+  'node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-agent-core@0.84.0',
+  'node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai@0.84.0',
+  'node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-client@0.84.0',
+  'node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-protocol@0.84.0',
+  'node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-telemetry@0.84.0',
+  'node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui@0.84.0',
 ]);
 const reviewedRuntimeDependencies = {};
 const reviewed = [];

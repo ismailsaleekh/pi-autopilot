@@ -38,7 +38,8 @@ declare module "@earendil-works/pi-coding-agent" {
   }
 
   export function defineTool<T extends ToolDefinition>(definition: T): T;
-  export function createBashTool(cwd: string, options?: { operations?: BashOperations }): ToolDefinition;
+  export type BashToolOptions = { operations?: BashOperations; exposeSessionEnvironment?: boolean };
+  export function createBashTool(cwd: string, options?: BashToolOptions): ToolDefinition;
   export function createEditTool(cwd: string, options?: { operations?: EditOperations }): ToolDefinition;
   export function createWriteTool(cwd: string, options?: { operations?: WriteOperations }): ToolDefinition;
   export function createLocalBashOperations(): BashOperations;

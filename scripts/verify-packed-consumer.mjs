@@ -61,7 +61,7 @@ function assertInstalledManifest(expectedRoot, installedRoot, packFiles) {
 function assertPublicAliasVersions() {
   const pi = packageJson(join(GLOBAL_PI_ROOT, 'package.json'));
   const typebox = packageJson(join(GLOBAL_TYPEBOX_ROOT, 'package.json'));
-  if (pi.name !== '@earendil-works/pi-coding-agent' || pi.version !== '0.83.0') fail(`global Pi public alias must be 0.83.0, got ${pi.name}@${pi.version}`);
+  if (pi.name !== '@earendil-works/pi-coding-agent' || pi.version !== '0.84.0') fail(`global Pi public alias must be 0.84.0, got ${pi.name}@${pi.version}`);
   if (typebox.name !== 'typebox' || typebox.version !== '1.3.7') fail(`global TypeBox public alias must be 1.3.7, got ${typebox.name}@${typebox.version}`);
   return { pi, typebox };
 }

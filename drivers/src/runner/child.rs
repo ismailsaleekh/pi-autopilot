@@ -101,6 +101,7 @@ struct ChildDeliveryPolicyReceipt {
 }
 
 pub(crate) const MAX_DELIVERY_POLICY_DENIALS: usize = 32;
+pub(crate) const MAX_APPROVED_COMMAND_EXECUTIONS: usize = 64;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -133,10 +134,36 @@ pub(crate) struct DeliveryPolicyDenialLedger {
     pub entries: Vec<DeliveryPolicyDenial>,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ApprovedCommandExecutionOutcome {
+    Succeeded,
+    Failed,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ApprovedCommandExecution {
+    pub execution_id: String,
+    pub command_id: kernel::generated::Id,
+    pub command_digest: String,
+    pub outcome: ApprovedCommandExecutionOutcome,
+    pub result_digest: String,
+    pub scope_snapshot_digest: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ApprovedCommandExecutionLedger {
+    pub schema: String,
+    pub overflowed: bool,
+    pub entries: Vec<ApprovedCommandExecution>,
+}
+
 pub(crate) fn validate_delivery_policy_denial_ledger(
     ledger: &DeliveryPolicyDenialLedger,
 ) -> Result<(), String> {
-    if ledger.schema != "autopilot.delivery_policy_denials.v1"
+    if ledger.schema != "autopilot.delivery_policy_denials.v2"
         || ledger.entries.len() > MAX_DELIVERY_POLICY_DENIALS
         || (ledger.overflowed && ledger.entries.len() != MAX_DELIVERY_POLICY_DENIALS)
     {
@@ -145,7 +172,7 @@ pub(crate) fn validate_delivery_policy_denial_ledger(
     for (index, entry) in ledger.entries.iter().enumerate() {
         let expected_id = format!("denial-{}", index + 1);
         if entry.denial_id != expected_id
-            || !matches!(entry.tool.as_str(), "bash" | "edit" | "write")
+            || entry.tool != super::APPROVED_COMMAND_TOOL
             || entry.request_digest.len() != 64
             || !entry
                 .request_digest
@@ -157,6 +184,35 @@ pub(crate) fn validate_delivery_policy_denial_ledger(
         }
     }
     Ok(())
+}
+
+pub(crate) fn validate_approved_command_execution_ledger(
+    ledger: &ApprovedCommandExecutionLedger,
+) -> Result<(), String> {
+    if ledger.schema != "autopilot.approved_command_executions.v1"
+        || ledger.entries.len() > MAX_APPROVED_COMMAND_EXECUTIONS
+        || (ledger.overflowed && ledger.entries.len() != MAX_APPROVED_COMMAND_EXECUTIONS)
+    {
+        return Err("approved command execution ledger shape drift".to_owned());
+    }
+    for (index, entry) in ledger.entries.iter().enumerate() {
+        if entry.execution_id != format!("execution-{}", index + 1)
+            || entry.command_id.0.trim().is_empty()
+            || !is_sha256_hex(&entry.command_digest)
+            || !is_sha256_hex(&entry.result_digest)
+            || !is_sha256_hex(&entry.scope_snapshot_digest)
+        {
+            return Err("approved command execution ledger entry drift".to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1061,7 +1117,11 @@ fn validate_delivery_policy_receipt(
         || receipt.cwd != spec.cwd.0
         || receipt.policy_digest != expected_policy_digest
         || receipt.active_overrides
-            != vec!["bash".to_owned(), "edit".to_owned(), "write".to_owned()]
+            != vec![
+                super::APPROVED_COMMAND_TOOL.to_owned(),
+                "edit".to_owned(),
+                "write".to_owned(),
+            ]
     {
         return Err("agent-run delivery policy receipt drift".to_owned());
     }
@@ -1081,12 +1141,8 @@ fn validate_delivery_policy_receipt(
         .flat_map(|unit| unit.files.iter().map(|path| path.0.as_str()))
         .collect::<BTreeSet<_>>()
         .len();
-    let approved_command_count = artifact
-        .ordered_units
-        .iter()
-        .flat_map(|unit| unit.commands.iter().map(|command| command.command.as_str()))
-        .collect::<BTreeSet<_>>()
-        .len();
+    super::validate_approved_command_bindings(&artifact)?;
+    let approved_command_count = artifact.approved_commands.len();
     if receipt.allowed_unit_file_count != allowed_unit_file_count
         || receipt.approved_command_count != approved_command_count
         || allowed_unit_file_count == 0
@@ -3309,7 +3365,7 @@ fn validate_delivery_assignment_artifact(
     base_commit: &kernel::generated::Sha,
     worktree: &kernel::generated::Path,
 ) -> Result<(), String> {
-    if artifact.schema != "autopilot.delivery_assignment.v2"
+    if artifact.schema != "autopilot.delivery_assignment.v3"
         || artifact.workstream != strict.workstream
         || artifact.assignment_id != strict.assignment_id
         || artifact.lane_id != *lane_id
@@ -3320,6 +3376,7 @@ fn validate_delivery_assignment_artifact(
     {
         return Err("agent-run delivery assignment authority drift".to_owned());
     }
+    super::validate_approved_command_bindings(artifact)?;
     let mut previous = BTreeSet::new();
     let mut ids = BTreeSet::new();
     for unit in &artifact.ordered_units {
@@ -4535,6 +4592,7 @@ fn validate_validation_context_command_authority(
     if evidence.len() != context.evidence.len() {
         return Err("validation context duplicates evidence refs".to_owned());
     }
+    let mut command_ids = BTreeSet::new();
     let mut package_check_ids = BTreeSet::new();
     for criterion in &context.criteria {
         for command in &criterion.commands {
@@ -4545,6 +4603,29 @@ fn validate_validation_context_command_authority(
                         criterion.criterion_id.0, command.command_id.0
                     )
                 })?;
+            let Some(receipt) = evidence.get(&command.evidence_ref) else {
+                return Err(format!(
+                    "criterion {} command {} has no issued evidence",
+                    criterion.criterion_id.0, command.command_id.0
+                ));
+            };
+            let expected_evidence_ref = format!(
+                "approved-command-receipt:{}:{}",
+                command.command_id.0, receipt.digest.0
+            );
+            if receipt.command_id.as_ref() != Some(&command.command_id)
+                || receipt.package_check_id.is_some()
+                || receipt.kind != "delivery-approved-command"
+                || receipt.evidence_ref.0 != expected_evidence_ref
+                || receipt.exact_commit != context.exact_commit
+                || receipt.exact_tree != context.exact_tree
+            {
+                return Err(format!(
+                    "criterion {} command {} evidence drift",
+                    criterion.criterion_id.0, command.command_id.0
+                ));
+            }
+            command_ids.insert(command.command_id.clone());
         }
         for check in &criterion.package_checks {
             if check.check_id.0.trim().is_empty()
@@ -4584,12 +4665,26 @@ fn validate_validation_context_command_authority(
             package_check_ids.insert(check.check_id.clone());
         }
     }
-    if context
+    if context.evidence.iter().any(|item| {
+        (item.kind == "delivery-package-check") != item.package_check_id.is_some()
+            || (item.kind == "delivery-approved-command") != item.command_id.is_some()
+            || (item.command_id.is_some() && item.package_check_id.is_some())
+    }) {
+        return Err("validation typed evidence kind/id drift".to_owned());
+    }
+    let evidence_command_id_list = context
         .evidence
         .iter()
-        .any(|item| (item.kind == "delivery-package-check") != item.package_check_id.is_some())
+        .filter_map(|item| item.command_id.clone())
+        .collect::<Vec<_>>();
+    let evidence_command_ids = evidence_command_id_list
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if evidence_command_ids.len() != evidence_command_id_list.len()
+        || evidence_command_ids != command_ids
     {
-        return Err("validation package-check evidence kind/id drift".to_owned());
+        return Err("validation approved-command evidence set drift".to_owned());
     }
     let evidence_check_id_list = context
         .evidence
@@ -4661,6 +4756,12 @@ fn validate_validation_submission_against(
         .iter()
         .map(|item| item.evidence_ref.clone())
         .collect::<BTreeSet<_>>();
+    let command_evidence = context
+        .evidence
+        .iter()
+        .filter(|item| item.command_id.is_some())
+        .map(|item| &item.evidence_ref)
+        .collect::<BTreeSet<_>>();
     let package_evidence = context
         .evidence
         .iter()
@@ -4687,6 +4788,22 @@ fn validate_validation_submission_against(
             .find(|criterion| criterion.criterion_id == result.criterion_id)
             .expect("criterion sets were proven equal");
         let cited_evidence = result.evidence_refs.iter().collect::<BTreeSet<_>>();
+        let required_command_evidence = criterion
+            .commands
+            .iter()
+            .map(|command| &command.evidence_ref)
+            .collect::<BTreeSet<_>>();
+        let cited_command_evidence = cited_evidence
+            .intersection(&command_evidence)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if cited_command_evidence != required_command_evidence {
+            return Err(value_rejection(
+                "criterion_results.evidence_refs",
+                "exact Core-owned approved-command receipts assigned to the criterion",
+                result.criterion_id.0.clone(),
+            ));
+        }
         let required_package_evidence = criterion
             .package_checks
             .iter()
@@ -4892,6 +5009,47 @@ fn terminal_delivery_denial_ledger(
     }
 }
 
+fn terminal_approved_command_execution_ledger(
+    spec: &AgentRunSpec,
+    terminal: &ToolTerminal,
+) -> Result<Option<ApprovedCommandExecutionLedger>, ValueRejection> {
+    let is_delivery = matches!(
+        spec.assignment_kind,
+        kernel::generated::ValidationAssignmentKind::Delivery
+    );
+    match (&terminal.details.approved_command_executions, is_delivery) {
+        (Some(value), true) => {
+            let ledger: ApprovedCommandExecutionLedger = serde_json::from_value(value.clone())
+                .map_err(|error| {
+                    value_rejection(
+                        "approved_command_executions",
+                        "closed package command execution ledger",
+                        error.to_string(),
+                    )
+                })?;
+            validate_approved_command_execution_ledger(&ledger).map_err(|error| {
+                value_rejection(
+                    "approved_command_executions",
+                    "valid bounded command execution ledger",
+                    error,
+                )
+            })?;
+            Ok(Some(ledger))
+        }
+        (None, true) => Err(value_rejection(
+            "approved_command_executions",
+            "required delivery command execution ledger",
+            "missing",
+        )),
+        (Some(_), false) => Err(value_rejection(
+            "approved_command_executions",
+            "absent outside delivery",
+            "present",
+        )),
+        (None, false) => Ok(None),
+    }
+}
+
 fn package_tool_result(
     spec_path: &Path,
     spec_bytes: &str,
@@ -4904,6 +5062,7 @@ fn package_tool_result(
     let (_, runtime_digest) = runtime_addon(spec)
         .ok_or_else(|| value_rejection(RUNTIME_ADDON_DIGEST_FIELD, "digest", "missing"))?;
     let denial_ledger = terminal_delivery_denial_ledger(spec, terminal)?;
+    let execution_ledger = terminal_approved_command_execution_ledger(spec, terminal)?;
     let submission_bytes = serde_json::to_vec(&submission)
         .map_err(|error| value_rejection("submission", "serializable", error.to_string()))?;
     let submission_digest = sha256_hex(&submission_bytes);
@@ -4926,8 +5085,16 @@ fn package_tool_result(
             )
         })?;
     }
+    let audit_schema = if matches!(
+        spec.assignment_kind,
+        kernel::generated::ValidationAssignmentKind::Delivery
+    ) {
+        "autopilot.tool_audit.v2"
+    } else {
+        "autopilot.tool_audit.v1"
+    };
     let mut audit = serde_json::json!({
-        "schema": "autopilot.tool_audit.v1",
+        "schema": audit_schema,
         "tool_call_id": terminal.tool_call_id,
         "profile_id": terminal.details.profile_id,
         "tool_name": terminal.tool_name,
@@ -4964,8 +5131,9 @@ fn package_tool_result(
                     &worktree.0,
                     &spec.cwd.0,
                 ),
-                "active_overrides": ["bash", "edit", "write"],
+                "active_overrides": [super::APPROVED_COMMAND_TOOL, "edit", "write"],
                 "denials": denial_ledger.expect("validated delivery denial ledger"),
+                "command_executions": execution_ledger.expect("validated delivery command execution ledger"),
             }),
         );
     }

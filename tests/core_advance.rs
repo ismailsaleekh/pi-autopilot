@@ -816,6 +816,31 @@ fn write_approved_plan(root: &Path, units: usize, block_after_first: bool) {
     .expect("approved plan");
 }
 
+fn successful_command_execution_ledger(
+    typed: &kernel::generated::AgentRunSpec,
+) -> serde_json::Value {
+    let artifact: runner::DeliveryAssignmentArtifact = serde_json::from_slice(
+        &fs::read(&typed.assignment_path.as_ref().expect("assignment path").0)
+            .expect("assignment artifact"),
+    )
+    .expect("typed assignment artifact");
+    let snapshot =
+        runner::delivery_scope_snapshot_digest(Path::new(&typed.cwd.0), &artifact.ordered_units)
+            .expect("delivery scope snapshot");
+    serde_json::json!({
+        "schema":"autopilot.approved_command_executions.v1",
+        "overflowed":false,
+        "entries":artifact.approved_commands.iter().enumerate().map(|(index, binding)| serde_json::json!({
+            "execution_id":format!("execution-{}", index + 1),
+            "command_id":binding.command_id,
+            "command_digest":binding.command_digest,
+            "outcome":"succeeded",
+            "result_digest":"a".repeat(64),
+            "scope_snapshot_digest":snapshot,
+        })).collect::<Vec<_>>()
+    })
+}
+
 fn delivery_carrier(spec: &serde_json::Value, changed_path: &str) -> serde_json::Value {
     let typed: kernel::generated::AgentRunSpec =
         serde_json::from_value(spec.clone()).expect("delivery spec");
@@ -836,7 +861,8 @@ fn delivery_carrier(spec: &serde_json::Value, changed_path: &str) -> serde_json:
     let submission_digest = sha256_hex(&serde_json::to_vec(&submission).expect("submission"));
     let binding = drivers::runner::child::carrier_binding(&typed);
     let tool_call_id = "delivery-tool-call-advance";
-    let audit = serde_json::json!({"schema":"autopilot.tool_audit.v1","tool_call_id":tool_call_id,"profile_id":profile.0,"tool_name":profile.1,"boundary_id":profile.2,"result_contract":profile.3,"schema_digest":profile.4,"binding":binding,"submission_digest":submission_digest,"delivery_policy":{"version":drivers::runner::DELIVERY_POLICY_VERSION,"assignment_path":typed.assignment_path.as_ref().expect("assignment path").0.clone(),"assignment_digest":typed.assignment_digest.as_ref().expect("assignment digest").0.clone(),"worktree":typed.worktree.as_ref().expect("worktree").0.clone(),"cwd":typed.cwd.0.clone(),"policy_digest":drivers::runner::delivery_policy_digest(&typed.assignment_path.as_ref().expect("assignment path").0,&typed.assignment_digest.as_ref().expect("assignment digest").0,&typed.worktree.as_ref().expect("worktree").0,&typed.cwd.0),"active_overrides":["bash","edit","write"],"denials":{"schema":"autopilot.delivery_policy_denials.v1","overflowed":false,"entries":[]}}});
+    let command_executions = successful_command_execution_ledger(&typed);
+    let audit = serde_json::json!({"schema":"autopilot.tool_audit.v2","tool_call_id":tool_call_id,"profile_id":profile.0,"tool_name":profile.1,"boundary_id":profile.2,"result_contract":profile.3,"schema_digest":profile.4,"binding":binding,"submission_digest":submission_digest,"delivery_policy":{"version":drivers::runner::DELIVERY_POLICY_VERSION,"assignment_path":typed.assignment_path.as_ref().expect("assignment path").0.clone(),"assignment_digest":typed.assignment_digest.as_ref().expect("assignment digest").0.clone(),"worktree":typed.worktree.as_ref().expect("worktree").0.clone(),"cwd":typed.cwd.0.clone(),"policy_digest":drivers::runner::delivery_policy_digest(&typed.assignment_path.as_ref().expect("assignment path").0,&typed.assignment_digest.as_ref().expect("assignment digest").0,&typed.worktree.as_ref().expect("worktree").0,&typed.cwd.0),"active_overrides":[drivers::runner::APPROVED_COMMAND_TOOL,"edit","write"],"denials":{"schema":"autopilot.delivery_policy_denials.v2","overflowed":false,"entries":[]},"command_executions":command_executions}});
     let audit_bytes = serde_json::to_vec_pretty(&audit).expect("audit");
     let audit_path = PathBuf::from(spec["carrier_path"].as_str().expect("carrier"))
         .with_extension("tool-audit.json");
@@ -928,10 +954,24 @@ fn validation_carrier_with_outcome(
         .iter()
         .enumerate()
         .map(|(index, criterion)| {
+            let evidence_refs = std::iter::once(evidence_ref.clone())
+                .chain(
+                    criterion
+                        .commands
+                        .iter()
+                        .map(|command| command.evidence_ref.0.clone()),
+                )
+                .chain(
+                    criterion
+                        .package_checks
+                        .iter()
+                        .map(|check| check.evidence_ref.0.clone()),
+                )
+                .collect::<Vec<_>>();
             serde_json::json!({
                 "criterion_id": criterion.criterion_id,
                 "verdict": if blocked && index == 0 { "FAIL" } else { "PASS" },
-                "evidence_refs": [evidence_ref],
+                "evidence_refs": evidence_refs,
                 "finding_ids": if blocked && index == 0 { vec!["finding-validation-1"] } else { Vec::<&str>::new() },
                 "covered_paths": criterion.covered_paths,
                 "semantic_surface_ids": criterion.semantic_surface_ids,

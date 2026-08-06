@@ -506,7 +506,7 @@ fn resume_pending_delivery_recovery(
         let source = issued_binding_for_assignment(state, &idv(&source_id))
             .ok_or_else(|| format!("recovery resume missing source binding {source_id}"))?;
         if source.workstream.0 != workstream
-            || source.role_id.0 != "implementer"
+            || source.result_contract.0 != "autopilot.delivery_result.v2"
             || !terminal_consumed(state, &source)
         {
             continue;
@@ -1244,11 +1244,15 @@ fn route_task_completed(
                 return done(id, rejection("delivery-rejected", &format!("{error:?}")));
             }
         };
-        let validation_issue =
-            match validation_issue_for_delivery(&binding, &accepted, state.state.revision) {
-                Ok(value) => value,
-                Err(error) => return done(id, rejection("delivery-package-check", &error)),
-            };
+        let validation_issue = match validation_issue_for_delivery(
+            &binding,
+            &accepted,
+            &validated.command_executions,
+            state.state.revision,
+        ) {
+            Ok(value) => value,
+            Err(error) => return done(id, rejection("delivery-package-check", &error)),
+        };
         append_terminal_event(state, &payload, &binding)?;
         record_task_completion_control(state, &payload)?;
         state.append(
@@ -1499,7 +1503,7 @@ fn validate_delivery_assignment_binding(
     }
     let artifact: runner::DeliveryAssignmentArtifact = serde_json::from_slice(&bytes)
         .map_err(|error| format!("delivery assignment json:{error}"))?;
-    if artifact.schema != "autopilot.delivery_assignment.v2"
+    if artifact.schema != "autopilot.delivery_assignment.v3"
         || artifact.workstream != binding.workstream
         || artifact.assignment_id != binding.assignment_id
         || Some(&artifact.lane_id) != binding.lane_id.as_ref()
@@ -1511,6 +1515,7 @@ fn validate_delivery_assignment_binding(
         return Err("delivery assignment artifact identity drift".to_owned());
     }
     validate_delivery_artifact_units(&artifact.ordered_units)?;
+    runner::validate_approved_command_bindings(&artifact)?;
     Ok(artifact)
 }
 
@@ -1606,6 +1611,22 @@ fn validate_delivery_artifact_units(units: &[ApprovedUnit]) -> Result<(), String
 struct ValidatedDeliveryFacts {
     assignment: runner::DeliveryAssignmentArtifact,
     denial_ledger: runner::child::DeliveryPolicyDenialLedger,
+    command_executions: Vec<runner::VerifiedCommandExecution>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeliveryToolAudit {
+    schema: String,
+    tool_call_id: String,
+    profile_id: String,
+    tool_name: String,
+    boundary_id: String,
+    result_contract: String,
+    schema_digest: String,
+    binding: String,
+    submission_digest: String,
+    delivery_policy: DeliveryToolAuditPolicy,
 }
 
 #[derive(serde::Deserialize)]
@@ -1619,6 +1640,7 @@ struct DeliveryToolAuditPolicy {
     policy_digest: String,
     active_overrides: Vec<String>,
     denials: runner::child::DeliveryPolicyDenialLedger,
+    command_executions: runner::child::ApprovedCommandExecutionLedger,
 }
 
 fn validate_delivery_result_v2(
@@ -1705,7 +1727,14 @@ fn validate_delivery_result_v2(
     if sha256_hex_local(&audit) != result.tool_audit_digest.0 {
         return Err("delivery tool audit digest drift".to_owned());
     }
-    let denial_ledger = validate_delivery_tool_audit_policy(&audit, &spec)?;
+    let (denial_ledger, command_execution_ledger) =
+        validate_delivery_tool_audit_policy(&audit, &spec, result)?;
+    let command_executions = validate_delivery_command_executions(
+        &assignment,
+        &command_execution_ledger,
+        &result.submission,
+        Path::new(&result.worktree.0),
+    )?;
     let submission = serde_json::to_vec(
         &serde_json::to_value(&result.submission).map_err(|error| error.to_string())?,
     )
@@ -1716,22 +1745,24 @@ fn validate_delivery_result_v2(
     Ok(ValidatedDeliveryFacts {
         assignment,
         denial_ledger,
+        command_executions,
     })
 }
 
 fn validate_delivery_tool_audit_policy(
     audit: &[u8],
     spec: &kernel::generated::AgentRunSpec,
-) -> Result<runner::child::DeliveryPolicyDenialLedger, String> {
-    let value: serde_json::Value = serde_json::from_slice(audit)
-        .map_err(|error| format!("delivery tool audit json:{error}"))?;
-    let policy: DeliveryToolAuditPolicy = serde_json::from_value(
-        value
-            .get("delivery_policy")
-            .cloned()
-            .ok_or_else(|| "delivery tool audit missing policy authority".to_owned())?,
-    )
-    .map_err(|error| format!("delivery tool audit policy shape:{error}"))?;
+    result: &kernel::generated::DeliveryResultV2,
+) -> Result<
+    (
+        runner::child::DeliveryPolicyDenialLedger,
+        runner::child::ApprovedCommandExecutionLedger,
+    ),
+    String,
+> {
+    let audit: DeliveryToolAudit = serde_json::from_slice(audit)
+        .map_err(|error| format!("delivery tool audit shape:{error}"))?;
+    let policy = audit.delivery_policy;
     let assignment_path = spec
         .assignment_path
         .as_ref()
@@ -1750,18 +1781,87 @@ fn validate_delivery_tool_audit_policy(
         &worktree.0,
         &spec.cwd.0,
     );
-    if policy.version != runner::DELIVERY_POLICY_VERSION
+    if audit.schema != "autopilot.tool_audit.v2"
+        || audit.tool_call_id != result.tool_call_id
+        || audit.profile_id != result.terminal_profile_id
+        || audit.tool_name != result.tool_name.0
+        || audit.boundary_id != result.boundary_id.0
+        || audit.result_contract != result.result_contract.0
+        || audit.schema_digest != result.tool_schema_digest.0
+        || audit.binding != result.carrier_binding.0
+        || audit.submission_digest != result.submission_digest.0
+        || policy.version != runner::DELIVERY_POLICY_VERSION
         || policy.assignment_path != assignment_path.0
         || policy.assignment_digest != assignment_digest.0
         || policy.worktree != worktree.0
         || policy.cwd != spec.cwd.0
         || policy.policy_digest != expected_policy_digest
-        || policy.active_overrides != ["bash", "edit", "write"]
+        || policy.active_overrides != [runner::APPROVED_COMMAND_TOOL, "edit", "write"]
     {
         return Err("delivery tool audit policy authority drift".to_owned());
     }
     runner::child::validate_delivery_policy_denial_ledger(&policy.denials)?;
-    Ok(policy.denials)
+    runner::child::validate_approved_command_execution_ledger(&policy.command_executions)?;
+    Ok((policy.denials, policy.command_executions))
+}
+
+fn validate_delivery_command_executions(
+    assignment: &runner::DeliveryAssignmentArtifact,
+    ledger: &runner::child::ApprovedCommandExecutionLedger,
+    submission: &kernel::generated::DeliverySubmissionV2,
+    worktree: &Path,
+) -> Result<Vec<runner::VerifiedCommandExecution>, String> {
+    runner::validate_approved_command_bindings(assignment)?;
+    let bindings = assignment
+        .approved_commands
+        .iter()
+        .map(|binding| (&binding.command_id, binding))
+        .collect::<BTreeMap<_, _>>();
+    for execution in &ledger.entries {
+        let binding = bindings
+            .get(&execution.command_id)
+            .ok_or_else(|| "approved command execution names unknown command".to_owned())?;
+        if execution.command_digest != binding.command_digest {
+            return Err("approved command execution digest drift".to_owned());
+        }
+    }
+    if runner::delivery_submission_outcome(submission) == runner::DeliverySubmissionOutcome::Blocked
+    {
+        return Ok(Vec::new());
+    }
+    if ledger.overflowed {
+        return Err("approved command execution ledger overflowed".to_owned());
+    }
+    let final_snapshot =
+        runner::delivery_scope_snapshot_digest(worktree, &assignment.ordered_units)
+            .map_err(|error| format!("delivery final scope snapshot failed:{error:?}"))?;
+    let mut verified = Vec::new();
+    for binding in &assignment.approved_commands {
+        let execution = ledger
+            .entries
+            .iter()
+            .rev()
+            .find(|execution| {
+                execution.command_id == binding.command_id
+                    && execution.outcome
+                        == runner::child::ApprovedCommandExecutionOutcome::Succeeded
+                    && execution.scope_snapshot_digest == final_snapshot
+            })
+            .ok_or_else(|| {
+                format!(
+                    "approved command {} lacks success on final source snapshot",
+                    binding.command_id.0
+                )
+            })?;
+        verified.push(runner::VerifiedCommandExecution {
+            execution_id: execution.execution_id.clone(),
+            command_id: execution.command_id.clone(),
+            command_digest: execution.command_digest.clone(),
+            result_digest: execution.result_digest.clone(),
+            scope_snapshot_digest: execution.scope_snapshot_digest.clone(),
+        });
+    }
+    Ok(verified)
 }
 
 fn delivery_v1_projection(result: &kernel::generated::DeliveryResultV2) -> DeliveryResult {
@@ -2908,7 +3008,7 @@ fn assess_blocked_delivery_recovery(
                 && !denials.entries.is_empty()
                 && denials.entries.iter().all(|entry| {
                     entry.kind == runner::child::DeliveryPolicyDenialKind::UnapprovedCommand
-                        && entry.tool == "bash"
+                        && entry.tool == runner::APPROVED_COMMAND_TOOL
                         && !entry.effected
                 });
             if !bounded_pre_effect_command_denials {
@@ -3282,6 +3382,7 @@ fn repair_needed(
 fn validation_issue_for_delivery(
     binding: &runner::IssuedRunnerBinding,
     accepted: &runner::AcceptedDelivery,
+    command_executions: &[runner::VerifiedCommandExecution],
     run_revision: u64,
 ) -> Result<runner::IssuedRunnerAction, String> {
     if binding.role_id.0 == "validator" || binding.assignment_id.0.contains("validator") {
@@ -3334,6 +3435,11 @@ fn validation_issue_for_delivery(
             base_commit,
             worktree,
             approved_units,
+            producer_assignment_digest: binding
+                .assignment_digest
+                .clone()
+                .ok_or_else(|| "delivery binding missing assignment_digest".to_owned())?,
+            approved_command_executions: command_executions.to_vec(),
         },
         &runner::RunnerTransportFacts::from_env().map_err(|error| error.to_string())?,
     )
@@ -3361,12 +3467,14 @@ fn read_delivery_assignment_units(
     }
     let artifact: runner::DeliveryAssignmentArtifact = serde_json::from_slice(&bytes)
         .map_err(|error| format!("delivery assignment json:{error}"))?;
-    if artifact.assignment_id != binding.assignment_id
+    if artifact.schema != "autopilot.delivery_assignment.v3"
+        || artifact.assignment_id != binding.assignment_id
         || binding.lane_id.as_ref() != Some(&artifact.lane_id)
         || artifact.ordered_units.is_empty()
     {
         return Err("delivery assignment identity drift".to_owned());
     }
+    runner::validate_approved_command_bindings(&artifact)?;
     Ok(artifact.ordered_units)
 }
 

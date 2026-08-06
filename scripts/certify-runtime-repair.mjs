@@ -272,7 +272,7 @@ function main() {
   const env = baseEnv({ PI_BACKGROUND_TASKS_PACKAGE_ROOT: args.backgroundRoot });
   const before = {
     autopilot: cleanIdentity(args.autopilotRoot, 'pi-autopilot', '1.3.1'),
-    background: cleanIdentity(args.backgroundRoot, 'pi-background-tasks', '0.6.1'),
+    background: cleanIdentity(args.backgroundRoot, 'pi-background-tasks', '2.1.1'),
   };
   const rows = [];
   rows.push(runCommand('background-default-suite', args.backgroundRoot, 'npm', ['run', 'test'], env, args.evidenceDir, 600_000));
@@ -287,7 +287,7 @@ function main() {
   rows.push(installedConsumer(args, env, args.evidenceDir, packed.tarballs));
   const after = {
     autopilot: cleanIdentity(args.autopilotRoot, 'pi-autopilot', '1.3.1'),
-    background: cleanIdentity(args.backgroundRoot, 'pi-background-tasks', '0.6.1'),
+    background: cleanIdentity(args.backgroundRoot, 'pi-background-tasks', '2.1.1'),
   };
   if (JSON.stringify(before) !== JSON.stringify(after)) throw new Error('candidate identity changed during certification');
   const finalReport = { id: 'final-clean-identity', passed: true, before, after };
@@ -302,7 +302,7 @@ function main() {
     autopilot_oid: after.autopilot.oid,
     autopilot_tree: after.autopilot.tree,
     background_tasks_package: 'pi-background-tasks',
-    background_tasks_version: '0.6.1',
+    background_tasks_version: '2.1.1',
     background_tasks_oid: after.background.oid,
     background_tasks_tree: after.background.tree,
     loaded_runtime_source: '../packages/pi-autopilot',

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 
+import { createBashTool } from "@earendil-works/pi-coding-agent";
 import { Compile } from "typebox/compile";
 
 import { TERMINAL_TOOL_SCHEMAS } from "../../src/generated/tool-schemas.ts";
@@ -80,8 +81,8 @@ const validSamples: Record<string, Record<string, unknown>> = {
   },
   "autopilot.delivery_submission.v2": {
     actual_changed_paths: ["package.json"],
-    execution_audit_ref: "reports/pi083.md",
-    focused_evidence_refs: ["host/tests/pi083-typebox-compat.test.ts"],
+    execution_audit_ref: "reports/pi084.md",
+    focused_evidence_refs: ["host/tests/pi084-typebox-compat.test.ts"],
     terminal_status: "succeeded",
     hard_boundary_violations: [],
   },
@@ -115,7 +116,7 @@ const emptyArraySamples: Record<string, Record<string, unknown>> = {
   "planning.plan-review.v1": { verdicts: [] },
   "autopilot.delivery_submission.v2": {
     actual_changed_paths: [],
-    execution_audit_ref: "reports/pi083.md",
+    execution_audit_ref: "reports/pi084.md",
     focused_evidence_refs: [],
     terminal_status: "succeeded",
     hard_boundary_violations: [],
@@ -133,7 +134,7 @@ const emptyArraySamples: Record<string, Record<string, unknown>> = {
   },
 };
 
-test("Pi 0.83 package metadata keeps Pi SDK and TypeBox as public peers only", async () => {
+test("Pi 0.84 package metadata keeps Pi SDK and TypeBox as public peers only", async () => {
   const pkg = readJsonRecord(await readFile(new URL("package.json", root), "utf8"), "package.json");
   const lock = readJsonRecord(await readFile(new URL("package-lock.json", root), "utf8"), "package-lock.json");
   assert.deepEqual(pkg.peerDependencies, {
@@ -142,7 +143,7 @@ test("Pi 0.83 package metadata keeps Pi SDK and TypeBox as public peers only", a
   });
   assert.equal(isRecord(pkg.dependencies) && "typebox" in pkg.dependencies, false, "typebox must not be a runtime dependency");
   assert.equal(Array.isArray(pkg.bundledDependencies) && pkg.bundledDependencies.includes("typebox"), false, "typebox must not be bundled");
-  assert.equal((pkg.devDependencies as Record<string, unknown>)["@earendil-works/pi-coding-agent"], "0.83.0");
+  assert.equal((pkg.devDependencies as Record<string, unknown>)["@earendil-works/pi-coding-agent"], "0.84.0");
   assert.equal((pkg.devDependencies as Record<string, unknown>).typebox, "1.3.7");
 
   assert.equal(isRecord(lock.packages), true, "lock.packages must be an object");
@@ -150,14 +151,57 @@ test("Pi 0.83 package metadata keeps Pi SDK and TypeBox as public peers only", a
   const rootLock = packages[""]!;
   assert.deepEqual(rootLock.peerDependencies, pkg.peerDependencies);
   assert.equal(isRecord(rootLock.dependencies) && "typebox" in rootLock.dependencies, false, "lock root must not have runtime typebox");
-  assert.equal((rootLock.devDependencies as Record<string, unknown>)["@earendil-works/pi-coding-agent"], "0.83.0");
+  assert.equal((rootLock.devDependencies as Record<string, unknown>)["@earendil-works/pi-coding-agent"], "0.84.0");
   assert.equal((rootLock.devDependencies as Record<string, unknown>).typebox, "1.3.7");
-  assert.equal(packages["node_modules/@earendil-works/pi-coding-agent"]?.version, "0.83.0");
+  assert.equal(packages["node_modules/@earendil-works/pi-coding-agent"]?.version, "0.84.0");
   assert.equal(packages["node_modules/typebox"]?.version, "1.3.7");
   assert.equal(packages["node_modules/@earendil-works/pi-coding-agent/node_modules/typebox"]?.version, "1.3.7");
 });
 
-test("TypeBox 1.3.7 compiles every terminal tool schema with strict null/array semantics", () => {
+test("Pi 0.84 Bash adapter preserves the hidden-shell no-session-environment boundary", async () => {
+  const sessionKeys = ["PI_SESSION_ID", "PI_SESSION_FILE", "PI_PROVIDER", "PI_MODEL", "PI_REASONING_LEVEL"] as const;
+  const previous = new Map(sessionKeys.map((key) => [key, process.env[key]]));
+  let observed: { command: string; cwd: string; env: NodeJS.ProcessEnv } | undefined;
+  try {
+    for (const key of sessionKeys) process.env[key] = `ambient-${key.toLowerCase()}`;
+    const tool = createBashTool("/fixed-package-worktree", {
+      exposeSessionEnvironment: false,
+      operations: {
+        async exec(command, cwd, options) {
+          observed = { command, cwd, env: { ...options.env } };
+          options.onData(Buffer.from("approved output\n"));
+          return { exitCode: 0 };
+        },
+      },
+    });
+    assert.equal(tool.promptGuidelines, undefined, "disabled session exposure must not advertise PI_* inspection");
+    const result = await tool.execute(
+      "pi084-approved-command",
+      { command: "cargo test --locked" },
+      undefined,
+      undefined,
+      {
+        sessionManager: { getSessionId: () => "secret-session", getSessionFile: () => "/secret/session.jsonl" },
+        model: { provider: "secret-provider", id: "secret-model" },
+        thinkingLevel: "secret-level",
+      },
+    ) as { content: Array<{ type: string; text: string }> };
+    assert.deepEqual({ command: observed?.command, cwd: observed?.cwd }, {
+      command: "cargo test --locked",
+      cwd: "/fixed-package-worktree",
+    });
+    for (const key of sessionKeys) assert.equal(observed?.env[key], undefined, `${key} must be stripped before execution`);
+    assert.equal(result.content[0]?.text, "approved output\n");
+  } finally {
+    for (const key of sessionKeys) {
+      const value = previous.get(key);
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test("TypeBox 1.3.7 under Pi 0.84 compiles every terminal schema with strict null/array semantics", () => {
   const entries = Object.entries(TERMINAL_TOOL_SCHEMAS);
   assert.equal(entries.length, 7, "all terminal boundary schemas must be covered");
   for (const [boundary, descriptor] of entries) {
@@ -187,7 +231,7 @@ test("TypeBox 1.3.7 compiles every terminal tool schema with strict null/array s
     const wrongObjectItem = clone(valid); wrongObjectItem[arrayKey] = [{}];
     assert.equal(check.Check(wrongObjectItem), false, `${boundary}: wrong object/missing item fields must fail`);
 
-    const extra = { ...clone(valid), unexpected_pi083_field: true };
+    const extra = { ...clone(valid), unexpected_pi084_field: true };
     assert.equal(check.Check(extra), descriptor.parameters.additionalProperties !== false, `${boundary}: extra top field must match schema additionalProperties`);
   }
 

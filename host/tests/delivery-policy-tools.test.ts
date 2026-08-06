@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import {
+  APPROVED_COMMAND_TOOL,
   createDeliveryWriteOperations,
   DELIVERY_POLICY_VERSION,
   deliveryPolicyDigest,
@@ -27,7 +28,11 @@ import {
 
 type RegisteredTool = {
   name: string;
-  execute(id: string, params: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>;
+  description?: string;
+  promptSnippet?: string;
+  promptGuidelines?: string[];
+  parameters?: unknown;
+  execute(id: string, params: Record<string, unknown>, signal?: AbortSignal, onUpdate?: unknown, ctx?: unknown): Promise<unknown>;
 };
 
 type Fixture = {
@@ -42,12 +47,22 @@ type Fixture = {
 
 const roots: string[] = [];
 
-test("delivery policy confines edit/write/bash at production tool overrides", { concurrency: false }, async () => {
+test("delivery policy confines edit/write and package-approved command references", { concurrency: false }, async () => {
   const fixture = makeFixture();
   try {
     const write = fixture.tools.get("write")!;
     const edit = fixture.tools.get("edit")!;
-    const bash = fixture.tools.get("bash")!;
+    const approvedCommand = fixture.tools.get(APPROVED_COMMAND_TOOL)!;
+    assert.equal(fixture.tools.has("bash"), false);
+    const approvedMetadata = JSON.stringify({
+      description: approvedCommand.description,
+      promptSnippet: approvedCommand.promptSnippet,
+      promptGuidelines: approvedCommand.promptGuidelines,
+      parameters: approvedCommand.parameters,
+    });
+    assert.match(approvedMetadata, /CMD-U1-1/);
+    assert.doesNotMatch(approvedMetadata, /PI_/);
+    assert.doesNotMatch(approvedMetadata, /Bash command|bash commands/);
 
     await write.execute("write-ok", { path: "src/lib.rs", content: "pub fn ok() {}\n" });
     assert.equal(readFileSync(join(fixture.worktree, "src/lib.rs"), "utf8"), "pub fn ok() {}\n");
@@ -57,23 +72,55 @@ test("delivery policy confines edit/write/bash at production tool overrides", { 
     });
     assert.match(readFileSync(join(fixture.worktree, "src/lib.rs"), "utf8"), /true/);
 
-    const bashResult = await bash.execute("bash-ok", { command: "printf approved" }) as { content: Array<{ text: string }> };
-    assert.equal(bashResult.content[0]!.text, "approved");
-    await assert.rejects(() => bash.execute("bash-diff", { command: "printf approvee" }), /unapproved bash command/);
+    const commandResult = await approvedCommand.execute("command-ok", { command_id: "CMD-U1-1" }) as { content: Array<{ text: string }> };
+    assert.equal(commandResult.content[0]!.text, "approved");
+    await assert.rejects(
+      () => approvedCommand.execute("command-text", { command: "printf approvee" }),
+      /exactly one command_id|accepts no shell text/,
+    );
+    await assert.rejects(
+      () => approvedCommand.execute("command-extra-shell", {
+        command_id: "CMD-U1-1",
+        command: "printf attacker-controlled",
+      }),
+      /exactly one command_id|accepts no shell text/,
+    );
+    await assert.rejects(
+      () => approvedCommand.execute("command-unknown", { command_id: "CMD-U1-999" }),
+      /denied pre-effect/,
+    );
     const denial = fixture.policy.denialLedger();
-    assert.equal(denial.schema, "autopilot.delivery_policy_denials.v1");
+    assert.equal(denial.schema, "autopilot.delivery_policy_denials.v2");
     assert.equal(denial.overflowed, false);
     assert.deepEqual(
       denial.entries.map(({ denial_id, kind, tool, effected }) => ({ denial_id, kind, tool, effected })),
-      [{ denial_id: "denial-1", kind: "unapproved-command", tool: "bash", effected: false }],
+      [{ denial_id: "denial-1", kind: "unapproved-command", tool: APPROVED_COMMAND_TOOL, effected: false }],
     );
     assert.match(denial.entries[0]!.request_digest, /^[0-9a-f]{64}$/);
+    const executions = fixture.policy.executionLedger();
+    assert.equal(executions.schema, "autopilot.approved_command_executions.v1");
+    assert.equal(executions.overflowed, false);
+    assert.equal(executions.entries.length, 1);
+    assert.equal(executions.entries[0]!.command_id, "CMD-U1-1");
+    assert.equal(executions.entries[0]!.outcome, "succeeded");
+    assert.match(executions.entries[0]!.scope_snapshot_digest, /^[0-9a-f]{64}$/);
 
     await write.execute("write-approved-new-file", { path: "new/allowed.txt", content: "new approved\n" });
     assert.equal(readFileSync(join(fixture.worktree, "new/allowed.txt"), "utf8"), "new approved\n");
+    await approvedCommand.execute("command-after-final-edit", { command_id: "CMD-U1-1" });
+    const finalExecutions = fixture.policy.executionLedger();
+    assert.equal(finalExecutions.entries.length, 2);
+    assert.notEqual(
+      finalExecutions.entries[0]!.scope_snapshot_digest,
+      finalExecutions.entries[1]!.scope_snapshot_digest,
+      "approved-file content changes must change command snapshot evidence",
+    );
 
     const foreignFile = join(fixture.foreign, "operator.txt");
     const beforeForeign = readFileSync(foreignFile, "utf8");
+    symlinkSync(foreignFile, join(fixture.worktree, "link.txt"));
+    symlinkSync(fixture.foreign, join(fixture.worktree, "linked"));
+    mkdirSync(join(fixture.worktree, "special.txt"));
     const writeBlockCases = [
       ["absolute", { path: foreignFile, content: "bad" }],
       ["parent escape", { path: "../foreign/operator.txt", content: "bad" }],
@@ -116,11 +163,11 @@ test("delivery policy confines edit/write/bash at production tool overrides", { 
 test("delivery policy denial ledger is bounded and reports overflow", { concurrency: false }, async () => {
   const fixture = makeFixture();
   try {
-    const bash = fixture.tools.get("bash")!;
+    const approvedCommand = fixture.tools.get(APPROVED_COMMAND_TOOL)!;
     for (let index = 0; index < 33; index += 1) {
       await assert.rejects(
-        () => bash.execute(`denial-${index}`, { command: `printf denied-${index}` }),
-        /unapproved bash command/,
+        () => approvedCommand.execute(`denial-${index}`, { command_id: `CMD-U1-${index + 99}` }),
+        /denied pre-effect/,
       );
     }
     const ledger = fixture.policy.denialLedger();
@@ -133,7 +180,48 @@ test("delivery policy denial ledger is bounded and reports overflow", { concurre
   }
 });
 
-test("delivery policy serializes parallel bash/edit/write race attempts", { concurrency: false }, async () => {
+test("approved-command backend does not expose Pi session environment", { concurrency: false }, async () => {
+  const command = `node -e ${JSON.stringify("process.exit(process.env.PI_SESSION_ID ? 42 : 0)")}`;
+  const fixture = makeUnitFixture(["src/lib.rs"], { commands: [command] });
+  try {
+    const approvedCommand = fixture.tools.get(APPROVED_COMMAND_TOOL)!;
+    await approvedCommand.execute(
+      "session-env-hidden",
+      { command_id: "CMD-U1-1" },
+      undefined,
+      undefined,
+      {
+        model: { provider: "provider-probe", id: "model-probe" },
+        thinkingLevel: "high",
+        sessionManager: {
+          getSessionId: () => "session-probe",
+          getSessionFile: () => "/tmp/session-probe.jsonl",
+        },
+      },
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("approved-command execution ledger is bounded and reports overflow", { concurrency: false }, async () => {
+  const fixture = makeUnitFixture(["src/lib.rs"]);
+  try {
+    const approvedCommand = fixture.tools.get(APPROVED_COMMAND_TOOL)!;
+    for (let index = 0; index < 65; index += 1) {
+      await approvedCommand.execute(`execution-${index}`, { command_id: "CMD-U1-1" });
+    }
+    const ledger = fixture.policy.executionLedger();
+    assert.equal(ledger.entries.length, 64);
+    assert.equal(ledger.overflowed, true);
+    assert.equal(ledger.entries[63]!.execution_id, "execution-64");
+    assert.equal(ledger.entries.every((entry) => entry.outcome === "succeeded"), true);
+  } finally {
+    cleanup();
+  }
+});
+
+test("delivery policy serializes parallel approved-command/edit/write race attempts", { concurrency: false }, async () => {
   const fixture = makeFixture();
   try {
     const raceDir = join(fixture.worktree, "race");
@@ -141,17 +229,16 @@ test("delivery policy serializes parallel bash/edit/write race attempts", { conc
     writeFileSync(join(raceDir, "file.txt"), "safe\n");
     const foreignRaceFile = join(fixture.foreign, "file.txt");
     writeFileSync(foreignRaceFile, "foreign\n");
-    const command = `rm -rf race && ln -s ${JSON.stringify(fixture.foreign)} race`;
-    const bash = fixture.tools.get("bash")!;
+    const approvedCommand = fixture.tools.get(APPROVED_COMMAND_TOOL)!;
     const write = fixture.tools.get("write")!;
     const edit = fixture.tools.get("edit")!;
 
     const results = await Promise.allSettled([
-      bash.execute("race-bash", { command }),
+      approvedCommand.execute("race-command", { command_id: "CMD-U1-2" }),
       write.execute("race-write", { path: "race/file.txt", content: "escaped\n" }),
       edit.execute("race-edit", { path: "race/file.txt", edits: [{ oldText: "foreign", newText: "escaped" }] }),
     ]);
-    assert.equal(results[0]!.status, "fulfilled");
+    assert.equal(results[0]!.status, "rejected", "unsafe command-created topology must fail closed");
     assert.equal(results[1]!.status, "rejected");
     assert.equal(results[2]!.status, "rejected");
     assert.equal(readFileSync(foreignRaceFile, "utf8"), "foreign\n");
@@ -175,10 +262,10 @@ test("delivery policy rejects duplicate unit file authority but permits repeated
     const { env } = makeEnv({ root, worktree, files: ["src/lib.rs"], commands: ["printf repeat", "printf repeat"] });
     const policy = loadDeliveryPolicyFromEnv(env as never, worktree);
     assert.equal(policy.receipt().allowed_unit_file_count, 1);
-    assert.equal(policy.receipt().approved_command_count, 1);
+    assert.equal(policy.receipt().approved_command_count, 2);
     const tools = new Map<string, RegisteredTool>();
     registerDeliveryPolicyTools({ registerTool(tool: RegisteredTool) { tools.set(tool.name, tool); } } as never, policy);
-    const result = await tools.get("bash")!.execute("repeat-ok", { command: "printf repeat" }) as { content: Array<{ text: string }> };
+    const result = await tools.get(APPROVED_COMMAND_TOOL)!.execute("repeat-ok", { command_id: "CMD-U1-1" }) as { content: Array<{ text: string }> };
     assert.equal(result.content[0]!.text, "repeat");
   } finally {
     cleanup();
@@ -220,6 +307,42 @@ test("delivery package checks fail closed on every executable-boundary shape def
   }
 });
 
+test("delivery approved-command bindings fail closed on every identity defect", { concurrency: false }, () => {
+  const mutations: Array<[string, (assignment: Record<string, unknown>, bindings: Array<Record<string, unknown>>) => void]> = [
+    ["missing bindings", (assignment) => { delete assignment["approved_commands"]; }],
+    ["duplicate command id", (_assignment, bindings) => { bindings.push({ ...bindings[0] }); }],
+    ["unknown unit", (_assignment, bindings) => { bindings[0]!["unit_id"] = "U404"; }],
+    ["zero ordinal", (_assignment, bindings) => { bindings[0]!["command_ordinal"] = 0; }],
+    ["out of range ordinal", (_assignment, bindings) => { bindings[0]!["command_ordinal"] = 99; }],
+    ["digest drift", (_assignment, bindings) => { bindings[0]!["command_digest"] = "0".repeat(64); }],
+  ];
+  for (const [label, mutate] of mutations) {
+    const fixture = makeFixture(false);
+    try {
+      const assignment = JSON.parse(readFileSync(fixture.assignmentPath, "utf8")) as Record<string, unknown>;
+      const bindings = assignment["approved_commands"] as Array<Record<string, unknown>>;
+      mutate(assignment, bindings);
+      const bytes = Buffer.from(JSON.stringify(assignment, null, 2));
+      writeFileSync(fixture.assignmentPath, bytes);
+      const assignmentDigest = createHash("sha256").update(bytes).digest("hex");
+      const env = { ...fixture.env, AUTOPILOT_DELIVERY_ASSIGNMENT_DIGEST: assignmentDigest };
+      env.AUTOPILOT_DELIVERY_POLICY_DIGEST = deliveryPolicyDigest({
+        assignmentPath: fixture.assignmentPath,
+        assignmentDigest,
+        worktree: fixture.worktree,
+        cwd: fixture.worktree,
+      });
+      assert.throws(
+        () => loadDeliveryPolicyFromEnv(env as never, fixture.worktree),
+        /approved_commands|approved command binding|approved command digest/,
+        label,
+      );
+    } finally {
+      cleanup();
+    }
+  }
+});
+
 test("delivery policy launch authority fails closed before tool registration", { concurrency: false }, () => {
   const fixture = makeFixture(false);
   try {
@@ -254,12 +377,12 @@ type MinimalFixture = {
 // directories an approved unit file lives in). This is the shape the real
 // framework write tool sees on a fresh delivery: it is what proves mkdir
 // actually creates directories rather than merely validating them.
-function makeUnitFixture(files: string[], options?: { registerTools?: boolean }): MinimalFixture {
+function makeUnitFixture(files: string[], options?: { registerTools?: boolean; commands?: string[] }): MinimalFixture {
   const root = mkdtempSync(join(realpathSync.native(tmpdir()), "autopilot-policy-mkdir-"));
   roots.push(root);
   const worktree = join(root, "worktree");
   mkdirSync(worktree);
-  const { env } = makeEnv({ root, worktree, files });
+  const { env } = makeEnv({ root, worktree, files, commands: options?.commands });
   const policy = loadDeliveryPolicyFromEnv(env as never, worktree);
   const tools = new Map<string, RegisteredTool>();
   if (options?.registerTools !== false) {
@@ -400,11 +523,8 @@ function makeFixture(registerTools = true): Fixture {
   mkdirSync(join(worktree, "src"));
   mkdirSync(join(worktree, "new"));
   mkdirSync(join(worktree, "linked-target"));
-  mkdirSync(join(worktree, "special.txt"));
   writeFileSync(join(worktree, "src/lib.rs"), "original\n");
   writeFileSync(join(foreign, "operator.txt"), "foreign\n");
-  symlinkSync(join(foreign, "operator.txt"), join(worktree, "link.txt"));
-  symlinkSync(foreign, join(worktree, "linked"));
   const { env, assignmentPath } = makeEnv({
     root,
     worktree,
@@ -419,17 +539,30 @@ function makeFixture(registerTools = true): Fixture {
   return { root, worktree, foreign, assignmentPath, env, policy, tools };
 }
 
+function approvedCommandDigest(unitId: string, ordinal: number, command: string): string {
+  return createHash("sha256")
+    .update(`autopilot.approved_command.v1\0${unitId}\0${ordinal}\0${command}`, "utf8")
+    .digest("hex");
+}
+
 function makeEnv(input: { root: string; worktree: string; files: string[]; commands?: string[] }): { env: Record<string, string>; assignmentPath: string } {
   const assignmentPath = join(input.root, `assignment-${createHash("sha1").update(input.files.join("|")).digest("hex")}.json`);
+  const commands = input.commands ?? ["printf approved"];
   const assignment = {
-    schema: "autopilot.delivery_assignment.v2",
+    schema: "autopilot.delivery_assignment.v3",
     workstream: "main",
     assignment_id: "assignment-main-L1",
     lane_id: "L1",
     attempt: 1,
     base_commit: "0123456789abcdef0123456789abcdef01234567",
     worktree: input.worktree,
-    ordered_units: [{ id: "U1", kind: "implementation", files: input.files, commands: (input.commands ?? ["printf approved"]).map((command) => ({ command })), package_checks: [{ check_id: "PKG-U1-TIP", kind: "clean-exact-package-tip", criterion_ordinals: [1], expected: "Core proves the exact clean package tip." }] }],
+    ordered_units: [{ id: "U1", kind: "implementation", files: input.files, commands: commands.map((command) => ({ command, expected: `Command ${command} exits successfully.` })), package_checks: [{ check_id: "PKG-U1-TIP", kind: "clean-exact-package-tip", criterion_ordinals: [1], expected: "Core proves the exact clean package tip." }] }],
+    approved_commands: commands.map((command, index) => ({
+      command_id: `CMD-U1-${index + 1}`,
+      unit_id: "U1",
+      command_ordinal: index + 1,
+      command_digest: approvedCommandDigest("U1", index + 1, command),
+    })),
   };
   const bytes = Buffer.from(JSON.stringify(assignment, null, 2));
   writeFileSync(assignmentPath, bytes);
@@ -446,7 +579,7 @@ function makeEnv(input: { root: string; worktree: string; files: string[]; comma
     AUTOPILOT_DELIVERY_BASE_COMMIT: assignment.base_commit,
     AUTOPILOT_DELIVERY_POLICY_DIGEST: deliveryPolicyDigest({ assignmentPath, assignmentDigest, worktree: input.worktree, cwd: input.worktree }),
   };
-  assert.equal(DELIVERY_POLICY_VERSION, "autopilot.delivery_tool_policy.v2");
+  assert.equal(DELIVERY_POLICY_VERSION, "autopilot.delivery_tool_policy.v3");
   return { env, assignmentPath };
 }
 

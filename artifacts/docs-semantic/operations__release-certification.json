@@ -1,0 +1,15 @@
+{
+  "schema_version": "autopilot.docs_semantic_attestation.v2",
+  "doc_id": "operations/release-certification",
+  "reviewed_body_hash": "sha256:7789372c3c79970ba87e872865eb05aecf103a2bdc1dae7bd2bb9e406c4e92d9",
+  "reviewed_doc_sha256": "sha256:d3298583b687ecc777ecf42a69842367b6186e8c703db11183baccc6393269a3",
+  "covers_sources": [
+    "scripts/certify-runtime-repair.mjs",
+    "scripts/check-payload.mjs",
+    "scripts/security-scan.mjs"
+  ],
+  "verdict": "PASS",
+  "reviewer": "anthropic/claude-opus-5 via Pi subscription delegates db42a5ce3d2beaeaaea5b28798ef99031 and d69559a60b20ee1c897e1a5fd5273bbf7; verified answer sha256 798456585ac78ae23d6a62c9ff2828e44abb24e1ff6ff5ccd2dd6c1dda95e25c and 7bf7b838f137aa8b9ecea796492a046e1a166c4cb2969f930e0ff9fe269cef3e",
+  "reviewed_at": "2026-08-06T14:20:01.000Z",
+  "notes": "PASS: independent reviews verified Pi 0.84 remains a dev-only public-peer test dependency, six exact integrity exceptions match the lock, and release certification binds clean pi-autopilot 1.3.1 plus pi-background-tasks 2.1.1 identities without weakening the generic EventBus capability gate."
+}

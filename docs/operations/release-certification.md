@@ -6,15 +6,16 @@ covers_surfaces: []
 covers_sources:
   - scripts/certify-runtime-repair.mjs
   - scripts/check-payload.mjs
-signature_hash: 'sha256:17987c94a79011cfcb9fcf835367977709b749a88fce76034013332fbf327569'
-body_hash: 'sha256:17987c94a79011cfcb9fcf835367977709b749a88fce76034013332fbf327569'
-semantic_attestation: 'sha256:17987c94a79011cfcb9fcf835367977709b749a88fce76034013332fbf327569'
+  - scripts/security-scan.mjs
+signature_hash: 'sha256:7789372c3c79970ba87e872865eb05aecf103a2bdc1dae7bd2bb9e406c4e92d9'
+body_hash: 'sha256:7789372c3c79970ba87e872865eb05aecf103a2bdc1dae7bd2bb9e406c4e92d9'
+semantic_attestation: 'sha256:7789372c3c79970ba87e872865eb05aecf103a2bdc1dae7bd2bb9e406c4e92d9'
 stability: evolving
 ---
 
 # Operations: runtime-repair release certification
 
-The runtime-repair certificate is scoped to one clean `pi-autopilot@1.3.1` candidate and one clean `pi-background-tasks@0.6.1` candidate. It proves the pair can run the real Pi SDK background integration with no network, no paid/metered API, deterministic tarballs, and installed-consumer parity.
+The runtime-repair certificate is scoped to one clean `pi-autopilot@1.3.1` candidate and one clean `pi-background-tasks@2.1.1` candidate. It proves the pair can run the real Pi SDK background integration with no network, no paid/metered API, deterministic tarballs, and installed-consumer parity.
 
 ## Driver
 
@@ -25,7 +26,7 @@ node scripts/certify-runtime-repair.mjs \
   --evidence-dir /absolute/external/evidence-dir
 ```
 
-The driver refuses metered credential variables, requires absolute clean package roots, writes evidence outside both repositories, and fails if package commit/tree identity changes during certification. Payload certification treats `extensions/autopilot.ts` as the package-declared Pi entrypoint and requires it alongside the Host source, bin wrappers, generated contracts/add-on files, and shipped binaries. The offline security scan allowlists only exact reviewed install-script packages and three Pi 0.83 SDK nested-lock integrity exceptions. TypeBox is a Pi-provided peer (`peerDependencies.typebox="*"`) plus dev-only `typebox@1.3.7` for local compile/type tests; it must not appear as a runtime or bundled dependency.
+The driver refuses metered credential variables, requires absolute clean package roots, writes evidence outside both repositories, and fails if package commit/tree identity changes during certification. Payload certification treats `extensions/autopilot.ts` as the package-declared Pi entrypoint and requires it alongside the Host source, bin wrappers, generated contracts/add-on files, and shipped binaries. The offline security scan allowlists only exact reviewed install-script packages and six Pi 0.84 SDK nested-lock integrity exceptions. TypeBox is a Pi-provided peer (`peerDependencies.typebox="*"`) plus dev-only `typebox@1.3.7` for local compile/type tests; it must not appear as a runtime or bundled dependency.
 
 ## Ledger IDs expected by the SMF validator
 

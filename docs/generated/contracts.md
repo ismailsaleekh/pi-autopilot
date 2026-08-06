@@ -677,6 +677,7 @@ Sources: `data/contracts.kdl`.
 | validation_context_v2 | list | validation_context_command.generated_paths | path | true |  |  |
 | validation_context_v2 | field | validation_context_command.handling | command_effect_handling | true |  |  |
 | validation_context_v2 | field | validation_context_command.scope_preservation | string | true |  |  |
+| validation_context_v2 | field | validation_context_command.evidence_ref | ref | true |  | Core-minted receipt proving this exact approved command succeeded on the final delivered source snapshot. |
 | validation_context_v2 | field | validation_context_package_check.check_id | id | true |  |  |
 | validation_context_v2 | field | validation_context_package_check.kind | package-check-kind | true |  |  |
 | validation_context_v2 | field | validation_context_package_check.expected | string | true |  |  |

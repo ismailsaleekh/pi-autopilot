@@ -4,11 +4,11 @@
 
 # pi-autopilot
 
-`pi-autopilot@1.3.1` is a Pi extension package that keeps the Host thin and moves planning/run authority into the shipped Rust `autopilot-core` binary. It is certified as a lockstep pair with `pi-background-tasks@0.6.1`; Host background work uses that package's documented `pi.events` request/response/terminal protocol, never a fictional `ctx.bg_run` API.
+`pi-autopilot@1.3.1` is a Pi extension package that keeps the Host thin and moves planning/run authority into the shipped Rust `autopilot-core` binary. It is certified as a lockstep pair with `pi-background-tasks@2.1.1`; Host background work uses that package's documented `pi.events` request/response/terminal protocol, never a fictional `ctx.bg_run` API.
 
 ## Runtime surfaces
 
-- Pi extension entry: `./src/extension.ts`.
+- Pi extension entry: `./extensions/autopilot.ts` (which delegates to `./src/extension.ts`).
 - Slash commands: `/autopilot-plan`, `/autopilot`, `/autopilot-onboard`, `/autopilot-inject`, `/autopilot-status`, `/autopilot-config`, `/autopilot-handoff`, `/autopilot-close`, `/autopilot-abort`.
 - Bins: `autopilot-core` (`bin/autopilot-core.mjs`) and `autopilot-agent-run` (`bin/autopilot-agent-run.mjs`).
 - Shipped Rust binaries: `binaries/{darwin-arm64,darwin-x64,linux-arm64,linux-x64,win32-x64}/` with `binaries/MANIFEST.json` parity.
@@ -21,7 +21,7 @@
 4. Child `agent-run` validates `autopilot.agent_run_spec.v4`, launches Pi RPC with a run-owned session, `--no-extensions`, and one explicit codegen-anchored child add-on, and strips metered API-key overrides.
 5. Every model assignment receives one parent-selected generated terminal profile. Core accepts only correlated terminating tool-result details, validates profile/tool/boundary/schema/binding identity, and writes a package-owned carrier; assistant terminal text is never a carrier.
 6. A typed, fresh `recovery-engineer` may investigate one semantically rejected plan/result or one mechanically proven pre-effect command denial with nonempty in-scope work. It preserves original authority, emits a closed disposition, and can return only `repaired`/`no-defect` to the unchanged independent gate once; Core never auto-adopts blocked work, and real authority, infrastructure, unsafe, stale-snapshot, or second-rejection outcomes fail closed.
-7. Delivery `commands` are pre-package child evidence only. Committed-tip criteria use the closed `clean-exact-package-tip` package check, which Core proves after its exclusive package commit and forwards to the independent Validator as digest-bound evidence.
+7. Delivery children have no general Bash tool. Core projects each pre-package verification command to a package-owned `CMD-<unit>-<ordinal>` id; `autopilot_run_approved_command` accepts only that id, executes the exact bound bytes in the assigned worktree, and emits typed final-source receipts. Core re-proves complete successful command coverage before packaging and forwards digest-bound command and `clean-exact-package-tip` receipts to the independent Validator.
 8. Fresh subscription children use bounded deterministic startup buckets keyed by planning ordinal or lane identity to avoid parallel OAuth credential-read bursts. No credential injection, API-key fallback, or route substitution is permitted.
 
 ## Four-file planning input

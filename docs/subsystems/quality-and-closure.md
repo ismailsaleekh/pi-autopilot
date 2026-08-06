@@ -4,98 +4,119 @@ mode: authored
 review_policy: behavioral
 covers_surfaces: []
 covers_sources:
-  - src/core/quality/contract.ts
-  - src/core/quality/spec-gate.ts
-  - src/core/adjudication/index.ts
-  - src/core/lifecycle/index.ts
-  - src/core/state-store/index.ts
-signature_hash: 'sha256:c602e7d05563ac3b9cbf795cc9f08a5b2ed38a9d9ad63d9444b66564187b361f'
-body_hash: 'sha256:5cf80e60a9e7d0f7e150253e403513fe1692b7fb459aed7490302067686a0342'
-semantic_attestation: 'sha256:5cf80e60a9e7d0f7e150253e403513fe1692b7fb459aed7490302067686a0342'
+  - data/closure.kdl
+  - data/failure-table.kdl
+  - data/finalization.kdl
+  - data/recovery.kdl
+  - data/seam_real_producers.rs
+  - drivers/src/closure/mod.rs
+  - drivers/src/finalize/mod.rs
+  - drivers/src/repair/mod.rs
+  - drivers/src/seam/mod.rs
+signature_hash: 'sha256:12f73f09fce71a83ab9b1535dbefa7b5290477cd14b8bac2f3ebc75f35e3a8e7'
+body_hash: 'sha256:12f73f09fce71a83ab9b1535dbefa7b5290477cd14b8bac2f3ebc75f35e3a8e7'
+semantic_attestation: 'sha256:12f73f09fce71a83ab9b1535dbefa7b5290477cd14b8bac2f3ebc75f35e3a8e7'
 stability: stable
 ---
 
-# Quality vNext and Terminal Closure
+# Quality and terminal closure
 
-Autopilot's green result means root-cause, independently validated, ownership-audited,
-evidence-backed work. This subsystem holds the perfect-quality doctrine, the
-scope/protected-path adjudication, the work-item lifecycle, the closure gate, and the
-durable state store.
+Autopilot admits recovery and publication through package-owned predicates rather than model
+prose. This document distinguishes the predicates that are wired today from declarative or
+library surfaces that are not yet production evidence.
 
-## Key files
+## Source map
 
 | Concern | Source |
 |---|---|
-| Perfect-quality contract rules + render helpers | `src/core/quality/contract.ts` |
-| Deterministic pre-spend spec-quality gate | `src/core/quality/spec-gate.ts` |
-| Scope + protected-path adjudication | `src/core/adjudication/index.ts` |
-| Work-item lifecycle + closure gate | `src/core/lifecycle/index.ts` |
-| Atomic state + monotonic events + resume | `src/core/state-store/index.ts` |
-
-## Perfect-quality doctrine
-
-`src/core/quality/contract.ts` defines the package-owned contract and its render helpers
-(`renderAutopilotPerfectQualityRules`, `renderAutopilotPerfectQualityParagraph`); the
-prompt renderer (documented in
-[runner-and-forced-output.md](runner-and-forced-output.md)) embeds them into parent and
-child prompts: no band-aids, hacks, silent
-fallbacks, fake-green tests, fixture tampering, deferred consumers, or source-changing
-self-certification. If correct work needs more scope, Autopilot records and routes the
-exception instead of hiding it behind a green status.
+| One-attempt semantic recovery policy | `data/recovery.kdl`, `drivers/src/repair/mod.rs` |
+| Closed failure and escalation taxonomy | `data/failure-table.kdl` |
+| Planning-recovery immutability | `data/seam_real_producers.rs` |
+| Recovery admission, validation handoff, durable state, and publication | `drivers/src/seam/mod.rs` |
+| Closure-bundle and repair-routing library | `data/closure.kdl`, `drivers/src/closure/mod.rs` |
+| Wired final-gate predicate and its declarative policy | `drivers/src/finalize/mod.rs`, `data/finalization.kdl` |
 
 ## Bounded semantic recovery
 
-Fail-closed detection does not require aborting on every correctable model-quality miss. A fresh Recovery Engineer may investigate one admitted semantic rejection or one mechanically proven pre-effect command-policy denial using original authority, repository facts, upstream outputs, and the gate's typed diagnosis. The diagnosis is not trusted blindly. Planning recovery may change only objective/criteria/command details of exactly declared existing units; unit identity, ordering, dependencies, files, atom links, tests, and authority remain fixed mechanically. Source recovery uses the original approved unit file scope and normal delivery audit. A closed disposition records `repaired`, `no-defect`, `requires-new-authority`, `infrastructure-blocked`, or `unsafe-blocked`; only the first two return to the exact independent gate, once. The Recovery Engineer never self-certifies. The model's blocker label is not enough to open recovery: Core requires exact assignment/audit provenance and mechanical Git facts. A `requires-new-authority` delivery is eligible for one reconciliation attempt only when an unapproved bash request was denied before effect, the bounded denial ledger did not overflow, HEAD remains the exact base, and nonempty dirty paths are wholly approved. Core never auto-adopts or commits the blocked work; the Recovery Engineer must submit a new admitted result, after which Core packages and the same independent gate runs. Missing authority, infrastructure/provider faults, path-policy denials, unsafe/effected mutations, clean/no-change contradictions, stale snapshots, or a second rejection remain loud terminal outcomes.
+A fresh Recovery Engineer may investigate one admitted semantic rejection or one mechanically
+proven pre-effect command-policy denial using original authority, repository facts, upstream
+outputs, and the gate's typed diagnosis. The diagnosis is evidence, not authority.
 
-## Work-item lifecycle
+Planning recovery mechanically fixes unit count, identity and position, kind, dependencies, files,
+and atom links. Objective, criteria, verification commands, and package checks may change only on
+units named in `affected_unit_ids`. The required `preserved_authority` list is model-supplied
+evidence, not a package fence for tests or gates. Source recovery uses the original approved unit
+scope and normal delivery admission. A closed
+disposition records `repaired`, `no-defect`, `requires-new-authority`,
+`infrastructure-blocked`, or `unsafe-blocked`; only the first two may return to the same
+independent gate, once. A second rejection is preserved as exhaustion rather than fed into a
+loop.
 
-After transport, `nextAutopilotWorkItemStateAfterTransport` moves source-changing work to
-`validation-ready` (when its execution audit is `clean`) or `audit-review` (otherwise);
-only non-source-changing work goes straight to `closed`.
-`nextAutopilotWorkItemStateAfterValidation` then advances a `validate`/`bughunt` status
-to `closed` on a `PASS` verdict, `needs-fix` on `NEEDS_FIX`, and `audit-review` for any
-other verdict; a status whose role is neither `validate` nor `bughunt` leaves the work
-item's state unchanged. Transport success is therefore deliberately
-separated from semantic closure: a source-changing item is never `closed` by transport
-alone — it must pass its own referenced independent validation with clean/adjudicated
-audits first.
+The model's blocker label cannot open delivery recovery by itself. Core requires the exact issued
+assignment and audit provenance plus mechanical Git and worktree facts. A
+`requires-new-authority` delivery is reconcilable only when a nonempty bounded denial ledger
+contains exclusively unknown `autopilot_run_approved_command` identifiers denied before effect,
+HEAD is still the exact base, and nonempty dirty paths are wholly approved. Core never adopts or
+commits the blocked work: a fresh Recovery Engineer must produce a newly admitted result before
+packaging and the unchanged Validator handoff. Missing authority, infrastructure/provider faults,
+path-policy denials, unsafe or effected mutations, clean/no-change contradictions, stale
+snapshots, malformed or overflowed audit, and exhaustion remain loud terminal outcomes. The
+separately attested capability and receipt mechanics are documented in
+[runner-and-forced-output.md](runner-and-forced-output.md).
 
-## Closure gate
+## Validation and closure library
 
-`evaluateAutopilotClosureGate` rejects closure while:
+At the seam, recovery output supplies a new candidate to the existing validation handoff, not a
+substitute verdict. The exact command-receipt and criterion-citation predicates live in the runner
+boundary linked above; this document does not duplicate their source ownership.
 
-- any running unit remains (`state.running.length > 0`),
-- there are unresolved scope/protected-path exceptions,
-- any source-changing execution audit exists but there are no source-changing work items
-  to carry independent validation refs,
-- any **source-changing** work item is not yet `closed`, or fails
-  `sourceChangingWorkItemValidationBlockers` — which requires a `validation_unit_id` and
-  `validation_status_ref` and then rejects self-validation, a validation id outside the
-  work item, a missing state unit, a mismatched status ref, no matching validation
-  status, or a non-`PASS` validation verdict. The audit-adjudication check below runs
-  over **all** supplied audits first; only the independent-validation requirement is
-  scoped to source-changing work items,
-- for high-risk/critical or multi-lane work, there is no `bughunt` status with a `PASS`
-  verdict **and** no decision whose event is `blocker_ruling` (either one clears this
-  check),
-- an execution audit that is not `clean` and lacks its required adjudication: a
-  `scope-review-required` audit that is not ratified, a
-  `protected-path-review-required`/`critical-protected-path-violation` audit that is not
-  resolved, or any audit with an unknown classification (rejected as "audit
-  unavailable"). A `clean` audit passes and needs no adjudication.
+`DeepValidationBundle::build` rejects duplicate declared criterion ids, observations for unknown
+criteria, and any declared criterion with no observation. It does not reject repeated observations
+for the same declared criterion. `criteria_for_delta` can select criteria whose paths or semantic
+surfaces changed or whose ids became stale, but currently has test callers only. Likewise, the
+bounded `RepairLedger` can route surviving material findings, while the production integration
+bundle currently synthesizes a passing criterion with no findings, so that escalation path is not
+currently exercised by the seam. These are package-owned library capabilities, not claims of
+additional production closure evidence.
 
-## Adjudication
+## Wired final gate
 
-Outside-owned changes become scope-review work (not automatic discard);
-read-only/untouchable touches block semantic closure until validator/adjudicator
-remediation or an explicit plan amendment. Scope ratification binds the master plan,
-the execution audit, and a decision-log entry.
+`verify_final_gate` implements nine Rust conditions. Current seam wiring supplies them as follows:
 
-## State store
+- every required lane must have a `unit-closed:` ref and no active or unknown work may remain;
+- the attributable-diff input currently proves only that required lanes are nonempty and at least
+  one `unit-closed:` ref exists; it does not independently inspect the integrated diff;
+- mandatory-finding and stale-proof prefixes must be absent, but current Core code has no producer
+  for either prefix;
+- final-command, full-suite, and final-Validator booleans are all minted for the current tip from
+  the one `run_final_verification_at_tip` outcome. In `.pi/live-test.json` repositories that
+  outcome executes the configured verification commands; outside that harness the function
+  currently returns success without running commands; and
+- `verify_final_gate` can require exact-tip Bughunter evidence when its trigger input says so, but
+  current seam construction hardcodes low risk and false protected/operator flags, computes lane
+  count after active work is gone, and has no `bughunter-pass:` producer. It also queries an
+  `integration:conflict-route` ref prefix even though production emits that text as an event kind,
+  not an artifact ref, so neither the completion guard nor conflict trigger observes it. The
+  production path therefore does not currently exercise the Bughunter requirement.
 
-`state-store` writes `state.json` atomically, appends `events.jsonl` monotonically,
-validates runtime references, and resumes from bounded event tails under
-`.pi/autopilot/<workstream>/`.
+`data/finalization.kdl` also declares `active-evidence-receipts` and
+`closed-evidence-envelope`. They are not represented in `FinalCondition::ALL` and are not enforced
+by `verify_final_gate`; their presence in declarative data must not be cited as a green runtime
+proof. The current nine-input predicate is therefore narrower than the complete declarative
+policy.
+
+When the wired predicate passes, `evaluate_final_gate` binds tip, tree, run identity, and the
+provided evidence digest. Publication persists a prepared intent, creates the result ref with a
+zero-old-object compare-and-swap, verifies the ref, records durable closed state, and archives the
+publication. A conflicting ref or mismatched prepared publication is rejected; a matching
+prepared publication can be completed on replay.
+
+## Durable state
+
+`CoreState` replays the append-only event path and advances monotonically by checked sequence and
+revision. Recovery-pending, assignment-issued, validation, integration,
+publication-prepared, and publication-closed facts are appended before their corresponding
+spawn or publication transition, allowing restart replay rather than successful-state inference.
 
 ## Related
 

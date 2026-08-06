@@ -869,6 +869,7 @@ artifact "validation_context_v2" schema="autopilot.validation_context.v1" produc
         list "generated_paths" item="path" required=#true
         field "handling" type="command_effect_handling" required=#true
         field "scope_preservation" type="string" required=#true
+        field "evidence_ref" type="ref" required=#true doc="Core-minted receipt proving this exact approved command succeeded on the final delivered source snapshot."
     }
     record "validation_context_package_check" {
         field "check_id" type="id" required=#true

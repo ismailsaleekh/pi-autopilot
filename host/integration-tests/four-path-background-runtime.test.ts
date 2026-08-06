@@ -54,7 +54,7 @@ after(() => {
 
 for (const candidate of packageSets) {
   test(`four-path command reaches real background event-bus runtime without ctx.bg_run (${candidate.label})`, { timeout: 90000 }, async () => {
-    assert.equal(PI_SDK_VERSION, "0.82.1", `runtime integration must use real Pi 0.82.1 SDK, got ${PI_SDK_VERSION}`);
+    assert.equal(PI_SDK_VERSION, "0.84.0", `runtime integration must use real Pi 0.84.0 SDK, got ${PI_SDK_VERSION}`);
     assertPackageCandidate(candidate.packageRoot, "pi-autopilot");
     assertBackgroundCandidate(candidate.backgroundRoot);
     assertCoreBinaryPresent(candidate.packageRoot);
@@ -131,7 +131,7 @@ for (const candidate of packageSets) {
 
         const fakePiInvocations = readJsonlIfPresent(harness.fakePiCanary);
         assert.ok(fakePiInvocations.length >= 1, "package-contained runner did not invoke fake pi");
-        assert.ok(fakePiInvocations.every((entry) => entry.argv.includes("--mode") && entry.argv.includes("json")));
+        assert.ok(fakePiInvocations.every((entry) => entry.argv.includes("--mode") && entry.argv.includes("rpc")));
         assert.ok(fakePiInvocations.every((entry) => entry.meteredCredentials.length === 0), JSON.stringify(fakePiInvocations));
         assert.deepEqual(networkCalls, [], "runtime integration must not call provider/network fetch");
         assert.equal(Object.prototype.hasOwnProperty.call(session, "bg_run"), false);
@@ -201,8 +201,8 @@ test("BUG-184: autopilot tools and prompt text are absent until an activating co
       const afterNames = session.getAllTools().map((tool) => tool.name);
       assert.deepEqual(afterNames.filter((name) => name.startsWith("autopilot_")).sort(), [
         "autopilot_submit_atoms",
+        "autopilot_submit_context",
         "autopilot_submit_plan_cluster",
-        "autopilot_submit_questions",
         "autopilot_submit_resolution",
         "autopilot_submit_review",
         "autopilot_submit_scout_report",
@@ -336,7 +336,7 @@ function createRuntimeHarness(prefix) {
   git(project, ["config", "user.name", "Runtime Test"]);
   git(project, ["add", "."]);
   git(project, ["commit", "-m", "runtime fixture"]);
-  const eventLog = join(project, "events.jsonl");
+  const eventLog = join(project, ".pi", "autopilot", "core-events.jsonl");
   const fakeBin = mkdtempSync(join(tmpdir(), `${prefix}fake-pi-`));
   const fakePiCanary = join(project, "fake-pi-invocations.jsonl");
   writeFakePi(fakeBin, fakePiCanary);
@@ -379,7 +379,7 @@ function installOfflineCanaries(fakeBin, fakePiCanary, project) {
   process.env.PATH = `${fakeBin}:${previous.PATH ?? ""}`;
   process.env.PI_OFFLINE = "1";
   process.env.PI_BG_DISABLE_UPDATE_CHECK = "1";
-  process.env.AUTOPILOT_CORE_EVENT_LOG = join(fakePiCanary, "..", "events.jsonl");
+  process.env.AUTOPILOT_CORE_EVENT_LOG = join(project, ".pi", "autopilot", "core-events.jsonl");
   process.chdir(project);
   for (const key of METERED_ENV) delete process.env[key];
   rmSync(fakePiCanary, { force: true });
@@ -684,8 +684,8 @@ function assertPackageCandidate(root, name) {
 function assertBackgroundCandidate(root) {
   const metadata = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   assert.equal(metadata.name, "pi-background-tasks");
-  assert.equal(metadata.version, "0.6.1");
-  assert.ok(existsSync(join(root, "src", "core", "extension-api.ts")), "background candidate must expose the 0.6.1 extension API source");
+  assert.equal(metadata.version, "2.1.1");
+  assert.ok(existsSync(join(root, "src", "core", "extension-api.ts")), "background candidate must expose the 2.1.1 extension API source");
 }
 
 function assertCoreBinaryPresent(packageRoot) {

@@ -1022,6 +1022,7 @@ export interface ValidationContextCommand {
   generated_paths: Path[];
   handling: CommandEffectHandling;
   scope_preservation: string;
+  evidence_ref: Ref;
 }
 
 export interface ValidationContextPackageCheck {

@@ -80,7 +80,7 @@ fn missing_background_task_capability_pauses_before_any_mutation()
                 needs: OperatorDecision::SupplyCapability
             }
         );
-        assert!(error.instruction.contains("pi-background-tasks 0.6.1"));
+        assert!(error.instruction.contains("pi-background-tasks 2.1.1"));
         assert!(error.instruction.contains("reload/restart"));
         assert!(!target.exists(), "{label} created a directory");
         assert!(!target.join("artifact").exists(), "{label} created a file");

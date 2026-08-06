@@ -1,0 +1,21 @@
+{
+  "schema_version": "autopilot.docs_semantic_attestation.v2",
+  "doc_id": "subsystems/quality-and-closure",
+  "reviewed_body_hash": "sha256:12f73f09fce71a83ab9b1535dbefa7b5290477cd14b8bac2f3ebc75f35e3a8e7",
+  "reviewed_doc_sha256": "sha256:402fa6922f0d14feb42633ce83f469a3051200b0642b631a354f3d0420f020c0",
+  "covers_sources": [
+    "data/closure.kdl",
+    "data/failure-table.kdl",
+    "data/finalization.kdl",
+    "data/recovery.kdl",
+    "data/seam_real_producers.rs",
+    "drivers/src/closure/mod.rs",
+    "drivers/src/finalize/mod.rs",
+    "drivers/src/repair/mod.rs",
+    "drivers/src/seam/mod.rs"
+  ],
+  "verdict": "PASS",
+  "reviewer": "anthropic/claude-opus-5 via Pi subscription delegate d227ad1f8095952e63c5ce54d87b6284c; verified answer sha256 dcc87b44f16eb0c376d4aead38cbc6631a120631c97f9e5c4795aa5d3ee787af",
+  "reviewed_at": "2026-08-06T14:23:23.000Z",
+  "notes": "PASS: independent source review verified one-attempt recovery admission and typed replay, exact mechanical planning fences, honest closure-library versus wired behavior, nine Rust conditions versus eleven declarative conditions, live/non-live verification limits, inert conflict and Bughunter inputs, and publication/event replay."
+}

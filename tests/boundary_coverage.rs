@@ -692,6 +692,70 @@ fn malformed_validation_context_command_authority_is_rejected_at_submission_admi
 }
 
 #[test]
+fn validation_approved_command_receipts_are_exact_and_criterion_bound() {
+    let command = validation_context_command_authority(
+        "verify assigned unit",
+        "pass",
+        "no-effect",
+        vec![],
+        "none",
+        "scope kept",
+    );
+    let (assignment, context, submission) = validation_authority_bundle(command);
+    drivers::runner::child::admit_validation_submission_with_authority(
+        &submission,
+        &assignment,
+        &context,
+    )
+    .expect("exact approved-command receipt is admitted");
+
+    let mut omitted = submission.clone();
+    omitted.criterion_results[0].evidence_refs.clear();
+    assert!(
+        drivers::runner::child::admit_validation_submission_with_authority(
+            &omitted,
+            &assignment,
+            &context,
+        )
+        .is_err(),
+        "criterion omitted its required approved-command receipt"
+    );
+
+    let mut kind_drift = context.clone();
+    kind_drift.evidence[0].kind = "delivery-focused".to_owned();
+    assert!(
+        drivers::runner::child::admit_validation_submission_with_authority(
+            &submission,
+            &assignment,
+            &kind_drift,
+        )
+        .is_err(),
+        "command receipt kind drift was admitted"
+    );
+
+    let mut unrelated_context = context.clone();
+    let mut unrelated_criterion = unrelated_context.criteria[0].clone();
+    unrelated_criterion.criterion_id = Id("criterion-without-command".to_owned());
+    unrelated_criterion.commands.clear();
+    unrelated_context.criteria.push(unrelated_criterion);
+    let mut unrelated_submission = submission.clone();
+    let mut unrelated_result = unrelated_submission.criterion_results[0].clone();
+    unrelated_result.criterion_id = Id("criterion-without-command".to_owned());
+    unrelated_submission
+        .criterion_results
+        .push(unrelated_result);
+    assert!(
+        drivers::runner::child::admit_validation_submission_with_authority(
+            &unrelated_submission,
+            &assignment,
+            &unrelated_context,
+        )
+        .is_err(),
+        "unrelated criterion substituted an approved-command receipt"
+    );
+}
+
+#[test]
 fn validation_package_check_receipts_are_exactly_bound_and_cannot_duplicate() {
     let command = validation_context_command_authority(
         "verify assigned unit",
@@ -735,7 +799,8 @@ fn validation_package_check_receipts_are_exactly_bound_and_cannot_duplicate() {
         .is_err(),
         "criterion omitted its required Core-owned package-check receipt"
     );
-    submission.criterion_results[0].evidence_refs = vec![evidence_ref];
+    let command_evidence_ref = context.criteria[0].commands[0].evidence_ref.clone();
+    submission.criterion_results[0].evidence_refs = vec![command_evidence_ref, evidence_ref];
     drivers::runner::child::admit_validation_submission_with_authority(
         &submission,
         &assignment,
@@ -829,6 +894,7 @@ fn validation_context_command_authority(
         "generated_paths":generated_paths,
         "handling":handling,
         "scope_preservation":scope_preservation,
+        "evidence_ref":"approved-command-receipt:CMD1:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
     })
 }
 
@@ -901,9 +967,9 @@ fn validation_authority_bundle(
             "witness_ids":["witness-1"]
         }],
         "evidence":[{
-            "evidence_ref":"evidence:command-1",
+            "evidence_ref":"approved-command-receipt:CMD1:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
             "digest":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-            "kind":"command-output",
+            "kind":"delivery-approved-command",
             "exact_commit":exact_commit,
             "exact_tree":exact_tree,
             "command_id":"CMD1"
@@ -927,7 +993,7 @@ fn validation_authority_bundle(
         "criterion_results":[{
             "criterion_id":"CR1",
             "verdict":"PASS",
-            "evidence_refs":["evidence:command-1"],
+            "evidence_refs":["approved-command-receipt:CMD1:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"],
             "finding_ids":[],
             "covered_paths":["src/unit.txt"],
             "semantic_surface_ids":["surface-1"],

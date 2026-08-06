@@ -1,8 +1,8 @@
 {
   "schema_version": "autopilot.docs_semantic_attestation.v2",
   "doc_id": "subsystems/runner-and-forced-output",
-  "reviewed_body_hash": "sha256:328874aaa9b3c1d553b29d71893637929454949fc91f05924def1e04a70a9348",
-  "reviewed_doc_sha256": "sha256:bf83cd12357c08e71283b6ffcb8702f6b72144b20c9b812558f6a6e176758e11",
+  "reviewed_body_hash": "sha256:9d614f9020ee575fdadad2e82011b56cf1a6f88691a65c2b4e13dbac3dc35d55",
+  "reviewed_doc_sha256": "sha256:85eb3fccdbf873a2c9bbf783a88bf9f852abed41c81da07d4eeabd84fba06db1",
   "covers_sources": [
     "data/control.kdl",
     "data/seam_real_producers.rs",
@@ -14,7 +14,7 @@
     "src/resolve-core.ts"
   ],
   "verdict": "PASS",
-  "reviewer": "anthropic/claude-opus-5 via Pi subscription bg_delegate d8a30929b3e50a96d0c48aa8a966581a6 (verified answer sha256:86ae762d761bd8a5ccd3e74f35ec38d80dee3daf8d32ad8bc64ba00147bbb618)",
-  "reviewed_at": "2026-08-06T07:46:09.526Z",
-  "notes": "PASS: child allowlist derives only from commands; criterion-bound package receipts re-prove exact HEAD/tree/base ancestry/changed paths and reject non-package untracked residue before delivery acceptance; validation requires the exact assigned receipt set; policy-denial recovery remains one typed pre-effect, in-scope attempt with event-before-action replay and no blocked-worktree auto-adoption."
+  "reviewer": "anthropic/claude-opus-5 via Pi subscription delegates ddfc078bdbdba0f070c6c5855846b0bf4 and d69559a60b20ee1c897e1a5fd5273bbf7; verified answer sha256 8a80152045b41baab9a60b48a7e5a1accad6ab78d836206da6c4646b46231685 and 7bf7b838f137aa8b9ecea796492a046e1a166c4cb2969f930e0ff9fe269cef3e",
+  "reviewed_at": "2026-08-06T14:20:01.000Z",
+  "notes": "PASS: independent reviews verified the final approved-command id-only boundary, hidden Pi 0.84 shell isolation, UTF-8 final-snapshot receipts, exact generated digest admission, unchanged Validator evidence authority, and the exact pi-background-tasks 2.1.1 api_version-1 EventBus pair."
 }

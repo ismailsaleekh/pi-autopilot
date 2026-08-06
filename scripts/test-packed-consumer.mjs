@@ -95,7 +95,7 @@ function main() {
     run('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund', '--legacy-peer-deps', tarball], consumer, env, 300_000);
     const publicPi = readPackageJson(join(GLOBAL_PI_ROOT, 'package.json'), 'global Pi public alias package.json');
     const publicTypebox = readPackageJson(join(GLOBAL_TYPEBOX_ROOT, 'package.json'), 'global TypeBox public alias package.json');
-    if (publicPi.name !== '@earendil-works/pi-coding-agent' || publicPi.version !== '0.83.0') fail(`global Pi public alias must be 0.83.0, got ${publicPi.name}@${publicPi.version}`);
+    if (publicPi.name !== '@earendil-works/pi-coding-agent' || publicPi.version !== '0.84.0') fail(`global Pi public alias must be 0.84.0, got ${publicPi.name}@${publicPi.version}`);
     if (publicTypebox.name !== 'typebox' || publicTypebox.version !== '1.3.7') fail(`global TypeBox public alias must be 1.3.7, got ${publicTypebox.name}@${publicTypebox.version}`);
     mkdirSync(join(consumer, 'node_modules', '@earendil-works'), { recursive: true });
     symlinkSync(GLOBAL_PI_ROOT, join(consumer, 'node_modules', '@earendil-works', 'pi-coding-agent'), 'dir');
@@ -150,7 +150,7 @@ function main() {
       pi_peer: `${publicPi.name}@${publicPi.version}`,
       typebox_peer: `${publicTypebox.name}@${publicTypebox.version}`,
       runtime_private_peer_copies: 0,
-      does_not_prove: 'This offline witness does not drive Pi headlessly; it proves the installed package layout loads through Pi 0.83 public peer aliases and exposes the Host entry and package.json bin path a loader would use.',
+      does_not_prove: 'This offline witness does not drive Pi headlessly; it proves the installed package layout loads through Pi 0.84 public peer aliases and exposes the Host entry and package.json bin path a loader would use.',
     };
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   } finally {

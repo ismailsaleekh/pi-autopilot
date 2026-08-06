@@ -528,6 +528,8 @@ pub struct ToolCarrierDetails {
     pub payload: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_policy_denials: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_command_executions: Option<Value>,
 }
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct TerminalMessage {

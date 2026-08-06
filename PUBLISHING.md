@@ -1,6 +1,6 @@
 # Publishing pi-autopilot
 
-Publish only an exact clean package candidate paired with `pi-background-tasks@0.6.1`. A green source checkout without rebuilt shipped binaries, deterministic tarballs, installed-consumer proof, and the SMF-named certificate is not publishable.
+Publish only an exact clean package candidate paired with `pi-background-tasks@2.1.1`. A green source checkout without rebuilt shipped binaries, deterministic tarballs, installed-consumer proof, and the SMF-named certificate is not publishable.
 
 ## Pre-publish sequence
 

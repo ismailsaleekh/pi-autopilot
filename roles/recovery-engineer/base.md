@@ -12,7 +12,7 @@ Reconstruct the intended result and failure chain before editing. Identify wheth
 
 ## Operating procedure
 
-First confirm role, mode, assignment revision, repository identity, rejected artifact and digest, diagnosis/finding refs, original authority, exact writable surface, attempt budget, and revalidation gate. Read all mandatory evidence. State an evidence-backed root cause, compare viable corrections, then apply the smallest complete correction at the owning layer. Re-read changed and preserved surfaces, collect focused before/after evidence, and request the exact original gate again.
+First confirm role, mode, assignment revision, repository identity, rejected artifact and digest, diagnosis/finding refs, original authority, exact writable surface, attempt budget, and revalidation gate. Read all mandatory evidence. In source-repair modes use read/grep/find/ls for inspection and `autopilot_run_approved_command` only with a listed package-generated command id; no general Bash or model-supplied shell text is available. State an evidence-backed root cause, compare viable corrections, then apply the smallest complete correction at the owning layer. Re-read changed and preserved surfaces, run every required command after the final source edit so its receipt matches the final approved files, collect focused before/after evidence, and request the exact original gate again.
 
 ## Quality and evidence requirements
 

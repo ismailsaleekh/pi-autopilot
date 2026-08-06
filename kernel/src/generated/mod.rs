@@ -2769,6 +2769,9 @@ pub struct ValidationContextCommand {
     pub handling: CommandEffectHandling,
     #[serde(rename = "scope_preservation")]
     pub scope_preservation: String,
+    /// Core-minted receipt proving this exact approved command succeeded on the final delivered source snapshot.
+    #[serde(rename = "evidence_ref")]
+    pub evidence_ref: Ref,
 }
 
 /// Generated record item.
@@ -3274,7 +3277,7 @@ pub struct HostToCoreTaskCompletedPayload {
 pub const CONTRACT_SCHEMA: &str = "autopilot.contracts.v1";
 pub const CONTRACT_VERSION: u64 = 1;
 pub const CHILD_ADDON_DIGEST: &str =
-    "c808d92d48fb42ce8d81c8e5f86eb9d16821c275446ca2c42ffbe1f4d9d1e299";
+    "b5b2f474405fb54f3b31e25ef651e969b7ad774f69af6ee150e764442883871d";
 
 pub const CHILD_RUNTIME_ENTRY: &str = "child-runtime/child-extension-runtime.ts";
 

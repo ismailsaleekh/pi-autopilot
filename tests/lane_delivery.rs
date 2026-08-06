@@ -409,7 +409,7 @@ fn lane_delivery_agent_git_mutation_and_incomplete_delivery_are_refused_without_
         serde_json::from_slice(&assignment_bytes).expect("assignment json");
     assert_eq!(
         assignment_json["schema"],
-        "autopilot.delivery_assignment.v2"
+        "autopilot.delivery_assignment.v3"
     );
     assert_eq!(
         assignment_json["ordered_units"][0]["files"],
@@ -442,6 +442,20 @@ fn lane_delivery_agent_git_mutation_and_incomplete_delivery_are_refused_without_
     let package_tree = git_stdout(&worktree, &["rev-parse", "HEAD^{tree}"])
         .trim()
         .to_owned();
+    let scope_snapshot =
+        runner::delivery_scope_snapshot_digest(&runner.worktree, &runner.approved_units)
+            .expect("delivery scope snapshot");
+    let command_executions = runner::approved_command_bindings(&runner.approved_units)
+        .into_iter()
+        .enumerate()
+        .map(|(index, binding)| runner::VerifiedCommandExecution {
+            execution_id: format!("execution-{}", index + 1),
+            command_id: binding.command_id,
+            command_digest: binding.command_digest,
+            result_digest: "a".repeat(64),
+            scope_snapshot_digest: scope_snapshot.clone(),
+        })
+        .collect();
     let validation = validation_issue(
         &ValidationRunnerRequest {
             workstream: runner.workstream.clone(),
@@ -462,6 +476,11 @@ fn lane_delivery_agent_git_mutation_and_incomplete_delivery_are_refused_without_
             base_commit: runner.base_commit.clone(),
             worktree: runner.worktree.clone(),
             approved_units: runner.approved_units.clone(),
+            producer_assignment_digest: spec["assignment_digest"]
+                .as_str()
+                .expect("assignment digest")
+                .to_owned(),
+            approved_command_executions: command_executions,
         },
         &facts,
     )
@@ -487,7 +506,7 @@ fn lane_delivery_agent_git_mutation_and_incomplete_delivery_are_refused_without_
 
     let prompt = fs::read_to_string(spec["prompt_path"].as_str().expect("prompt")).expect("prompt");
     assert!(
-        prompt.contains("```````json autopilot.delivery_assignment.v2"),
+        prompt.contains("```````json autopilot.delivery_assignment.v3"),
         "{prompt}"
     );
     assert!(
@@ -604,7 +623,7 @@ fn lane_delivery_core_rejects_tool_audit_policy_authority_drift_after_digest_upd
     let mut audit: serde_json::Value =
         serde_json::from_slice(&original_audit_bytes).expect("tool audit json");
     audit["delivery_policy"]["active_overrides"] =
-        serde_json::json!(["bash", "edit", "write", "read"]);
+        serde_json::json!(["autopilot_run_approved_command", "edit", "write", "read"]);
     let mutated_audit_bytes = serde_json::to_vec_pretty(&audit).expect("mutated audit");
     fs::write(&audit_path, &mutated_audit_bytes).expect("audit rewrite");
     carrier["tool_audit_digest"] = serde_json::json!(sha256_hex(&mutated_audit_bytes));
@@ -641,6 +660,105 @@ fn lane_delivery_core_rejects_tool_audit_policy_authority_drift_after_digest_upd
 }
 
 #[test]
+fn delivery_command_execution_receipts_fail_closed_on_every_authority_defect() {
+    for label in [
+        "missing-success",
+        "failed-only",
+        "unknown-command",
+        "command-digest-drift",
+        "snapshot-drift",
+        "execution-id-drift",
+        "overflow",
+        "audit-schema-v1",
+        "audit-extra-field",
+    ] {
+        let (mut core, spawn, spec, carrier_path, worktree) =
+            launched_core_delivery(&format!("command-receipt-{label}"));
+        fs::write(
+            worktree.join("README.md"),
+            format!("delivery command receipt mutation {label}\n"),
+        )
+        .expect("worktree edit");
+        let mut carrier = delivery_carrier_without_package_for_core(&spec, 2);
+        let audit_path = PathBuf::from(carrier["tool_audit_ref"].as_str().expect("tool audit ref"));
+        let mut audit: serde_json::Value =
+            serde_json::from_slice(&fs::read(&audit_path).expect("tool audit"))
+                .expect("tool audit json");
+        let executions = &mut audit["delivery_policy"]["command_executions"];
+        match label {
+            "missing-success" => executions["entries"] = serde_json::json!([]),
+            "failed-only" => executions["entries"][0]["outcome"] = serde_json::json!("failed"),
+            "unknown-command" => {
+                executions["entries"][0]["command_id"] = serde_json::json!("CMD-UNKNOWN-1")
+            }
+            "command-digest-drift" => {
+                executions["entries"][0]["command_digest"] = serde_json::json!("b".repeat(64))
+            }
+            "snapshot-drift" => {
+                executions["entries"][0]["scope_snapshot_digest"] =
+                    serde_json::json!("c".repeat(64))
+            }
+            "execution-id-drift" => {
+                executions["entries"][0]["execution_id"] = serde_json::json!("execution-2")
+            }
+            "overflow" => executions["overflowed"] = serde_json::json!(true),
+            "audit-schema-v1" => audit["schema"] = serde_json::json!("autopilot.tool_audit.v1"),
+            "audit-extra-field" => audit["unexpected"] = serde_json::json!(true),
+            _ => unreachable!(),
+        }
+        let audit_bytes = serde_json::to_vec_pretty(&audit).expect("mutated audit");
+        fs::write(&audit_path, &audit_bytes).expect("audit rewrite");
+        carrier["tool_audit_digest"] = serde_json::json!(sha256_hex(&audit_bytes));
+        fs::create_dir_all(carrier_path.parent().expect("carrier parent")).expect("carrier dir");
+        fs::write(
+            &carrier_path,
+            serde_json::to_vec_pretty(&carrier).expect("delivery carrier"),
+        )
+        .expect("carrier write");
+
+        let rejected = core.send_json(serde_json::json!({"v":1,"id":2,"kind":"task-completed","payload":{"task_id":format!("task-{label}"),"action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}));
+        assert_eq!(rejected.kind, "done", "{label}: {rejected:?}");
+        let status = done_status(&rejected);
+        assert!(
+            status.contains("delivery-carrier-binding"),
+            "{label} did not fail at command receipt admission: {status}"
+        );
+        let events = fs::read_to_string(core.event_log()).expect("events");
+        assert!(
+            !events.contains("agent:delivery-accepted"),
+            "{label}: {events}"
+        );
+        assert!(!events.contains("validation:required"), "{label}: {events}");
+        core.shutdown();
+    }
+}
+
+#[test]
+fn delivery_command_receipt_replay_rejects_worktree_drift_after_terminal() {
+    let (mut core, spawn, spec, carrier_path, worktree) =
+        launched_core_delivery("command-receipt-worktree-drift");
+    fs::write(worktree.join("README.md"), "tested source\n").expect("tested edit");
+    let carrier = delivery_carrier_without_package_for_core(&spec, 2);
+    fs::write(worktree.join("README.md"), "drift after terminal\n").expect("post-terminal drift");
+    fs::create_dir_all(carrier_path.parent().expect("carrier parent")).expect("carrier dir");
+    fs::write(
+        &carrier_path,
+        serde_json::to_vec_pretty(&carrier).expect("delivery carrier"),
+    )
+    .expect("carrier write");
+
+    let rejected = core.send_json(serde_json::json!({"v":1,"id":2,"kind":"task-completed","payload":{"task_id":"task-command-receipt-worktree-drift","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}));
+    assert_eq!(rejected.kind, "done", "{rejected:?}");
+    assert!(
+        done_status(&rejected).contains("lacks success on final source snapshot"),
+        "{rejected:?}"
+    );
+    let events = fs::read_to_string(core.event_log()).expect("events");
+    assert!(!events.contains("agent:delivery-accepted"), "{events}");
+    core.shutdown();
+}
+
+#[test]
 fn lane_delivery_core_rejects_changed_path_outside_approved_unit_scope() {
     let (mut core, spawn, spec, carrier_path, worktree) =
         launched_core_delivery("outside-approved-scope");
@@ -665,18 +783,20 @@ fn lane_delivery_core_rejects_changed_path_outside_approved_unit_scope() {
 
 #[test]
 fn delivery_submission_admission_accepts_blocked_and_rejects_mixed_shapes() {
+    let ordered_units = vec![ApprovedUnit {
+        files: vec![ContractPath("README.md".to_owned())],
+        ..unit("U1", 1, &[])
+    }];
     let assignment = runner::DeliveryAssignmentArtifact {
-        schema: "autopilot.delivery_assignment.v2".to_owned(),
+        schema: "autopilot.delivery_assignment.v3".to_owned(),
         workstream: id("main"),
         assignment_id: id("assignment-main-L1"),
         lane_id: id("L1"),
         attempt: 1,
         base_commit: Sha("0123456789abcdef0123456789abcdef01234567".to_owned()),
         worktree: "/tmp/worktree".to_owned(),
-        ordered_units: vec![ApprovedUnit {
-            files: vec![ContractPath("README.md".to_owned())],
-            ..unit("U1", 1, &[])
-        }],
+        approved_commands: runner::approved_command_bindings(&ordered_units),
+        ordered_units,
         recovery: None,
     };
     let mut submission = kernel::generated::DeliverySubmissionV2 {
@@ -841,7 +961,7 @@ fn requires_new_authority_with_pre_effect_command_denial_routes_one_recovery_eng
     let denials = serde_json::json!([{
         "denial_id":"denial-1",
         "kind":"unapproved-command",
-        "tool":"bash",
+        "tool":"autopilot_run_approved_command",
         "request_digest":"a".repeat(64),
         "effected":false
     }]);
@@ -970,7 +1090,7 @@ fn pre_effect_denial_with_clean_worktree_does_not_auto_succeed_or_recover() {
         serde_json::json!([{
             "denial_id":"denial-1",
             "kind":"unapproved-command",
-            "tool":"bash",
+            "tool":"autopilot_run_approved_command",
             "request_digest":"9".repeat(64),
             "effected":false
         }]),
@@ -1003,7 +1123,7 @@ fn overflowed_denial_ledger_cannot_open_recovery() {
             serde_json::json!({
                 "denial_id":format!("denial-{index}"),
                 "kind":"unapproved-command",
-                "tool":"bash",
+                "tool":"autopilot_run_approved_command",
                 "request_digest":"e".repeat(64),
                 "effected":false
             })
@@ -1101,11 +1221,16 @@ fn blocked_delivery_recovery_replays_after_crash_before_issue() {
         .iter()
         .rposition(|line| line.contains("delivery:recovery-required"))
         .expect("durable recovery issue event");
-    fs::write(
-        &event_log,
-        format!("{}\n", issued_lines[..=issued_cutoff].join("\n")),
-    )
-    .expect("project crash after issue before control frame");
+    let before_reemit = format!("{}\n", issued_lines[..=issued_cutoff].join("\n"));
+    let fixer_source = before_reemit.replace(
+        "\\\"role_id\\\":\\\"implementer\\\"",
+        "\\\"role_id\\\":\\\"fixer-integrator\\\"",
+    );
+    assert_ne!(
+        fixer_source, before_reemit,
+        "source role projection changed"
+    );
+    fs::write(&event_log, fixer_source).expect("project crash after issue before control frame");
     let mut reemitter = CoreProcess::spawn(&root);
     let reemitted = reemitter.send_json(autopilot_command(4));
     assert_eq!(reemitted.kind, "spawn", "reemit response: {reemitted:?}");
@@ -1138,7 +1263,7 @@ fn effected_git_mutation_stays_unsafe_despite_pre_effect_denial_evidence() {
         serde_json::json!([{
             "denial_id":"denial-1",
             "kind":"unapproved-command",
-            "tool":"bash",
+            "tool":"autopilot_run_approved_command",
             "request_digest":"d".repeat(64),
             "effected":false
         }]),
@@ -1175,7 +1300,7 @@ fn recovery_resume_fails_closed_when_blocked_worktree_snapshot_drifts() {
         serde_json::json!([{
             "denial_id":"denial-1",
             "kind":"unapproved-command",
-            "tool":"bash",
+            "tool":"autopilot_run_approved_command",
             "request_digest":"f".repeat(64),
             "effected":false
         }]),
@@ -1317,7 +1442,7 @@ fn blocked_delivery_with_out_of_scope_residue_fails_closed_without_recovery() {
             serde_json::json!([{
                 "denial_id":"denial-1",
                 "kind":"unapproved-command",
-                "tool":"bash",
+                "tool":"autopilot_run_approved_command",
                 "request_digest":"c".repeat(64),
                 "effected":false
             }]),
@@ -1691,6 +1816,30 @@ fn id(value: &str) -> Id {
     Id(value.to_owned())
 }
 
+fn successful_command_execution_ledger(
+    typed: &kernel::generated::AgentRunSpec,
+) -> serde_json::Value {
+    let assignment_path = typed.assignment_path.as_ref().expect("assignment path");
+    let artifact: runner::DeliveryAssignmentArtifact =
+        serde_json::from_slice(&fs::read(&assignment_path.0).expect("assignment artifact"))
+            .expect("typed assignment artifact");
+    let snapshot =
+        runner::delivery_scope_snapshot_digest(Path::new(&typed.cwd.0), &artifact.ordered_units)
+            .expect("delivery scope snapshot");
+    serde_json::json!({
+        "schema":"autopilot.approved_command_executions.v1",
+        "overflowed":false,
+        "entries":artifact.approved_commands.iter().enumerate().map(|(index, binding)| serde_json::json!({
+            "execution_id":format!("execution-{}", index + 1),
+            "command_id":binding.command_id,
+            "command_digest":binding.command_digest,
+            "outcome":"succeeded",
+            "result_digest":"a".repeat(64),
+            "scope_snapshot_digest":snapshot,
+        })).collect::<Vec<_>>()
+    })
+}
+
 fn delivery_carrier_without_package_for_core(
     spec: &serde_json::Value,
     evidence_count: usize,
@@ -1724,8 +1873,9 @@ fn delivery_carrier_for_core_path(
     let submission_digest = sha256_hex(&serde_json::to_vec(&submission).expect("submission"));
     let tool_call_id = "delivery-tool-call-1";
     let binding = drivers::runner::child::carrier_binding(&typed);
+    let command_executions = successful_command_execution_ledger(&typed);
     let audit = serde_json::json!({
-        "schema":"autopilot.tool_audit.v1",
+        "schema":"autopilot.tool_audit.v2",
         "tool_call_id":tool_call_id,
         "profile_id":profile.0,
         "tool_name":profile.1,
@@ -1746,8 +1896,9 @@ fn delivery_carrier_for_core_path(
                 &typed.worktree.as_ref().expect("worktree").0,
                 &typed.cwd.0,
             ),
-            "active_overrides":["bash","edit","write"],
-            "denials":{"schema":"autopilot.delivery_policy_denials.v1","overflowed":false,"entries":[]},
+            "active_overrides":[drivers::runner::APPROVED_COMMAND_TOOL,"edit","write"],
+            "denials":{"schema":"autopilot.delivery_policy_denials.v2","overflowed":false,"entries":[]},
+            "command_executions":command_executions,
         },
     });
     let spec_bytes =
@@ -1827,7 +1978,7 @@ fn delivery_blocked_carrier_for_core_with_class_and_denials(
     let tool_call_id = "delivery-tool-call-blocked";
     let binding = drivers::runner::child::carrier_binding(&typed);
     let audit = serde_json::json!({
-        "schema":"autopilot.tool_audit.v1",
+        "schema":"autopilot.tool_audit.v2",
         "tool_call_id":tool_call_id,
         "profile_id":profile.0,
         "tool_name":profile.1,
@@ -1848,8 +1999,9 @@ fn delivery_blocked_carrier_for_core_with_class_and_denials(
                 &typed.worktree.as_ref().expect("worktree").0,
                 &typed.cwd.0,
             ),
-            "active_overrides":["bash","edit","write"],
-            "denials":{"schema":"autopilot.delivery_policy_denials.v1","overflowed":false,"entries":denials},
+            "active_overrides":[drivers::runner::APPROVED_COMMAND_TOOL,"edit","write"],
+            "denials":{"schema":"autopilot.delivery_policy_denials.v2","overflowed":false,"entries":denials},
+            "command_executions":{"schema":"autopilot.approved_command_executions.v1","overflowed":false,"entries":[]},
         },
     });
     let spec_bytes =

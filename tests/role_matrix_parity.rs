@@ -272,8 +272,25 @@ fn recovery_engineer_planning_profile_is_mechanically_read_only_but_delivery_can
     );
     let delivery = drivers::runner::resolve_role_tools("recovery-engineer", "delivery-status.v2")
         .expect("delivery recovery tools");
-    for required in ["bash", "edit", "write", "autopilot_emit_status"] {
+    for required in [
+        "autopilot_run_approved_command",
+        "edit",
+        "write",
+        "autopilot_emit_status",
+    ] {
         assert!(delivery.active.iter().any(|tool| tool == required));
+    }
+    assert!(!delivery.active.iter().any(|tool| tool == "bash"));
+    for role in ["implementer", "fixer-integrator"] {
+        let tools = drivers::runner::resolve_role_tools(role, "delivery-status.v2")
+            .expect("delivery tools");
+        assert!(
+            tools
+                .active
+                .iter()
+                .any(|tool| tool == "autopilot_run_approved_command")
+        );
+        assert!(!tools.active.iter().any(|tool| tool == "bash"));
     }
 }
 

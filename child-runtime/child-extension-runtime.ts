@@ -1,5 +1,15 @@
 import { createHash } from "node:crypto";
-import { constants, lstatSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  realpathSync,
+} from "node:fs";
 import { access, readFile, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,16 +25,22 @@ import {
   type ExtensionAPI,
   type WriteOperations,
 } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 
 import type { SubmitToolDescriptor } from "../src/generated/tool-schemas.ts";
 
 export const CHILD_RECEIPT_ENTRY = "pi-autopilot:child-tools";
-export const DELIVERY_POLICY_VERSION = "autopilot.delivery_tool_policy.v2";
-export const DELIVERY_POLICY_OVERRIDES = ["bash", "edit", "write"] as const;
+export const DELIVERY_POLICY_VERSION = "autopilot.delivery_tool_policy.v3";
+export const APPROVED_COMMAND_TOOL = "autopilot_run_approved_command";
+export const DELIVERY_POLICY_OVERRIDES = [APPROVED_COMMAND_TOOL, "edit", "write"] as const;
 
 const DELIVERY_PROFILE_ID = "delivery-status.v2";
 const MAX_DELIVERY_ASSIGNMENT_BYTES = 256 * 1024;
 const MAX_DELIVERY_POLICY_DENIALS = 32;
+const MAX_APPROVED_COMMAND_EXECUTIONS = 64;
+const MAX_SCOPE_SNAPSHOT_FILE_BYTES = 64 * 1024 * 1024;
+const MAX_SCOPE_SNAPSHOT_TOTAL_BYTES = 256 * 1024 * 1024;
+const SCOPE_SNAPSHOT_DOMAIN = "autopilot.delivery_scope_snapshot.v1\0";
 const DELIVERY_ENV_KEYS = [
   "AUTOPILOT_DELIVERY_ASSIGNMENT_PATH",
   "AUTOPILOT_DELIVERY_ASSIGNMENT_DIGEST",
@@ -51,28 +67,56 @@ type DeliveryAssignmentArtifact = {
   base_commit: string;
   worktree: string;
   ordered_units: DeliveryUnit[];
+  approved_commands: DeliveryApprovedCommandBinding[];
+};
+
+type DeliveryApprovedCommandBinding = {
+  command_id: string;
+  unit_id: string;
+  command_ordinal: number;
+  command_digest: string;
+};
+
+type ApprovedCommand = DeliveryApprovedCommandBinding & {
+  command: string;
+  expected: string;
 };
 
 type DeliveryPackageCheck = { check_id: string; kind: "clean-exact-package-tip";
   criterion_ordinals: number[]; expected: string };
 type DeliveryUnit = {
   id: string; kind: string;
-  files: string[]; commands: Array<{ command: string }>;
+  files: string[]; commands: Array<{ command: string; expected: string }>;
   package_checks: DeliveryPackageCheck[];
 };
 
 type DeliveryPolicyDenial = {
   denial_id: string;
   kind: "unapproved-command";
-  tool: "bash";
+  tool: typeof APPROVED_COMMAND_TOOL;
   request_digest: string;
   effected: false;
 };
 
 type DeliveryPolicyDenialLedger = {
-  schema: "autopilot.delivery_policy_denials.v1";
+  schema: "autopilot.delivery_policy_denials.v2";
   overflowed: boolean;
   entries: DeliveryPolicyDenial[];
+};
+
+type ApprovedCommandExecution = {
+  execution_id: string;
+  command_id: string;
+  command_digest: string;
+  outcome: "succeeded" | "failed";
+  result_digest: string;
+  scope_snapshot_digest: string;
+};
+
+type ApprovedCommandExecutionLedger = {
+  schema: "autopilot.approved_command_executions.v1";
+  overflowed: boolean;
+  entries: ApprovedCommandExecution[];
 };
 
 type DeliveryPolicyReceipt = {
@@ -109,10 +153,13 @@ export class DeliveryPolicy {
   readonly allowedRelativePaths: Set<string>;
   readonly allowedAbsolutePaths: Set<string>;
   readonly allowedParentDirectories: Set<string>;
-  readonly approvedCommands: Set<string>;
+  readonly approvedCommands: Map<string, ApprovedCommand>;
+  readonly approvedCommandBytes: Set<string>;
   readonly queue = new SerialPolicyQueue();
   readonly denialEntries: DeliveryPolicyDenial[] = [];
+  readonly executionEntries: ApprovedCommandExecution[] = [];
   denialOverflowed = false;
+  executionOverflowed = false;
 
   constructor(input: {
     assignmentPath: string;
@@ -121,7 +168,7 @@ export class DeliveryPolicy {
     cwd: string;
     policyDigest: string;
     allowedRelativePaths: Set<string>;
-    approvedCommands: Set<string>;
+    approvedCommands: Map<string, ApprovedCommand>;
   }) {
     this.assignmentPath = input.assignmentPath;
     this.assignmentDigest = input.assignmentDigest;
@@ -130,6 +177,7 @@ export class DeliveryPolicy {
     this.policyDigest = input.policyDigest;
     this.allowedRelativePaths = input.allowedRelativePaths;
     this.approvedCommands = input.approvedCommands;
+    this.approvedCommandBytes = new Set([...input.approvedCommands.values()].map((item) => item.command));
     this.allowedAbsolutePaths = new Set(
       [...this.allowedRelativePaths].map((relativePath) => path.resolve(this.worktree, relativePath)),
     );
@@ -152,7 +200,7 @@ export class DeliveryPolicy {
     };
   }
 
-  recordUnapprovedCommand(request: { command: string; cwd: string }): void {
+  recordUnapprovedCommandReference(request: { command_id: string; cwd: string }): void {
     if (this.denialEntries.length >= MAX_DELIVERY_POLICY_DENIALS) {
       this.denialOverflowed = true;
       return;
@@ -160,17 +208,49 @@ export class DeliveryPolicy {
     this.denialEntries.push({
       denial_id: `denial-${this.denialEntries.length + 1}`,
       kind: "unapproved-command",
-      tool: "bash",
+      tool: APPROVED_COMMAND_TOOL,
       request_digest: sha256Hex(Buffer.from(canonicalJson(request), "utf8")),
       effected: false,
     });
   }
 
+  recordExecution(
+    command: ApprovedCommand,
+    outcome: "succeeded" | "failed",
+    result: unknown,
+  ): void {
+    if (this.executionEntries.length >= MAX_APPROVED_COMMAND_EXECUTIONS) {
+      this.executionOverflowed = true;
+      return;
+    }
+    this.executionEntries.push({
+      execution_id: `execution-${this.executionEntries.length + 1}`,
+      command_id: command.command_id,
+      command_digest: command.command_digest,
+      outcome,
+      result_digest: sha256Hex(Buffer.from(canonicalJson(result), "utf8")),
+      scope_snapshot_digest: approvedScopeSnapshotDigest(this),
+    });
+  }
+
+  commandDescription(): string {
+    const listed = JSON.stringify([...this.approvedCommands.keys()]);
+    return `Run approved command_id only; no shell text/cwd/env/timeout. IDs: ${listed}. Use read/grep/find/ls.`;
+  }
+
   denialLedger(): DeliveryPolicyDenialLedger {
     return {
-      schema: "autopilot.delivery_policy_denials.v1",
+      schema: "autopilot.delivery_policy_denials.v2",
       overflowed: this.denialOverflowed,
       entries: this.denialEntries.map((entry) => ({ ...entry })),
+    };
+  }
+
+  executionLedger(): ApprovedCommandExecutionLedger {
+    return {
+      schema: "autopilot.approved_command_executions.v1",
+      overflowed: this.executionOverflowed,
+      entries: this.executionEntries.map((entry) => ({ ...entry })),
     };
   }
 }
@@ -207,16 +287,53 @@ export function registerSubmitTools(pi: ExtensionAPI, tools: SubmitTools, _wrapp
 }
 
 export function registerDeliveryPolicyTools(pi: ExtensionAPI, policy: DeliveryPolicy): void {
-  const bashTool = createBashTool(policy.cwd, { operations: createDeliveryBashOperations(policy) });
+  const shellExecutor = createBashTool(policy.cwd, {
+    operations: createDeliveryBashOperations(policy),
+    exposeSessionEnvironment: false,
+  });
   const editTool = createEditTool(policy.cwd, { operations: createDeliveryEditOperations(policy) });
   const writeTool = createWriteTool(policy.cwd, { operations: createDeliveryWriteOperations(policy) });
 
-  pi.registerTool({
-    ...bashTool,
+  pi.registerTool(defineTool({
+    name: APPROVED_COMMAND_TOOL,
+    label: "Run approved command",
+    description: policy.commandDescription(),
+    promptSnippet: "Run an assignment-approved verification command by its package-generated command_id",
+    promptGuidelines: [
+      "Pass only a command_id listed in the delivery assignment; never provide shell text.",
+      "Use read, grep, find, and ls for inspection. This tool is only for approved verification commands.",
+    ],
+    parameters: Type.Object(
+      { command_id: Type.String({ description: "Package-generated approved command identifier" }) },
+      { additionalProperties: false },
+    ),
     async execute(id, params, signal, onUpdate, ctx) {
-      return policy.queue.run(() => bashTool.execute(id, params, signal, onUpdate, ctx));
+      if (
+        params === null ||
+        typeof params !== "object" ||
+        Object.keys(params).length !== 1 ||
+        typeof params.command_id !== "string"
+      ) {
+        throw new Error("Approved command tool requires exactly one command_id and accepts no shell text");
+      }
+      const approved = policy.approvedCommands.get(params.command_id);
+      if (approved === undefined) {
+        policy.recordUnapprovedCommandReference({ command_id: params.command_id, cwd: policy.cwd });
+        throw new Error("Approved command reference denied pre-effect; no command ran");
+      }
+      return policy.queue.run(async () => {
+        let result: unknown;
+        try {
+          result = await shellExecutor.execute(id, { command: approved.command }, signal, onUpdate, ctx);
+        } catch (error) {
+          policy.recordExecution(approved, "failed", commandErrorReceipt(error));
+          throw error;
+        }
+        policy.recordExecution(approved, "succeeded", result);
+        return result;
+      });
     },
-  });
+  }));
   pi.registerTool({
     ...editTool,
     async execute(id, params, signal, onUpdate, ctx) {
@@ -268,8 +385,8 @@ function registerTool(
     ],
     parameters: tool.parameters,
     async execute(_toolCallId, params) {
-      return {
-        content: [{ type: "text", text: `Submitted ${tool.boundary_id}` }],
+      const terminalResult = () => ({
+        content: [{ type: "text" as const, text: `Submitted ${tool.boundary_id}` }],
         details: {
           profile_id: tool.profile_id,
           tool_name: tool.name,
@@ -280,10 +397,16 @@ function registerTool(
           payload: params as Record<string, unknown>,
           ...(deliveryPolicy === undefined
             ? {}
-            : { delivery_policy_denials: deliveryPolicy.denialLedger() }),
+            : {
+                delivery_policy_denials: deliveryPolicy.denialLedger(),
+                approved_command_executions: deliveryPolicy.executionLedger(),
+              }),
         },
         terminate: true,
-      };
+      });
+      return deliveryPolicy === undefined
+        ? terminalResult()
+        : deliveryPolicy.queue.run(terminalResult);
     },
   }));
 }
@@ -333,7 +456,8 @@ export function loadDeliveryPolicyFromEnv(env: DeliveryEnv, processCwd: string):
   const artifact = parseDeliveryAssignment(assignmentBytes);
   assertAssignmentIdentity(artifact, env, worktree);
   const allowedRelativePaths = new Set<string>();
-  const approvedCommands = new Set<string>();
+  const approvedCommands = new Map<string, ApprovedCommand>();
+  const unitCommands = new Map<string, DeliveryUnit["commands"]>();
   const seenUnitIds = new Set<string>();
   const seenUnitFilePaths = new Set<string>();
   for (const unit of artifact.ordered_units) {
@@ -347,13 +471,46 @@ export function loadDeliveryPolicyFromEnv(env: DeliveryEnv, processCwd: string):
       allowedRelativePaths.add(filePath);
     }
     for (const command of unit.commands) {
-      if (typeof command.command !== "string" || command.command.trim() === "") {
+      if (
+        typeof command.command !== "string" || command.command.trim() === "" ||
+        typeof command.expected !== "string" || command.expected.trim() === ""
+      ) {
         throw new Error(`autopilot delivery empty approved command: ${unit.id}`);
       }
-      approvedCommands.add(command.command);
     }
+    unitCommands.set(unit.id, unit.commands);
   }
-  if (allowedRelativePaths.size === 0 || approvedCommands.size === 0) {
+  const seenUnitOrdinals = new Set<string>();
+  for (const binding of artifact.approved_commands) {
+    const commands = unitCommands.get(binding.unit_id);
+    const ordinalKey = `${binding.unit_id}\0${binding.command_ordinal}`;
+    if (
+      approvedCommands.has(binding.command_id) ||
+      seenUnitOrdinals.has(ordinalKey) ||
+      commands === undefined ||
+      !Number.isInteger(binding.command_ordinal) ||
+      binding.command_ordinal < 1 ||
+      binding.command_ordinal > commands.length
+    ) {
+      throw new Error(`autopilot delivery approved command binding drift: ${binding.command_id}`);
+    }
+    const command = commands[binding.command_ordinal - 1];
+    if (command === undefined) throw new Error("autopilot delivery approved command disappeared");
+    if (
+      binding.command_digest !==
+      approvedCommandDigest(binding.unit_id, binding.command_ordinal, command.command)
+    ) {
+      throw new Error(`autopilot delivery approved command digest drift: ${binding.command_id}`);
+    }
+    seenUnitOrdinals.add(ordinalKey);
+    approvedCommands.set(binding.command_id, { ...binding, ...command });
+  }
+  const expectedCommandCount = [...unitCommands.values()].reduce((total, commands) => total + commands.length, 0);
+  if (
+    allowedRelativePaths.size === 0 ||
+    approvedCommands.size === 0 ||
+    approvedCommands.size !== expectedCommandCount
+  ) {
     throw new Error("autopilot delivery policy has no unit files or commands");
   }
   const policyDigest = deliveryPolicyDigest({ assignmentPath, assignmentDigest, worktree, cwd });
@@ -389,13 +546,12 @@ function createDeliveryBashOperations(policy: DeliveryPolicy): BashOperations {
   const local = createLocalBashOperations();
   return {
     async exec(command, cwd, options) {
-      if (!policy.approvedCommands.has(command)) {
-        policy.recordUnapprovedCommand({ command, cwd });
-        throw new Error("Delivery policy blocked unapproved bash command");
+      if (!policy.approvedCommandBytes.has(command)) {
+        throw new Error("Approved command executor received bytes outside package authority");
       }
-      const actualCwd = canonicalDirectory("bash cwd", cwd);
+      const actualCwd = canonicalDirectory("approved command cwd", cwd);
       if (actualCwd !== policy.worktree) {
-        throw new Error(`Delivery policy blocked bash cwd mismatch: ${actualCwd}`);
+        throw new Error(`Approved command executor cwd mismatch: ${actualCwd}`);
       }
       return local.exec(command, policy.worktree, options);
     },
@@ -574,6 +730,7 @@ function parseDeliveryAssignment(bytes: Buffer): DeliveryAssignmentArtifact {
     base_commit: requiredString(object, "base_commit"),
     worktree: requiredString(object, "worktree"),
     ordered_units: ordered.map((unit, index) => parseDeliveryUnit(unit, index)),
+    approved_commands: parseApprovedCommandBindings(object["approved_commands"]),
   };
 }
 
@@ -598,7 +755,11 @@ function parseDeliveryUnit(value: unknown, index: number): DeliveryUnit {
       if (item === null || typeof item !== "object") {
         throw new Error(`autopilot delivery unit ${index} command ${commandIndex} is not an object`);
       }
-      return { command: requiredString(item as Record<string, unknown>, "command") };
+      const command = item as Record<string, unknown>;
+      return {
+        command: requiredString(command, "command"),
+        expected: requiredString(command, "expected"),
+      };
     }),
     package_checks: packageChecks.map((item, checkIndex) => {
       if (item === null || typeof item !== "object") {
@@ -628,8 +789,26 @@ function parseDeliveryUnit(value: unknown, index: number): DeliveryUnit {
   };
 }
 
+function parseApprovedCommandBindings(value: unknown): DeliveryApprovedCommandBinding[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error("autopilot delivery assignment has no approved_commands");
+  }
+  return value.map((item, index) => {
+    if (item === null || typeof item !== "object") {
+      throw new Error(`autopilot delivery approved command ${index} is not an object`);
+    }
+    const object = item as Record<string, unknown>;
+    return {
+      command_id: requiredString(object, "command_id"),
+      unit_id: requiredString(object, "unit_id"),
+      command_ordinal: requiredNumber(object, "command_ordinal"),
+      command_digest: requiredString(object, "command_digest"),
+    };
+  });
+}
+
 function assertAssignmentIdentity(artifact: DeliveryAssignmentArtifact, env: DeliveryEnv, worktree: string): void {
-  if (artifact.schema !== "autopilot.delivery_assignment.v2") throw new Error("autopilot delivery assignment schema drift");
+  if (artifact.schema !== "autopilot.delivery_assignment.v3") throw new Error("autopilot delivery assignment schema drift");
   if (
     artifact.assignment_id !== env.AUTOPILOT_DELIVERY_ASSIGNMENT_ID ||
     artifact.workstream !== env.AUTOPILOT_DELIVERY_WORKSTREAM ||
@@ -689,6 +868,63 @@ function rejectSymlinkComponents(value: string): void {
     const metadata = lstatSync(current);
     if (metadata.isSymbolicLink()) throw new Error(`autopilot delivery symlink authority component refused: ${current}`);
   }
+}
+
+function approvedCommandDigest(unitId: string, ordinal: number, command: string): string {
+  return sha256Hex(Buffer.from(`autopilot.approved_command.v1\0${unitId}\0${ordinal}\0${command}`, "utf8"));
+}
+
+function approvedScopeSnapshotDigest(policy: DeliveryPolicy): string {
+  const digest = createHash("sha256");
+  digest.update(SCOPE_SNAPSHOT_DOMAIN);
+  let totalBytes = 0;
+  for (const rel of [...policy.allowedRelativePaths].sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)))) {
+    digest.update(rel, "utf8");
+    digest.update(Buffer.from([0]));
+    const absolutePath = path.resolve(policy.worktree, rel);
+    assertMutationTopology(policy, absolutePath, false);
+    let descriptor: number;
+    try {
+      descriptor = openSync(absolutePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      digest.update("missing\0", "utf8");
+      continue;
+    }
+    try {
+      const metadata = fstatSync(descriptor);
+      if (!metadata.isFile()) throw new Error(`Delivery snapshot blocked non-regular file: ${rel}`);
+      if (metadata.size > MAX_SCOPE_SNAPSHOT_FILE_BYTES) {
+        throw new Error(`Delivery snapshot file exceeds bound: ${rel}`);
+      }
+      totalBytes += metadata.size;
+      if (totalBytes > MAX_SCOPE_SNAPSHOT_TOTAL_BYTES) {
+        throw new Error("Delivery snapshot total bytes exceed bound");
+      }
+      digest.update((metadata.mode & 0o111) === 0 ? "file\0" : "executable\0", "utf8");
+      const size = Buffer.alloc(8);
+      size.writeBigUInt64BE(BigInt(metadata.size));
+      digest.update(size);
+      const buffer = Buffer.alloc(64 * 1024);
+      let position = 0;
+      while (position < metadata.size) {
+        const count = readSync(descriptor, buffer, 0, Math.min(buffer.length, metadata.size - position), position);
+        if (count <= 0) throw new Error(`Delivery snapshot short read: ${rel}`);
+        digest.update(buffer.subarray(0, count));
+        position += count;
+      }
+      digest.update(Buffer.from([0]));
+    } finally {
+      closeSync(descriptor);
+    }
+  }
+  return digest.digest("hex");
+}
+
+function commandErrorReceipt(error: unknown): Record<string, string> {
+  return error instanceof Error
+    ? { name: error.name, message: error.message }
+    : { name: "NonError", message: String(error) };
 }
 
 function selfDigest(wrapperUrl: string): string {

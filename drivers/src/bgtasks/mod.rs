@@ -1,7 +1,7 @@
 use kernel::failure::{Failure, OperatorDecision};
 use kernel::generated::BackgroundCapabilities;
 
-const INSTALL: &str = "Missing pi-background-tasks 0.6.1 event API. Install/enable the paired package, then reload/restart Pi.";
+const INSTALL: &str = "Missing pi-background-tasks 2.1.1 event API. Install/enable the paired package, then reload/restart Pi.";
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum BgCapability {

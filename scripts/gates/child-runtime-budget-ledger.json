@@ -34,5 +34,14 @@
     "sourceDelta": 5,
     "date": "2026-08-06",
     "justification": "UPWARD +5, itemized, for criterion-bound package-check confinement. WHY: the initial closed package-check parser proved that checks were non-executable but did not preserve which exact criterion each receipt could support; attaching one receipt to every unit criterion would let package-state evidence be substituted for unrelated functional evidence. WHAT THE +5 BUYS: the child artifact parser now requires a nonempty unique positive-integer criterion_ordinals array and preserves it in the typed assignment while approvedCommands remains derived exclusively from commands. Core independently enforces ordinals are 1-based and in range, emits each receipt only for named criteria, and validation admission requires each affected result to cite it. NO AUTHORITY WIDENING: ordinals do not enter command or path authority and the child still cannot execute package checks. The ceiling is flush with measured actual and has zero discretionary headroom."
+  },
+  {
+    "from": 650,
+    "to": 875,
+    "actualBefore": 650,
+    "actualAfter": 875,
+    "sourceDelta": 225,
+    "date": "2026-08-06",
+    "justification": "UPWARD +225, itemized, for replacing misleading free-form delivery Bash with package-bound approved-command execution and final-source receipts. WHY: delivery children were shown Pi's general Bash schema and PI_* inspection guidance even though execution admitted only exact planner-approved bytes; every LIVE implementer attempted unauthorized startup diagnostics and one stopped on the truthful pre-effect denial. WHAT THE +225 BUYS: (1) a custom autopilot_run_approved_command schema accepting exactly one package-generated command_id and no command/cwd/env/timeout fields; (2) strict delivery-assignment v3 parsing of a complete unique unit/ordinal/id/digest command binding set; (3) hidden use of Pi's bounded shell backend with session-environment injection disabled and a second exact-byte guard; (4) assignment-specific description and guidelines that name only approved ids and direct inspection to read/grep/find/ls; (5) bounded sequential success/failure execution receipts with command/result digests; (6) a deterministic symlink-refusing, regular-file-only, content/mode-sensitive approved-scope snapshot using no-follow file descriptors, per-file and aggregate byte limits, explicit missing-file states, and exact short-read checks; and (7) typed terminal attachment of both denial and execution ledgers under the same serial queue as edit/write so a terminal cannot race pending mutation. NO AUTHORITY WIDENING: the child supplies only an opaque id; command bytes, cwd, unit binding, policy digest, and file scope remain package-owned; general Bash is not registered; unknown ids are denied before effect; and Core independently revalidates every receipt and final snapshot. The ceiling is flush with measured actual and has zero discretionary headroom."
   }
 ]
