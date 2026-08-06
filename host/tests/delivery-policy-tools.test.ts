@@ -185,14 +185,24 @@ test("delivery policy rejects duplicate unit file authority but permits repeated
   }
 });
 
-test("delivery package checks require unique positive integer criterion ordinals", { concurrency: false }, () => {
-  for (const ordinals of [[], [1, 1], [0], [1.5]]) {
+test("delivery package checks fail closed on every executable-boundary shape defect", { concurrency: false }, () => {
+  const mutations: Array<[string, (unit: Record<string, unknown>, check: Record<string, unknown>) => void]> = [
+    ["missing package_checks", (unit) => { delete unit["package_checks"]; }],
+    ["unknown kind", (_unit, check) => { check["kind"] = "model-shell"; }],
+    ["blank expectation", (_unit, check) => { check["expected"] = " "; }],
+    ["duplicate check id", (unit, check) => { unit["package_checks"] = [check, { ...check }]; }],
+    ["empty ordinals", (_unit, check) => { check["criterion_ordinals"] = []; }],
+    ["duplicate ordinals", (_unit, check) => { check["criterion_ordinals"] = [1, 1]; }],
+    ["zero ordinal", (_unit, check) => { check["criterion_ordinals"] = [0]; }],
+    ["fractional ordinal", (_unit, check) => { check["criterion_ordinals"] = [1.5]; }],
+  ];
+  for (const [label, mutate] of mutations) {
     const fixture = makeFixture(false);
     try {
       const assignment = JSON.parse(readFileSync(fixture.assignmentPath, "utf8")) as Record<string, unknown>;
-      const units = assignment["ordered_units"] as Array<Record<string, unknown>>;
-      const checks = units[0]!["package_checks"] as Array<Record<string, unknown>>;
-      checks[0]!["criterion_ordinals"] = ordinals;
+      const unit = (assignment["ordered_units"] as Array<Record<string, unknown>>)[0]!;
+      const check = (unit["package_checks"] as Array<Record<string, unknown>>)[0]!;
+      mutate(unit, check);
       const bytes = Buffer.from(JSON.stringify(assignment, null, 2));
       writeFileSync(fixture.assignmentPath, bytes);
       const assignmentDigest = createHash("sha256").update(bytes).digest("hex");
@@ -203,11 +213,7 @@ test("delivery package checks require unique positive integer criterion ordinals
         worktree: fixture.worktree,
         cwd: fixture.worktree,
       });
-      assert.throws(
-        () => loadDeliveryPolicyFromEnv(env as never, fixture.worktree),
-        /invalid package check criterion ordinals/,
-        JSON.stringify(ordinals),
-      );
+      assert.throws(() => loadDeliveryPolicyFromEnv(env as never, fixture.worktree), /package check|package_checks|missing string expected/, label);
     } finally {
       cleanup();
     }
