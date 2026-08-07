@@ -5,7 +5,7 @@
       "path": "binaries/darwin-arm64/autopilot-core",
       "sha256": "f722c1f9666e275d716dae1192d5e9e8a3b3d20bb67e808f21848308609659fa",
       "sizeBytes": 6743760,
-      "sourceHash": "3d07ec48341be0e15c7966df4cb57d3a29a60a484ff7de91706202968900dd61",
+      "sourceHash": "fe12401bba6aca405c8351ac117d289e660c160fc6b52b2f985ce213472ec9a2",
       "target": "aarch64-apple-darwin"
     },
     "darwin-x64": {
@@ -13,7 +13,7 @@
       "path": "binaries/darwin-x64/autopilot-core",
       "sha256": "bd401e6d25e2247ae936ed62fee0fc597a627bd97cac52131b9d2f4d183796bb",
       "sizeBytes": 7526576,
-      "sourceHash": "3d07ec48341be0e15c7966df4cb57d3a29a60a484ff7de91706202968900dd61",
+      "sourceHash": "fe12401bba6aca405c8351ac117d289e660c160fc6b52b2f985ce213472ec9a2",
       "target": "x86_64-apple-darwin"
     },
     "linux-arm64": {
@@ -21,7 +21,7 @@
       "path": "binaries/linux-arm64/autopilot-core",
       "sha256": "1e30e77590f3eaf2fd1a5750c7560b91b05af44efa83b49e578258f81357df4e",
       "sizeBytes": 7486008,
-      "sourceHash": "3d07ec48341be0e15c7966df4cb57d3a29a60a484ff7de91706202968900dd61",
+      "sourceHash": "fe12401bba6aca405c8351ac117d289e660c160fc6b52b2f985ce213472ec9a2",
       "target": "aarch64-unknown-linux-musl"
     },
     "linux-x64": {
@@ -29,19 +29,19 @@
       "path": "binaries/linux-x64/autopilot-core",
       "sha256": "592040603c65c8cdcd7666fcf2b68bf6822294da8bcdb9b16270670478376547",
       "sizeBytes": 8383280,
-      "sourceHash": "3d07ec48341be0e15c7966df4cb57d3a29a60a484ff7de91706202968900dd61",
+      "sourceHash": "fe12401bba6aca405c8351ac117d289e660c160fc6b52b2f985ce213472ec9a2",
       "target": "x86_64-unknown-linux-musl"
     },
     "win32-x64": {
       "buildMethod": "cargo build --release --target x86_64-pc-windows-gnu -p drivers --bin autopilot-core with x86_64-w64-mingw32-gcc",
       "path": "binaries/win32-x64/autopilot-core.exe",
-      "sha256": "c56100afdc1635ca878bb85ab366e6c6e7a2455b76c386e97778d1d5fc0a57d8",
+      "sha256": "dbe7c45b9ea67ab31675852868e744c90ea1bac074f573b420cbc39c2c2cdd3d",
       "sizeBytes": 10762401,
-      "sourceHash": "3d07ec48341be0e15c7966df4cb57d3a29a60a484ff7de91706202968900dd61",
+      "sourceHash": "fe12401bba6aca405c8351ac117d289e660c160fc6b52b2f985ce213472ec9a2",
       "target": "x86_64-pc-windows-gnu"
     }
   },
-  "generatedAt": "2026-08-07T16:25:56Z",
+  "generatedAt": "2026-08-07T22:49:12Z",
   "schema": 1,
   "source": {
     "directories": [
@@ -57,7 +57,7 @@
       "Cargo.lock",
       "rust-toolchain.toml"
     ],
-    "hash": "3d07ec48341be0e15c7966df4cb57d3a29a60a484ff7de91706202968900dd61",
+    "hash": "fe12401bba6aca405c8351ac117d289e660c160fc6b52b2f985ce213472ec9a2",
     "hashAlgorithm": "sha256(path-nul-content-nul over build-affecting tracked and untracked inputs)"
   }
 }
