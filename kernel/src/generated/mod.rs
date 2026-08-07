@@ -676,6 +676,36 @@ pub enum SessionContinuity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ValidationAdmissionComparison {
+    #[serde(rename = "exact")]
+    Exact,
+    #[serde(rename = "line-bounds")]
+    LineBounds,
+    #[serde(rename = "membership")]
+    Membership,
+    #[serde(rename = "subset-of")]
+    SubsetOf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ValidationAdmissionDisposition {
+    #[serde(rename = "fatal-authority")]
+    FatalAuthority,
+    #[serde(rename = "repairable-model-value")]
+    RepairableModelValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ValidationAdmissionPhase {
+    #[serde(rename = "authority")]
+    Authority,
+    #[serde(rename = "shape")]
+    Shape,
+    #[serde(rename = "value")]
+    Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ValidationAssignmentKind {
     #[serde(rename = "delivery")]
     Delivery,
@@ -2595,7 +2625,73 @@ pub struct TaskDocument {
     pub body: String,
 }
 
-/// Package-produced independent Validator assignment. Production validation uses v2 submissions/results; v1 verdicts remain historical.
+/// Complete deterministic v3 validation admission diagnostic. Authority corruption is fatal; model shape and semantic-value mismatches are repaired together. Large value lists and excess rows are represented by deterministic count/digest summaries inside the generated repair-prompt byte ceiling without reclassifying model input as fatal; mismatch_count retains the complete pre-summary count.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidationAdmissionDiagnostic {
+    #[serde(rename = "schema")]
+    pub schema: SchemaId,
+    #[serde(rename = "boundary_id")]
+    pub boundary_id: ContractId,
+    #[serde(rename = "validation_id")]
+    pub validation_id: Id,
+    #[serde(rename = "assignment_id")]
+    pub assignment_id: Id,
+    #[serde(rename = "authority_digest")]
+    pub authority_digest: Digest,
+    #[serde(rename = "value_attempt")]
+    pub value_attempt: u32,
+    #[serde(rename = "phase")]
+    pub phase: ValidationAdmissionPhase,
+    #[serde(rename = "disposition")]
+    pub disposition: ValidationAdmissionDisposition,
+    #[serde(rename = "complete")]
+    pub complete: bool,
+    #[serde(rename = "mismatch_count")]
+    pub mismatch_count: u32,
+    #[serde(rename = "mismatches")]
+    pub mismatches: Vec<ValidationAdmissionMismatch>,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidationAdmissionMismatch {
+    #[serde(rename = "code")]
+    pub code: String,
+    #[serde(rename = "field")]
+    pub field: String,
+    #[serde(rename = "criterion_id")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub criterion_id: Option<Id>,
+    #[serde(rename = "finding_id")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finding_id: Option<Id>,
+    #[serde(rename = "comparison")]
+    pub comparison: ValidationAdmissionComparison,
+    #[serde(rename = "expected")]
+    pub expected: Vec<String>,
+    #[serde(rename = "actual")]
+    pub actual: Vec<String>,
+    #[serde(rename = "missing")]
+    pub missing: Vec<String>,
+    #[serde(rename = "extra")]
+    pub extra: Vec<String>,
+    #[serde(rename = "duplicates")]
+    pub duplicates: Vec<ValidationAdmissionDuplicate>,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidationAdmissionDuplicate {
+    #[serde(rename = "value")]
+    pub value: String,
+    #[serde(rename = "count")]
+    pub count: u32,
+}
+
+/// Retained legacy Validator assignment. Already-issued v2 bindings preserve exact-echo admission; new production validation issuance uses v3.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ValidationAssignmentV2 {
@@ -2669,7 +2765,55 @@ pub struct ValidationAssignmentV2 {
     pub max_transport_attempts: u32,
 }
 
-/// Canonical fact-only Validator context. Forbidden producer reasoning/session classes are listed explicitly.
+/// Package-issued v3 Validator assignment bound to one validation evidence authority.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidationAssignmentV3 {
+    #[serde(rename = "schema")]
+    pub schema: SchemaId,
+    #[serde(rename = "validation_id")]
+    pub validation_id: Id,
+    #[serde(rename = "validation_key")]
+    pub validation_key: Digest,
+    #[serde(rename = "workstream")]
+    pub workstream: Id,
+    #[serde(rename = "run_revision")]
+    pub run_revision: u64,
+    #[serde(rename = "role_id")]
+    pub role_id: Id,
+    #[serde(rename = "mode")]
+    pub mode: ModeId,
+    #[serde(rename = "assignment_id")]
+    pub assignment_id: Id,
+    #[serde(rename = "action_id")]
+    pub action_id: Id,
+    #[serde(rename = "validation_attempt")]
+    pub validation_attempt: u32,
+    #[serde(rename = "semantic_round")]
+    pub semantic_round: u32,
+    #[serde(rename = "producer_assignment_ids")]
+    pub producer_assignment_ids: Vec<Id>,
+    #[serde(rename = "base_commit")]
+    pub base_commit: GitOid,
+    #[serde(rename = "exact_commit")]
+    pub exact_commit: GitOid,
+    #[serde(rename = "exact_tree")]
+    pub exact_tree: GitOid,
+    #[serde(rename = "candidate_root")]
+    pub candidate_root: Path,
+    #[serde(rename = "context_path")]
+    pub context_path: Path,
+    #[serde(rename = "context_digest")]
+    pub context_digest: Digest,
+    #[serde(rename = "authority_path")]
+    pub authority_path: Path,
+    #[serde(rename = "authority_digest")]
+    pub authority_digest: Digest,
+    #[serde(rename = "max_value_attempts")]
+    pub max_value_attempts: u32,
+}
+
+/// Retained legacy fact-only Validator context for already-issued v2 bindings. Forbidden producer reasoning/session classes remain explicit.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ValidationContextV2 {
@@ -2820,7 +2964,202 @@ pub struct ValidationExcludedRef {
     pub reason: String,
 }
 
-/// Package-bound Validator carrier written create-once after validating model submission and immutable runner binding.
+/// Fact-only v3 Validator context. It projects readable exact source/diff citations but never asks the model to echo Core-owned receipts or coverage.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidationContextV3 {
+    #[serde(rename = "schema")]
+    pub schema: SchemaId,
+    #[serde(rename = "validation_id")]
+    pub validation_id: Id,
+    #[serde(rename = "assignment_id")]
+    pub assignment_id: Id,
+    #[serde(rename = "authority_digest")]
+    pub authority_digest: Digest,
+    #[serde(rename = "criteria")]
+    pub criteria: Vec<ValidationContextV3Criterion>,
+    #[serde(rename = "citation_records")]
+    pub citation_records: Vec<ValidationCitationRecord>,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidationContextV3Criterion {
+    #[serde(rename = "criterion_id")]
+    pub criterion_id: Id,
+    #[serde(rename = "requirement_text")]
+    pub requirement_text: String,
+    #[serde(rename = "allowed_citation_refs")]
+    pub allowed_citation_refs: Vec<Ref>,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidationCitationRecord {
+    #[serde(rename = "evidence_ref")]
+    pub evidence_ref: Ref,
+    #[serde(rename = "kind")]
+    pub kind: String,
+    #[serde(rename = "source_path")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<Path>,
+    #[serde(rename = "blob_digest")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blob_digest: Option<Digest>,
+    #[serde(rename = "line_count")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_count: Option<u32>,
+    #[serde(rename = "diff_digest")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff_digest: Option<Digest>,
+    #[serde(rename = "diff_path")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff_path: Option<Path>,
+}
+
+/// Single digest-bound authority for v3 validation identity, exact candidate evidence, receipt bindings, coverage, and allowed model citations.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidationEvidenceAuthority {
+    #[serde(rename = "schema")]
+    pub schema: SchemaId,
+    #[serde(rename = "validation_id")]
+    pub validation_id: Id,
+    #[serde(rename = "assignment_id")]
+    pub assignment_id: Id,
+    #[serde(rename = "exact_commit")]
+    pub exact_commit: GitOid,
+    #[serde(rename = "exact_tree")]
+    pub exact_tree: GitOid,
+    #[serde(rename = "base_commit")]
+    pub base_commit: GitOid,
+    #[serde(rename = "candidate_root")]
+    pub candidate_root: Path,
+    #[serde(rename = "unchanged_recovery")]
+    pub unchanged_recovery: bool,
+    #[serde(rename = "changed_paths")]
+    pub changed_paths: Vec<Path>,
+    #[serde(rename = "deleted_paths")]
+    pub deleted_paths: Vec<Path>,
+    #[serde(rename = "diff_ref")]
+    pub diff_ref: Ref,
+    #[serde(rename = "diff_digest")]
+    pub diff_digest: Digest,
+    #[serde(rename = "diff_path")]
+    pub diff_path: Path,
+    #[serde(rename = "source_records")]
+    pub source_records: Vec<ValidationSourceRecord>,
+    #[serde(rename = "diff_records")]
+    pub diff_records: Vec<ValidationDiffRecord>,
+    #[serde(rename = "command_receipts")]
+    pub command_receipts: Vec<ValidationReceiptRecord>,
+    #[serde(rename = "package_check_receipts")]
+    pub package_check_receipts: Vec<ValidationReceiptRecord>,
+    #[serde(rename = "criteria")]
+    pub criteria: Vec<ValidationAuthorityCriterion>,
+    #[serde(rename = "authority_digest")]
+    pub authority_digest: Digest,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidationSourceRecord {
+    #[serde(rename = "evidence_ref")]
+    pub evidence_ref: Ref,
+    #[serde(rename = "kind")]
+    pub kind: String,
+    #[serde(rename = "exact_commit")]
+    pub exact_commit: GitOid,
+    #[serde(rename = "exact_tree")]
+    pub exact_tree: GitOid,
+    #[serde(rename = "source_path")]
+    pub source_path: Path,
+    #[serde(rename = "git_blob_oid")]
+    pub git_blob_oid: GitOid,
+    #[serde(rename = "blob_digest")]
+    pub blob_digest: Digest,
+    #[serde(rename = "mode")]
+    pub mode: String,
+    #[serde(rename = "line_count")]
+    pub line_count: u32,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidationDiffRecord {
+    #[serde(rename = "evidence_ref")]
+    pub evidence_ref: Ref,
+    #[serde(rename = "kind")]
+    pub kind: String,
+    #[serde(rename = "exact_commit")]
+    pub exact_commit: GitOid,
+    #[serde(rename = "exact_tree")]
+    pub exact_tree: GitOid,
+    #[serde(rename = "base_commit")]
+    pub base_commit: GitOid,
+    #[serde(rename = "diff_digest")]
+    pub diff_digest: Digest,
+    #[serde(rename = "diff_path")]
+    pub diff_path: Path,
+    #[serde(rename = "byte_length")]
+    pub byte_length: u64,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidationReceiptRecord {
+    #[serde(rename = "evidence_ref")]
+    pub evidence_ref: Ref,
+    #[serde(rename = "receipt_digest")]
+    pub receipt_digest: Digest,
+    #[serde(rename = "receipt_json")]
+    pub receipt_json: Bytes,
+    #[serde(rename = "kind")]
+    pub kind: String,
+    #[serde(rename = "exact_commit")]
+    pub exact_commit: GitOid,
+    #[serde(rename = "exact_tree")]
+    pub exact_tree: GitOid,
+    #[serde(rename = "binding_id")]
+    pub binding_id: Id,
+    #[serde(rename = "unit_id")]
+    pub unit_id: Id,
+    #[serde(rename = "criterion_ids")]
+    pub criterion_ids: Vec<Id>,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidationAuthorityCriterion {
+    #[serde(rename = "criterion_id")]
+    pub criterion_id: Id,
+    #[serde(rename = "unit_id")]
+    pub unit_id: Id,
+    #[serde(rename = "unit_criterion_ordinal")]
+    pub unit_criterion_ordinal: u32,
+    #[serde(rename = "requirement_text")]
+    pub requirement_text: String,
+    #[serde(rename = "covered_paths")]
+    pub covered_paths: Vec<Path>,
+    #[serde(rename = "semantic_surface_ids")]
+    pub semantic_surface_ids: Vec<Id>,
+    #[serde(rename = "forward_edge_ids")]
+    pub forward_edge_ids: Vec<Id>,
+    #[serde(rename = "allowed_citation_refs")]
+    pub allowed_citation_refs: Vec<Ref>,
+    #[serde(rename = "command_receipt_refs")]
+    pub command_receipt_refs: Vec<Ref>,
+    #[serde(rename = "package_check_receipt_refs")]
+    pub package_check_receipt_refs: Vec<Ref>,
+}
+
+/// Retained legacy package-bound Validator carrier written create-once after exact-echo v2 admission and immutable runner binding.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ValidationResultV2 {
@@ -2909,7 +3248,103 @@ pub struct ValidationResultV2 {
     pub submission: ValidationSubmissionV2,
 }
 
-/// Only payload accepted by the Validator terminal tool. Assistant-text JSON without the terminal tool is not a carrier.
+/// Package-bound v3 Validator result preserving canonical admitted model semantics, exact authority binding, and Core-normalized verdict bytes. Raw tool arguments remain in the Pi session and attempt evidence rather than influencing carrier bytes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidationResultV3 {
+    #[serde(rename = "schema")]
+    pub schema: SchemaId,
+    #[serde(rename = "action_id")]
+    pub action_id: Id,
+    #[serde(rename = "assignment_id")]
+    pub assignment_id: Id,
+    #[serde(rename = "validation_id")]
+    pub validation_id: Id,
+    #[serde(rename = "validation_key")]
+    pub validation_key: Digest,
+    #[serde(rename = "validation_attempt")]
+    pub validation_attempt: u32,
+    #[serde(rename = "semantic_round")]
+    pub semantic_round: u32,
+    #[serde(rename = "run_revision")]
+    pub run_revision: u64,
+    #[serde(rename = "workstream")]
+    pub workstream: Id,
+    #[serde(rename = "role_id")]
+    pub role_id: Id,
+    #[serde(rename = "mode")]
+    pub mode: ModeId,
+    #[serde(rename = "producer_assignment_ids")]
+    pub producer_assignment_ids: Vec<Id>,
+    #[serde(rename = "exact_commit")]
+    pub exact_commit: GitOid,
+    #[serde(rename = "exact_tree")]
+    pub exact_tree: GitOid,
+    #[serde(rename = "assignment_path")]
+    pub assignment_path: Path,
+    #[serde(rename = "assignment_digest")]
+    pub assignment_digest: Digest,
+    #[serde(rename = "context_manifest_path")]
+    pub context_manifest_path: Path,
+    #[serde(rename = "context_manifest_digest")]
+    pub context_manifest_digest: Digest,
+    #[serde(rename = "authority_path")]
+    pub authority_path: Path,
+    #[serde(rename = "authority_digest")]
+    pub authority_digest: Digest,
+    #[serde(rename = "prompt_path")]
+    pub prompt_path: Path,
+    #[serde(rename = "prompt_digest")]
+    pub prompt_digest: Digest,
+    #[serde(rename = "spec_path")]
+    pub spec_path: Path,
+    #[serde(rename = "spec_digest")]
+    pub spec_digest: Digest,
+    #[serde(rename = "spec_bytes")]
+    pub spec_bytes: Bytes,
+    #[serde(rename = "carrier_path")]
+    pub carrier_path: Path,
+    #[serde(rename = "boundary_id")]
+    pub boundary_id: ContractId,
+    #[serde(rename = "boundary_digest")]
+    pub boundary_digest: Digest,
+    #[serde(rename = "result_contract")]
+    pub result_contract: ContractId,
+    #[serde(rename = "result_contract_digest")]
+    pub result_contract_digest: Digest,
+    #[serde(rename = "settings_digest")]
+    pub settings_digest: Digest,
+    #[serde(rename = "skills_digest")]
+    pub skills_digest: Digest,
+    #[serde(rename = "subscription_digest")]
+    pub subscription_digest: Digest,
+    #[serde(rename = "runtime_extension_digest")]
+    pub runtime_extension_digest: Digest,
+    #[serde(rename = "terminal_profile_id")]
+    pub terminal_profile_id: String,
+    #[serde(rename = "tool_name")]
+    pub tool_name: ToolName,
+    #[serde(rename = "tool_schema_digest")]
+    pub tool_schema_digest: Digest,
+    #[serde(rename = "carrier_binding")]
+    pub carrier_binding: Digest,
+    #[serde(rename = "tool_call_id")]
+    pub tool_call_id: String,
+    #[serde(rename = "tool_audit_ref")]
+    pub tool_audit_ref: Ref,
+    #[serde(rename = "tool_audit_digest")]
+    pub tool_audit_digest: Digest,
+    #[serde(rename = "submission_digest")]
+    pub submission_digest: Digest,
+    #[serde(rename = "submission")]
+    pub submission: ValidationSubmissionV3,
+    #[serde(rename = "verdict_digest")]
+    pub verdict_digest: Digest,
+    #[serde(rename = "verdict")]
+    pub verdict: ValidationVerdictV3,
+}
+
+/// Closed terminal payload retained for already-issued v2 Validator bindings. Assistant-text JSON without the terminal tool is not a carrier.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ValidationSubmissionV2 {
@@ -2956,6 +3391,66 @@ pub struct CriterionResultV2 {
     pub forward_edge_ids: Vec<Id>,
 }
 
+/// Closed v3 Validator model payload. Core owns identity, candidate state, assigned coverage, receipts, and outcome; the model owns only semantic verdicts, citation selection, and findings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidationSubmissionV3 {
+    #[serde(rename = "schema")]
+    pub schema: SchemaId,
+    #[serde(rename = "criterion_results")]
+    pub criterion_results: Vec<CriterionResultV3>,
+    #[serde(rename = "findings")]
+    pub findings: Vec<FindingV3>,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CriterionResultV3 {
+    #[serde(rename = "criterion_id")]
+    pub criterion_id: Id,
+    #[serde(rename = "verdict")]
+    pub verdict: CriterionVerdict,
+    #[serde(rename = "citation_refs")]
+    pub citation_refs: Vec<Ref>,
+    #[serde(rename = "finding_ids")]
+    pub finding_ids: Vec<Id>,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FindingV3 {
+    #[serde(rename = "finding_id")]
+    pub finding_id: Id,
+    #[serde(rename = "kind")]
+    pub kind: FindingKindV2,
+    #[serde(rename = "effect")]
+    pub effect: FindingEffect,
+    #[serde(rename = "summary")]
+    pub summary: String,
+    #[serde(rename = "detail")]
+    pub detail: String,
+    #[serde(rename = "criterion_ids")]
+    pub criterion_ids: Vec<Id>,
+    #[serde(rename = "citation_refs")]
+    pub citation_refs: Vec<Ref>,
+    #[serde(rename = "source_locations")]
+    pub source_locations: Vec<ValidationSourceLocation>,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidationSourceLocation {
+    #[serde(rename = "citation_ref")]
+    pub citation_ref: Ref,
+    #[serde(rename = "start_line")]
+    pub start_line: u32,
+    #[serde(rename = "end_line")]
+    pub end_line: u32,
+}
+
 /// Independent validation verdict bundle for forward, closure, conflict, delta, or final review (D76 §9.2).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ValidationVerdict {
@@ -2990,6 +3485,52 @@ pub struct CriterionResult {
     pub evidence_refs: Vec<Ref>,
     #[serde(rename = "finding_refs")]
     pub finding_refs: Vec<Ref>,
+    #[serde(rename = "covered_paths")]
+    pub covered_paths: Vec<Path>,
+    #[serde(rename = "semantic_surface_ids")]
+    pub semantic_surface_ids: Vec<Id>,
+    #[serde(rename = "forward_edge_ids")]
+    pub forward_edge_ids: Vec<Id>,
+}
+
+/// Core-normalized v3 validation verdict. It keeps model citations separate from automatically bound command/package receipts and derives coverage and outcome.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidationVerdictV3 {
+    #[serde(rename = "schema")]
+    pub schema: SchemaId,
+    #[serde(rename = "validation_id")]
+    pub validation_id: Id,
+    #[serde(rename = "assignment_id")]
+    pub assignment_id: Id,
+    #[serde(rename = "exact_commit")]
+    pub exact_commit: GitOid,
+    #[serde(rename = "exact_tree")]
+    pub exact_tree: GitOid,
+    #[serde(rename = "outcome")]
+    pub outcome: ValidationOutcomeV2,
+    #[serde(rename = "criterion_results")]
+    pub criterion_results: Vec<NormalizedCriterionResultV3>,
+    #[serde(rename = "findings")]
+    pub findings: Vec<FindingV3>,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NormalizedCriterionResultV3 {
+    #[serde(rename = "criterion_id")]
+    pub criterion_id: Id,
+    #[serde(rename = "verdict")]
+    pub verdict: CriterionVerdict,
+    #[serde(rename = "model_citation_refs")]
+    pub model_citation_refs: Vec<Ref>,
+    #[serde(rename = "command_receipt_refs")]
+    pub command_receipt_refs: Vec<Ref>,
+    #[serde(rename = "package_check_receipt_refs")]
+    pub package_check_receipt_refs: Vec<Ref>,
+    #[serde(rename = "finding_ids")]
+    pub finding_ids: Vec<Id>,
     #[serde(rename = "covered_paths")]
     pub covered_paths: Vec<Path>,
     #[serde(rename = "semantic_surface_ids")]
@@ -3277,7 +3818,7 @@ pub struct HostToCoreTaskCompletedPayload {
 pub const CONTRACT_SCHEMA: &str = "autopilot.contracts.v1";
 pub const CONTRACT_VERSION: u64 = 1;
 pub const CHILD_ADDON_DIGEST: &str =
-    "b5b2f474405fb54f3b31e25ef651e969b7ad774f69af6ee150e764442883871d";
+    "a5f23995e9fd51f7fae7263f1c85be1bb1d96444beb1486444f789be6b843642";
 
 pub const CHILD_RUNTIME_ENTRY: &str = "child-runtime/child-extension-runtime.ts";
 
@@ -3292,10 +3833,17 @@ pub const QUESTIONS_ADMITS: &str = "Question output must be an explicit question
 pub const SCOUT_DOSSIER_ADMITS: &str = "Repository scout and dossier output must cite current evidence and avoid work planning. Call autopilot_submit_scout_report as the final action with findings containing path, observation, and evidence_ref. A context-curation assignment calls autopilot_submit_context instead, with the same findings shape.";
 pub const TASK_ATOMS_ADMITS: &str = "Task extractor output must use the exact runner-issued atom id prefix for every atoms[].id. New model submissions must name operator-task atoms with sources copied as exact decoded JSON sources[].source strings from the runtime-supplied package-authoritative task:// source manifest, and include no repository findings. Package-derived legacy aliases remain accepted only for compatibility; arbitrary values and prefix matches are never accepted. Call autopilot_submit_atoms as the final action with atoms containing id, kind, text, and sources.";
 pub const VALIDATION_SUBMISSION_V2_ADMITS: &str = "Call autopilot_emit_status exactly once with this closed JSON object. Verdict every required criterion exactly once, cite only declared evidence refs, embed every finding, and do not claim PASS/READY when Core would compute a material blocker.";
+pub const VALIDATION_SUBMISSION_V3_ADMITS: &str = "Call autopilot_emit_status exactly once with this closed v3 object. Submit only criterion semantic verdicts, allowed source/diff citation_refs, and findings. Do not include validation or assignment identity, commit/tree, outcome, covered paths/surfaces/edges, command/package receipts, or mixed evidence refs. Core derives canonical criterion/finding order and auto-binds exact receipt sets from the generated validation authority; receipt-looking citation refs are rejected. Citation and finding arrays may arrive in any order but must be duplicate-free. Inspect each supplied source/diff record only through the policy-confined read tool at its supplied path, cite only records authorized for the relevant criterion, and give every source-defect finding at least one cited in-range source_location.";
 pub const VALIDATION_VERDICT_ADMITS: &str = "Verdict every required criterion independently as PASS, FAIL, or BLOCKED, and attach evidence refs, finding refs, covered paths, semantic surfaces, and forward-edge ids. Do not issue an overall PASS while any required criterion is unverdicted, stale, failed, or blocked. Use FORWARD_READY, FORWARD_BLOCKED, or BLOCKED only for forward validation, and PASS, NEEDS_FIX, or BLOCKED only for closure/final validation.";
 pub const WORK_MAP_ADMITS: &str = "Plan compiler, synthesizer, and Recovery Engineer output must contain one or more executable implementation units only. Each unit kind must be exactly implementation. Never emit context-gate or verification units: unresolved context must be recorded as review-blocking evidence, and independent verification must be folded into exact criteria plus nonempty focused commands on the owning implementation unit. Each units[].links element must equal exactly one bound atom registry atoms[].id byte-for-byte: no `atoms:` prefix, ranges, comma groups, task/source/scout/context/artifact refs, placeholders, or inferred expansion. Commands are strictly pre-package child evidence and must be executable without creating or requiring a commit. A criterion about the Core-owned committed tip, exact package tree, base ancestry, clean package worktree, or exact base-to-package changed paths must use units[].package_checks with kind clean-exact-package-tip and must never be represented as a child command. Package checks are closed Core-owned obligations, are verified after an admitted child submission, and are forwarded as package evidence to the unchanged independent Validator. Each command must declare closed Git-visible effect authority: no-effect with empty generated_paths and none handling; declared-predictable with nonempty exact normalized repo-relative Git-visible persistent generated_paths and isolation, exact cleanup before the scope gate, or block-if-created handling; or unknown-generated with empty generated_paths and run-isolated handling. External temporary paths are not generated_paths; commands leaving no persistent Git-visible repo state use no-effect + [] + none even if they temporarily write outside the repo and clean up. Approved commands execute later inside a package-assigned delivery worktree/candidate root; the planning checkout absolute identity/path is not future execution authority. Command, expected, and scope_preservation text must use repository-relative facts plus typed base commit/tree/worktree authority and must not bake the planning checkout root as expected delivery identity. Exact command strings are transported unchanged; allocation and delivery must not rewrite them. If an approved command conflicts with the later assigned worktree, the implementer must submit the typed blocked outcome and stop rather than seeking another checkout. Every command must include a nonempty final-scope preservation statement proving verification leaves Git-visible state inside approved unit files. Each unit must have a nonempty objective, criteria, depends_on array, files array, commands array, an explicit package_checks array (which may be empty), and traceable links by real atom id. Every package check must name the exact unique 1-based criterion_ordinals it proves. A unit with any package check is a closure unit and its files must include the complete union of files declared by every work-map unit, so final integrated repair remains inside original mechanically declared authority. A Recovery Engineer must preserve all unaffected units and authority links and include recovery evidence that verifies the runtime diagnosis rather than blindly accepting it. Call the parent-selected terminal tool exactly once: autopilot_submit_plan_cluster for a compiler, autopilot_submit_synthesis for a synthesizer, or autopilot_emit_status for a Recovery Engineer.";
+pub const VALIDATION_EVIDENCE_AUTHORITY_MAX_BYTES: usize = 1048576;
+pub const VALIDATION_ASSIGNMENT_V3_MAX_BYTES: usize = 131072;
+pub const VALIDATION_CONTEXT_V3_MAX_BYTES: usize = 1048576;
+pub const VALIDATION_SUBMISSION_V3_MAX_BYTES: usize = 1048576;
+pub const VALIDATION_VERDICT_V3_MAX_BYTES: usize = 2097152;
+pub const VALIDATION_ADMISSION_DIAGNOSTIC_MAX_BYTES: usize = 2097152;
 
-pub const ADMISSION_CONTRACTS: [(&str, &str, &str); 13] = [
+pub const ADMISSION_CONTRACTS: [(&str, &str, &str); 14] = [
     (
         "agent_handoff",
         "autopilot.agent-handoff.v1",
@@ -3352,6 +3900,11 @@ pub const ADMISSION_CONTRACTS: [(&str, &str, &str); 13] = [
         "Call autopilot_emit_status exactly once with this closed JSON object. Verdict every required criterion exactly once, cite only declared evidence refs, embed every finding, and do not claim PASS/READY when Core would compute a material blocker.",
     ),
     (
+        "validation_submission_v3",
+        "autopilot.validation_submission.v3",
+        "Call autopilot_emit_status exactly once with this closed v3 object. Submit only criterion semantic verdicts, allowed source/diff citation_refs, and findings. Do not include validation or assignment identity, commit/tree, outcome, covered paths/surfaces/edges, command/package receipts, or mixed evidence refs. Core derives canonical criterion/finding order and auto-binds exact receipt sets from the generated validation authority; receipt-looking citation refs are rejected. Citation and finding arrays may arrive in any order but must be duplicate-free. Inspect each supplied source/diff record only through the policy-confined read tool at its supplied path, cite only records authorized for the relevant criterion, and give every source-defect finding at least one cited in-range source_location.",
+    ),
+    (
         "validation_verdict",
         "autopilot.validation_verdict.v1",
         "Verdict every required criterion independently as PASS, FAIL, or BLOCKED, and attach evidence refs, finding refs, covered paths, semantic surfaces, and forward-edge ids. Do not issue an overall PASS while any required criterion is unverdicted, stale, failed, or blocked. Use FORWARD_READY, FORWARD_BLOCKED, or BLOCKED only for forward validation, and PASS, NEEDS_FIX, or BLOCKED only for closure/final validation.",
@@ -3406,7 +3959,7 @@ pub const SUBMIT_TOOLS: [(&str, &str, &str); 8] = [
     ),
 ];
 
-pub const TERMINAL_PROFILES: [(&str, &str, &str, &str, &str); 10] = [
+pub const TERMINAL_PROFILES: [(&str, &str, &str, &str, &str); 11] = [
     (
         "delivery-status.v2",
         "autopilot_emit_status",
@@ -3476,5 +4029,12 @@ pub const TERMINAL_PROFILES: [(&str, &str, &str, &str, &str); 10] = [
         "autopilot.validation_submission.v2",
         "autopilot.validation_result.v2",
         "0eb7655083ed7e8c707965ecb094134c1241f0d4355c271750fdde0300899674",
+    ),
+    (
+        "validation-status.v3",
+        "autopilot_emit_status",
+        "autopilot.validation_submission.v3",
+        "autopilot.validation_result.v3",
+        "86052745eff30b746b44366bd1a9dc54aeee74aba63c1d6be80a187efc691545",
     ),
 ];

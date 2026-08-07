@@ -543,11 +543,12 @@ fn task_path_classification_terminal_events_require_core_issued_action_assignmen
 }
 
 #[test]
-fn task_path_classification_delivery_runtime_packages_uncommitted_lane_changes_and_ignores_unclaimed_residue()
+fn task_path_classification_delivery_runtime_packages_uncommitted_lane_changes_for_clean_v3_validation()
  {
     let _guard = CWD_LOCK.lock().expect("cwd lock");
     let root = temp_repo("delivery-runtime-package");
     fs::write(root.join("README.md"), "delivery terminal fixture\n").expect("fixture file");
+    fs::write(root.join("obsolete.txt"), "approved deletion fixture\n").expect("deleted fixture");
     git_init(&root);
     let repo_authority =
         runner::repository_authority_binding(&root, "main").expect("repo authority");
@@ -555,7 +556,7 @@ fn task_path_classification_delivery_runtime_packages_uncommitted_lane_changes_a
     fs::write(root.join(".pi/autopilot/main/approved-plan.json"), serde_json::to_vec_pretty(&serde_json::json!({
         "repository_authority": {"manifest_path": repo_authority.path, "manifest_digest": repo_authority.digest, "head_commit": repo_authority.manifest.head_commit, "head_tree": repo_authority.manifest.head_tree},
         "units":[
-            {"id":"U1","kind":"implementation","objective":"deliver U1","operator_order":1,"decisions":[],"criteria":["AC1"],"criterion_text":[{"id":"AC1","text":"criterion text AC1"}],"dependencies":[],"predecessor_forward_criteria":[],"downstream_release_edges":["EDGE1"],"files":["README.md",".gitignore"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"package_checks":[]}
+            {"id":"U1","kind":"implementation","objective":"deliver U1","operator_order":1,"decisions":[],"criteria":["AC1"],"criterion_text":[{"id":"AC1","text":"criterion text AC1"}],"dependencies":[],"predecessor_forward_criteria":[],"downstream_release_edges":["EDGE1"],"files":["README.md",".gitignore","obsolete.txt"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"package_checks":[]}
         ]
     })).expect("approved json")).expect("approved plan");
     let previous = std::env::current_dir().expect("cwd");
@@ -610,7 +611,7 @@ fn task_path_classification_delivery_runtime_packages_uncommitted_lane_changes_a
         "delivery terminal fixture changed\n",
     )
     .expect("worktree edit");
-    fs::write(worktree.join("Cargo.lock"), "# build residue\n").expect("cargo residue");
+    fs::remove_file(worktree.join("obsolete.txt")).expect("approved file deletion");
     fs::create_dir_all(worktree.join(".pi/autopilot/runner/attempt-events"))
         .expect("attempt-events dir");
     fs::create_dir_all(worktree.join(".pi/autopilot/runner/carriers")).expect("carriers dir");
@@ -622,8 +623,12 @@ fn task_path_classification_delivery_runtime_packages_uncommitted_lane_changes_a
     fs::create_dir_all(carrier_path.parent().expect("carrier parent")).expect("carrier dir");
     fs::write(
         &carrier_path,
-        serde_json::to_vec_pretty(&delivery_carrier_without_package(&spec, 2))
-            .expect("delivery carrier"),
+        serde_json::to_vec_pretty(&delivery_carrier_without_package_paths(
+            &spec,
+            2,
+            &["README.md", "obsolete.txt"],
+        ))
+        .expect("delivery carrier"),
     )
     .expect("carrier write");
 
@@ -631,7 +636,7 @@ fn task_path_classification_delivery_runtime_packages_uncommitted_lane_changes_a
         &mut state,
         serde_json::json!({"v":1,"id":30,"kind":"task-completed","payload":{"task_id":"task-delivery-runtime","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}),
     );
-    assert_eq!(accepted.kind, "spawn");
+    assert_eq!(accepted.kind, "spawn", "accepted response: {accepted:?}");
     let validation: CoreToHostSpawnPayload =
         serde_json::from_value(accepted.payload).expect("validation spawn");
     assert_eq!(
@@ -657,215 +662,450 @@ fn task_path_classification_delivery_runtime_packages_uncommitted_lane_changes_a
     assert_eq!(validation_spec["assignment_kind"], "validation");
     assert_eq!(
         validation_spec["terminal_profile_id"],
-        "validation-status.v2"
+        "validation-status.v3"
     );
     assert_eq!(
         validation_spec["boundary_id"],
-        "autopilot.validation_submission.v2"
+        "autopilot.validation_submission.v3"
     );
     assert_eq!(
         validation_spec["result_contract"],
-        "autopilot.validation_result.v2"
+        "autopilot.validation_result.v3"
     );
     assert_eq!(
         validation_spec["allowed_tools"],
-        serde_json::json!(["read", "grep", "find", "ls", "autopilot_emit_status"])
+        serde_json::json!(["read", "autopilot_emit_status"])
     );
     assert_eq!(
         validation_spec["unavailable_tools"],
         serde_json::json!(["autopilot_request_test"])
     );
-    let validation_context: serde_json::Value = serde_json::from_slice(
-        &fs::read(
-            validation_spec["context_manifest_path"]
-                .as_str()
-                .expect("context path"),
-        )
-        .expect("validation context"),
+    assert!(
+        validation_spec["model_submission_path"]
+            .as_str()
+            .expect("model submission path")
+            .ends_with("model-submission.v3.json")
+    );
+    let assignment_bytes = fs::read(
+        validation_spec["assignment_path"]
+            .as_str()
+            .expect("assignment path"),
     )
-    .expect("context json");
+    .expect("v3 assignment");
+    let assignment: kernel::generated::ValidationAssignmentV3 =
+        serde_json::from_slice(&assignment_bytes).expect("v3 assignment json");
+    let context_bytes = fs::read(
+        validation_spec["context_manifest_path"]
+            .as_str()
+            .expect("context path"),
+    )
+    .expect("v3 validation context");
+    let context: kernel::generated::ValidationContextV3 =
+        serde_json::from_slice(&context_bytes).expect("v3 context json");
+    let authority_bytes = fs::read(&assignment.authority_path.0).expect("v3 authority");
+    let authority: kernel::generated::ValidationEvidenceAuthority =
+        serde_json::from_slice(&authority_bytes).expect("v3 authority json");
     assert_eq!(
-        validation_context["exact_commit"],
+        authority.exact_commit.0,
         git_out(&worktree, &["rev-parse", "--verify", "HEAD^{commit}"])
     );
     assert_eq!(
-        validation_context["candidate"]["actual_changed_paths"],
-        serde_json::json!(["README.md"])
+        authority
+            .changed_paths
+            .iter()
+            .map(|path| path.0.as_str())
+            .collect::<Vec<_>>(),
+        ["README.md", "obsolete.txt"]
     );
+    assert!(!authority.unchanged_recovery);
     assert_eq!(
-        validation_context["criteria"]
-            .as_array()
-            .expect("criteria")
-            .len(),
-        1
+        authority
+            .deleted_paths
+            .iter()
+            .map(|path| path.0.as_str())
+            .collect::<Vec<_>>(),
+        ["obsolete.txt"]
     );
-    assert_eq!(
-        validation_context["evidence"]
-            .as_array()
-            .expect("evidence")
-            .len(),
-        3
-    );
-    let criterion = &validation_context["criteria"][0];
-    assert_eq!(criterion["requirement_text"], "criterion text AC1");
-    assert_eq!(
-        criterion["covered_paths"],
-        serde_json::json!(["README.md", ".gitignore"]),
-        "validation criteria must retain complete approved scope, not fall back to changed paths"
-    );
-    assert_eq!(criterion["commands"][0]["command_id"], "CMD-U1-1");
-    assert_eq!(criterion["commands"][0]["command"], "cargo test -q");
     assert!(
-        criterion["commands"][0]["evidence_ref"]
-            .as_str()
-            .expect("command evidence ref")
+        authority
+            .source_records
+            .iter()
+            .all(|record| record.source_path.0 != "obsolete.txt")
+    );
+    assert_eq!(authority.criteria.len(), 1);
+    assert_eq!(authority.criteria[0].unit_id.0, "U1");
+    assert_eq!(authority.criteria[0].unit_criterion_ordinal, 1);
+    assert_eq!(authority.criteria[0].requirement_text, "criterion text AC1");
+    assert_eq!(
+        authority.criteria[0]
+            .covered_paths
+            .iter()
+            .map(|path| path.0.as_str())
+            .collect::<Vec<_>>(),
+        [".gitignore", "README.md", "obsolete.txt"],
+        "v3 authority must retain complete approved scope including deletions"
+    );
+    assert_eq!(authority.command_receipts.len(), 1);
+    assert_eq!(authority.command_receipts[0].unit_id.0, "U1");
+    let command_receipt: serde_json::Value =
+        serde_json::from_str(&authority.command_receipts[0].receipt_json.0)
+            .expect("closed v3 command receipt");
+    assert_eq!(command_receipt["unit_id"], "U1");
+    assert_eq!(authority.criteria[0].command_receipt_refs.len(), 1);
+    assert!(
+        authority.criteria[0].command_receipt_refs[0]
+            .0
             .starts_with("approved-command-receipt:CMD-U1-1:")
     );
-    let evidence_ref = validation_context["evidence"][0]["evidence_ref"]
-        .as_str()
-        .expect("evidence ref");
-    let criterion_evidence_refs = std::iter::once(evidence_ref.to_owned())
-        .chain(
-            criterion["commands"]
-                .as_array()
-                .expect("commands")
-                .iter()
-                .map(|command| {
-                    command["evidence_ref"]
-                        .as_str()
-                        .expect("command evidence")
-                        .to_owned()
-                }),
-        )
-        .chain(
-            criterion["package_checks"]
-                .as_array()
-                .expect("package checks")
-                .iter()
-                .map(|check| {
-                    check["evidence_ref"]
-                        .as_str()
-                        .expect("package evidence")
-                        .to_owned()
-                }),
-        )
-        .collect::<Vec<_>>();
+    assert!(authority.package_check_receipts.is_empty());
+    assert!(authority.criteria[0].package_check_receipt_refs.is_empty());
+    assert_eq!(context.criteria.len(), 1);
+    assert_eq!(
+        context.citation_records.len(),
+        authority.source_records.len() + 1
+    );
+    let diff_citation = context
+        .citation_records
+        .iter()
+        .find(|record| record.kind == "candidate-diff")
+        .expect("readable candidate diff citation");
+    let diff_path = diff_citation
+        .diff_path
+        .as_ref()
+        .expect("candidate diff path must be model-visible");
+    assert_eq!(
+        sha256_hex(&fs::read(&diff_path.0).expect("candidate diff bytes")),
+        diff_citation
+            .diff_digest
+            .as_ref()
+            .expect("candidate diff digest")
+            .0
+    );
+    let rendered_prompt = fs::read_to_string(
+        validation_spec["prompt_path"]
+            .as_str()
+            .expect("v3 prompt path"),
+    )
+    .expect("v3 rendered prompt");
+    assert!(!rendered_prompt.contains(&assignment.authority_path.0));
+    assert!(!rendered_prompt.contains("approved-command-receipt:"));
+    assert!(!rendered_prompt.contains("package-check-receipt:"));
+    assert!(
+        !rendered_prompt.contains("attach evidence refs, finding refs, covered paths"),
+        "legacy validation_verdict instructions leaked into v3: {rendered_prompt}"
+    );
+    assert!(
+        !rendered_prompt.contains("For each material issue, record one effect"),
+        "legacy finding instructions leaked into v3: {rendered_prompt}"
+    );
+    assert!(
+        !rendered_prompt.contains("terminal result must name the role/mode/assignment"),
+        "legacy identity-echo instruction leaked into v3: {rendered_prompt}"
+    );
+    assert!(rendered_prompt.contains(&context.criteria[0].allowed_citation_refs[0].0));
+
+    let citation = context.criteria[0]
+        .allowed_citation_refs
+        .first()
+        .expect("allowed citation")
+        .clone();
     let submission_value = serde_json::json!({
-        "schema":"autopilot.validation_submission.v2",
-        "validation_id":validation_context["validation_id"],
-        "assignment_id":validation_context["assignment_id"],
-        "scope":"forward",
-        "exact_commit":validation_context["exact_commit"],
-        "exact_tree":validation_context["exact_tree"],
-        "outcome":"FORWARD_READY",
+        "schema":"autopilot.validation_submission.v3",
         "criterion_results":[{
-            "criterion_id":criterion["criterion_id"],
+            "criterion_id":context.criteria[0].criterion_id,
             "verdict":"PASS",
-            "evidence_refs":criterion_evidence_refs,
-            "finding_ids":[],
-            "covered_paths":criterion["covered_paths"],
-            "semantic_surface_ids":criterion["semantic_surface_ids"],
-            "forward_edge_ids":criterion["forward_edge_ids"]
+            "citation_refs":[citation],
+            "finding_ids":[]
         }],
         "findings":[]
     });
-    let typed_spec: kernel::generated::AgentRunSpec =
-        serde_json::from_value(validation_spec.clone()).expect("typed validation spec");
-    let valid_submission: kernel::generated::ValidationSubmissionV2 =
-        serde_json::from_value(submission_value.clone()).expect("typed submission");
-    drivers::runner::child::admit_validation_submission(&typed_spec, &valid_submission)
-        .expect("issued validation submission");
-    for (label, mutate) in [
-        (
-            "forged-commit",
-            serde_json::json!("0000000000000000000000000000000000000000"),
-        ),
-        ("unknown-evidence", serde_json::json!("evidence:unknown")),
-    ] {
-        let mut forged = submission_value.clone();
-        if label == "forged-commit" {
-            forged["exact_commit"] = mutate;
-        } else {
-            forged["criterion_results"][0]["evidence_refs"][0] = mutate;
-        }
-        let forged: kernel::generated::ValidationSubmissionV2 =
-            serde_json::from_value(forged).expect("typed forged submission");
+    assert!(submission_value.get("validation_id").is_none());
+    assert!(submission_value.get("outcome").is_none());
+    assert!(submission_value.to_string().find("receipt").is_none());
+    let valid_submission: kernel::generated::ValidationSubmissionV3 =
+        serde_json::from_value(submission_value.clone()).expect("typed v3 submission");
+    let (verdict, _) = drivers::runner::child::normalize_validation_submission_v3(
+        &assignment,
+        &context,
+        &valid_submission,
+        1,
+    )
+    .expect("issued v3 validation submission");
+    assert_eq!(
+        verdict.outcome,
+        kernel::generated::ValidationOutcomeV2::FORWARDREADY
+    );
+    assert_eq!(
+        verdict.criterion_results[0].command_receipt_refs,
+        authority.criteria[0].command_receipt_refs
+    );
+    assert_eq!(
+        verdict.criterion_results[0].package_check_receipt_refs,
+        authority.criteria[0].package_check_receipt_refs
+    );
+
+    let mut unordered_citations = valid_submission.clone();
+    unordered_citations.criterion_results[0].citation_refs = authority.criteria[0]
+        .allowed_citation_refs
+        .iter()
+        .rev()
+        .cloned()
+        .collect();
+    let (unordered_verdict, _) = drivers::runner::child::normalize_validation_submission_v3(
+        &assignment,
+        &context,
+        &unordered_citations,
+        1,
+    )
+    .expect("Core must canonicalize an unordered duplicate-free citation subset");
+    assert_eq!(
+        unordered_verdict.criterion_results[0].model_citation_refs,
+        authority.criteria[0].allowed_citation_refs,
+        "normalized verdict owns canonical citation order"
+    );
+    let mut ordered_citations = valid_submission.clone();
+    ordered_citations.criterion_results[0].citation_refs =
+        authority.criteria[0].allowed_citation_refs.clone();
+    let (ordered_verdict, _) = drivers::runner::child::normalize_validation_submission_v3(
+        &assignment,
+        &context,
+        &ordered_citations,
+        1,
+    )
+    .expect("ordered complete citation set");
+    assert_eq!(unordered_verdict, ordered_verdict);
+    let (canonical_original, original_bytes) =
+        drivers::runner::child::canonical_validation_submission_v3(
+            &assignment,
+            &context,
+            &ordered_citations,
+            1,
+        )
+        .expect("canonical original submission");
+    let (canonical_unordered, unordered_bytes) =
+        drivers::runner::child::canonical_validation_submission_v3(
+            &assignment,
+            &context,
+            &unordered_citations,
+            1,
+        )
+        .expect("canonical unordered submission");
+    assert_eq!(canonical_unordered, canonical_original);
+    assert_eq!(
+        unordered_bytes, original_bytes,
+        "model order must not alter admitted submission bytes"
+    );
+
+    let mut unknown_citation = valid_submission.clone();
+    unknown_citation.criterion_results[0].citation_refs = vec![kernel::generated::Ref(
+        "validation-source:unknown".to_owned(),
+    )];
+    assert!(
+        drivers::runner::child::normalize_validation_submission_v3(
+            &assignment,
+            &context,
+            &unknown_citation,
+            1,
+        )
+        .is_err(),
+        "unknown v3 citation must fail"
+    );
+    let mut receipt_citation = valid_submission.clone();
+    receipt_citation.criterion_results[0].citation_refs =
+        authority.criteria[0].command_receipt_refs.clone();
+    let receipt_error = drivers::runner::child::normalize_validation_submission_v3(
+        &assignment,
+        &context,
+        &receipt_citation,
+        1,
+    )
+    .expect_err("model must never echo a Core receipt as a citation");
+    for receipt in &authority.criteria[0].command_receipt_refs {
         assert!(
-            drivers::runner::child::admit_validation_submission(&typed_spec, &forged).is_err(),
-            "{label} must be rejected"
+            !receipt_error.contains(&receipt.0),
+            "repair diagnostic leaked receipt authority: {receipt_error}"
         );
     }
-    for (field, invented) in [
-        ("covered_paths", "outside-approved-scope.txt"),
-        ("semantic_surface_ids", "invented-surface"),
-        ("forward_edge_ids", "invented-edge"),
-    ] {
-        let mut forged = submission_value.clone();
-        forged["criterion_results"][0][field]
-            .as_array_mut()
-            .expect("coverage array")
-            .push(serde_json::json!(invented));
-        let forged: kernel::generated::ValidationSubmissionV2 =
-            serde_json::from_value(forged).expect("typed invented coverage submission");
-        assert!(
-            drivers::runner::child::admit_validation_submission(&typed_spec, &forged).is_err(),
-            "validator must not invent extra {field} authority"
-        );
-    }
-    let mut blocked_with_finding = submission_value.clone();
-    blocked_with_finding["outcome"] = serde_json::json!("BLOCKED");
-    blocked_with_finding["criterion_results"][0]["verdict"] = serde_json::json!("FAIL");
-    blocked_with_finding["criterion_results"][0]["finding_ids"] =
-        serde_json::json!(["finding-validation-1"]);
-    blocked_with_finding["findings"] = serde_json::json!([{
-        "finding_id":"finding-validation-1",
+    assert!(receipt_error.contains("@rejected-receipt-reference"));
+
+    let mut pass_with_blocker = valid_submission.clone();
+    pass_with_blocker.criterion_results[0].finding_ids =
+        vec![kernel::generated::Id("finding-pass-blocker".to_owned())];
+    pass_with_blocker.findings = serde_json::from_value(serde_json::json!([{
+        "finding_id":"finding-pass-blocker",
         "kind":"source-defect",
         "effect":"forward-blocking",
-        "summary":"issued scope defect",
-        "detail":"the exact issued criterion is not satisfied",
-        "criterion_ids":[criterion["criterion_id"].clone()],
-        "edge_ids":criterion["forward_edge_ids"].clone(),
-        "evidence_refs":[evidence_ref],
-        "covered_paths":criterion["covered_paths"].clone(),
-        "semantic_surface_ids":criterion["semantic_surface_ids"].clone()
-    }]);
-    let typed_blocked: kernel::generated::ValidationSubmissionV2 =
-        serde_json::from_value(blocked_with_finding.clone()).expect("typed blocked finding");
-    drivers::runner::child::admit_validation_submission(&typed_spec, &typed_blocked)
-        .expect("finding bound to exact issued authority");
-    for (field, invented) in [
-        ("criterion_ids", "invented-criterion"),
-        ("edge_ids", "invented-edge"),
-        ("evidence_refs", "invented-evidence"),
-        ("covered_paths", "invented-path"),
-        ("semantic_surface_ids", "invented-surface"),
+        "summary":"blocking source defect",
+        "detail":"PASS may not retain a forward blocker",
+        "criterion_ids":[context.criteria[0].criterion_id],
+        "citation_refs":[context.criteria[0].allowed_citation_refs[0]],
+        "source_locations":[]
+    }]))
+    .expect("typed PASS blocker");
+    let pass_error = drivers::runner::child::normalize_validation_submission_v3(
+        &assignment,
+        &context,
+        &pass_with_blocker,
+        1,
+    )
+    .expect_err("PASS with a blocker must fail");
+    assert!(
+        pass_error.contains("PASS with no forward-blocking finding"),
+        "{pass_error}"
+    );
+    let mut duplicate_citation = valid_submission.clone();
+    let duplicate_ref = duplicate_citation.criterion_results[0].citation_refs[0].clone();
+    duplicate_citation.criterion_results[0]
+        .citation_refs
+        .push(duplicate_ref);
+    let duplicate_error = drivers::runner::child::normalize_validation_submission_v3(
+        &assignment,
+        &context,
+        &duplicate_citation,
+        1,
+    )
+    .expect_err("duplicate v3 citation must fail");
+    assert!(duplicate_error.contains("duplicates"), "{duplicate_error}");
+
+    let mut all_at_once = valid_submission.clone();
+    let valid_ref = all_at_once.criterion_results[0].citation_refs[0].clone();
+    all_at_once.criterion_results[0].citation_refs = vec![
+        valid_ref,
+        kernel::generated::Ref("validation-source:unknown".to_owned()),
+        kernel::generated::Ref("validation-source:unknown".to_owned()),
+    ];
+    all_at_once.criterion_results[0].finding_ids = vec![
+        kernel::generated::Id("missing-finding".to_owned()),
+        kernel::generated::Id("missing-finding".to_owned()),
+    ];
+    all_at_once.findings = serde_json::from_value(serde_json::json!([
+        {
+            "finding_id":"duplicate-finding",
+            "kind":"source-defect",
+            "effect":"forward-blocking",
+            "summary":"",
+            "detail":"",
+            "criterion_ids":["unknown-criterion"],
+            "citation_refs":["validation-source:unknown"],
+            "source_locations":[{
+                "citation_ref":"validation-source:unknown",
+                "start_line":0,
+                "end_line":999
+            }]
+        },
+        {
+            "finding_id":"duplicate-finding",
+            "kind":"source-defect",
+            "effect":"advisory",
+            "summary":"duplicate",
+            "detail":"duplicate identity remains independently inspectable",
+            "criterion_ids":[context.criteria[0].criterion_id],
+            "citation_refs":[context.criteria[0].allowed_citation_refs[0]],
+            "source_locations":[]
+        }
+    ]))
+    .expect("malformed-but-typed duplicate findings");
+    let diagnostic_text = drivers::runner::child::normalize_validation_submission_v3(
+        &assignment,
+        &context,
+        &all_at_once,
+        2,
+    )
+    .expect_err("all v3 mismatches must be aggregated");
+    let diagnostic: serde_json::Value =
+        serde_json::from_str(&diagnostic_text).expect("canonical aggregate diagnostic JSON");
+    let mismatches = diagnostic["mismatches"]
+        .as_array()
+        .expect("diagnostic mismatches");
+    assert_eq!(
+        diagnostic["mismatch_count"].as_u64(),
+        Some(mismatches.len() as u64)
+    );
+    assert_eq!(diagnostic["value_attempt"], 2);
+    let citation_row = mismatches
+        .iter()
+        .find(|row| row["code"] == "criterion-citation-refs")
+        .expect("citation mismatch row");
+    assert_eq!(
+        citation_row["extra"],
+        serde_json::json!(["validation-source:unknown", "validation-source:unknown"])
+    );
+    assert_eq!(
+        citation_row["duplicates"],
+        serde_json::json!([{"value":"validation-source:unknown","count":2}])
+    );
+    assert_eq!(citation_row["missing"], serde_json::json!([]));
+    let finding_row = mismatches
+        .iter()
+        .find(|row| row["code"] == "criterion-finding-ids")
+        .expect("finding mismatch row");
+    assert_eq!(
+        finding_row["actual"],
+        serde_json::json!(["missing-finding", "missing-finding"])
+    );
+    let criterion_backlink_row = mismatches
+        .iter()
+        .find(|row| row["code"] == "criterion-finding-link")
+        .expect("criterion backlink mismatch row");
+    assert_eq!(
+        criterion_backlink_row["expected"],
+        serde_json::json!(["missing-finding", "missing-finding"])
+    );
+    assert_eq!(criterion_backlink_row["actual"], serde_json::json!([]));
+    assert_eq!(
+        criterion_backlink_row["missing"],
+        serde_json::json!(["missing-finding", "missing-finding"])
+    );
+    assert_eq!(criterion_backlink_row["extra"], serde_json::json!([]));
+    let backlink_row = mismatches
+        .iter()
+        .find(|row| {
+            row["code"] == "finding-criterion-link"
+                && row["missing"].as_array().is_some_and(|items| {
+                    items.iter().any(|item| {
+                        item.as_str() == Some(context.criteria[0].criterion_id.0.as_str())
+                    })
+                })
+        })
+        .expect("finding backlink mismatch row");
+    assert_eq!(backlink_row["actual"], serde_json::json!([]));
+    assert_eq!(
+        backlink_row["missing"],
+        serde_json::json!([context.criteria[0].criterion_id.0])
+    );
+    for code in [
+        "finding-identity",
+        "finding-summary",
+        "finding-detail",
+        "finding-criterion-ids",
+        "finding-citation-refs",
+        "finding-source-locations",
+        "source-defect-location",
     ] {
-        let mut forged = blocked_with_finding.clone();
-        forged["findings"][0][field] = serde_json::json!([invented]);
-        let forged: kernel::generated::ValidationSubmissionV2 =
-            serde_json::from_value(forged).expect("typed forged finding scope");
         assert!(
-            drivers::runner::child::admit_validation_submission(&typed_spec, &forged).is_err(),
-            "validator finding must not invent {field} authority"
+            mismatches.iter().any(|row| row["code"] == code),
+            "complete diagnostic omitted independently knowable {code}: {mismatches:?}"
         );
     }
-    let mut unknown_finding_link = blocked_with_finding.clone();
-    unknown_finding_link["criterion_results"][0]["finding_ids"] =
-        serde_json::json!(["invented-finding"]);
-    let unknown_finding_link: kernel::generated::ValidationSubmissionV2 =
-        serde_json::from_value(unknown_finding_link).expect("typed unknown finding link");
     assert!(
-        drivers::runner::child::admit_validation_submission(&typed_spec, &unknown_finding_link)
-            .is_err()
+        mismatches.iter().all(|row| {
+            let pointer = row["field"].as_str().expect("JSON pointer field");
+            pointer.is_empty() || pointer.starts_with('/')
+        }),
+        "every diagnostic field must be a root or absolute JSON pointer"
     );
-    let mut omitted = valid_submission.clone();
-    omitted.criterion_results.clear();
-    assert!(drivers::runner::child::admit_validation_submission(&typed_spec, &omitted).is_err());
-    let mut false_ready = valid_submission.clone();
-    false_ready.criterion_results[0].verdict = kernel::generated::CriterionVerdict::FAIL;
-    assert!(
-        drivers::runner::child::admit_validation_submission(&typed_spec, &false_ready).is_err()
-    );
+    let keys = mismatches
+        .iter()
+        .map(|row| {
+            (
+                row["field"].as_str().unwrap_or("").to_owned(),
+                row["criterion_id"].as_str().unwrap_or("").to_owned(),
+                row["finding_id"].as_str().unwrap_or("").to_owned(),
+                row["code"].as_str().unwrap_or("").to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(keys.windows(2).all(|pair| pair[0] <= pair[1]));
     let package_commit = git_out(&worktree, &["rev-parse", "--verify", "HEAD^{commit}"]);
     assert_ne!(
         package_commit, base_commit,
@@ -876,11 +1116,7 @@ fn task_path_classification_delivery_runtime_packages_uncommitted_lane_changes_a
             &worktree,
             &["diff", "--name-only", &base_commit, &package_commit, "--"]
         ),
-        "README.md"
-    );
-    assert!(
-        worktree.join("Cargo.lock").exists(),
-        "residue is not packaged"
+        "README.md\nobsolete.txt"
     );
     let events = fs::read_to_string(&event_path).expect("event log");
     assert!(events.contains("agent:delivery-accepted"));
@@ -1118,6 +1354,14 @@ fn delivery_carrier_without_package(
     spec: &serde_json::Value,
     evidence_count: usize,
 ) -> serde_json::Value {
+    delivery_carrier_without_package_paths(spec, evidence_count, &["README.md"])
+}
+
+fn delivery_carrier_without_package_paths(
+    spec: &serde_json::Value,
+    evidence_count: usize,
+    changed_paths: &[&str],
+) -> serde_json::Value {
     let typed: kernel::generated::AgentRunSpec =
         serde_json::from_value(spec.clone()).expect("spec");
     let profile = kernel::generated::TERMINAL_PROFILES
@@ -1125,7 +1369,7 @@ fn delivery_carrier_without_package(
         .find(|row| row.0 == "delivery-status.v2")
         .expect("profile");
     let submission = serde_json::json!({
-        "actual_changed_paths":["README.md"],
+        "actual_changed_paths":changed_paths,
         "execution_audit_ref":"audit:delivery",
         "focused_evidence_refs":(0..evidence_count).map(|index| serde_json::json!(format!("evidence:{index}"))).collect::<Vec<_>>(),
         "terminal_status":"succeeded",

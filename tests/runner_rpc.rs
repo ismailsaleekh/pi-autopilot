@@ -108,6 +108,96 @@ fn runner_rpc_framing_lf_only_crlf_unicode_separators_utf8_chunks_and_large_fram
 }
 
 #[test]
+fn runner_rpc_refuses_oversized_unterminated_and_message_update_frames_before_allocation() {
+    let oversized = vec![b'x'; 65];
+    let mut unterminated =
+        JsonlReader::with_max_record_bytes(BufReader::new(oversized.as_slice()), 64);
+    assert_eq!(
+        unterminated.next_record(),
+        Err(RpcError::FrameTooLarge {
+            bytes: 65,
+            limit: 64,
+        })
+    );
+    assert!(unterminated.peak_line_capacity <= 64);
+
+    let update = format!(
+        "{{\"type\":\"message_update\",\"text\":\"{}\"}}\n",
+        "x".repeat(65)
+    );
+    let mut message_update =
+        JsonlReader::with_max_record_bytes(BufReader::new(update.as_bytes()), 64);
+    assert!(matches!(
+        message_update.next_record(),
+        Err(RpcError::FrameTooLarge { limit: 64, .. })
+    ));
+}
+
+#[test]
+fn runner_rpc_spawn_rejects_a_terminal_ceiling_override_before_launch() {
+    let root = temp_root("runner-rpc-hard-ceiling");
+    let mut config = RpcSpawnConfig::new(
+        root.clone(),
+        "openai-codex".to_owned(),
+        "gpt-5.3-codex".to_owned(),
+        "high".to_owned(),
+        "session-hard-ceiling".to_owned(),
+        root.join("session"),
+        vec!["read".to_owned()],
+    );
+    let mut stderr_config = config.clone();
+    stderr_config.stderr_tail_bytes = drivers::runner::rpc::MAX_STDERR_TAIL_BYTES + 1;
+    assert!(matches!(
+        RpcClient::spawn(stderr_config),
+        Err(RpcError::ProtocolViolation(detail)) if detail.contains("stderr tail limit")
+    ));
+    config.max_terminal_bytes = drivers::generated::pi_rpc::DEFAULT_MAX_TERMINAL_BYTES + 1;
+    assert!(matches!(
+        RpcClient::spawn(config),
+        Err(RpcError::ProtocolViolation(detail)) if detail.contains("terminal byte limit")
+    ));
+    fs::remove_dir_all(root).expect("remove hard-ceiling fixture");
+}
+
+#[test]
+fn runner_rpc_stderr_hard_ceiling_kills_the_child_and_rejects_the_run() {
+    let root = temp_root("runner-rpc-stderr-ceiling");
+    write_fake_pi(
+        &root,
+        r#"#!/usr/bin/env python3
+import sys, time
+sys.stderr.write("x" * 65)
+sys.stderr.flush()
+while True:
+    time.sleep(10)
+"#,
+    );
+    let mut config = test_spawn_config(&root);
+    config.pi_executable = root.join("pi").into_os_string();
+    config.stderr_tail_bytes = 64;
+    let mut client = RpcClient::spawn(config).expect("spawn stderr fixture");
+    assert_eq!(
+        client.next_frame(),
+        Err(RpcError::StderrTooLarge {
+            bytes: 65,
+            limit: 64,
+        })
+    );
+    let diagnostics = client.diagnostics();
+    assert_eq!(diagnostics.stderr_total_bytes, 65);
+    assert_eq!(diagnostics.stderr_tail_bytes, 64);
+    assert!(diagnostics.stderr_tail_truncated);
+    assert!(matches!(
+        client.shutdown(Duration::from_millis(50)),
+        Err(RpcError::StderrTooLarge {
+            bytes: 65,
+            limit: 64
+        })
+    ));
+    fs::remove_dir_all(root).expect("remove stderr fixture");
+}
+
+#[test]
 fn runner_rpc_volume_drains_548_mb_without_retaining_nonterminal_frames_or_leaking_child_stdout() {
     let root = temp_root("runner-rpc-volume");
     write_fake_pi(&root, &volume_fake_pi());
@@ -427,6 +517,62 @@ fn runner_rpc_shutdown_closes_stdin_and_reaps_process() {
 }
 
 #[test]
+fn runner_rpc_shutdown_requires_the_complete_stderr_reader_result() {
+    let root = temp_root("runner-rpc-stderr-complete");
+    write_fake_pi(
+        &root,
+        "#!/usr/bin/env python3\nimport sys\nsys.stderr.write('complete stderr')\nsys.stderr.flush()\n",
+    );
+    let mut client = spawn_fake_client(&root, 1024 * 1024);
+    let shutdown = client.shutdown(Duration::from_secs(5)).expect("shutdown");
+    assert_eq!(shutdown.stderr_tail, b"complete stderr");
+    assert!(shutdown.status.expect("status").success());
+    fs::remove_dir_all(root).expect("remove complete stderr fixture");
+}
+
+#[test]
+fn runner_rpc_shutdown_rejects_incomplete_stderr_after_process_group_exit() {
+    let root = temp_root("runner-rpc-stderr-incomplete");
+    write_fake_pi(&root, &escaped_stderr_descendant_fake_pi());
+    let mut client = spawn_fake_client(&root, 1024 * 1024);
+    let result = client.shutdown(Duration::from_secs(5));
+    let retry = client.shutdown(Duration::from_secs(5));
+    if result.is_ok() {
+        std::thread::sleep(Duration::from_secs(2));
+    } else {
+        std::thread::sleep(Duration::from_millis(700));
+    }
+    assert!(matches!(
+        result,
+        Err(RpcError::Io(detail)) if detail.contains("stderr reader did not complete")
+    ));
+    assert!(matches!(
+        retry,
+        Err(RpcError::Io(detail)) if detail.contains("previous terminal wait failed")
+    ));
+    fs::remove_dir_all(root).expect("remove incomplete stderr fixture");
+}
+
+#[test]
+fn runner_rpc_shutdown_kills_a_stderr_retaining_descendant_before_success() {
+    let root = temp_root("runner-rpc-stderr-descendant");
+    let marker = root.join("descendant-survived");
+    write_fake_pi(&root, &stderr_descendant_fake_pi(&marker));
+    let mut client = spawn_fake_client(&root, 1024 * 1024);
+    let shutdown = client.shutdown(Duration::from_secs(5)).expect("shutdown");
+    assert!(!shutdown.escalated);
+    let status = shutdown.status.expect("status");
+    assert!(status.success(), "unexpected child status: {status:?}");
+    std::thread::sleep(Duration::from_millis(500));
+    match fs::remove_file(&marker) {
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Ok(()) => panic!("stderr-retaining descendant survived shutdown"),
+        Err(error) => panic!("descendant marker cleanup failed: {error}"),
+    }
+    fs::remove_dir_all(root).expect("remove stderr descendant fixture");
+}
+
+#[test]
 fn runner_rpc_shutdown_escalates_hung_process() {
     let root = temp_root("runner-rpc-shutdown-hung");
     write_fake_pi(&root, &hung_fake_pi());
@@ -435,6 +581,25 @@ fn runner_rpc_shutdown_escalates_hung_process() {
         .shutdown(Duration::from_millis(50))
         .expect("shutdown");
     assert!(shutdown.escalated);
+}
+
+#[test]
+fn runner_rpc_shutdown_kills_sigterm_ignoring_descendant_after_leader_exit() {
+    let root = temp_root("runner-rpc-shutdown-term-descendant");
+    let marker = root.join("sigterm-descendant-survived");
+    write_fake_pi(&root, &sigterm_descendant_fake_pi(&marker));
+    let mut client = spawn_fake_client(&root, 1024 * 1024);
+    let shutdown = client
+        .shutdown(Duration::from_millis(50))
+        .expect("shutdown");
+    assert!(shutdown.escalated);
+    std::thread::sleep(Duration::from_millis(700));
+    match fs::remove_file(&marker) {
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Ok(()) => panic!("SIGTERM-ignoring descendant survived shutdown"),
+        Err(error) => panic!("SIGTERM descendant marker cleanup failed: {error}"),
+    }
+    fs::remove_dir_all(root).expect("remove SIGTERM descendant fixture");
 }
 
 fn test_spawn_config(root: &Path) -> RpcSpawnConfig {
@@ -497,6 +662,29 @@ for _ in sys.stdin:
     )
 }
 
+fn escaped_stderr_descendant_fake_pi() -> String {
+    r#"#!/usr/bin/env python3
+import subprocess, sys
+subprocess.Popen(
+    [sys.executable, "-c", "import time;time.sleep(1.5)"],
+    stdout=subprocess.DEVNULL,
+    start_new_session=True,
+)
+"#
+    .to_owned()
+}
+
+fn stderr_descendant_fake_pi(marker: &Path) -> String {
+    format!(
+        r#"#!/usr/bin/env python3
+import subprocess, sys
+code = 'import pathlib,time;time.sleep(0.2);pathlib.Path({:?}).write_text("survived")'
+subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.DEVNULL)
+"#,
+        marker.display().to_string()
+    )
+}
+
 fn stdin_exit_fake_pi() -> String {
     r#"#!/usr/bin/env python3
 import sys
@@ -504,6 +692,21 @@ for _ in sys.stdin:
     pass
 "#
     .to_owned()
+}
+
+fn sigterm_descendant_fake_pi(marker: &Path) -> String {
+    format!(
+        r#"#!/usr/bin/env python3
+import subprocess, sys, time
+code = 'import pathlib,signal,sys,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);print("ready",flush=True);time.sleep(0.5);pathlib.Path({:?}).write_text("survived")'
+descendant = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE)
+if descendant.stdout.readline() != b"ready\\n":
+    sys.exit(65)
+while True:
+    time.sleep(10)
+"#,
+        marker.display().to_string()
+    )
 }
 
 fn hung_fake_pi() -> String {

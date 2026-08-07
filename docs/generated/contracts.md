@@ -46,11 +46,18 @@ Sources: `data/contracts.kdl`.
 | delivery_result_v2 | autopilot.delivery_result.v2 | Package | false | Package-bound delivery carrier written create-once from an admitted terminal-tool submission and immutable runner identity. |
 | validation_verdict | autopilot.validation_verdict.v1 | Model | true | Independent validation verdict bundle for forward, closure, conflict, delta, or final review (D76 §9.2). |
 | finding | autopilot.finding.v1 | Model | true | Validator/Bughunter/Fixer finding with semantic scheduling effect (D76 §5.3 and D74 §11.2). |
-| validation_assignment_v2 | autopilot.validation_assignment.v1 | Package | false | Package-produced independent Validator assignment. Production validation uses v2 submissions/results; v1 verdicts remain historical. |
+| validation_assignment_v2 | autopilot.validation_assignment.v1 | Package | false | Retained legacy Validator assignment. Already-issued v2 bindings preserve exact-echo admission; new production validation issuance uses v3. |
 | finding_v2 | autopilot.finding.v2 | Model | true | Embedded v2 validation finding with deterministic validation-id ordinal identifier. |
-| validation_context_v2 | autopilot.validation_context.v1 | Package | false | Canonical fact-only Validator context. Forbidden producer reasoning/session classes are listed explicitly. |
-| validation_submission_v2 | autopilot.validation_submission.v2 | Model | true | Only payload accepted by the Validator terminal tool. Assistant-text JSON without the terminal tool is not a carrier. |
-| validation_result_v2 | autopilot.validation_result.v2 | Package | false | Package-bound Validator carrier written create-once after validating model submission and immutable runner binding. |
+| validation_context_v2 | autopilot.validation_context.v1 | Package | false | Retained legacy fact-only Validator context for already-issued v2 bindings. Forbidden producer reasoning/session classes remain explicit. |
+| validation_submission_v2 | autopilot.validation_submission.v2 | Model | true | Closed terminal payload retained for already-issued v2 Validator bindings. Assistant-text JSON without the terminal tool is not a carrier. |
+| validation_result_v2 | autopilot.validation_result.v2 | Package | false | Retained legacy package-bound Validator carrier written create-once after exact-echo v2 admission and immutable runner binding. |
+| validation_evidence_authority | autopilot.validation_evidence_authority.v1 | Package | false | Single digest-bound authority for v3 validation identity, exact candidate evidence, receipt bindings, coverage, and allowed model citations. |
+| validation_assignment_v3 | autopilot.validation_assignment.v3 | Package | false | Package-issued v3 Validator assignment bound to one validation evidence authority. |
+| validation_context_v3 | autopilot.validation_context.v3 | Package | false | Fact-only v3 Validator context. It projects readable exact source/diff citations but never asks the model to echo Core-owned receipts or coverage. |
+| validation_submission_v3 | autopilot.validation_submission.v3 | Model | true | Closed v3 Validator model payload. Core owns identity, candidate state, assigned coverage, receipts, and outcome; the model owns only semantic verdicts, citation selection, and findings. |
+| validation_verdict_v3 | autopilot.validation_verdict.v3 | Package | false | Core-normalized v3 validation verdict. It keeps model citations separate from automatically bound command/package receipts and derives coverage and outcome. |
+| validation_admission_diagnostic | autopilot.validation_admission_diagnostic.v1 | Package | false | Complete deterministic v3 validation admission diagnostic. Authority corruption is fatal; model shape and semantic-value mismatches are repaired together. Large value lists and excess rows are represented by deterministic count/digest summaries inside the generated repair-prompt byte ceiling without reclassifying model input as fatal; mismatch_count retains the complete pre-summary count. |
+| validation_result_v3 | autopilot.validation_result.v3 | Package | false | Package-bound v3 Validator result preserving canonical admitted model semantics, exact authority binding, and Core-normalized verdict bytes. Raw tool arguments remain in the Pi session and attempt evidence rather than influencing carrier bytes. |
 | seam_envelope | autopilot.seam_envelope.v1 | Host | false | D78 §3.1 newline-delimited JSON frame envelope over stdio. |
 | artifact_link | autopilot.artifact_link.v1 | Package | false | Digest-bound run-root artifact link used by finalization assemblies and archive manifests. |
 | accepted_evidence_envelope | autopilot.accepted_evidence_envelope.v1 | Package | false | Authoritative accepted evidence envelope. External-attested advisory origin is archived but cannot satisfy final conditions. |
@@ -749,6 +756,201 @@ Sources: `data/contracts.kdl`.
 | validation_result_v2 | field | tool_audit_digest | digest | true |  |  |
 | validation_result_v2 | field | submission_digest | digest | true |  |  |
 | validation_result_v2 | field | submission | validation_submission_v2 | true |  |  |
+| validation_evidence_authority | field | schema | schema-id | true |  |  |
+| validation_evidence_authority | field | validation_id | id | true |  |  |
+| validation_evidence_authority | field | assignment_id | id | true |  |  |
+| validation_evidence_authority | field | exact_commit | git-oid | true |  |  |
+| validation_evidence_authority | field | exact_tree | git-oid | true |  |  |
+| validation_evidence_authority | field | base_commit | git-oid | true |  |  |
+| validation_evidence_authority | field | candidate_root | path | true |  |  |
+| validation_evidence_authority | field | unchanged_recovery | bool | true |  |  |
+| validation_evidence_authority | list | changed_paths | path | true |  |  |
+| validation_evidence_authority | list | deleted_paths | path | true |  |  |
+| validation_evidence_authority | field | diff_ref | ref | true |  |  |
+| validation_evidence_authority | field | diff_digest | digest | true |  |  |
+| validation_evidence_authority | field | diff_path | path | true |  |  |
+| validation_evidence_authority | list | source_records | validation_source_record | true |  |  |
+| validation_evidence_authority | list | diff_records | validation_diff_record | true |  |  |
+| validation_evidence_authority | list | command_receipts | validation_receipt_record | true |  |  |
+| validation_evidence_authority | list | package_check_receipts | validation_receipt_record | true |  |  |
+| validation_evidence_authority | list | criteria | validation_authority_criterion | true |  |  |
+| validation_evidence_authority | field | authority_digest | digest | true |  |  |
+| validation_evidence_authority | field | validation_source_record.evidence_ref | ref | true |  |  |
+| validation_evidence_authority | field | validation_source_record.kind | string | true |  |  |
+| validation_evidence_authority | field | validation_source_record.exact_commit | git-oid | true |  |  |
+| validation_evidence_authority | field | validation_source_record.exact_tree | git-oid | true |  |  |
+| validation_evidence_authority | field | validation_source_record.source_path | path | true |  |  |
+| validation_evidence_authority | field | validation_source_record.git_blob_oid | git-oid | true |  |  |
+| validation_evidence_authority | field | validation_source_record.blob_digest | digest | true |  |  |
+| validation_evidence_authority | field | validation_source_record.mode | string | true |  |  |
+| validation_evidence_authority | field | validation_source_record.line_count | u32 | true |  |  |
+| validation_evidence_authority | field | validation_diff_record.evidence_ref | ref | true |  |  |
+| validation_evidence_authority | field | validation_diff_record.kind | string | true |  |  |
+| validation_evidence_authority | field | validation_diff_record.exact_commit | git-oid | true |  |  |
+| validation_evidence_authority | field | validation_diff_record.exact_tree | git-oid | true |  |  |
+| validation_evidence_authority | field | validation_diff_record.base_commit | git-oid | true |  |  |
+| validation_evidence_authority | field | validation_diff_record.diff_digest | digest | true |  |  |
+| validation_evidence_authority | field | validation_diff_record.diff_path | path | true |  |  |
+| validation_evidence_authority | field | validation_diff_record.byte_length | u64 | true |  |  |
+| validation_evidence_authority | field | validation_receipt_record.evidence_ref | ref | true |  |  |
+| validation_evidence_authority | field | validation_receipt_record.receipt_digest | digest | true |  |  |
+| validation_evidence_authority | field | validation_receipt_record.receipt_json | bytes | true |  |  |
+| validation_evidence_authority | field | validation_receipt_record.kind | string | true |  |  |
+| validation_evidence_authority | field | validation_receipt_record.exact_commit | git-oid | true |  |  |
+| validation_evidence_authority | field | validation_receipt_record.exact_tree | git-oid | true |  |  |
+| validation_evidence_authority | field | validation_receipt_record.binding_id | id | true |  |  |
+| validation_evidence_authority | field | validation_receipt_record.unit_id | id | true |  |  |
+| validation_evidence_authority | list | validation_receipt_record.criterion_ids | id | true |  |  |
+| validation_evidence_authority | field | validation_authority_criterion.criterion_id | id | true |  |  |
+| validation_evidence_authority | field | validation_authority_criterion.unit_id | id | true |  |  |
+| validation_evidence_authority | field | validation_authority_criterion.unit_criterion_ordinal | u32 | true |  |  |
+| validation_evidence_authority | field | validation_authority_criterion.requirement_text | string | true |  |  |
+| validation_evidence_authority | list | validation_authority_criterion.covered_paths | path | true |  |  |
+| validation_evidence_authority | list | validation_authority_criterion.semantic_surface_ids | id | true |  |  |
+| validation_evidence_authority | list | validation_authority_criterion.forward_edge_ids | id | true |  |  |
+| validation_evidence_authority | list | validation_authority_criterion.allowed_citation_refs | ref | true |  |  |
+| validation_evidence_authority | list | validation_authority_criterion.command_receipt_refs | ref | true |  |  |
+| validation_evidence_authority | list | validation_authority_criterion.package_check_receipt_refs | ref | true |  |  |
+| validation_assignment_v3 | field | schema | schema-id | true |  |  |
+| validation_assignment_v3 | field | validation_id | id | true |  |  |
+| validation_assignment_v3 | field | validation_key | digest | true |  |  |
+| validation_assignment_v3 | field | workstream | id | true |  |  |
+| validation_assignment_v3 | field | run_revision | u64 | true |  |  |
+| validation_assignment_v3 | field | role_id | id | true |  |  |
+| validation_assignment_v3 | field | mode | mode-id | true |  |  |
+| validation_assignment_v3 | field | assignment_id | id | true |  |  |
+| validation_assignment_v3 | field | action_id | id | true |  |  |
+| validation_assignment_v3 | field | validation_attempt | u32 | true |  |  |
+| validation_assignment_v3 | field | semantic_round | u32 | true |  |  |
+| validation_assignment_v3 | list | producer_assignment_ids | id | true |  |  |
+| validation_assignment_v3 | field | base_commit | git-oid | true |  |  |
+| validation_assignment_v3 | field | exact_commit | git-oid | true |  |  |
+| validation_assignment_v3 | field | exact_tree | git-oid | true |  |  |
+| validation_assignment_v3 | field | candidate_root | path | true |  |  |
+| validation_assignment_v3 | field | context_path | path | true |  |  |
+| validation_assignment_v3 | field | context_digest | digest | true |  |  |
+| validation_assignment_v3 | field | authority_path | path | true |  |  |
+| validation_assignment_v3 | field | authority_digest | digest | true |  |  |
+| validation_assignment_v3 | field | max_value_attempts | u32 | true |  |  |
+| validation_context_v3 | field | schema | schema-id | true |  |  |
+| validation_context_v3 | field | validation_id | id | true |  |  |
+| validation_context_v3 | field | assignment_id | id | true |  |  |
+| validation_context_v3 | field | authority_digest | digest | true |  |  |
+| validation_context_v3 | list | criteria | validation_context_v3_criterion | true |  |  |
+| validation_context_v3 | list | citation_records | validation_citation_record | true |  |  |
+| validation_context_v3 | field | validation_context_v3_criterion.criterion_id | id | true |  |  |
+| validation_context_v3 | field | validation_context_v3_criterion.requirement_text | string | true |  |  |
+| validation_context_v3 | list | validation_context_v3_criterion.allowed_citation_refs | ref | true |  |  |
+| validation_context_v3 | field | validation_citation_record.evidence_ref | ref | true |  |  |
+| validation_context_v3 | field | validation_citation_record.kind | string | true |  |  |
+| validation_context_v3 | field | validation_citation_record.source_path | path | false |  |  |
+| validation_context_v3 | field | validation_citation_record.blob_digest | digest | false |  |  |
+| validation_context_v3 | field | validation_citation_record.line_count | u32 | false |  |  |
+| validation_context_v3 | field | validation_citation_record.diff_digest | digest | false |  |  |
+| validation_context_v3 | field | validation_citation_record.diff_path | path | false |  |  |
+| validation_submission_v3 | field | schema | schema-id | true |  |  |
+| validation_submission_v3 | list | criterion_results | criterion_result_v3 | true |  |  |
+| validation_submission_v3 | list | findings | finding_v3 | true |  |  |
+| validation_submission_v3 | field | criterion_result_v3.criterion_id | id | true |  |  |
+| validation_submission_v3 | field | criterion_result_v3.verdict | criterion_verdict | true |  |  |
+| validation_submission_v3 | list | criterion_result_v3.citation_refs | ref | true |  |  |
+| validation_submission_v3 | list | criterion_result_v3.finding_ids | id | true |  |  |
+| validation_submission_v3 | field | finding_v3.finding_id | id | true |  |  |
+| validation_submission_v3 | field | finding_v3.kind | finding_kind_v2 | true |  |  |
+| validation_submission_v3 | field | finding_v3.effect | finding_effect | true |  |  |
+| validation_submission_v3 | field | finding_v3.summary | string | true |  |  |
+| validation_submission_v3 | field | finding_v3.detail | string | true |  |  |
+| validation_submission_v3 | list | finding_v3.criterion_ids | id | true |  |  |
+| validation_submission_v3 | list | finding_v3.citation_refs | ref | true |  |  |
+| validation_submission_v3 | list | finding_v3.source_locations | validation_source_location | true |  |  |
+| validation_submission_v3 | field | validation_source_location.citation_ref | ref | true |  |  |
+| validation_submission_v3 | field | validation_source_location.start_line | u32 | true |  |  |
+| validation_submission_v3 | field | validation_source_location.end_line | u32 | true |  |  |
+| validation_verdict_v3 | field | schema | schema-id | true |  |  |
+| validation_verdict_v3 | field | validation_id | id | true |  |  |
+| validation_verdict_v3 | field | assignment_id | id | true |  |  |
+| validation_verdict_v3 | field | exact_commit | git-oid | true |  |  |
+| validation_verdict_v3 | field | exact_tree | git-oid | true |  |  |
+| validation_verdict_v3 | field | outcome | validation_outcome_v2 | true |  |  |
+| validation_verdict_v3 | list | criterion_results | normalized_criterion_result_v3 | true |  |  |
+| validation_verdict_v3 | list | findings | finding_v3 | true |  |  |
+| validation_verdict_v3 | field | normalized_criterion_result_v3.criterion_id | id | true |  |  |
+| validation_verdict_v3 | field | normalized_criterion_result_v3.verdict | criterion_verdict | true |  |  |
+| validation_verdict_v3 | list | normalized_criterion_result_v3.model_citation_refs | ref | true |  |  |
+| validation_verdict_v3 | list | normalized_criterion_result_v3.command_receipt_refs | ref | true |  |  |
+| validation_verdict_v3 | list | normalized_criterion_result_v3.package_check_receipt_refs | ref | true |  |  |
+| validation_verdict_v3 | list | normalized_criterion_result_v3.finding_ids | id | true |  |  |
+| validation_verdict_v3 | list | normalized_criterion_result_v3.covered_paths | path | true |  |  |
+| validation_verdict_v3 | list | normalized_criterion_result_v3.semantic_surface_ids | id | true |  |  |
+| validation_verdict_v3 | list | normalized_criterion_result_v3.forward_edge_ids | id | true |  |  |
+| validation_admission_diagnostic | field | schema | schema-id | true |  |  |
+| validation_admission_diagnostic | field | boundary_id | contract-id | true |  |  |
+| validation_admission_diagnostic | field | validation_id | id | true |  |  |
+| validation_admission_diagnostic | field | assignment_id | id | true |  |  |
+| validation_admission_diagnostic | field | authority_digest | digest | true |  |  |
+| validation_admission_diagnostic | field | value_attempt | u32 | true |  |  |
+| validation_admission_diagnostic | field | phase | validation-admission-phase | true |  |  |
+| validation_admission_diagnostic | field | disposition | validation-admission-disposition | true |  |  |
+| validation_admission_diagnostic | field | complete | bool | true |  |  |
+| validation_admission_diagnostic | field | mismatch_count | u32 | true |  |  |
+| validation_admission_diagnostic | list | mismatches | validation_admission_mismatch | true |  |  |
+| validation_admission_diagnostic | field | validation_admission_mismatch.code | string | true |  |  |
+| validation_admission_diagnostic | field | validation_admission_mismatch.field | string | true |  |  |
+| validation_admission_diagnostic | field | validation_admission_mismatch.criterion_id | id | false | true |  |
+| validation_admission_diagnostic | field | validation_admission_mismatch.finding_id | id | false | true |  |
+| validation_admission_diagnostic | field | validation_admission_mismatch.comparison | validation-admission-comparison | true |  |  |
+| validation_admission_diagnostic | list | validation_admission_mismatch.expected | string | true |  |  |
+| validation_admission_diagnostic | list | validation_admission_mismatch.actual | string | true |  |  |
+| validation_admission_diagnostic | list | validation_admission_mismatch.missing | string | true |  |  |
+| validation_admission_diagnostic | list | validation_admission_mismatch.extra | string | true |  |  |
+| validation_admission_diagnostic | list | validation_admission_mismatch.duplicates | validation_admission_duplicate | true |  |  |
+| validation_admission_diagnostic | field | validation_admission_duplicate.value | string | true |  |  |
+| validation_admission_diagnostic | field | validation_admission_duplicate.count | u32 | true |  |  |
+| validation_result_v3 | field | schema | schema-id | true |  |  |
+| validation_result_v3 | field | action_id | id | true |  |  |
+| validation_result_v3 | field | assignment_id | id | true |  |  |
+| validation_result_v3 | field | validation_id | id | true |  |  |
+| validation_result_v3 | field | validation_key | digest | true |  |  |
+| validation_result_v3 | field | validation_attempt | u32 | true |  |  |
+| validation_result_v3 | field | semantic_round | u32 | true |  |  |
+| validation_result_v3 | field | run_revision | u64 | true |  |  |
+| validation_result_v3 | field | workstream | id | true |  |  |
+| validation_result_v3 | field | role_id | id | true |  |  |
+| validation_result_v3 | field | mode | mode-id | true |  |  |
+| validation_result_v3 | list | producer_assignment_ids | id | true |  |  |
+| validation_result_v3 | field | exact_commit | git-oid | true |  |  |
+| validation_result_v3 | field | exact_tree | git-oid | true |  |  |
+| validation_result_v3 | field | assignment_path | path | true |  |  |
+| validation_result_v3 | field | assignment_digest | digest | true |  |  |
+| validation_result_v3 | field | context_manifest_path | path | true |  |  |
+| validation_result_v3 | field | context_manifest_digest | digest | true |  |  |
+| validation_result_v3 | field | authority_path | path | true |  |  |
+| validation_result_v3 | field | authority_digest | digest | true |  |  |
+| validation_result_v3 | field | prompt_path | path | true |  |  |
+| validation_result_v3 | field | prompt_digest | digest | true |  |  |
+| validation_result_v3 | field | spec_path | path | true |  |  |
+| validation_result_v3 | field | spec_digest | digest | true |  |  |
+| validation_result_v3 | field | spec_bytes | bytes | true |  |  |
+| validation_result_v3 | field | carrier_path | path | true |  |  |
+| validation_result_v3 | field | boundary_id | contract-id | true |  |  |
+| validation_result_v3 | field | boundary_digest | digest | true |  |  |
+| validation_result_v3 | field | result_contract | contract-id | true |  |  |
+| validation_result_v3 | field | result_contract_digest | digest | true |  |  |
+| validation_result_v3 | field | settings_digest | digest | true |  |  |
+| validation_result_v3 | field | skills_digest | digest | true |  |  |
+| validation_result_v3 | field | subscription_digest | digest | true |  |  |
+| validation_result_v3 | field | runtime_extension_digest | digest | true |  |  |
+| validation_result_v3 | field | terminal_profile_id | string | true |  |  |
+| validation_result_v3 | field | tool_name | tool-name | true |  |  |
+| validation_result_v3 | field | tool_schema_digest | digest | true |  |  |
+| validation_result_v3 | field | carrier_binding | digest | true |  |  |
+| validation_result_v3 | field | tool_call_id | string | true |  |  |
+| validation_result_v3 | field | tool_audit_ref | ref | true |  |  |
+| validation_result_v3 | field | tool_audit_digest | digest | true |  |  |
+| validation_result_v3 | field | submission_digest | digest | true |  |  |
+| validation_result_v3 | field | submission | validation_submission_v3 | true |  |  |
+| validation_result_v3 | field | verdict_digest | digest | true |  |  |
+| validation_result_v3 | field | verdict | validation_verdict_v3 | true |  |  |
 | seam_envelope | field | v | u32 | true |  |  |
 | seam_envelope | field | id | u64 | true |  |  |
 | seam_envelope | field | kind | string | true |  |  |
@@ -927,6 +1129,7 @@ Sources: `data/contracts.kdl`.
 | plan_review | planning.plan-review.v1 | autopilot_submit_review | Submit plan review |
 | delivery_submission_v2 | autopilot.delivery_submission.v2 | autopilot_emit_status | Submit delivery status |
 | validation_submission_v2 | autopilot.validation_submission.v2 | autopilot_emit_status | Submit validation status |
+| validation_submission_v3 | autopilot.validation_submission.v3 | autopilot_emit_status | Submit validation status |
 
 ## Enums
 
@@ -951,6 +1154,9 @@ Sources: `data/contracts.kdl`.
 | forward_verdict | FORWARD_READY, FORWARD_BLOCKED, BLOCKED |
 | closure_verdict | PASS, NEEDS_FIX, BLOCKED |
 | criterion_verdict | PASS, FAIL, BLOCKED |
+| validation-admission-phase | shape, value, authority |
+| validation-admission-disposition | repairable-model-value, fatal-authority |
+| validation-admission-comparison | exact, subset-of, membership, line-bounds |
 | finding_effect | forward-blocking, closure-blocking-forward-safe, advisory |
 | evidence_content_kind | prompt, assignment, action, producer-binding, report, producer-sidecar, acceptance-receipt, failure-receipt, supersession-receipt, transcript, envelope-manifest |
 | evidence_error_code | EVIDENCE_PRODUCER_UNAVAILABLE, EVIDENCE_ASSIGNMENT_CONFLICT, EVIDENCE_ACTION_NOT_ISSUED, EVIDENCE_ACTION_EXPIRED, EVIDENCE_ACTION_SUPERSEDED, EVIDENCE_TASK_BINDING_CONFLICT, EVIDENCE_TERMINAL_NOT_COMPLETED, EVIDENCE_SOURCE_PATH_INVALID, EVIDENCE_SOURCE_MISSING, EVIDENCE_SOURCE_NOT_REGULAR, EVIDENCE_SOURCE_SYMLINK, EVIDENCE_SCHEMA_UNSUPPORTED, EVIDENCE_PROSE_NOT_CONTRACT, EVIDENCE_HASH_MISMATCH, EVIDENCE_PRODUCER_REQUEST_MISMATCH, EVIDENCE_PROVIDER_MISMATCH, EVIDENCE_MODEL_MISMATCH, EVIDENCE_CHANNEL_FORBIDDEN, EVIDENCE_METERED_USAGE_OBSERVED, EVIDENCE_SESSION_CONFLICT, EVIDENCE_IDEMPOTENCY_CONFLICT, EVIDENCE_SUBJECT_STALE, EVIDENCE_BOUNDARY_REJECTED, EVIDENCE_SUPERSESSION_INVALID, EVIDENCE_EVENT_LOG_CORRUPT, EVIDENCE_STORE_IO, EVIDENCE_ENVELOPE_OPEN, EVIDENCE_ENVELOPE_MEMBER_MISMATCH, EVIDENCE_UNDECLARED_INPUT |

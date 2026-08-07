@@ -691,6 +691,170 @@ export const VALIDATION_SUBMISSION_V2_TOOL_PARAMETERS = {
 } as TSchema;
 export const VALIDATION_SUBMISSION_V2_TOOL_SCHEMA_DIGEST = "0eb7655083ed7e8c707965ecb094134c1241f0d4355c271750fdde0300899674";
 
+export const VALIDATION_SUBMISSION_V3_TOOL_PARAMETERS = {
+  "additionalProperties": false,
+  "properties": {
+    "criterion_results": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "citation_refs": {
+            "items": {
+              "maxLength": 512,
+              "type": "string"
+            },
+            "maxItems": 64,
+            "minItems": 1,
+            "type": "array"
+          },
+          "criterion_id": {
+            "maxLength": 256,
+            "type": "string"
+          },
+          "finding_ids": {
+            "items": {
+              "maxLength": 256,
+              "type": "string"
+            },
+            "maxItems": 128,
+            "type": "array"
+          },
+          "verdict": {
+            "enum": [
+              "PASS",
+              "FAIL",
+              "BLOCKED"
+            ],
+            "maxLength": 16,
+            "type": "string"
+          }
+        },
+        "required": [
+          "criterion_id",
+          "verdict",
+          "citation_refs",
+          "finding_ids"
+        ],
+        "type": "object"
+      },
+      "maxItems": 256,
+      "minItems": 1,
+      "type": "array"
+    },
+    "findings": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "citation_refs": {
+            "items": {
+              "maxLength": 512,
+              "type": "string"
+            },
+            "maxItems": 64,
+            "minItems": 1,
+            "type": "array"
+          },
+          "criterion_ids": {
+            "items": {
+              "maxLength": 256,
+              "type": "string"
+            },
+            "maxItems": 256,
+            "minItems": 1,
+            "type": "array"
+          },
+          "detail": {
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "effect": {
+            "enum": [
+              "forward-blocking",
+              "closure-blocking-forward-safe",
+              "advisory"
+            ],
+            "maxLength": 32,
+            "type": "string"
+          },
+          "finding_id": {
+            "maxLength": 256,
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "source-defect",
+              "test-defect",
+              "contract-defect",
+              "evidence-gap",
+              "context-gap",
+              "unsafe-boundary",
+              "advisory"
+            ],
+            "maxLength": 32,
+            "type": "string"
+          },
+          "source_locations": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "citation_ref": {
+                  "maxLength": 512,
+                  "type": "string"
+                },
+                "end_line": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "start_line": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "citation_ref",
+                "start_line",
+                "end_line"
+              ],
+              "type": "object"
+            },
+            "maxItems": 64,
+            "type": "array"
+          },
+          "summary": {
+            "maxLength": 512,
+            "type": "string"
+          }
+        },
+        "required": [
+          "finding_id",
+          "kind",
+          "effect",
+          "summary",
+          "detail",
+          "criterion_ids",
+          "citation_refs",
+          "source_locations"
+        ],
+        "type": "object"
+      },
+      "maxItems": 128,
+      "type": "array"
+    },
+    "schema": {
+      "const": "autopilot.validation_submission.v3",
+      "maxLength": 64,
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema",
+    "criterion_results",
+    "findings"
+  ],
+  "type": "object"
+} as TSchema;
+export const VALIDATION_SUBMISSION_V3_TOOL_SCHEMA_DIGEST = "86052745eff30b746b44366bd1a9dc54aeee74aba63c1d6be80a187efc691545";
+
 export const TERMINAL_TOOL_SCHEMAS = {
   "planning.task-atoms.v1": { boundary_id: "planning.task-atoms.v1", schema_digest: TASK_ATOMS_TOOL_SCHEMA_DIGEST, parameters: TASK_ATOMS_TOOL_PARAMETERS },
   "planning.scout-dossier.v1": { boundary_id: "planning.scout-dossier.v1", schema_digest: SCOUT_DOSSIER_TOOL_SCHEMA_DIGEST, parameters: SCOUT_DOSSIER_TOOL_PARAMETERS },
@@ -699,6 +863,7 @@ export const TERMINAL_TOOL_SCHEMAS = {
   "planning.plan-review.v1": { boundary_id: "planning.plan-review.v1", schema_digest: PLAN_REVIEW_TOOL_SCHEMA_DIGEST, parameters: PLAN_REVIEW_TOOL_PARAMETERS },
   "autopilot.delivery_submission.v2": { boundary_id: "autopilot.delivery_submission.v2", schema_digest: DELIVERY_SUBMISSION_V2_TOOL_SCHEMA_DIGEST, parameters: DELIVERY_SUBMISSION_V2_TOOL_PARAMETERS },
   "autopilot.validation_submission.v2": { boundary_id: "autopilot.validation_submission.v2", schema_digest: VALIDATION_SUBMISSION_V2_TOOL_SCHEMA_DIGEST, parameters: VALIDATION_SUBMISSION_V2_TOOL_PARAMETERS },
+  "autopilot.validation_submission.v3": { boundary_id: "autopilot.validation_submission.v3", schema_digest: VALIDATION_SUBMISSION_V3_TOOL_SCHEMA_DIGEST, parameters: VALIDATION_SUBMISSION_V3_TOOL_PARAMETERS },
 } as const satisfies Record<string, ToolSchemaDescriptor>;
 
 export const PLANNING_TOOL_SCHEMAS = Object.fromEntries(Object.entries(TERMINAL_TOOL_SCHEMAS).filter(([boundary]) => boundary.startsWith("planning."))) as Record<string, ToolSchemaDescriptor>;
@@ -724,4 +889,5 @@ export const SUBMIT_TOOLS: readonly SubmitToolDescriptor[] = [
   { profile_id: "planning.work-map.v1:autopilot_submit_synthesis", name: "autopilot_submit_synthesis", label: "Submit synthesized work map", boundary_id: "planning.work-map.v1", result_contract: "planning.work-map.v1", schema_digest: WORK_MAP_TOOL_SCHEMA_DIGEST, parameters: WORK_MAP_TOOL_PARAMETERS },
   { profile_id: "recovery-work-map.v1", name: "autopilot_emit_status", label: "Submit recovered work map", boundary_id: "planning.work-map.v1", result_contract: "planning.work-map.v1", schema_digest: WORK_MAP_TOOL_SCHEMA_DIGEST, parameters: WORK_MAP_TOOL_PARAMETERS },
   { profile_id: "validation-status.v2", name: "autopilot_emit_status", label: "Submit validation status", boundary_id: "autopilot.validation_submission.v2", result_contract: "autopilot.validation_result.v2", schema_digest: VALIDATION_SUBMISSION_V2_TOOL_SCHEMA_DIGEST, parameters: VALIDATION_SUBMISSION_V2_TOOL_PARAMETERS },
+  { profile_id: "validation-status.v3", name: "autopilot_emit_status", label: "Submit validation status", boundary_id: "autopilot.validation_submission.v3", result_contract: "autopilot.validation_result.v3", schema_digest: VALIDATION_SUBMISSION_V3_TOOL_SCHEMA_DIGEST, parameters: VALIDATION_SUBMISSION_V3_TOOL_PARAMETERS },
 ] as const;

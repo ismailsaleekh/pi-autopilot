@@ -20,7 +20,7 @@ Sources: `data/roles.kdl`, `roles/**`.
 | context-curator | reasoning | xhigh | discovery-navigation, planning-context, execution-context | read, autopilot_submit_context | autopilot_submit_context |
 | execution-allocator | reasoning | xhigh | initial-allocation, delta-allocation | read, autopilot_submit_allocation | autopilot_submit_allocation |
 | implementer | coding | high | lane-delivery | read, grep, find, ls, autopilot_run_approved_command, edit, write, autopilot_emit_status | autopilot_emit_status |
-| validator | review | xhigh | forward-release, deep-closure, delta-revalidation, conflict-review, final-review | read, grep, find, ls, autopilot_request_test, autopilot_emit_status | autopilot_emit_status |
+| validator | review | xhigh | forward-release, deep-closure, delta-revalidation, conflict-review, final-review | read, autopilot_request_test, autopilot_emit_status | autopilot_emit_status |
 | fixer-integrator | coding | high | forward-critical, closure-repair, failed-test, conflict-resolution | read, grep, find, ls, autopilot_run_approved_command, edit, write, autopilot_emit_status | autopilot_emit_status |
 | recovery-engineer | reasoning | xhigh | planning-repair, forward-critical, closure-repair, failed-test, conflict-resolution | read, grep, find, ls, autopilot_run_approved_command, edit, write, autopilot_emit_status | autopilot_emit_status |
 | bughunter | review | xhigh | final-bughunt | read, grep, find, ls, bash, autopilot_emit_status | autopilot_emit_status |

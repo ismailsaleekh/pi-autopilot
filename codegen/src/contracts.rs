@@ -23,6 +23,7 @@ pub struct Artifact {
     pub name: String,
     pub schema: String,
     pub model_produced: bool,
+    pub max_bytes: Option<u64>,
     pub doc: String,
     pub admits: Option<String>,
     pub submit_tools: Vec<TerminalTool>,
@@ -63,6 +64,12 @@ pub struct Item {
     pub type_id: String,
     pub required: bool,
     pub nullable: bool,
+    pub constant: Option<String>,
+    pub min_items: Option<u64>,
+    pub max_items: Option<u64>,
+    pub max_bytes: Option<u64>,
+    pub item_max_bytes: Option<u64>,
+    pub unique: bool,
     pub doc: Option<String>,
     pub items: Vec<Item>,
 }
@@ -155,7 +162,11 @@ fn parse_type(doc: &SourceDoc, node: &KdlNode) -> Result<String> {
 }
 
 fn parse_artifact(doc: &SourceDoc, node: &KdlNode) -> Result<Artifact> {
-    doc.entries(node, 1, &["schema", "producer", "model_produced"])?;
+    doc.entries(
+        node,
+        1,
+        &["schema", "producer", "model_produced", "max_bytes"],
+    )?;
     let artifact_name = doc.arg_string(node, 0)?.to_owned();
     let schema = doc.prop_string(node, "schema")?.to_owned();
     doc.prop_string(node, "producer")?;
@@ -163,6 +174,10 @@ fn parse_artifact(doc: &SourceDoc, node: &KdlNode) -> Result<Artifact> {
         name: artifact_name.clone(),
         schema: schema.clone(),
         model_produced: doc.prop_bool(node, "model_produced")?,
+        max_bytes: node
+            .entry("max_bytes")
+            .map(|_| doc.prop_u64(node, "max_bytes"))
+            .transpose()?,
         doc: String::new(),
         admits: None,
         submit_tools: Vec::new(),
@@ -288,8 +303,24 @@ fn parse_item(doc: &SourceDoc, node: &KdlNode, owner: &str) -> Result<Item> {
         _ => unreachable!(),
     };
     let props = match kind {
-        ItemKind::Field => &["type", "required", "nullable", "doc", "constant"][..],
-        ItemKind::List => &["item", "required", "nullable", "doc"],
+        ItemKind::Field => &[
+            "type",
+            "required",
+            "nullable",
+            "doc",
+            "constant",
+            "max_bytes",
+        ][..],
+        ItemKind::List => &[
+            "item",
+            "required",
+            "nullable",
+            "doc",
+            "min_items",
+            "max_items",
+            "item_max_bytes",
+            "unique",
+        ],
         ItemKind::Group => &["required"],
         ItemKind::Record => &[],
     };
@@ -302,8 +333,22 @@ fn parse_item(doc: &SourceDoc, node: &KdlNode, owner: &str) -> Result<Item> {
     };
     let required = matches!(kind, ItemKind::Field | ItemKind::List | ItemKind::Group)
         && doc.prop_bool(node, "required")?;
-    if let Some(value) = doc.opt_string(node, "constant")? {
+    let constant = doc.opt_string(node, "constant")?.map(str::to_owned);
+    if let Some(value) = constant.as_deref() {
         validate_constant(doc, node, &name, &type_id, value)?;
+    }
+    let optional_u64 = |key: &str| node.entry(key).map(|_| doc.prop_u64(node, key)).transpose();
+    let min_items = optional_u64("min_items")?;
+    let max_items = optional_u64("max_items")?;
+    let max_bytes = optional_u64("max_bytes")?;
+    let item_max_bytes = optional_u64("item_max_bytes")?;
+    let unique = doc.opt_bool(node, "unique")?.unwrap_or(false);
+    if min_items.is_some_and(|min| max_items.is_some_and(|max| min > max)) {
+        return line_err(
+            doc,
+            node,
+            format!("list `{name}` has min_items greater than max_items in {owner}"),
+        );
     }
     let items = if matches!(kind, ItemKind::Group | ItemKind::Record) {
         parse_items(doc, node, owner)?
@@ -317,6 +362,12 @@ fn parse_item(doc: &SourceDoc, node: &KdlNode, owner: &str) -> Result<Item> {
         type_id,
         required,
         nullable: doc.opt_bool(node, "nullable")?.unwrap_or(false),
+        constant,
+        min_items,
+        max_items,
+        max_bytes,
+        item_max_bytes,
+        unique,
         doc: doc.opt_string(node, "doc")?.map(str::to_owned),
         items,
     })
@@ -455,6 +506,12 @@ pub fn json_schema_for_items(
             ItemKind::Group => json_schema_for_items(&item.items, shapes, enums, closed)?,
             ItemKind::Record => continue,
         };
+        if let Some(constant) = &item.constant {
+            add_schema_constant(&mut value, &item.type_id, constant)?;
+        }
+        if let Some(max_bytes) = item.max_bytes {
+            add_schema_u64(&mut value, "maxLength", max_bytes)?;
+        }
         if let Some(doc) = &item.doc {
             add_schema_description(&mut value, doc)?;
         }
@@ -477,13 +534,66 @@ fn add_schema_description(schema: &mut JsonValue, doc: &str) -> Result<()> {
     Ok(())
 }
 
+fn add_schema_constant(schema: &mut JsonValue, type_id: &str, constant: &str) -> Result<()> {
+    let value = match type_id {
+        "u8" | "u32" | "u64" => JsonValue::from(
+            constant
+                .parse::<u64>()
+                .map_err(|error| Error::input(format!("invalid integer constant: {error}")))?,
+        ),
+        "bool" => JsonValue::from(
+            constant
+                .parse::<bool>()
+                .map_err(|error| Error::input(format!("invalid bool constant: {error}")))?,
+        ),
+        _ => JsonValue::String(constant.to_owned()),
+    };
+    let Some(object) = schema.as_object_mut() else {
+        return Err(Error::input(
+            "json schema constant target was not an object",
+        ));
+    };
+    object.insert("const".to_owned(), value);
+    Ok(())
+}
+
+fn add_schema_u64(schema: &mut JsonValue, key: &str, value: u64) -> Result<()> {
+    let Some(object) = schema.as_object_mut() else {
+        return Err(Error::input("json schema bound target was not an object"));
+    };
+    object.insert(key.to_owned(), JsonValue::from(value));
+    Ok(())
+}
+
 fn list_schema(
     item: &Item,
     shapes: &BTreeMap<String, Vec<Item>>,
     enums: &BTreeMap<&str, Vec<String>>,
     closed: bool,
 ) -> Result<JsonValue> {
-    let value = json!({ "type": "array", "items": json_schema_for_type(&item.type_id, shapes, enums, false, closed)? });
+    let mut value = json!({
+        "type": "array",
+        "items": json_schema_for_type(&item.type_id, shapes, enums, false, closed)?,
+    });
+    if let Some(min_items) = item.min_items {
+        add_schema_u64(&mut value, "minItems", min_items)?;
+    }
+    if let Some(max_items) = item.max_items {
+        add_schema_u64(&mut value, "maxItems", max_items)?;
+    }
+    if item.unique {
+        value
+            .as_object_mut()
+            .expect("array schema is an object")
+            .insert("uniqueItems".to_owned(), JsonValue::Bool(true));
+    }
+    if let Some(max_bytes) = item.item_max_bytes {
+        let item_schema = value
+            .as_object_mut()
+            .and_then(|object| object.get_mut("items"))
+            .ok_or_else(|| Error::input("array item schema missing"))?;
+        add_schema_u64(item_schema, "maxLength", max_bytes)?;
+    }
     Ok(if item.nullable {
         json!({ "anyOf": [value, { "type": "null" }] })
     } else {

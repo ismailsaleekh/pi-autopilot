@@ -12,18 +12,29 @@ import { runStatusFrameLaunch } from './check-launch-entrypoint.mjs';
 const sourceRoot = realpathSync(fileURLToPath(new URL('..', import.meta.url)));
 const GLOBAL_PI_ROOT = realpathSync('/usr/local/lib/node_modules/@earendil-works/pi-coding-agent');
 const GLOBAL_TYPEBOX_ROOT = realpathSync(join(GLOBAL_PI_ROOT, 'node_modules', 'typebox'));
+const CANONICAL_TMP_ROOT = realpathSync(tmpdir());
 const EXPECTED_COMMANDS = Object.freeze(['autopilot-plan', 'autopilot', 'autopilot-onboard', 'autopilot-inject', 'autopilot-status', 'autopilot-config', 'autopilot-handoff', 'autopilot-close', 'autopilot-abort', 'autopilot-answer']);
-const EXPECTED_CHILD_PROFILES = Object.freeze([
-  'delivery-status.v2',
-  'planning.plan-review.v1:autopilot_submit_review',
-  'planning.questions.v1:autopilot_submit_resolution',
-  'planning.scout-dossier.v1:autopilot_submit_context',
-  'planning.scout-dossier.v1:autopilot_submit_scout_report',
-  'planning.task-atoms.v1:autopilot_submit_atoms',
-  'planning.work-map.v1:autopilot_submit_plan_cluster',
-  'planning.work-map.v1:autopilot_submit_synthesis',
-  'validation-status.v2',
+const DELIVERY_POLICY_VERSION = 'autopilot.delivery_tool_policy.v3';
+const DELIVERY_ENV_KEYS = Object.freeze([
+  'AUTOPILOT_DELIVERY_ASSIGNMENT_PATH', 'AUTOPILOT_DELIVERY_ASSIGNMENT_DIGEST',
+  'AUTOPILOT_DELIVERY_WORKTREE', 'AUTOPILOT_DELIVERY_CWD', 'AUTOPILOT_DELIVERY_ASSIGNMENT_ID',
+  'AUTOPILOT_DELIVERY_WORKSTREAM', 'AUTOPILOT_DELIVERY_LANE_ID', 'AUTOPILOT_DELIVERY_ATTEMPT',
+  'AUTOPILOT_DELIVERY_BASE_COMMIT', 'AUTOPILOT_DELIVERY_POLICY_DIGEST',
 ]);
+const EXPECTED_CHILD_PROFILE_BINDINGS = Object.freeze({
+  'delivery-status.v2': { tool: 'autopilot_emit_status', boundary: 'autopilot.delivery_submission.v2', result: 'autopilot.delivery_result.v2', tools: ['autopilot_run_approved_command', 'edit', 'write', 'autopilot_emit_status'] },
+  'planning.plan-review.v1:autopilot_submit_review': { tool: 'autopilot_submit_review', boundary: 'planning.plan-review.v1' },
+  'planning.questions.v1:autopilot_submit_resolution': { tool: 'autopilot_submit_resolution', boundary: 'planning.questions.v1' },
+  'planning.scout-dossier.v1:autopilot_submit_context': { tool: 'autopilot_submit_context', boundary: 'planning.scout-dossier.v1' },
+  'planning.scout-dossier.v1:autopilot_submit_scout_report': { tool: 'autopilot_submit_scout_report', boundary: 'planning.scout-dossier.v1' },
+  'planning.task-atoms.v1:autopilot_submit_atoms': { tool: 'autopilot_submit_atoms', boundary: 'planning.task-atoms.v1' },
+  'planning.work-map.v1:autopilot_submit_plan_cluster': { tool: 'autopilot_submit_plan_cluster', boundary: 'planning.work-map.v1' },
+  'planning.work-map.v1:autopilot_submit_synthesis': { tool: 'autopilot_submit_synthesis', boundary: 'planning.work-map.v1' },
+  'recovery-work-map.v1': { tool: 'autopilot_emit_status', boundary: 'planning.work-map.v1' },
+  'validation-status.v2': { tool: 'autopilot_emit_status', boundary: 'autopilot.validation_submission.v2', result: 'autopilot.validation_result.v2' },
+  'validation-status.v3': { tool: 'autopilot_emit_status', boundary: 'autopilot.validation_submission.v3', result: 'autopilot.validation_result.v3', tools: ['read', 'autopilot_emit_status'] },
+});
+const EXPECTED_CHILD_PROFILES = Object.freeze(Object.keys(EXPECTED_CHILD_PROFILE_BINDINGS));
 function fail(message) { throw new Error(`packed-consumer-invalid: ${message}`); }
 function sha256(bytes) { return `sha256:${createHash('sha256').update(bytes).digest('hex')}`; }
 function under(parent, candidate) { const rel = relative(parent, candidate); return rel === '' || (!rel.startsWith(`..${sep}`) && rel !== '..' && !isAbsolute(rel)); }
@@ -79,6 +90,7 @@ function validPayload(boundary) {
     'planning.plan-review.v1': { verdicts: [{ criterion_id: 'criterion-1', verdict: 'pass', finding: 'covered' }] },
     'autopilot.delivery_submission.v2': { actual_changed_paths: ['package.json'], execution_audit_ref: 'report.md', focused_evidence_refs: ['packed'], terminal_status: 'PASS', hard_boundary_violations: [] },
     'autopilot.validation_submission.v2': { schema: 'autopilot.validation_submission.v2', validation_id: 'validation-1', assignment_id: 'assignment-1', scope: 'final', exact_commit: 'HEAD', exact_tree: 'tree', outcome: 'PASS', criterion_results: [{ criterion_id: 'criterion-1', verdict: 'PASS', evidence_refs: ['packed'], finding_ids: [], covered_paths: ['package.json'], semantic_surface_ids: [], forward_edge_ids: [] }], findings: [] },
+    'autopilot.validation_submission.v3': { schema: 'autopilot.validation_submission.v3', criterion_results: [{ criterion_id: 'criterion-1', verdict: 'PASS', citation_refs: ['validation-source:packed'], finding_ids: [] }], findings: [] },
   };
   const sample = samples[boundary];
   if (sample === undefined) fail(`no valid payload sample for boundary ${boundary}`);
@@ -125,25 +137,68 @@ function inferBoundaryFromToolName(name) {
 async function loadRegisterInvokeChildren(factory) {
   const previousProfile = process.env.AUTOPILOT_TERMINAL_PROFILE;
   const previousBinding = process.env.AUTOPILOT_CARRIER_BINDING;
-  const results = [];
+  const validationKeys = ['AUTOPILOT_VALIDATION_CONTEXT_PATH', 'AUTOPILOT_VALIDATION_CONTEXT_DIGEST', 'AUTOPILOT_VALIDATION_CWD'];
+  const policyKeys = [...DELIVERY_ENV_KEYS, ...validationKeys];
+  const previousPolicy = Object.fromEntries(policyKeys.map((key) => [key, process.env[key]]));
+  const roots = []; const results = [];
   try {
     for (const profile of EXPECTED_CHILD_PROFILES) {
       process.env.AUTOPILOT_TERMINAL_PROFILE = profile;
       process.env.AUTOPILOT_CARRIER_BINDING = 'packed-public-alias-binding';
+      for (const key of policyKeys) delete process.env[key];
+      if (profile === 'delivery-status.v2') {
+        const root = mkdtempSync(join(CANONICAL_TMP_ROOT, 'pi-autopilot-packed-delivery-policy-')); roots.push(root);
+        const assignmentPath = join(root, 'assignment.v3.json'); const worktree = process.cwd(); const command = 'true';
+        mkdirSync(join(worktree, 'packed-proof'));
+        writeFileSync(join(worktree, 'packed-proof/policy.txt'), 'initial\n');
+        const assignment = { schema: 'autopilot.delivery_assignment.v3', workstream: 'packed', assignment_id: 'assignment-packed-L1', lane_id: 'L1', attempt: 1, base_commit: '0123456789abcdef0123456789abcdef01234567', worktree, ordered_units: [{ id: 'U1', kind: 'implementation', files: ['packed-proof/policy.txt'], commands: [{ command, expected: 'Command exits successfully.' }], package_checks: [{ check_id: 'PKG-U1-TIP', kind: 'clean-exact-package-tip', criterion_ordinals: [1], expected: 'Core proves the exact clean package tip.' }] }], approved_commands: [{ command_id: 'CMD-U1-1', unit_id: 'U1', command_ordinal: 1, command_digest: createHash('sha256').update(`autopilot.approved_command.v1\0U1\0${1}\0${command}`).digest('hex') }] };
+        const assignmentBytes = Buffer.from(JSON.stringify(assignment, null, 2)); writeFileSync(assignmentPath, assignmentBytes); const assignmentDigest = createHash('sha256').update(assignmentBytes).digest('hex');
+        const policyDigest = createHash('sha256').update(`${DELIVERY_POLICY_VERSION}\0${assignmentPath}\0${assignmentDigest}\0${worktree}\0${worktree}`).digest('hex');
+        Object.assign(process.env, { AUTOPILOT_DELIVERY_ASSIGNMENT_PATH: assignmentPath, AUTOPILOT_DELIVERY_ASSIGNMENT_DIGEST: assignmentDigest, AUTOPILOT_DELIVERY_WORKTREE: worktree, AUTOPILOT_DELIVERY_CWD: worktree, AUTOPILOT_DELIVERY_ASSIGNMENT_ID: assignment.assignment_id, AUTOPILOT_DELIVERY_WORKSTREAM: assignment.workstream, AUTOPILOT_DELIVERY_LANE_ID: assignment.lane_id, AUTOPILOT_DELIVERY_ATTEMPT: String(assignment.attempt), AUTOPILOT_DELIVERY_BASE_COMMIT: assignment.base_commit, AUTOPILOT_DELIVERY_POLICY_DIGEST: policyDigest });
+      }
+      if (profile === 'validation-status.v3') {
+        const root = mkdtempSync(join(CANONICAL_TMP_ROOT, 'pi-autopilot-packed-v3-policy-')); roots.push(root);
+        const diffPath = join(root, 'candidate.v3.diff'); const contextPath = join(root, 'context.v3.json');
+        writeFileSync(diffPath, 'packed diff\n');
+        const context = { schema: 'autopilot.validation_context.v3', validation_id: 'validation-packed', assignment_id: 'assignment-packed', authority_digest: '0'.repeat(64), criteria: [], citation_records: [{ evidence_ref: 'validation-source:packed', kind: 'source-snapshot', source_path: 'package.json', blob_digest: createHash('sha256').update(readFileSync('package.json')).digest('hex'), line_count: 1 }, { evidence_ref: 'validation-diff:packed', kind: 'candidate-diff', diff_digest: createHash('sha256').update(readFileSync(diffPath)).digest('hex'), diff_path: diffPath }] };
+        const bytes = Buffer.from(JSON.stringify(context, null, 2)); writeFileSync(contextPath, bytes);
+        process.env.AUTOPILOT_VALIDATION_CONTEXT_PATH = contextPath;
+        process.env.AUTOPILOT_VALIDATION_CONTEXT_DIGEST = createHash('sha256').update(bytes).digest('hex');
+        process.env.AUTOPILOT_VALIDATION_CWD = process.cwd();
+      }
       const tools = []; const hooks = new Map(); const entries = [];
-      const host = { registerTool: (tool) => { tools.push(tool); }, on: (name, handler) => { hooks.set(name, handler); }, appendEntry: (type, data) => { entries.push({ type, data }); }, getActiveTools: () => ['read', ...tools.map((tool) => tool.name)] };
+      const host = { registerTool: (tool) => { tools.push(tool); }, on: (name, handler) => { hooks.set(name, handler); }, appendEntry: (type, data) => { entries.push({ type, data }); }, getActiveTools: () => [...new Set(['read', ...tools.map((tool) => tool.name)])] };
       await factory(host);
-      if (tools.length !== 1) fail(`child profile ${profile} registered ${tools.length} tools, expected 1`);
+      const expected = EXPECTED_CHILD_PROFILE_BINDINGS[profile];
+      if (expected === undefined) fail(`child profile ${profile} has no independent expected binding`);
+      const expectedTools = expected.tools ?? [expected.tool];
+      const actualTools = tools.map((tool) => tool.name);
+      if (JSON.stringify(actualTools) !== JSON.stringify(expectedTools)) fail(`child profile ${profile} registered ${actualTools.join(',')}, expected ${expectedTools.join(',')}`);
       await hooks.get('session_start')?.();
       if (entries.length !== 1) fail(`child profile ${profile} did not append exactly one session_start receipt`);
-      const boundary = entries[0].data.boundary_id;
-      const result = await tools[0].execute('packed-child-tool-call', validPayload(boundary));
-      if (result?.terminate !== true || result.details?.boundary_id !== boundary) fail(`child profile ${profile} did not return terminating boundary ${boundary}`);
-      results.push({ profile, tool: tools[0].name, boundary });
+      const receipt = entries[0].data;
+      const expectedResult = expected.result ?? expected.boundary;
+      if (receipt.profile_id !== profile || receipt.tool_name !== expected.tool || receipt.boundary_id !== expected.boundary || receipt.result_contract !== expectedResult) fail(`child profile ${profile} receipt identity drift`);
+      const terminal = tools.find((tool) => tool.name === expected.tool);
+      if (terminal === undefined) fail(`child profile ${profile} omitted exact terminal ${expected.tool}`);
+      if (profile === 'delivery-status.v2') {
+        const byName = new Map(tools.map((tool) => [tool.name, tool]));
+        await byName.get('write').execute('packed-delivery-write', { path: 'packed-proof/policy.txt', content: 'written\n' });
+        await byName.get('edit').execute('packed-delivery-edit', { path: 'packed-proof/policy.txt', edits: [{ oldText: 'written', newText: 'edited' }] });
+        await byName.get('autopilot_run_approved_command').execute('packed-delivery-command', { command_id: 'CMD-U1-1' });
+        if (readFileSync('packed-proof/policy.txt', 'utf8') !== 'edited\n') fail('delivery policy tools did not effect the exact approved consumer path');
+      }
+      const raw = validPayload(expected.boundary); const prepared = terminal.prepareArguments?.(raw) ?? raw;
+      const result = await terminal.execute('packed-child-tool-call', prepared);
+      if (result?.terminate !== true || result.details?.boundary_id !== expected.boundary) fail(`child profile ${profile} did not return terminating boundary ${expected.boundary}`);
+      if (profile === 'validation-status.v3' && JSON.stringify(result.details?.payload) !== JSON.stringify(raw)) fail('v3 raw transport changed the model payload');
+      results.push({ profile, tool: terminal.name, boundary: expected.boundary });
     }
   } finally {
     if (previousProfile === undefined) delete process.env.AUTOPILOT_TERMINAL_PROFILE; else process.env.AUTOPILOT_TERMINAL_PROFILE = previousProfile;
     if (previousBinding === undefined) delete process.env.AUTOPILOT_CARRIER_BINDING; else process.env.AUTOPILOT_CARRIER_BINDING = previousBinding;
+    for (const key of policyKeys) { const value = previousPolicy[key]; if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    for (const root of roots) rmSync(root, { recursive: true, force: true });
   }
   return results;
 }
@@ -156,6 +211,21 @@ function installNetworkCanary(marker) {
   const originalFetch = globalThis.fetch; globalThis.fetch = async () => deny('global.fetch'); syncBuiltinESMExports();
   return () => { for (const restore of originals.reverse()) restore(); globalThis.fetch = originalFetch; syncBuiltinESMExports(); };
 }
+function enterOsNetworkSandbox() {
+  const sentinel = 'AUTOPILOT_PACKED_NETWORK_SANDBOX';
+  if (process.env[sentinel] === 'darwin-deny-network') {
+    const probe = spawnSync(process.execPath, ['-e', `const net=require('node:net');const socket=net.connect({host:'127.0.0.1',port:9});socket.on('error',(error)=>process.exit(error.code==='EPERM'||error.code==='EACCES'?0:2));setTimeout(()=>process.exit(3),1000);`], { encoding: 'utf8', timeout: 3000, maxBuffer: 1024 * 1024 });
+    if (probe.error !== undefined || probe.signal !== null || probe.status !== 0) fail(`OS network-denial probe failed status=${String(probe.status)} signal=${String(probe.signal)} error=${probe.error?.message ?? '<none>'}`);
+    return false;
+  }
+  if (process.platform !== 'darwin') fail(`packed zero-network witness requires an OS network-denial launcher, unsupported platform=${process.platform}`);
+  const result = spawnSync('/usr/bin/sandbox-exec', ['-p', '(version 1)(allow default)(deny network*)', process.execPath, ...process.argv.slice(1)], { env: { ...process.env, [sentinel]: 'darwin-deny-network' }, encoding: 'utf8', timeout: 1_800_000, maxBuffer: 64 * 1024 * 1024 });
+  if (result.error !== undefined || result.signal !== null || result.status !== 0) fail(`OS-network-sandboxed verifier failed status=${String(result.status)} signal=${String(result.signal)} error=${result.error?.message ?? '<none>'}\n${result.stderr ?? ''}`);
+  if (result.stdout.length > 0) process.stdout.write(result.stdout);
+  if (result.stderr.length > 0) process.stderr.write(result.stderr);
+  return true;
+}
+
 async function main() {
   const tarballArg = process.argv[2];
   if (tarballArg === undefined || process.argv.length !== 3 || !isAbsolute(tarballArg)) fail('usage: node scripts/verify-packed-consumer.mjs <absolute-candidate-tarball>');
@@ -178,20 +248,26 @@ async function main() {
     if (!Array.isArray(manifestValue) || manifestValue.length !== 1 || !Array.isArray(manifestValue[0]?.files)) fail('candidate npm pack manifest is malformed');
     const extracted = join(root, 'extracted'); mkdirSync(extracted, { mode: 0o700 }); checkedRun('tar', ['-xzf', tarball, '-C', extracted], root, env);
     const installedManifest = assertInstalledManifest(join(extracted, 'package'), installedRoot, manifestValue[0].files);
-    const restore = installNetworkCanary(networkMarker);
-    let mainProof; let childProof;
+    const restore = installNetworkCanary(networkMarker); const previousCwd = process.cwd();
+    let mainProof; let childProof; let coreStatusProbe;
     try {
+      process.chdir(project);
       const peerRequire = createRequire(join(projectNodeModules, '@earendil-works', 'pi-coding-agent', 'package.json'));
       const { createJiti } = peerRequire('jiti'); const jiti = createJiti(import.meta.url, { moduleCache: false });
       mainProof = await loadRegisterInvokeMain(await jiti.import(join(installedRoot, 'extensions', 'autopilot.ts'), { default: true }), join(root, 'main-state'));
       childProof = await loadRegisterInvokeChildren(await jiti.import(join(installedRoot, 'src', 'generated', 'child-extension.ts'), { default: true }));
-    } finally { restore(); }
-    if (existsSync(networkMarker)) fail(`packed witness attempted network access: ${readFileSync(networkMarker, 'utf8').trim()}`);
-    const coreStatusProbe = runStatusFrameLaunch({ command: join(project, 'node_modules', '.bin', 'autopilot-core'), cwd: project, env, requestId: 1, timeoutMs: 30_000, maxBuffer: 64 * 1024 * 1024 });
-    const agentUsage = spawnSync(join(project, 'node_modules', '.bin', 'autopilot-agent-run'), ['--help'], { cwd: project, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
-    if (agentUsage.error !== undefined || agentUsage.signal !== null || agentUsage.status !== 1 || !/usage: autopilot-core agent-run --spec <absolute-spec\.json>/u.test(agentUsage.stderr)) fail(`installed autopilot-agent-run usage probe did not reach contained core status=${String(agentUsage.status)} signal=${String(agentUsage.signal)} error=${agentUsage.error?.message ?? '<none>'}\n${agentUsage.stderr}`);
-    summary = { schema_version: 'autopilot.packed_consumer_witness.v3', candidate_tarball: { path: tarball, byte_count: tarInfo.size, sha256: sha256(readFileSync(tarball)) }, pi_peer: { source: 'global-public-alias', name: publicAliases.pi.name, version: publicAliases.pi.version, package_json_sha256: sha256(readFileSync(join(GLOBAL_PI_ROOT, 'package.json'))) }, typebox_peer: { source: 'global-pi-public-alias', name: publicAliases.typebox.name, version: publicAliases.typebox.version, package_json_sha256: sha256(readFileSync(join(GLOBAL_TYPEBOX_ROOT, 'package.json'))) }, installed_manifest: installedManifest, runtime_private_peer_copies: 0, commands: EXPECTED_COMMANDS, main_public_alias_proof: mainProof, child_public_alias_profiles: childProof, core_status_probe: coreStatusProbe, agent_run_usage: true, network_calls: 0, passed: true };
+      coreStatusProbe = runStatusFrameLaunch({ command: join(project, 'node_modules', '.bin', 'autopilot-core'), cwd: project, env, requestId: 1, timeoutMs: 30_000, maxBuffer: 64 * 1024 * 1024 });
+      const agentUsage = spawnSync(join(project, 'node_modules', '.bin', 'autopilot-agent-run'), ['--help'], { cwd: project, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+      if (agentUsage.error !== undefined || agentUsage.signal !== null || agentUsage.status !== 1 || !/usage: autopilot-core agent-run --spec <absolute-spec\.json>/u.test(agentUsage.stderr)) fail(`installed autopilot-agent-run usage probe did not reach contained core status=${String(agentUsage.status)} signal=${String(agentUsage.signal)} error=${agentUsage.error?.message ?? '<none>'}\n${agentUsage.stderr}`);
+      if (existsSync(networkMarker)) fail(`packed witness attempted network access: ${readFileSync(networkMarker, 'utf8').trim()}`);
+    } finally {
+      process.chdir(previousCwd);
+      restore();
+    }
+    summary = { schema_version: 'autopilot.packed_consumer_witness.v3', candidate_tarball: { path: tarball, byte_count: tarInfo.size, sha256: sha256(readFileSync(tarball)) }, pi_peer: { source: 'global-public-alias', name: publicAliases.pi.name, version: publicAliases.pi.version, package_json_sha256: sha256(readFileSync(join(GLOBAL_PI_ROOT, 'package.json'))) }, typebox_peer: { source: 'global-pi-public-alias', name: publicAliases.typebox.name, version: publicAliases.typebox.version, package_json_sha256: sha256(readFileSync(join(GLOBAL_TYPEBOX_ROOT, 'package.json'))) }, installed_manifest: installedManifest, runtime_private_peer_copies: 0, commands: EXPECTED_COMMANDS, main_public_alias_proof: mainProof, child_public_alias_profiles: childProof, core_status_probe: coreStatusProbe, agent_run_usage: true, network_enforcement: 'darwin-sandbox-exec-deny-network', network_calls: 0, passed: true };
   } finally { rmSync(root, { recursive: true, force: false }); }
   process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
 }
-main().catch((error) => { process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`); process.exitCode = 1; });
+if (!enterOsNetworkSandbox()) {
+  main().catch((error) => { process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`); process.exitCode = 1; });
+}

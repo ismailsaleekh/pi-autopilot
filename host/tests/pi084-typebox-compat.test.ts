@@ -117,6 +117,25 @@ const validSamples: Record<string, Record<string, unknown>> = {
       semantic_surface_ids: ["surface-1"],
     }],
   },
+  "autopilot.validation_submission.v3": {
+    schema: "autopilot.validation_submission.v3",
+    criterion_results: [{
+      criterion_id: "criterion-1",
+      verdict: "FAIL",
+      citation_refs: ["validation-source:abc"],
+      finding_ids: ["finding-validation-1"],
+    }],
+    findings: [{
+      finding_id: "finding-validation-1",
+      kind: "source-defect",
+      effect: "forward-blocking",
+      summary: "Exact criterion is not satisfied",
+      detail: "The issued source snapshot demonstrates a material source defect.",
+      criterion_ids: ["criterion-1"],
+      citation_refs: ["validation-source:abc"],
+      source_locations: [{ citation_ref: "validation-source:abc", start_line: 1, end_line: 1 }],
+    }],
+  },
 };
 
 const emptyArraySamples: Record<string, Record<string, unknown>> = {
@@ -140,6 +159,11 @@ const emptyArraySamples: Record<string, Record<string, unknown>> = {
     exact_commit: "HEAD",
     exact_tree: "tree",
     outcome: "PASS",
+    criterion_results: [],
+    findings: [],
+  },
+  "autopilot.validation_submission.v3": {
+    schema: "autopilot.validation_submission.v3",
     criterion_results: [],
     findings: [],
   },
@@ -214,7 +238,7 @@ test("Pi 0.84 Bash adapter preserves the hidden-shell no-session-environment bou
 
 test("TypeBox 1.3.7 under Pi 0.84 compiles every terminal schema with strict null/array semantics", () => {
   const entries = Object.entries(TERMINAL_TOOL_SCHEMAS);
-  assert.equal(entries.length, 7, "all terminal boundary schemas must be covered");
+  assert.equal(entries.length, Object.keys(validSamples).length, "all terminal boundary schemas must be covered");
   for (const [boundary, descriptor] of entries) {
     const valid = validSamples[boundary];
     const empty = emptyArraySamples[boundary];
@@ -230,7 +254,9 @@ test("TypeBox 1.3.7 under Pi 0.84 compiles every terminal schema with strict nul
     const nullArray = clone(valid); nullArray[arrayKey] = null;
     assert.equal(check.Check(nullArray), false, `${boundary}: null array container must fail`);
 
-    assert.equal(check.Check(clone(empty)), true, `${boundary}: empty arrays remain valid`);
+    const properties = descriptor.parameters.properties as Record<string, { minItems?: number }>;
+    const emptyArrayIsValid = (properties[arrayKey]?.minItems ?? 0) === 0;
+    assert.equal(check.Check(clone(empty)), emptyArrayIsValid, `${boundary}: empty-array cardinality must match schema`);
     assert.equal(check.Check(clone(valid)), true, `${boundary}: valid sample must pass`);
 
     const nullItem = clone(valid); nullItem[arrayKey] = [null];

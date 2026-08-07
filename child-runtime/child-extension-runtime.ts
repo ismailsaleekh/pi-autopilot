@@ -18,11 +18,13 @@ import {
   createBashTool,
   createEditTool,
   createLocalBashOperations,
+  createReadTool,
   createWriteTool,
   defineTool,
   type BashOperations,
   type EditOperations,
   type ExtensionAPI,
+  type ReadOperations,
   type WriteOperations,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -35,6 +37,7 @@ export const APPROVED_COMMAND_TOOL = "autopilot_run_approved_command";
 export const DELIVERY_POLICY_OVERRIDES = [APPROVED_COMMAND_TOOL, "edit", "write"] as const;
 
 const DELIVERY_PROFILE_ID = "delivery-status.v2";
+const VALIDATION_PROFILE_ID = "validation-status.v3";
 const MAX_DELIVERY_ASSIGNMENT_BYTES = 256 * 1024;
 const MAX_DELIVERY_POLICY_DENIALS = 32;
 const MAX_APPROVED_COMMAND_EXECUTIONS = 64;
@@ -53,10 +56,29 @@ const DELIVERY_ENV_KEYS = [
   "AUTOPILOT_DELIVERY_BASE_COMMIT",
   "AUTOPILOT_DELIVERY_POLICY_DIGEST",
 ] as const;
+const VALIDATION_ENV_KEYS = [
+  "AUTOPILOT_VALIDATION_CONTEXT_PATH",
+  "AUTOPILOT_VALIDATION_CONTEXT_DIGEST",
+  "AUTOPILOT_VALIDATION_CWD",
+] as const;
+const MAX_VALIDATION_CONTEXT_BYTES = 1024 * 1024;
+const MAX_VALIDATION_EVIDENCE_BYTES = 2 * 1024 * 1024;
 
 type SubmitTools = readonly SubmitToolDescriptor[];
 
 type DeliveryEnv = Record<(typeof DELIVERY_ENV_KEYS)[number], string>;
+type ValidationEnv = Record<(typeof VALIDATION_ENV_KEYS)[number], string>;
+type ValidationCitation = {
+  evidence_ref: string; kind: string; source_path?: string | null; blob_digest?: string | null;
+  line_count?: number | null; diff_digest?: string | null; diff_path?: string | null;
+};
+type ValidationContext = {
+  schema: string; authority_digest: string; citation_records: ValidationCitation[];
+};
+type ValidationEvidenceReceipt = {
+  context_path: string; context_digest: string; cwd: string; evidence_count: number;
+  active_override: "read";
+};
 
 type DeliveryAssignmentArtifact = {
   schema: string;
@@ -130,6 +152,63 @@ type DeliveryPolicyReceipt = {
   approved_command_count: number;
   active_overrides: string[];
 };
+
+export class ValidationReadPolicy {
+  readonly files: Map<string, string>;
+  readonly contextPath: string;
+  readonly contextDigest: string;
+  readonly cwd: string;
+  constructor(contextPath: string, contextDigest: string, cwd: string, citations: ValidationCitation[]) {
+    this.contextPath = contextPath;
+    this.contextDigest = contextDigest;
+    this.cwd = cwd;
+    this.files = new Map(citations.map((citation) => {
+      const source = typeof citation.source_path === "string" ? citation.source_path : undefined;
+      const diff = typeof citation.diff_path === "string" ? citation.diff_path : undefined;
+      if ((source === undefined) === (diff === undefined) || receiptLookingRef(citation.evidence_ref)) {
+        throw new Error("autopilot validation citation projection is not source/diff-only");
+      }
+      const target = source === undefined
+        ? canonicalValidationFile(diff as string)
+        : canonicalValidationFile(path.resolve(cwd, checkedValidationSourcePath(source)));
+      const digest = source === undefined ? citation.diff_digest : citation.blob_digest;
+      if (typeof digest !== "string" || !/^[0-9a-f]{64}$/.test(digest)) {
+        throw new Error("autopilot validation citation projection lacks a content digest");
+      }
+      return [target, digest];
+    }));
+    if (this.files.size !== citations.length || citations.length === 0) {
+      throw new Error("autopilot validation citation projection is empty or duplicate");
+    }
+  }
+  receipt(): ValidationEvidenceReceipt {
+    return { context_path: this.contextPath, context_digest: this.contextDigest, cwd: this.cwd,
+      evidence_count: this.files.size, active_override: "read" };
+  }
+  operations(): ReadOperations {
+    const authorize = (value: string): string => {
+      const target = path.resolve(value);
+      if (!this.files.has(target)) throw new Error("Validation filesystem read is outside citation authority");
+      return canonicalValidationFile(target);
+    };
+    const readAuthorized = (value: string): Buffer => {
+      const target = authorize(value);
+      const bytes = readBoundedRegularFileSync(
+        "validation evidence",
+        target,
+        MAX_VALIDATION_EVIDENCE_BYTES,
+      );
+      const expected = this.files.get(target);
+      if (expected !== sha256Hex(bytes)) throw new Error("Validation evidence content digest drift");
+      return bytes;
+    };
+    return {
+      access: async (value) => access(authorize(value), constants.R_OK),
+      readFile: async (value) => readAuthorized(value),
+      detectImageMimeType: async (value) => validationImageMimeType(readAuthorized(value)),
+    };
+  }
+}
 
 class SerialPolicyQueue {
   private current: Promise<void> = Promise.resolve();
@@ -262,7 +341,9 @@ export function runAutopilotChild(
 ): void {
   const tool = selectedTerminalTool(tools);
   const deliveryPolicy = loadDeliveryPolicyForProfile(tool.profile_id);
+  const validationPolicy = loadValidationReadPolicy(tool.profile_id);
   if (deliveryPolicy) registerDeliveryPolicyTools(pi, deliveryPolicy);
+  if (validationPolicy) registerValidationReadOverride(pi, validationPolicy);
   registerTool(pi, tool, deliveryPolicy);
   pi.on("session_start", async () => {
     const receipt: Record<string, unknown> = {
@@ -276,6 +357,7 @@ export function runAutopilotChild(
       active_tools: [...pi.getActiveTools()].sort(),
     };
     if (deliveryPolicy) receipt["delivery_policy"] = deliveryPolicy.receipt();
+    if (validationPolicy) receipt["validation_evidence_policy"] = validationPolicy.receipt();
     pi.appendEntry(CHILD_RECEIPT_ENTRY, receipt);
   });
 }
@@ -284,6 +366,10 @@ export function registerSubmitTools(pi: ExtensionAPI, tools: SubmitTools, _wrapp
   for (const tool of tools) {
     if (tool.boundary_id.startsWith("planning.") && tool.name !== "autopilot_emit_status") registerTool(pi, tool);
   }
+}
+
+export function registerValidationReadOverride(pi: ExtensionAPI, policy: ValidationReadPolicy): void {
+  pi.registerTool(createReadTool(policy.cwd, { operations: policy.operations() }));
 }
 
 export function registerDeliveryPolicyTools(pi: ExtensionAPI, policy: DeliveryPolicy): void {
@@ -374,6 +460,8 @@ function registerTool(
     );
   }
   const description = `Submit the final ${tool.boundary_id} payload. Use this as the final action;`;
+  const transportRawV3 = tool.profile_id === VALIDATION_PROFILE_ID;
+  const rawV3Payloads: unknown[] = [];
   pi.registerTool(defineTool({
     name: tool.name,
     label: tool.label,
@@ -384,7 +472,26 @@ function registerTool(
       "Do not return the payload as assistant prose or markdown.",
     ],
     parameters: tool.parameters,
+    ...(transportRawV3 ? {
+      prepareArguments(args: unknown) {
+        rawV3Payloads.push(structuredClone(args ?? null));
+        return {
+          schema: "autopilot.validation_submission.v3",
+          criterion_results: [{
+            criterion_id: "autopilot-raw-v3-transport",
+            verdict: "PASS",
+            citation_refs: ["autopilot-raw-v3-transport"],
+            finding_ids: [],
+          }],
+          findings: [],
+        };
+      },
+    } : {}),
     async execute(_toolCallId, params) {
+      if (transportRawV3 && rawV3Payloads.length === 0) {
+        throw new Error("V3 terminal execution lacked prepareArguments raw transport");
+      }
+      const payload = transportRawV3 ? rawV3Payloads.shift() : params;
       const terminalResult = () => ({
         content: [{ type: "text" as const, text: `Submitted ${tool.boundary_id}` }],
         details: {
@@ -394,7 +501,7 @@ function registerTool(
           result_contract: tool.result_contract,
           schema_digest: tool.schema_digest,
           binding: process.env["AUTOPILOT_CARRIER_BINDING"] ?? "",
-          payload: params as Record<string, unknown>,
+          payload: payload as Record<string, unknown>,
           ...(deliveryPolicy === undefined
             ? {}
             : {
@@ -409,6 +516,45 @@ function registerTool(
         : deliveryPolicy.queue.run(terminalResult);
     },
   }));
+}
+
+function loadValidationReadPolicy(profileId: string): ValidationReadPolicy | undefined {
+  const present = VALIDATION_ENV_KEYS.filter((key) => process.env[key] !== undefined);
+  if (profileId !== VALIDATION_PROFILE_ID) {
+    if (present.length > 0) throw new Error("autopilot validation evidence env present on non-v3 profile");
+    return undefined;
+  }
+  if (present.length !== VALIDATION_ENV_KEYS.length) {
+    throw new Error(`autopilot validation evidence env must be all-or-none: ${present.length}/${VALIDATION_ENV_KEYS.length}`);
+  }
+  const env = Object.fromEntries(VALIDATION_ENV_KEYS.map((key) => {
+    const value = process.env[key];
+    if (value === undefined || value.trim() === "") throw new Error(`autopilot validation evidence env ${key} is empty`);
+    return [key, value];
+  })) as ValidationEnv;
+  const contextPath = canonicalValidationFile(env.AUTOPILOT_VALIDATION_CONTEXT_PATH);
+  const cwd = canonicalDirectory("validation cwd", env.AUTOPILOT_VALIDATION_CWD);
+  if (cwd !== canonicalDirectory("validation process.cwd", process.cwd())) {
+    throw new Error("autopilot validation evidence cwd/process mismatch");
+  }
+  const bytes = readBoundedRegularFileSync(
+    "validation context",
+    contextPath,
+    MAX_VALIDATION_CONTEXT_BYTES,
+  );
+  if (sha256Hex(bytes) !== env.AUTOPILOT_VALIDATION_CONTEXT_DIGEST) {
+    throw new Error("autopilot validation context byte/digest drift");
+  }
+  const context = JSON.parse(bytes.toString("utf8")) as ValidationContext;
+  if (context.schema !== "autopilot.validation_context.v3" || !Array.isArray(context.citation_records)) {
+    throw new Error("autopilot validation context shape drift");
+  }
+  return new ValidationReadPolicy(
+    contextPath,
+    env.AUTOPILOT_VALIDATION_CONTEXT_DIGEST,
+    cwd,
+    context.citation_records,
+  );
 }
 
 function loadDeliveryPolicyForProfile(profileId: string): DeliveryPolicy | undefined {
@@ -443,12 +589,11 @@ export function loadDeliveryPolicyFromEnv(env: DeliveryEnv, processCwd: string):
     throw new Error(`autopilot delivery policy cwd/worktree mismatch: cwd=${cwd} worktree=${worktree} process=${actualProcessCwd}`);
   }
 
-  const assignmentBytes = readFileSync(assignmentPath);
-  if (assignmentBytes.length > MAX_DELIVERY_ASSIGNMENT_BYTES) {
-    throw new Error(
-      `autopilot delivery assignment oversized: ${assignmentBytes.length} bytes exceeds ${MAX_DELIVERY_ASSIGNMENT_BYTES}`,
-    );
-  }
+  const assignmentBytes = readBoundedRegularFileSync(
+    "delivery assignment",
+    assignmentPath,
+    MAX_DELIVERY_ASSIGNMENT_BYTES,
+  );
   const assignmentDigest = sha256Hex(assignmentBytes);
   if (assignmentDigest !== env.AUTOPILOT_DELIVERY_ASSIGNMENT_DIGEST) {
     throw new Error("autopilot delivery assignment digest drift");
@@ -823,7 +968,7 @@ function assertAssignmentIdentity(artifact: DeliveryAssignmentArtifact, env: Del
 
 function requiredString(object: Record<string, unknown>, key: string): string {
   const value = object[key];
-  if (typeof value !== "string" || value.trim() === "") throw new Error(`autopilot delivery assignment missing string ${key}`);
+  if (typeof value !== "string" || value.trim() === "") throw new Error(`delivery assignment missing string ${key}`);
   return value;
 }
 
@@ -840,6 +985,62 @@ function isSafeRelativeUnitPath(value: string): boolean {
   return value
     .split("/")
     .every((part) => part !== "" && part !== "." && part !== ".." && part !== ".git" && part !== ".pi");
+}
+
+function receiptLookingRef(value: string): boolean {
+  return value.indexOf("approved-command-receipt:") === 0 || value.indexOf("package-check-receipt:") === 0;
+}
+
+function checkedValidationSourcePath(value: string): string {
+  if (!isSafeRelativeUnitPath(value)) throw new Error("autopilot validation source path is unsafe");
+  return value;
+}
+
+function canonicalValidationFile(value: string): string {
+  if (!path.isAbsolute(value)) throw new Error("autopilot validation evidence path must be absolute");
+  rejectSymlinkComponents(value);
+  if (!lstatSync(value).isFile()) throw new Error("autopilot validation evidence is not a regular file");
+  return realpathSync.native(value);
+}
+
+function validationImageMimeType(bytes: Buffer): string | null {
+  if (bytes.subarray(0, 8).equals(Buffer.from("89504e470d0a1a0a", "hex"))) return "image/png";
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
+  const six = bytes.subarray(0, 6).toString("ascii");
+  if (six === "GIF87a" || six === "GIF89a") return "image/gif";
+  if (bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP") {
+    return "image/webp";
+  }
+  if (bytes[0] === 0x42 && bytes[1] === 0x4d) return "image/bmp";
+  return null;
+}
+
+function readBoundedRegularFileSync(label: string, value: string, maximumBytes: number): Buffer {
+  const descriptor = openSync(value, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const metadata = fstatSync(descriptor);
+    if (!metadata.isFile() || metadata.size > maximumBytes) {
+      throw new Error(`autopilot ${label} oversized: exceeds regular-file byte authority`);
+    }
+    const capacity = Math.max(1, Math.min(maximumBytes + 1, metadata.size + 1));
+    const bytes = Buffer.alloc(capacity);
+    let total = 0;
+    while (total < capacity) {
+      const count = readSync(descriptor, bytes, total, capacity - total, null);
+      if (count === 0) break;
+      total += count;
+    }
+    if (total > maximumBytes) throw new Error(`autopilot ${label} oversized: exceeds byte authority`);
+    if (total === capacity) {
+      const probe = Buffer.alloc(1);
+      if (readSync(descriptor, probe, 0, 1, null) !== 0) {
+        throw new Error(`autopilot ${label} oversized: exceeds byte authority`);
+      }
+    }
+    return Buffer.from(bytes.subarray(0, total));
+  } finally {
+    closeSync(descriptor);
+  }
 }
 
 function canonicalRegularFile(label: string, value: string): string {
@@ -861,12 +1062,12 @@ function canonicalDirectory(label: string, value: string): string {
 function rejectSymlinkComponents(value: string): void {
   const absolute = path.resolve(value);
   const parsed = path.parse(absolute);
-  const relativeParts = path.relative(parsed.root, absolute).split(path.sep).filter(Boolean);
+  const parts = path.relative(parsed.root, absolute).split(path.sep).filter(Boolean);
   let current = parsed.root;
-  for (const part of relativeParts) {
+  for (const part of parts) {
     current = path.join(current, part);
     const metadata = lstatSync(current);
-    if (metadata.isSymbolicLink()) throw new Error(`autopilot delivery symlink authority component refused: ${current}`);
+    if (metadata.isSymbolicLink()) throw new Error(`autopilot symlink authority refused: ${current}`);
   }
 }
 

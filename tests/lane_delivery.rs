@@ -17,7 +17,6 @@ use drivers::runner::{
     RunnerTransportFacts, ValidationRunnerRequest, accept_delivery,
     accept_delivery_with_package_facts, delivery_bg_action_with_facts, delivery_issue_with_facts,
     establish_delivery_package, package_delivery_commit, refuse_agent_git_mutation,
-    validation_issue,
 };
 use drivers::{sim::SimPlatform, vcs::GitVcs};
 use kernel::generated::{
@@ -345,10 +344,24 @@ fn lane_delivery_agent_git_mutation_and_incomplete_delivery_are_refused_without_
         id: id("AC-l1-2"),
         text: "Core proves the exact packaged tip.".to_owned(),
     });
+    for ordinal in 3..=11 {
+        let criterion = id(&format!("AC-l1-{ordinal}"));
+        scoped_unit.criteria.push(criterion.clone());
+        scoped_unit.criterion_text.push(ApprovedCriterion {
+            id: criterion,
+            text: format!("Live-shaped validation criterion {ordinal}."),
+        });
+    }
+    let command_template = scoped_unit.commands[0].clone();
+    for ordinal in 2..=5 {
+        let mut command = command_template.clone();
+        command.command = format!("cargo test -q --test validation-{ordinal}");
+        scoped_unit.commands.push(command);
+    }
     scoped_unit.package_checks = vec![kernel::generated::PlanUnitPackageCheck {
         check_id: id("PKG-l1-TIP"),
         kind: kernel::generated::PackageCheckKind::CleanExactPackageTip,
-        criterion_ordinals: vec![2],
+        criterion_ordinals: vec![10, 11],
         expected: "Core proves a clean exact package tip after delivery.".to_owned(),
     }];
     let runner = RunnerAssignment {
@@ -429,7 +442,7 @@ fn lane_delivery_agent_git_mutation_and_incomplete_delivery_are_refused_without_
         serde_json::json!([{
             "check_id":"PKG-l1-TIP",
             "kind":"clean-exact-package-tip",
-            "criterion_ordinals":[2],
+            "criterion_ordinals":[10,11],
             "expected":"Core proves a clean exact package tip after delivery."
         }])
     );
@@ -445,28 +458,30 @@ fn lane_delivery_agent_git_mutation_and_incomplete_delivery_are_refused_without_
     let scope_snapshot =
         runner::delivery_scope_snapshot_digest(&runner.worktree, &runner.approved_units)
             .expect("delivery scope snapshot");
-    let command_executions = runner::approved_command_bindings(&runner.approved_units)
-        .into_iter()
-        .enumerate()
-        .map(|(index, binding)| runner::VerifiedCommandExecution {
-            execution_id: format!("execution-{}", index + 1),
-            command_id: binding.command_id,
-            command_digest: binding.command_digest,
-            result_digest: "a".repeat(64),
-            scope_snapshot_digest: scope_snapshot.clone(),
-        })
-        .collect();
-    let validation = validation_issue(
+    let command_executions: Vec<runner::VerifiedCommandExecution> =
+        runner::approved_command_bindings(&runner.approved_units)
+            .into_iter()
+            .enumerate()
+            .map(|(index, binding)| runner::VerifiedCommandExecution {
+                execution_id: format!("execution-{}", index + 1),
+                command_id: binding.command_id,
+                command_digest: binding.command_digest,
+                result_digest: "a".repeat(64),
+                scope_snapshot_digest: scope_snapshot.clone(),
+            })
+            .collect();
+    let validation = drivers::runner::validation_issue_v3(
         &ValidationRunnerRequest {
             workstream: runner.workstream.clone(),
             action_id: id("action-validate-main-l1"),
             assignment_id: runner.assignment_id.clone(),
             run_revision: runner.run_revision,
             producer_assignment_ids: vec![runner.assignment_id.clone()],
-            exact_commit: package_commit,
-            exact_tree: package_tree,
+            exact_commit: package_commit.clone(),
+            exact_tree: package_tree.clone(),
             candidate_root: runner.worktree.clone(),
             changed_paths: vec!["keep.txt".to_owned()],
+            unchanged_recovery: false,
             execution_audit_ref: Ref("audit:l1".to_owned()),
             evidence_refs: vec![Ref("evidence:l1".to_owned())],
             lane_id: runner.lane_id.clone(),
@@ -480,7 +495,7 @@ fn lane_delivery_agent_git_mutation_and_incomplete_delivery_are_refused_without_
                 .as_str()
                 .expect("assignment digest")
                 .to_owned(),
-            approved_command_executions: command_executions,
+            approved_command_executions: command_executions.clone(),
         },
         &facts,
     )
@@ -490,19 +505,156 @@ fn lane_delivery_agent_git_mutation_and_incomplete_delivery_are_refused_without_
             Path::new(&validation.binding.spec_path)
                 .parent()
                 .expect("validation spec parent")
-                .join("context.json"),
+                .join("authority.v3.json"),
         )
-        .expect("validation context"),
+        .expect("validation authority"),
     )
-    .expect("validation context json");
+    .expect("validation authority json");
     assert_eq!(
-        validation_context["criteria"][0]["package_checks"],
-        serde_json::json!([])
+        validation_context["criteria"]
+            .as_array()
+            .expect("live-shaped criteria")
+            .len(),
+        11
+    );
+    for (index, criterion) in validation_context["criteria"]
+        .as_array()
+        .expect("criteria")
+        .iter()
+        .enumerate()
+    {
+        assert_eq!(
+            criterion["command_receipt_refs"]
+                .as_array()
+                .expect("command receipts")
+                .len(),
+            5,
+            "criterion {} must bind all five command receipts",
+            index + 1
+        );
+        assert_eq!(
+            criterion["package_check_receipt_refs"]
+                .as_array()
+                .expect("package receipts")
+                .len(),
+            usize::from(index >= 9),
+            "package receipt belongs only to criteria 10/11"
+        );
+    }
+    assert_eq!(
+        validation_context["command_receipts"]
+            .as_array()
+            .expect("global command receipts")
+            .len(),
+        5
     );
     assert_eq!(
-        validation_context["criteria"][1]["package_checks"][0]["check_id"],
-        "PKG-l1-TIP"
+        validation_context["package_check_receipts"]
+            .as_array()
+            .expect("global package receipts")
+            .len(),
+        1
     );
+    let validation_assignment: kernel::generated::ValidationAssignmentV3 = serde_json::from_slice(
+        &fs::read(
+            validation
+                .binding
+                .assignment_path
+                .as_ref()
+                .expect("v3 assignment path"),
+        )
+        .expect("v3 assignment"),
+    )
+    .expect("v3 assignment json");
+    let validation_context_v3: kernel::generated::ValidationContextV3 = serde_json::from_slice(
+        &fs::read(&validation_assignment.context_path.0).expect("v3 context"),
+    )
+    .expect("v3 context json");
+    let reverse_order_submission: kernel::generated::ValidationSubmissionV3 =
+        serde_json::from_value(serde_json::json!({
+            "schema":"autopilot.validation_submission.v3",
+            "criterion_results":validation_context_v3.criteria.iter().rev().map(|criterion| serde_json::json!({
+                "criterion_id":criterion.criterion_id,
+                "verdict":"PASS",
+                "citation_refs":[criterion.allowed_citation_refs[0]],
+                "finding_ids":[]
+            })).collect::<Vec<_>>(),
+            "findings":[]
+        }))
+        .expect("reverse-order v3 submission");
+    let (normalized, _) = drivers::runner::child::normalize_validation_submission_v3(
+        &validation_assignment,
+        &validation_context_v3,
+        &reverse_order_submission,
+        1,
+    )
+    .expect("Core canonicalizes criterion order");
+    assert_eq!(
+        normalized
+            .criterion_results
+            .iter()
+            .map(|criterion| criterion.criterion_id.clone())
+            .collect::<Vec<_>>(),
+        validation_context_v3
+            .criteria
+            .iter()
+            .map(|criterion| criterion.criterion_id.clone())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        normalized
+            .criterion_results
+            .iter()
+            .enumerate()
+            .all(|(index, criterion)| {
+                criterion.command_receipt_refs.len() == 5
+                    && criterion.package_check_receipt_refs.len() == usize::from(index >= 9)
+            })
+    );
+
+    let unchanged = drivers::runner::validation_issue_v3(
+        &ValidationRunnerRequest {
+            workstream: runner.workstream.clone(),
+            action_id: id("action-validate-recovery-main-l1"),
+            assignment_id: id("validator-recovery-assignment-main-l1"),
+            run_revision: runner.run_revision + 1,
+            producer_assignment_ids: vec![runner.assignment_id.clone()],
+            exact_commit: package_commit.clone(),
+            exact_tree: package_tree,
+            candidate_root: runner.worktree.clone(),
+            changed_paths: Vec::new(),
+            unchanged_recovery: true,
+            execution_audit_ref: Ref("audit:recovery-l1".to_owned()),
+            evidence_refs: vec![Ref("evidence:recovery-l1".to_owned())],
+            lane_id: runner.lane_id.clone(),
+            attempt: runner.attempt,
+            validation_attempt: 2,
+            semantic_round: 2,
+            base_commit: Sha(package_commit),
+            worktree: runner.worktree.clone(),
+            approved_units: runner.approved_units.clone(),
+            producer_assignment_digest: spec["assignment_digest"]
+                .as_str()
+                .expect("assignment digest")
+                .to_owned(),
+            approved_command_executions: command_executions,
+        },
+        &facts,
+    )
+    .expect("explicit no-defect recovery reaches unchanged v3 validation");
+    let unchanged_authority: serde_json::Value = serde_json::from_slice(
+        &fs::read(
+            Path::new(&unchanged.binding.spec_path)
+                .parent()
+                .expect("unchanged validation parent")
+                .join("authority.v3.json"),
+        )
+        .expect("unchanged authority"),
+    )
+    .expect("unchanged authority json");
+    assert_eq!(unchanged_authority["unchanged_recovery"], true);
+    assert_eq!(unchanged_authority["changed_paths"], serde_json::json!([]));
+    assert_eq!(unchanged_authority["deleted_paths"], serde_json::json!([]));
 
     let prompt = fs::read_to_string(spec["prompt_path"].as_str().expect("prompt")).expect("prompt");
     assert!(
@@ -546,16 +698,13 @@ fn lane_delivery_core_stdout_stays_json_when_runtime_packages_uncommitted_change
 
     let accepted = core.send_json(serde_json::json!({"v":1,"id":2,"kind":"task-completed","payload":{"task_id":"task-stdout-purity","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}));
     assert_eq!(accepted.kind, "spawn", "accepted response: {accepted:?}");
-    let context_path =
-        worktree.join(".pi/autopilot/main/validation/validator-assignment-main-L1/context.json");
-    let context: serde_json::Value = serde_json::from_slice(
-        &fs::read(&context_path).expect("validator context with package receipt"),
+    let authority_path = worktree
+        .join(".pi/autopilot/main/validation/validator-assignment-main-L1/authority.v3.json");
+    let authority: serde_json::Value = serde_json::from_slice(
+        &fs::read(&authority_path).expect("validator authority with package receipt"),
     )
-    .expect("validator context json");
-    let check = &context["criteria"][0]["package_checks"][0];
-    assert_eq!(check["check_id"], "PKG-U1-TIP");
-    assert_eq!(check["kind"], "clean-exact-package-tip");
-    let evidence_ref = check["evidence_ref"]
+    .expect("validator authority json");
+    let evidence_ref = authority["criteria"][0]["package_check_receipt_refs"][0]
         .as_str()
         .expect("package evidence ref");
     assert!(
@@ -563,14 +712,15 @@ fn lane_delivery_core_stdout_stays_json_when_runtime_packages_uncommitted_change
         "{evidence_ref}"
     );
     assert!(
-        context["evidence"]
+        authority["package_check_receipts"]
             .as_array()
-            .expect("evidence")
+            .expect("package receipts")
             .iter()
             .any(|item| {
                 item["evidence_ref"] == evidence_ref
-                    && item["package_check_id"] == "PKG-U1-TIP"
+                    && item["binding_id"] == "PKG-U1-TIP"
                     && item["kind"] == "delivery-package-check"
+                    && item["criterion_ids"] == serde_json::json!(["AC1"])
             })
     );
     core.shutdown();

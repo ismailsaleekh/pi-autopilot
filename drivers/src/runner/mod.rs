@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -25,6 +25,7 @@ use crate::vcs::GitVcs;
 
 pub mod child;
 pub mod rpc;
+pub(crate) mod validation_authority;
 
 const ROLES_KDL: &str = include_str!("../../../data/roles.kdl");
 const KNOWN_INCOMPLETE_TOOLS_KDL: &str = include_str!("../../../data/known-incomplete-tools.kdl");
@@ -50,6 +51,8 @@ const REPOSITORY_AUTHORITY_LS_TREE_MAX_STDOUT_BYTES: usize =
 const REPOSITORY_AUTHORITY_LS_TREE_MAX_RECORD_BYTES: usize = 8 * 1024;
 const REPOSITORY_AUTHORITY_LS_TREE_MAX_PATH_BYTES: usize = 4 * 1024;
 const REPOSITORY_AUTHORITY_MAX_TRACKED_SOURCES: usize = 20_000;
+const PACKAGE_GIT_STDOUT_MAX_BYTES: usize = 64 * 1024 * 1024;
+const PACKAGE_GIT_STDERR_MAX_BYTES: usize = 1024 * 1024;
 const SKILLS_IDENTITY: &str = "agent-run-skills:disabled:v1";
 pub const ISSUED_BINDING_REF_PREFIX: &str = "runner-binding:";
 
@@ -178,6 +181,7 @@ pub struct ValidationRunnerRequest {
     pub exact_tree: String,
     pub candidate_root: PathBuf,
     pub changed_paths: Vec<String>,
+    pub unchanged_recovery: bool,
     pub execution_audit_ref: Ref,
     pub evidence_refs: Vec<Ref>,
     pub lane_id: Id,
@@ -1396,6 +1400,692 @@ pub fn validation_issue(
     Ok(IssuedRunnerAction { action, binding })
 }
 
+/// Issue the closed v3 Validator boundary for new production work.  The v2
+/// issuer above remains byte-compatible for already-durable bindings only.
+pub fn validation_issue_v3(
+    request: &ValidationRunnerRequest,
+    facts: &RunnerTransportFacts,
+) -> Result<IssuedRunnerAction, RunnerError> {
+    verify_validation_package_checks(request)?;
+    let cwd = absolute_path(&request.candidate_root)?;
+    let worktree = absolute_path(&request.worktree)?;
+    if cwd != worktree {
+        return Err(RunnerError::InvalidSpec(
+            "v3 validation candidate/worktree identity drift".to_owned(),
+        ));
+    }
+    let mut changed_paths = request.changed_paths.clone();
+    changed_paths.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+    if request.unchanged_recovery != changed_paths.is_empty()
+        || (request.unchanged_recovery
+            && (request.semantic_round < 2 || request.validation_attempt < 2))
+        || changed_paths.iter().collect::<BTreeSet<_>>().len() != changed_paths.len()
+        || changed_paths
+            .iter()
+            .any(|path| !delivery_changed_path_is_safe(path))
+    {
+        return Err(RunnerError::InvalidSpec(
+            "v3 validation changed-path/recovery posture is duplicate, unsafe, or malformed"
+                .to_owned(),
+        ));
+    }
+    verify_package_git_state(
+        &cwd,
+        &request.base_commit,
+        &Sha(request.exact_commit.clone()),
+        &Sha(request.exact_tree.clone()),
+        &changed_paths,
+        true,
+    )
+    .map_err(|error| {
+        RunnerError::InvalidSpec(format!(
+            "v3 validation candidate snapshot failed: {error:?}"
+        ))
+    })?;
+
+    let valid_digest = |value: &str| {
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    };
+    let expected_commands = approved_command_bindings(&request.approved_units);
+    if expected_commands.len() != request.approved_command_executions.len()
+        || !valid_digest(&request.producer_assignment_digest)
+        || request.approved_command_executions.iter().any(|execution| {
+            execution.execution_id.trim().is_empty()
+                || !valid_digest(&execution.command_digest)
+                || !valid_digest(&execution.result_digest)
+                || !valid_digest(&execution.scope_snapshot_digest)
+        })
+        || request
+            .approved_command_executions
+            .iter()
+            .map(|execution| execution.execution_id.as_str())
+            .collect::<BTreeSet<_>>()
+            .len()
+            != request.approved_command_executions.len()
+        || request
+            .approved_command_executions
+            .iter()
+            .map(|execution| execution.scope_snapshot_digest.as_str())
+            .collect::<BTreeSet<_>>()
+            .len()
+            != 1
+    {
+        return Err(RunnerError::InvalidSpec(
+            "v3 validation approved-command receipt set is incomplete or malformed".to_owned(),
+        ));
+    }
+    let mut executions = BTreeMap::new();
+    for execution in &request.approved_command_executions {
+        if executions
+            .insert(execution.command_id.clone(), execution)
+            .is_some()
+        {
+            return Err(RunnerError::InvalidSpec(
+                "v3 validation approved-command receipt ids are not globally unique".to_owned(),
+            ));
+        }
+    }
+
+    let paths = validation_paths(&cwd, &request.workstream.0, &request.assignment_id);
+    let base = paths
+        .spec_path
+        .parent()
+        .ok_or_else(|| RunnerError::InvalidSpec("validation paths have no parent".to_owned()))?;
+    let authority_path = base.join("authority.v3.json");
+    let assignment_path = base.join("assignment.v3.json");
+    let context_path = base.join("context.v3.json");
+    let model_submission_path = base.join("model-submission.v3.json");
+    let diff_path = base.join("candidate.v3.diff");
+    let validation_id = Id(format!("validation-{}", request.assignment_id.0));
+    let validation_key = sha256_hex(
+        format!(
+            "validation.v3\0{}\0{}\0{}",
+            validation_id.0, request.exact_commit, request.exact_tree
+        )
+        .as_bytes(),
+    );
+    let base_commit = kernel::generated::GitOid(request.base_commit.0.clone());
+    let exact_commit = kernel::generated::GitOid(request.exact_commit.clone());
+    let exact_tree = kernel::generated::GitOid(request.exact_tree.clone());
+
+    let diff_bytes =
+        validation_authority::capture_candidate_diff(&cwd, &base_commit.0, &exact_commit.0)
+            .map_err(|error| RunnerError::InvalidSpec(format!("v3 candidate diff: {error}")))?;
+    write_parent_file_create_once_exact(&diff_path, &diff_bytes)?;
+    let diff_record = validation_authority::derive_diff_record(
+        &base_commit,
+        &exact_commit,
+        &exact_tree,
+        &diff_path,
+        &diff_bytes,
+    )
+    .map_err(|error| RunnerError::InvalidSpec(format!("v3 diff record: {error}")))?;
+
+    let mut criterion_ids_by_unit = BTreeMap::<Id, Vec<Id>>::new();
+    let mut all_criterion_ids = BTreeSet::new();
+    let mut source_paths = BTreeSet::new();
+    for unit in &request.approved_units {
+        validate_approved_unit_for_runner(unit)?;
+        let criterion_ids = unit
+            .criterion_text
+            .iter()
+            .map(|criterion| criterion.id.clone())
+            .collect::<Vec<_>>();
+        if criterion_ids.is_empty()
+            || criterion_ids
+                .iter()
+                .any(|id| !all_criterion_ids.insert(id.clone()))
+        {
+            return Err(RunnerError::InvalidSpec(
+                "v3 validation criterion ids must be globally unique and nonempty".to_owned(),
+            ));
+        }
+        criterion_ids_by_unit.insert(unit.id.clone(), criterion_ids);
+        source_paths.extend(unit.files.iter().map(|path| path.0.clone()));
+    }
+    if source_paths.is_empty() {
+        return Err(RunnerError::InvalidSpec(
+            "v3 validation requires exact source paths".to_owned(),
+        ));
+    }
+    let mut source_records = Vec::new();
+    let mut deleted_paths = Vec::new();
+    for source_path in &source_paths {
+        match validation_authority::derive_source_record(
+            &cwd,
+            &exact_commit,
+            &exact_tree,
+            source_path,
+        )
+        .map_err(|error| {
+            RunnerError::InvalidSpec(format!("v3 source record {source_path}: {error}"))
+        })? {
+            Some(record) => source_records.push(record),
+            None if changed_paths.contains(source_path) => {
+                deleted_paths.push(ContractPath(source_path.clone()));
+            }
+            None => {
+                return Err(RunnerError::InvalidSpec(format!(
+                    "v3 approved source is absent without an exact candidate deletion: {source_path}"
+                )));
+            }
+        }
+    }
+    let source_refs = source_records
+        .iter()
+        .map(|record| (record.source_path.0.clone(), record.evidence_ref.clone()))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut command_refs = BTreeMap::new();
+    let mut command_records = Vec::new();
+    for unit in &request.approved_units {
+        let criterion_ids = criterion_ids_by_unit
+            .get(&unit.id)
+            .ok_or_else(|| RunnerError::InvalidSpec("v3 unit criterion map drift".to_owned()))?;
+        for (index, _) in unit.commands.iter().enumerate() {
+            let ordinal = u32::try_from(index + 1)
+                .map_err(|_| RunnerError::InvalidSpec("command ordinal overflow".to_owned()))?;
+            let command_id = approved_command_id(&unit.id, ordinal);
+            let binding = expected_commands
+                .iter()
+                .find(|binding| binding.command_id == command_id)
+                .ok_or_else(|| {
+                    RunnerError::InvalidSpec(format!("v3 missing command binding {}", command_id.0))
+                })?;
+            let execution = executions.get(&command_id).ok_or_else(|| {
+                RunnerError::InvalidSpec(format!("v3 missing command receipt {}", command_id.0))
+            })?;
+            if execution.command_digest != binding.command_digest {
+                return Err(RunnerError::InvalidSpec(format!(
+                    "v3 command receipt digest drift {}",
+                    command_id.0
+                )));
+            }
+            let mut mapped_criteria = criterion_ids.clone();
+            mapped_criteria.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+            let receipt = serde_json::json!({
+                "schema": "autopilot.approved_command_receipt.v1",
+                "producer_assignment_digest": request.producer_assignment_digest,
+                "execution_id": execution.execution_id,
+                "command_id": execution.command_id,
+                "command_digest": execution.command_digest,
+                "result_digest": execution.result_digest,
+                "scope_snapshot_digest": execution.scope_snapshot_digest,
+                "package_commit": exact_commit,
+                "package_tree": exact_tree,
+                "unit_id": unit.id,
+                "criterion_ids": mapped_criteria,
+            });
+            let receipt_bytes = validation_authority::canonical_json_bytes(&receipt)
+                .map_err(RunnerError::InvalidSpec)?;
+            let receipt_json = String::from_utf8(receipt_bytes.clone())
+                .map_err(|error| RunnerError::Io(error.to_string()))?;
+            let digest = sha256_hex(&receipt_bytes);
+            let evidence_ref = Ref(format!(
+                "approved-command-receipt:{}:{digest}",
+                command_id.0
+            ));
+            command_refs.insert(command_id.clone(), evidence_ref.clone());
+            command_records.push(serde_json::json!({
+                "evidence_ref": evidence_ref,
+                "receipt_digest": digest,
+                "receipt_json": receipt_json,
+                "kind": "delivery-approved-command",
+                "exact_commit": exact_commit,
+                "exact_tree": exact_tree,
+                "binding_id": command_id,
+                "unit_id": unit.id,
+                "criterion_ids": mapped_criteria,
+            }));
+        }
+    }
+    if command_refs.len() != expected_commands.len() {
+        return Err(RunnerError::InvalidSpec(
+            "v3 command receipt authority is not exact".to_owned(),
+        ));
+    }
+
+    let mut package_records = Vec::new();
+    let mut package_refs_by_criterion = BTreeMap::<Id, Vec<Ref>>::new();
+    let mut package_binding_ids = BTreeSet::new();
+    for unit in &request.approved_units {
+        for check in &unit.package_checks {
+            if !package_binding_ids.insert(check.check_id.clone())
+                || command_refs.keys().any(|id| id == &check.check_id)
+            {
+                return Err(RunnerError::InvalidSpec(format!(
+                    "v3 receipt binding id is not globally unique: {}",
+                    check.check_id.0
+                )));
+            }
+            let mut ordinals = check.criterion_ordinals.clone();
+            ordinals.sort_unstable();
+            let mut mapped_criteria = ordinals
+                .iter()
+                .map(|ordinal| {
+                    let index = usize::try_from(ordinal.saturating_sub(1)).map_err(|_| {
+                        RunnerError::InvalidSpec("package criterion ordinal overflow".to_owned())
+                    })?;
+                    unit.criterion_text
+                        .get(index)
+                        .map(|criterion| criterion.id.clone())
+                        .ok_or_else(|| {
+                            RunnerError::InvalidSpec(format!(
+                                "package criterion ordinal out of range: {}:{}",
+                                check.check_id.0, ordinal
+                            ))
+                        })
+                })
+                .collect::<Result<Vec<_>, RunnerError>>()?;
+            mapped_criteria.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+            let receipt = serde_json::json!({
+                "schema": "autopilot.package_check_receipt.v1",
+                "check_id": check.check_id,
+                "kind": check.kind,
+                "criterion_ordinals": ordinals,
+                "criterion_ids": mapped_criteria,
+                "unit_id": unit.id,
+                "assignment_id": request.assignment_id,
+                "base_commit": base_commit,
+                "package_commit": exact_commit,
+                "package_tree": exact_tree,
+                "changed_paths": changed_paths,
+            });
+            let receipt_bytes = validation_authority::canonical_json_bytes(&receipt)
+                .map_err(RunnerError::InvalidSpec)?;
+            let receipt_json = String::from_utf8(receipt_bytes.clone())
+                .map_err(|error| RunnerError::Io(error.to_string()))?;
+            let digest = sha256_hex(&receipt_bytes);
+            let evidence_ref = Ref(format!(
+                "package-check-receipt:{}:{digest}",
+                check.check_id.0
+            ));
+            for criterion_id in &mapped_criteria {
+                package_refs_by_criterion
+                    .entry(criterion_id.clone())
+                    .or_default()
+                    .push(evidence_ref.clone());
+            }
+            package_records.push(serde_json::json!({
+                "evidence_ref": evidence_ref,
+                "receipt_digest": digest,
+                "receipt_json": receipt_json,
+                "kind": "delivery-package-check",
+                "exact_commit": exact_commit,
+                "exact_tree": exact_tree,
+                "binding_id": check.check_id,
+                "unit_id": unit.id,
+                "criterion_ids": mapped_criteria,
+            }));
+        }
+    }
+
+    let mut criteria = Vec::new();
+    for unit in &request.approved_units {
+        let mut covered_paths = unit.files.clone();
+        covered_paths.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+        let mut surfaces = unit.decisions.clone();
+        surfaces.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+        let mut edges = unit.downstream_release_edges.clone();
+        edges.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+        let mut allowed_citations = covered_paths
+            .iter()
+            .filter_map(|path| source_refs.get(&path.0).cloned())
+            .collect::<Vec<_>>();
+        allowed_citations.push(diff_record.evidence_ref.clone());
+        allowed_citations.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+        let mut unit_command_refs = unit
+            .commands
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                let ordinal = u32::try_from(index + 1)
+                    .map_err(|_| RunnerError::InvalidSpec("command ordinal overflow".to_owned()))?;
+                command_refs
+                    .get(&approved_command_id(&unit.id, ordinal))
+                    .cloned()
+                    .ok_or_else(|| RunnerError::InvalidSpec("command ref drift".to_owned()))
+            })
+            .collect::<Result<Vec<_>, RunnerError>>()?;
+        unit_command_refs.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+        for (criterion_index, criterion) in unit.criterion_text.iter().enumerate() {
+            let criterion_ordinal = u32::try_from(criterion_index + 1)
+                .map_err(|_| RunnerError::InvalidSpec("criterion ordinal overflow".to_owned()))?;
+            let mut package_refs = package_refs_by_criterion
+                .get(&criterion.id)
+                .cloned()
+                .unwrap_or_default();
+            package_refs.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+            criteria.push(serde_json::json!({
+                "criterion_id": criterion.id,
+                "unit_id": unit.id,
+                "unit_criterion_ordinal": criterion_ordinal,
+                "requirement_text": criterion.text,
+                "covered_paths": covered_paths,
+                "semantic_surface_ids": surfaces,
+                "forward_edge_ids": edges,
+                "allowed_citation_refs": allowed_citations,
+                "command_receipt_refs": unit_command_refs,
+                "package_check_receipt_refs": package_refs,
+            }));
+        }
+    }
+
+    let mut authority_value = serde_json::json!({
+        "schema": "autopilot.validation_evidence_authority.v1",
+        "validation_id": validation_id,
+        "assignment_id": request.assignment_id,
+        "exact_commit": exact_commit,
+        "exact_tree": exact_tree,
+        "base_commit": base_commit,
+        "candidate_root": to_contract_path(&cwd)?,
+        "unchanged_recovery": request.unchanged_recovery,
+        "changed_paths": changed_paths.iter().map(|path| ContractPath(path.clone())).collect::<Vec<_>>(),
+        "deleted_paths": deleted_paths,
+        "diff_ref": diff_record.evidence_ref,
+        "diff_digest": diff_record.diff_digest,
+        "diff_path": diff_record.diff_path,
+        "source_records": source_records,
+        "diff_records": [diff_record],
+        "command_receipts": command_records,
+        "package_check_receipts": package_records,
+        "criteria": criteria,
+        "authority_digest": "pending",
+    });
+    let authority_digest = validation_authority::authority_digest(&authority_value)
+        .map_err(RunnerError::InvalidSpec)?;
+    authority_value["authority_digest"] = serde_json::json!(authority_digest);
+    let authority: kernel::generated::ValidationEvidenceAuthority =
+        serde_json::from_value(authority_value.clone())
+            .map_err(|error| RunnerError::InvalidSpec(format!("v3 authority shape: {error}")))?;
+    let _ = validation_authority::ValidationAuthorityIndex::from_authority(authority)
+        .map_err(|failure| RunnerError::InvalidSpec(admission_failure_text(&failure)))?;
+    let authority_bytes = serde_json::to_vec_pretty(&authority_value)
+        .map_err(|error| RunnerError::Io(error.to_string()))?;
+    if authority_bytes.len() > kernel::generated::VALIDATION_EVIDENCE_AUTHORITY_MAX_BYTES {
+        return Err(RunnerError::InvalidSpec(format!(
+            "v3 authority exceeds generated bound: {} > {}",
+            authority_bytes.len(),
+            kernel::generated::VALIDATION_EVIDENCE_AUTHORITY_MAX_BYTES
+        )));
+    }
+    write_parent_file_create_once_exact(&authority_path, &authority_bytes)?;
+    let expectation = validation_authority::ValidationAuthorityExpectation {
+        validation_id: &validation_id,
+        assignment_id: &request.assignment_id,
+        base_commit: &base_commit,
+        exact_commit: &exact_commit,
+        exact_tree: &exact_tree,
+        candidate_root: &cwd,
+    };
+    let index = validation_authority::ValidationAuthorityIndex::load_for(
+        &authority_path,
+        &authority_digest,
+        &expectation,
+    )
+    .map_err(|failure| RunnerError::InvalidSpec(admission_failure_text(&failure)))?;
+
+    let context = index.context_projection();
+    let context_bytes =
+        serde_json::to_vec_pretty(&context).map_err(|error| RunnerError::Io(error.to_string()))?;
+    if context_bytes.len() > kernel::generated::VALIDATION_CONTEXT_V3_MAX_BYTES {
+        return Err(RunnerError::InvalidSpec(format!(
+            "v3 context exceeds generated bound: {} > {}",
+            context_bytes.len(),
+            kernel::generated::VALIDATION_CONTEXT_V3_MAX_BYTES
+        )));
+    }
+    let context_digest = sha256_hex(&context_bytes);
+    write_parent_file_create_once_exact(&context_path, &context_bytes)?;
+
+    let assignment = kernel::generated::ValidationAssignmentV3 {
+        schema: kernel::generated::SchemaId("autopilot.validation_assignment.v3".to_owned()),
+        validation_id: validation_id.clone(),
+        validation_key: Digest(validation_key),
+        workstream: request.workstream.clone(),
+        run_revision: request.run_revision,
+        role_id: Id("validator".to_owned()),
+        mode: ModeId("forward-release".to_owned()),
+        assignment_id: request.assignment_id.clone(),
+        action_id: request.action_id.clone(),
+        validation_attempt: request.validation_attempt,
+        semantic_round: request.semantic_round,
+        producer_assignment_ids: request.producer_assignment_ids.clone(),
+        base_commit: base_commit.clone(),
+        exact_commit: exact_commit.clone(),
+        exact_tree: exact_tree.clone(),
+        candidate_root: to_contract_path(&cwd)?,
+        context_path: to_contract_path(&context_path)?,
+        context_digest: Digest(context_digest.clone()),
+        authority_path: to_contract_path(&authority_path)?,
+        authority_digest: Digest(authority_digest.clone()),
+        max_value_attempts: 3,
+    };
+    let assignment_bytes = serde_json::to_vec_pretty(&assignment)
+        .map_err(|error| RunnerError::Io(error.to_string()))?;
+    if assignment_bytes.len() > kernel::generated::VALIDATION_ASSIGNMENT_V3_MAX_BYTES {
+        return Err(RunnerError::InvalidSpec(
+            "v3 assignment exceeds generated bound".to_owned(),
+        ));
+    }
+    let assignment_digest = sha256_hex(&assignment_bytes);
+    write_parent_file_create_once_exact(&assignment_path, &assignment_bytes)?;
+
+    let role_id = assignment.role_id.clone();
+    let mode = assignment.mode.clone();
+    let boundary = ContractId("autopilot.validation_submission.v3".to_owned());
+    let result_contract = ContractId("autopilot.validation_result.v3".to_owned());
+    let profile = terminal_profile_for(&role_id.0, &boundary.0, &result_contract.0)?;
+    let resolved_tools = resolve_role_tools(&role_id.0, profile.0)?;
+    let route = route_for_role(&role_id.0)?;
+    let mut model_assignment =
+        serde_json::to_value(&assignment).map_err(|error| RunnerError::Io(error.to_string()))?;
+    model_assignment
+        .as_object_mut()
+        .ok_or_else(|| {
+            RunnerError::InvalidSpec("v3 assignment projection is not an object".to_owned())
+        })?
+        .remove("authority_path");
+    let assignment_text = serde_json::to_string_pretty(&model_assignment)
+        .map_err(|error| RunnerError::Io(error.to_string()))?;
+    let context_text = String::from_utf8(context_bytes.clone())
+        .map_err(|error| RunnerError::Io(error.to_string()))?;
+    let rendered = crate::prompt::render(&crate::prompt::PromptInput {
+        role_id: role_id.0.clone(),
+        mode_id: mode.0.clone(),
+        mode_parameter: None,
+        assignment_revision: request.run_revision.to_string(),
+        plan_revision: format!("validation-attempt-{}", request.validation_attempt),
+        runtime_revision: request.run_revision,
+        context_manifest_id: context_digest.clone(),
+        git_identity: format!("{}:{}", exact_commit.0, exact_tree.0),
+        assignment: assignment_text,
+        context_manifest: context_text,
+        contract: format!(
+            concat!(
+                "Core-verified v3 evidence authority digest: {}\n",
+                "Use only the redacted evidence context citation records; the full receipt ",
+                "authority is not model context. ",
+                "The model owns only semantic criterion verdicts, source/diff citation selection, and typed findings. ",
+                "Core owns identity, snapshot, coverage, receipts, normalization, and outcome."
+            ),
+            authority_digest
+        ),
+        runtime_overlay: None,
+    })
+    .map_err(|error| RunnerError::InvalidSpec(format!("v3 prompt render: {error:?}")))?;
+    let prompt = rendered.text;
+    if prompt.len() > child::MAX_RENDERED_PROMPT_BYTES {
+        return Err(RunnerError::InvalidSpec(format!(
+            "v3 rendered prompt exceeds child bound: {} > {}",
+            prompt.len(),
+            child::MAX_RENDERED_PROMPT_BYTES
+        )));
+    }
+    write_parent_file_create_once_exact(&paths.prompt_path, prompt.as_bytes())?;
+    let prompt_digest = sha256_hex(prompt.as_bytes());
+
+    let (addon_path, addon_digest) = child_addon()?;
+    let run_identity = run_identity_for(&request.workstream.0)?;
+    let session_dir = session_dir_for(&run_identity.run_root);
+    let session_id = session_id_for(
+        &run_identity.run_id_as_id(),
+        &request.workstream,
+        &request.assignment_id,
+        &role_id,
+        &mode,
+        &boundary,
+    );
+    let context_binding_digest = sha_json(&serde_json::json!({
+        "assignment_path": to_contract_path(&assignment_path)?,
+        "assignment_digest": assignment_digest,
+        "context_manifest_path": to_contract_path(&context_path)?,
+        "context_manifest_digest": context_digest,
+        "producer_assignment_ids": request.producer_assignment_ids,
+        "validation_id": validation_id,
+        "validation_attempt": request.validation_attempt,
+        "semantic_round": request.semantic_round,
+    }))?;
+    let binding_digests = BindingDigests {
+        boundary_digest: contract_digest(&boundary.0)?,
+        result_contract_digest: contract_digest(&result_contract.0)?,
+        settings_digest: settings_digest(true),
+        context_digest: context_binding_digest,
+        skills_digest: skills_digest(),
+        subscription_digest: subscription_digest(&route),
+    };
+    let spec = AgentRunSpec {
+        schema: kernel::generated::SchemaId("autopilot.agent_run_spec.v4".to_owned()),
+        assignment_kind: ValidationAssignmentKind::Validation,
+        action_id: request.action_id.clone(),
+        assignment_id: request.assignment_id.clone(),
+        run_id: run_identity.run_id_as_id(),
+        run_revision: request.run_revision,
+        workstream: request.workstream.clone(),
+        role_id: role_id.clone(),
+        mode: mode.clone(),
+        provider: route.provider.clone(),
+        model: route.model.clone(),
+        thinking: kernel::generated::ThinkingLevel(route.thinking.clone()),
+        route: "subscription".to_owned(),
+        cwd: to_contract_path(&cwd)?,
+        allowed_tools: resolved_tools
+            .active
+            .iter()
+            .cloned()
+            .map(ToolName)
+            .collect(),
+        spec_path: to_contract_path(&paths.spec_path)?,
+        prompt_path: to_contract_path(&paths.prompt_path)?,
+        prompt_digest: Digest(prompt_digest.clone()),
+        boundary_id: boundary.clone(),
+        boundary_digest: Digest(binding_digests.boundary_digest.clone()),
+        result_contract: result_contract.clone(),
+        result_contract_digest: Digest(binding_digests.result_contract_digest.clone()),
+        carrier_path: to_contract_path(&paths.carrier_path)?,
+        session_id: session_id.clone(),
+        session_dir: to_contract_path(&session_dir)?,
+        session_continuity: kernel::generated::SessionContinuity::Fresh,
+        settings_digest: Digest(binding_digests.settings_digest.clone()),
+        context_digest: Digest(binding_digests.context_digest.clone()),
+        skills_digest: Digest(binding_digests.skills_digest.clone()),
+        subscription_digest: Digest(binding_digests.subscription_digest.clone()),
+        lane_id: Some(request.lane_id.clone()),
+        attempt: Some(request.attempt),
+        base_commit: Some(request.base_commit.clone()),
+        worktree: Some(to_contract_path(&worktree)?),
+        required_focused_evidence: Some(1),
+        authority_set_id: None,
+        authority_documents: None,
+        context_document: None,
+        context_documents: None,
+        assignment_path: Some(to_contract_path(&assignment_path)?),
+        assignment_digest: Some(Digest(assignment_digest.clone())),
+        context_manifest_path: Some(to_contract_path(&context_path)?),
+        context_manifest_digest: Some(Digest(context_digest)),
+        runtime_extension_path: Some(to_contract_path(&addon_path)?),
+        runtime_extension_digest: Some(Digest(addon_digest)),
+        terminal_profile_id: Some(profile.0.to_owned()),
+        unavailable_tools: Some(
+            resolved_tools
+                .unavailable
+                .into_iter()
+                .map(ToolName)
+                .collect(),
+        ),
+        producer_assignment_ids: Some(request.producer_assignment_ids.clone()),
+        validation_id: Some(validation_id),
+        validation_attempt: Some(request.validation_attempt),
+        semantic_round: Some(request.semantic_round),
+        model_submission_path: Some(to_contract_path(&model_submission_path)?),
+        atom_id_prefix: None,
+        atom_registry_path: None,
+        atom_registry_digest: None,
+        planning_inputs_path: None,
+        planning_inputs_digest: None,
+        repository_manifest_path: None,
+        repository_manifest_digest: None,
+        repository_head_commit: None,
+        repository_head_tree: None,
+    };
+    let spec_digest = write_spec_document(&paths.spec_path, &spec)?;
+    let binding = IssuedRunnerBinding {
+        action_id: request.action_id.clone(),
+        assignment_id: request.assignment_id.clone(),
+        run_revision: request.run_revision,
+        workstream: request.workstream.clone(),
+        role_id,
+        mode,
+        boundary_id: boundary,
+        result_contract,
+        prompt_path: path_to_string(&paths.prompt_path)?,
+        prompt_digest,
+        spec_path: path_to_string(&paths.spec_path)?,
+        spec_digest,
+        carrier_path: path_to_string(&paths.carrier_path)?,
+        session_id,
+        boundary_digest: binding_digests.boundary_digest,
+        result_contract_digest: binding_digests.result_contract_digest,
+        settings_digest: binding_digests.settings_digest,
+        context_digest: binding_digests.context_digest,
+        skills_digest: binding_digests.skills_digest,
+        subscription_digest: binding_digests.subscription_digest,
+        assignment_path: Some(path_to_string(&assignment_path)?),
+        assignment_digest: Some(assignment_digest),
+        repository_manifest_path: None,
+        repository_manifest_digest: None,
+        repository_head_commit: None,
+        repository_head_tree: None,
+        mode_parameter: None,
+        planning_subject_assignment_id: None,
+        planning_subject_path: None,
+        planning_subject_digest: None,
+        lane_id: Some(request.lane_id.clone()),
+        attempt: Some(request.attempt),
+        base_commit: Some(request.base_commit.clone()),
+        worktree: Some(path_to_string(&worktree)?),
+        required_focused_evidence: 1,
+    };
+    Ok(IssuedRunnerAction {
+        action: action_from_doc(
+            facts,
+            &paths.spec_path,
+            &spec,
+            Some(DEFAULT_BG_TIMEOUT_SECONDS),
+        )?,
+        binding,
+    })
+}
+
+fn admission_failure_text(failure: &validation_authority::AdmissionFailure) -> String {
+    failure
+        .canonical_bytes()
+        .and_then(|bytes| String::from_utf8(bytes).map_err(|error| error.to_string()))
+        .unwrap_or_else(|error| format!("validation authority diagnostic failure: {error}"))
+}
 pub fn command_for_spec(facts: &RunnerTransportFacts, spec_path: &Path) -> String {
     try_command_for_spec(facts, spec_path).expect("runner command paths must have been validated")
 }
@@ -3148,11 +3838,28 @@ fn write_parent_file_create_once_exact(path: &Path, data: &[u8]) -> Result<(), R
 }
 
 pub fn read_bounded_file(path: &Path, max_bytes: usize) -> Result<Vec<u8>, RunnerError> {
+    read_bounded_file_optional(path, max_bytes)?.ok_or_else(|| {
+        io_error(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("bounded read path is absent: {}", path.display()),
+        ))
+    })
+}
+
+pub(crate) fn read_bounded_file_optional(
+    path: &Path,
+    max_bytes: usize,
+) -> Result<Option<Vec<u8>>, RunnerError> {
     reject_link_components_for_path(path)?;
-    let metadata = fs::symlink_metadata(path).map_err(io_error)?;
+    let file = match open_read_no_follow(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(io_error(error)),
+    };
+    let metadata = file.metadata().map_err(io_error)?;
     if !metadata.file_type().is_file() {
         return Err(RunnerError::InvalidSpec(format!(
-            "bounded read refused non-regular file: {}",
+            "bounded read refused non-regular descriptor: {}",
             path.display()
         )));
     }
@@ -3166,17 +3873,61 @@ pub fn read_bounded_file(path: &Path, max_bytes: usize) -> Result<Vec<u8>, Runne
             path.display()
         )));
     }
-    let mut file = fs::File::open(path).map_err(io_error)?;
-    let mut data = Vec::with_capacity(len);
-    file.read_to_end(&mut data).map_err(io_error)?;
+    let read_limit = u64::try_from(max_bytes)
+        .ok()
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| RunnerError::InvalidSpec("bounded read limit overflow".to_owned()))?;
+    let mut data = Vec::with_capacity(len.min(max_bytes));
+    file.take(read_limit)
+        .read_to_end(&mut data)
+        .map_err(io_error)?;
     if data.len() > max_bytes {
         return Err(RunnerError::InvalidSpec(format!(
-            "bounded read oversized after read: {} bytes exceeds {max_bytes} at {}",
-            data.len(),
+            "bounded read oversized after read: more than {max_bytes} bytes at {}",
             path.display()
         )));
     }
-    Ok(data)
+    Ok(Some(data))
+}
+
+#[cfg(unix)]
+fn open_read_no_follow(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    const O_NOFOLLOW: i32 = 0x0000_0100;
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "solaris",
+        target_os = "illumos"
+    ))]
+    const O_NOFOLLOW: i32 = 0x0002_0000;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn open_read_no_follow(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_read_no_follow(path: &Path) -> std::io::Result<fs::File> {
+    OpenOptions::new().read(true).open(path)
 }
 
 pub(crate) fn reject_link_components_for_path(path: &Path) -> Result<(), RunnerError> {
@@ -4119,18 +4870,17 @@ fn blocked_delivery_snapshot_digest(
 }
 
 fn delivery_mode_fingerprint(worktree: &Path, path: &Path) -> Result<Vec<u8>, DeliveryRejection> {
-    let output = Command::new("git")
-        .current_dir(worktree)
-        .args(["diff", "--no-index", "--summary", "--"])
-        .arg("/dev/null")
-        .arg(path)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|_| DeliveryRejection::GitState)?;
-    if !matches!(output.status.code(), Some(0 | 1))
-        || !output.stderr.is_empty()
-        || output.stdout.len() > 4 * 1024
-    {
+    let path = path.to_str().ok_or(DeliveryRejection::GitState)?;
+    let paths = vec!["/dev/null".to_owned(), path.to_owned()];
+    let output = git_output_bounded_with_limits(
+        worktree,
+        &["diff", "--no-index", "--summary", "--"],
+        &paths,
+        4 * 1024,
+        PACKAGE_GIT_STDERR_MAX_BYTES,
+    )
+    .map_err(|_| DeliveryRejection::GitState)?;
+    if !matches!(output.status.code(), Some(0 | 1)) || !output.stderr.is_empty() {
         return Err(DeliveryRejection::GitState);
     }
     Ok(output.stdout)
@@ -4601,12 +5351,7 @@ fn git_stdout_bytes_checked_with_paths(
     args: &[&str],
     paths: &[String],
 ) -> Result<Vec<u8>, String> {
-    let output = Command::new("git")
-        .current_dir(cwd)
-        .args(args)
-        .args(paths)
-        .output()
-        .map_err(|error| error.to_string())?;
+    let output = git_output_bounded(cwd, args, paths)?;
     if output.status.success() {
         Ok(output.stdout)
     } else {
@@ -4615,11 +5360,7 @@ fn git_stdout_bytes_checked_with_paths(
 }
 
 fn git_output_checked(cwd: &Path, args: &[&str]) -> Result<std::process::Output, String> {
-    let output = Command::new("git")
-        .current_dir(cwd)
-        .args(args)
-        .output()
-        .map_err(|error| error.to_string())?;
+    let output = git_output_bounded(cwd, args, &[])?;
     if !output.status.success() {
         return Err(format!("git {:?} failed", args));
     }
@@ -4627,11 +5368,7 @@ fn git_output_checked(cwd: &Path, args: &[&str]) -> Result<std::process::Output,
 }
 
 fn git_status_checked(cwd: &Path, args: &[&str]) -> Result<(), String> {
-    let output = Command::new("git")
-        .current_dir(cwd)
-        .args(args)
-        .output()
-        .map_err(|error| error.to_string())?;
+    let output = git_output_bounded(cwd, args, &[])?;
     if output.status.success() {
         Ok(())
     } else {
@@ -4644,16 +5381,159 @@ fn git_status_checked_with_paths(
     args: &[&str],
     paths: &[String],
 ) -> Result<(), String> {
-    let output = Command::new("git")
-        .current_dir(cwd)
-        .args(args)
-        .args(paths)
-        .output()
-        .map_err(|error| error.to_string())?;
+    let output = git_output_bounded(cwd, args, paths)?;
     if output.status.success() {
         Ok(())
     } else {
         Err(git_failure_message(args, &output, Some(paths.len())))
+    }
+}
+
+fn git_output_bounded(
+    cwd: &Path,
+    args: &[&str],
+    paths: &[String],
+) -> Result<std::process::Output, String> {
+    git_output_bounded_with_limits(
+        cwd,
+        args,
+        paths,
+        PACKAGE_GIT_STDOUT_MAX_BYTES,
+        PACKAGE_GIT_STDERR_MAX_BYTES,
+    )
+}
+
+pub(crate) fn git_output_bounded_with_limits(
+    cwd: &Path,
+    args: &[&str],
+    paths: &[String],
+    max_stdout_bytes: usize,
+    max_stderr_bytes: usize,
+) -> Result<std::process::Output, String> {
+    let mut command = Command::new("git");
+    command
+        .current_dir(cwd)
+        .args(args)
+        .args(paths)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command.spawn().map_err(|error| error.to_string())?;
+    let Some(stdout) = child.stdout.take() else {
+        terminate_git_process(&mut child);
+        return Err("git stdout pipe unavailable".to_owned());
+    };
+    let Some(stderr) = child.stderr.take() else {
+        terminate_git_process(&mut child);
+        return Err("git stderr pipe unavailable".to_owned());
+    };
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let stdout_sender = sender.clone();
+    let stdout_reader = std::thread::spawn(move || {
+        let result = read_process_pipe_bounded(stdout, max_stdout_bytes, "git stdout");
+        let _ = stdout_sender.send((0_usize, result));
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let result = read_process_pipe_bounded(stderr, max_stderr_bytes, "git stderr");
+        let _ = sender.send((1_usize, result));
+    });
+    let mut reads: [Option<Result<Vec<u8>, String>>; 2] = [None, None];
+    let mut status = None;
+    let mut stream_failure = false;
+    let mut process_group_terminated = false;
+    while reads.iter().any(Option::is_none) {
+        match receiver.recv_timeout(std::time::Duration::from_millis(2)) {
+            Ok((index, result)) => {
+                stream_failure |= result.is_err();
+                reads[index] = Some(result);
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                stream_failure = true;
+                for read in reads.iter_mut().filter(|read| read.is_none()) {
+                    *read = Some(Err("git pipe reader disconnected".to_owned()));
+                }
+            }
+        }
+        if stream_failure && !process_group_terminated {
+            terminate_git_process(&mut child);
+            process_group_terminated = true;
+        }
+        if status.is_none() {
+            status = child.try_wait().map_err(|error| error.to_string())?;
+        }
+        if status.is_some() && reads.iter().any(Option::is_none) && !process_group_terminated {
+            terminate_git_process(&mut child);
+            process_group_terminated = true;
+        }
+    }
+    let status = match status {
+        Some(status) => status,
+        None => child.wait().map_err(|error| error.to_string())?,
+    };
+    stdout_reader
+        .join()
+        .map_err(|_| "git stdout reader panicked".to_owned())?;
+    stderr_reader
+        .join()
+        .map_err(|_| "git stderr reader panicked".to_owned())?;
+    let stdout = reads[0]
+        .take()
+        .ok_or_else(|| "git stdout reader disconnected".to_owned())??;
+    let stderr = reads[1]
+        .take()
+        .ok_or_else(|| "git stderr reader disconnected".to_owned())??;
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn terminate_git_process(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    if let Ok(pid) = i32::try_from(child.id()) {
+        unsafe {
+            let _ = terminate_git_process_group(-pid, 9);
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = Command::new(concat!("task", "ki", "ll"))
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .output();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(unix)]
+unsafe extern "C" {
+    #[link_name = "kill"]
+    fn terminate_git_process_group(pid: i32, signal: i32) -> i32;
+}
+
+fn read_process_pipe_bounded(
+    mut pipe: impl Read,
+    max_bytes: usize,
+    label: &str,
+) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let count = pipe.read(&mut buffer).map_err(|error| error.to_string())?;
+        if count == 0 {
+            return Ok(bytes);
+        }
+        if bytes.len().saturating_add(count) > max_bytes {
+            return Err(format!("{label} exceeds {max_bytes} bytes"));
+        }
+        bytes.extend_from_slice(&buffer[..count]);
     }
 }
 
@@ -4817,4 +5697,96 @@ pub(crate) fn atom_registry_binding_from_spec<'a>(
         unreachable!("runtime.reject returns Err in enforce mode")
     };
     Ok((path, digest))
+}
+
+#[cfg(test)]
+mod bounded_io_tests {
+    use super::*;
+
+    #[test]
+    fn bounded_git_stderr_overflow_terminates_the_process_group() {
+        let temp = fs::canonicalize(std::env::temp_dir()).expect("canonical temp root");
+        let root = temp.join(format!(
+            "pi-autopilot-bounded-git-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("bounded git fixture root");
+        assert!(
+            Command::new("git")
+                .current_dir(&root)
+                .args(["init", "--quiet"])
+                .status()
+                .expect("git init")
+                .success()
+        );
+        let overflow_marker = root.join("overflow-descendant-survived");
+        let alias = format!(
+            concat!(
+                "alias.noisy=!python3 -c '",
+                "import pathlib,sys,time;sys.stderr.write(\"x\"*65);",
+                "sys.stderr.flush();time.sleep(0.2);pathlib.Path({:?}).write_text(\"survived\");",
+                "time.sleep(10)'"
+            ),
+            overflow_marker.display().to_string()
+        );
+        let error = git_output_bounded_with_limits(&root, &["-c", &alias, "noisy"], &[], 64, 64)
+            .expect_err("stderr overflow");
+        assert!(error.contains("git stderr exceeds 64 bytes"), "{error}");
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        match fs::remove_file(&overflow_marker) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(()) => panic!("overflow descendant survived Git termination"),
+            Err(error) => panic!("overflow marker cleanup failed: {error}"),
+        }
+
+        let late_alias = concat!(
+            "alias.late=!python3 -c '",
+            "import sys,time;time.sleep(1);sys.stderr.write(\"x\"*65);",
+            "sys.stderr.flush();time.sleep(10)' & exit 0"
+        );
+        let output =
+            git_output_bounded_with_limits(&root, &["-c", late_alias, "late"], &[], 64, 64)
+                .expect("leader exit terminates pipe-retaining descendants");
+        assert!(output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+        fs::remove_dir_all(root).expect("remove bounded git fixture");
+    }
+
+    #[test]
+    fn process_pipe_and_file_reads_refuse_bytes_beyond_their_allocation_ceiling() {
+        let pipe_error =
+            read_process_pipe_bounded(std::io::Cursor::new(vec![b'x'; 65]), 64, "fixture stdout")
+                .expect_err("oversized process output");
+        assert!(pipe_error.contains("exceeds 64 bytes"), "{pipe_error}");
+
+        let temp = fs::canonicalize(std::env::temp_dir()).expect("canonical temp root");
+        let root = temp.join(format!(
+            "pi-autopilot-bounded-read-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("bounded read fixture root");
+        let oversized = root.join("oversized.bin");
+        fs::write(&oversized, vec![b'x'; 65]).expect("oversized fixture");
+        let error = read_bounded_file(&oversized, 64).expect_err("oversized file");
+        assert!(
+            error.to_string().contains("bounded read oversized"),
+            "{error}"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let target = root.join("target.bin");
+            let alias = root.join("alias.bin");
+            fs::write(&target, b"target").expect("target fixture");
+            symlink(&target, &alias).expect("symlink fixture");
+            assert!(read_bounded_file(&alias, 64).is_err());
+        }
+        fs::remove_dir_all(root).expect("remove bounded read fixture");
+    }
 }

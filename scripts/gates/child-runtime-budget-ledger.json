@@ -43,5 +43,41 @@
     "sourceDelta": 225,
     "date": "2026-08-06",
     "justification": "UPWARD +225, itemized, for replacing misleading free-form delivery Bash with package-bound approved-command execution and final-source receipts. WHY: delivery children were shown Pi's general Bash schema and PI_* inspection guidance even though execution admitted only exact planner-approved bytes; every LIVE implementer attempted unauthorized startup diagnostics and one stopped on the truthful pre-effect denial. WHAT THE +225 BUYS: (1) a custom autopilot_run_approved_command schema accepting exactly one package-generated command_id and no command/cwd/env/timeout fields; (2) strict delivery-assignment v3 parsing of a complete unique unit/ordinal/id/digest command binding set; (3) hidden use of Pi's bounded shell backend with session-environment injection disabled and a second exact-byte guard; (4) assignment-specific description and guidelines that name only approved ids and direct inspection to read/grep/find/ls; (5) bounded sequential success/failure execution receipts with command/result digests; (6) a deterministic symlink-refusing, regular-file-only, content/mode-sensitive approved-scope snapshot using no-follow file descriptors, per-file and aggregate byte limits, explicit missing-file states, and exact short-read checks; and (7) typed terminal attachment of both denial and execution ledgers under the same serial queue as edit/write so a terminal cannot race pending mutation. NO AUTHORITY WIDENING: the child supplies only an opaque id; command bytes, cwd, unit binding, policy digest, and file scope remain package-owned; general Bash is not registered; unknown ids are denied before effect; and Core independently revalidates every receipt and final snapshot. The ceiling is flush with measured actual and has zero discretionary headroom."
+  },
+  {
+    "from": 875,
+    "to": 1022,
+    "actualBefore": 875,
+    "actualAfter": 1022,
+    "sourceDelta": 147,
+    "date": "2026-08-07",
+    "justification": "UPWARD +147, itemized, for the Validator V3 repair and evidence-confinement boundary required by the independent five-model review. WHY: strict TypeBox validation rejected malformed V3 calls inside Pi before Core could apply its mandated three-attempt value-repair loop, while the built-in read tool could discover sibling authority.v3.json and assignment files containing Core-owned receipt bindings. WHAT THE +147 BUYS: (1) a V3-only prepareArguments sentinel that satisfies Pi's transport schema while preserving the model's original raw object for Rust admission, with all non-V3 terminal profiles retaining their generated strict schemas; (2) an all-or-none V3 evidence-policy environment whose context bytes, SHA-256, cwd, schema, nonempty citation set, source-relative paths, and source/diff-only refs are checked before registration; (3) replacement of the built-in read tool for V3 with exact canonical regular-file operations limited to projected source and diff paths, rejecting symlink components, receipt-looking refs, duplicate targets, out-of-authority paths, oversized evidence, and any source/diff content whose SHA-256 drifts from the Core-projected digest; (4) removal of grep/find/ls from the Validator profile so no second discovery channel bypasses that exact read allowlist; and (5) a durable session-start receipt binding the context path/digest/cwd, evidence count, active override, and generated child-runtime self digest for independent Rust verification before the first prompt. NO AUTHORITY OR SCHEMA WIDENING: the model still sees and returns only semantic V3 fields; malformed raw values reach the same closed Rust validator for at most three same-session attempts; receipt refs and receipt-bearing files remain hidden; authority/provenance failures remain fatal; and legacy V2 preparation/admission is untouched. Regression evidence includes real Pi 0.84 terminal-profile tests for malformed raw transport, exact source reads, sibling authority denial, post-registration source-digest drift denial, missing-policy failure, receipt parity, packed-consumer activation, and Rust child/parent policy-receipt verification. The ceiling is flush with measured actual and has zero discretionary headroom."
+  },
+  {
+    "from": 1022,
+    "to": 1056,
+    "actualBefore": 1022,
+    "actualAfter": 1056,
+    "sourceDelta": 34,
+    "date": "2026-08-07",
+    "justification": "UPWARD +34, itemized, for pre-allocation Validator evidence byte confinement after the fresh five-model adversarial review proved that readFile/readFileSync allocated an entire drifted file before enforcing the declared limit. WHAT THE +34 BUYS: one shared no-follow descriptor reader that rejects a non-regular or stat-oversized file before allocation, allocates at most the package bound plus one byte, loops with an explicit short-read check, performs a one-byte growth probe when the stat-sized buffer fills, rejects concurrent growth beyond authority, and closes the descriptor on every path. Both the digest-bound context bootstrap and every policy-confined source/diff read now use it; SHA-256 verification remains after the bounded read. NO AUTHORITY WIDENING: canonical exact-path membership, symlink-component refusal, context/cwd binding, source/diff-only projection, and digest checks are unchanged, while oversized or raced files fail before their full contents can enter memory. A real read-tool regression exercises the oversized source path. The ceiling is flush with the measured 1056 LOC and retains zero discretionary headroom."
+  },
+  {
+    "from": 1056,
+    "to": 1069,
+    "actualBefore": 1056,
+    "actualAfter": 1069,
+    "sourceDelta": 13,
+    "date": "2026-08-07",
+    "justification": "UPWARD +13, itemized, for preserving Pi read-tool image semantics inside the exact V3 evidence boundary. WHY: supplying custom read operations without a MIME operation made an authorized PNG flow through the text path, leaving image evidence unusable even though production source authority permits regular image blobs. WHAT THE +13 BUYS: fixed magic-byte classification for exactly Pi's five documented image families (PNG, JPEG, GIF, WebP, BMP), invoked only after exact path authorization plus the bounded no-follow read and SHA-256 check; unsupported bytes remain text. The framework then performs its normal image processing on the same policy-confined path, whose second read repeats every authority and digest check. NO DISCOVERY OR AUTHORITY WIDENING: extensions, names, directories, aliases, and sibling files do not grant image access; only a context-projected exact path can reach classification. Host regressions exercise text, image, symlink alias, NFD, curly-quote, macOS AM/PM, authority-sibling, digest-drift, and oversized reads. The ceiling is flush with the measured 1069 LOC and retains zero discretionary headroom."
+  },
+  {
+    "from": 1069,
+    "to": 1068,
+    "actualBefore": 1069,
+    "actualAfter": 1068,
+    "sourceDelta": -1,
+    "date": "2026-08-07",
+    "justification": "DOWNWARD -1: delivery assignment loading now reuses the existing bounded no-follow regular-file reader instead of allocating with readFileSync and checking length afterward. This closes the child policy's pre-allocation limit while removing the redundant post-read branch. The ceiling is lowered to the measured 1068 LOC, preserving zero discretionary headroom."
   }
 ]

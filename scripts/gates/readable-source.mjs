@@ -50,30 +50,21 @@ const ALLOWED_PLAIN_TEXT_INCLUDES = new Set(['README.md', 'LICENSE']);
 // finding: it means debt was paid and this ledger must be lowered deliberately, so
 // the numbers ratchet down over time instead of silently eroding upward.
 //
-// overlong_handwritten_source is 260 against a certified baseline of 244. Those
-// +16 lines are CANDIDATE-INTRODUCED, OPERATOR-ACCEPTED debt (not pre-existing),
-// itemized below. They are not rewrappable, because rewrapping a >120-column line
-// costs +1 LOC and every one of them sits behind a hard constraint:
-//   *  7 in child-runtime/child-extension-runtime.ts — child-runtime-thinness is
-//      flush at 578/578; +1 turns it RED. Those bytes are also inside
-//      CHILD_ADDON_DIGEST, so any edit forces codegen regeneration.
-//   *  4 in src/pi-coding-agent-shim.d.ts — host-thinness is flush at 1123/1123;
-//      +1 turns it RED and re-breaks the host-thinness blocker.
-//   *  5 Rust prompt/authority string literals in drivers/src/{runner,planning}/mod.rs
-//      and drivers/src/contract_authority.rs. In Rust, breaking a string literal
-//      across lines without a trailing backslash injects the newline AND the next
-//      line's leading whitespace INTO THE VALUE. These exact strings are asserted
-//      by command_routing.rs / runner_child.rs / boundary_coverage.rs and are the
-//      direct targets of mutants M-WM-1..M-WM-5, which were proven to kill on them.
-//      Rewrapping risks silently changing the prompt a real model receives.
-// rustfmt is authoritative for Rust line breaking and `cargo fmt --check` is green,
-// so any surviving >120-column Rust line is one rustfmt will not break.
+// overlong_handwritten_source is 258 against a certified baseline of 244. The
+// surviving +14 lines are CANDIDATE-INTRODUCED, OPERATOR-ACCEPTED debt (not
+// pre-existing) and remain itemized in every gate report. This ratchet was lowered
+// from 260 after codegen's list-schema expression and the ambient ReadOperations
+// declaration were structurally wrapped without changing runtime bytes. Other debt
+// remains constrained by flush Host/child LOC
+// budgets or exact prompt/authority bytes. Rustfmt is authoritative for Rust line
+// breaking and `cargo fmt --check` is green, so any surviving >120-column Rust line
+// is one rustfmt will not break automatically.
 const EXPECTED_CLASS_COUNTS = {
   codegen_escaped_newline_string: 3,
   hidden_data_rust_include: 1,
   identity_macro: 7,
   immediate_identity_invocation: 5,
-  overlong_handwritten_source: 260,
+  overlong_handwritten_source: 258,
   rustfmt_suppression: 1,
 };
 

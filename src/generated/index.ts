@@ -68,6 +68,9 @@ export type RunHealth = "healthy" | "degraded" | "paused" | "unsafe-halt";
 export type RunOutcome = "null" | "closed" | "aborted";
 export type RunPhase = "planning" | "ready-to-execute" | "allocating" | "executing" | "final-verification" | "ready-to-close" | "terminal";
 export type SessionContinuity = "fresh" | "resume";
+export type ValidationAdmissionComparison = "exact" | "subset-of" | "membership" | "line-bounds";
+export type ValidationAdmissionDisposition = "repairable-model-value" | "fatal-authority";
+export type ValidationAdmissionPhase = "shape" | "value" | "authority";
 export type ValidationAssignmentKind = "planning-review" | "delivery" | "validation";
 export type ValidationBlockerKind = "missing-evidence" | "stale-evidence" | "context-gap" | "external-prerequisite" | "unsafe-boundary";
 export type ValidationOutcomeV2 = "FORWARD_READY" | "FORWARD_BLOCKED" | "PASS" | "NEEDS_FIX" | "BLOCKED";
@@ -939,6 +942,38 @@ export interface TaskDocument {
   body: string;
 }
 
+export interface ValidationAdmissionDiagnostic {
+  schema: SchemaId;
+  boundary_id: ContractId;
+  validation_id: Id;
+  assignment_id: Id;
+  authority_digest: Digest;
+  value_attempt: number;
+  phase: ValidationAdmissionPhase;
+  disposition: ValidationAdmissionDisposition;
+  complete: boolean;
+  mismatch_count: number;
+  mismatches: ValidationAdmissionMismatch[];
+}
+
+export interface ValidationAdmissionMismatch {
+  code: string;
+  field: string;
+  criterion_id?: Id | null;
+  finding_id?: Id | null;
+  comparison: ValidationAdmissionComparison;
+  expected: string[];
+  actual: string[];
+  missing: string[];
+  extra: string[];
+  duplicates: ValidationAdmissionDuplicate[];
+}
+
+export interface ValidationAdmissionDuplicate {
+  value: string;
+  count: number;
+}
+
 export interface ValidationAssignmentV2 {
   schema: SchemaId;
   validation_id: Id;
@@ -972,6 +1007,30 @@ export interface ValidationAssignmentV2 {
   allowed_read_roots: Path[];
   allowed_command_ids: Id[];
   max_transport_attempts: number;
+}
+
+export interface ValidationAssignmentV3 {
+  schema: SchemaId;
+  validation_id: Id;
+  validation_key: Digest;
+  workstream: Id;
+  run_revision: number;
+  role_id: Id;
+  mode: ModeId;
+  assignment_id: Id;
+  action_id: Id;
+  validation_attempt: number;
+  semantic_round: number;
+  producer_assignment_ids: Id[];
+  base_commit: GitOid;
+  exact_commit: GitOid;
+  exact_tree: GitOid;
+  candidate_root: Path;
+  context_path: Path;
+  context_digest: Digest;
+  authority_path: Path;
+  authority_digest: Digest;
+  max_value_attempts: number;
 }
 
 export interface ValidationContextV2 {
@@ -1047,6 +1106,101 @@ export interface ValidationExcludedRef {
   reason: string;
 }
 
+export interface ValidationContextV3 {
+  schema: SchemaId;
+  validation_id: Id;
+  assignment_id: Id;
+  authority_digest: Digest;
+  criteria: ValidationContextV3Criterion[];
+  citation_records: ValidationCitationRecord[];
+}
+
+export interface ValidationContextV3Criterion {
+  criterion_id: Id;
+  requirement_text: string;
+  allowed_citation_refs: Ref[];
+}
+
+export interface ValidationCitationRecord {
+  evidence_ref: Ref;
+  kind: string;
+  source_path?: Path;
+  blob_digest?: Digest;
+  line_count?: number;
+  diff_digest?: Digest;
+  diff_path?: Path;
+}
+
+export interface ValidationEvidenceAuthority {
+  schema: SchemaId;
+  validation_id: Id;
+  assignment_id: Id;
+  exact_commit: GitOid;
+  exact_tree: GitOid;
+  base_commit: GitOid;
+  candidate_root: Path;
+  unchanged_recovery: boolean;
+  changed_paths: Path[];
+  deleted_paths: Path[];
+  diff_ref: Ref;
+  diff_digest: Digest;
+  diff_path: Path;
+  source_records: ValidationSourceRecord[];
+  diff_records: ValidationDiffRecord[];
+  command_receipts: ValidationReceiptRecord[];
+  package_check_receipts: ValidationReceiptRecord[];
+  criteria: ValidationAuthorityCriterion[];
+  authority_digest: Digest;
+}
+
+export interface ValidationSourceRecord {
+  evidence_ref: Ref;
+  kind: string;
+  exact_commit: GitOid;
+  exact_tree: GitOid;
+  source_path: Path;
+  git_blob_oid: GitOid;
+  blob_digest: Digest;
+  mode: string;
+  line_count: number;
+}
+
+export interface ValidationDiffRecord {
+  evidence_ref: Ref;
+  kind: string;
+  exact_commit: GitOid;
+  exact_tree: GitOid;
+  base_commit: GitOid;
+  diff_digest: Digest;
+  diff_path: Path;
+  byte_length: number;
+}
+
+export interface ValidationReceiptRecord {
+  evidence_ref: Ref;
+  receipt_digest: Digest;
+  receipt_json: Bytes;
+  kind: string;
+  exact_commit: GitOid;
+  exact_tree: GitOid;
+  binding_id: Id;
+  unit_id: Id;
+  criterion_ids: Id[];
+}
+
+export interface ValidationAuthorityCriterion {
+  criterion_id: Id;
+  unit_id: Id;
+  unit_criterion_ordinal: number;
+  requirement_text: string;
+  covered_paths: Path[];
+  semantic_surface_ids: Id[];
+  forward_edge_ids: Id[];
+  allowed_citation_refs: Ref[];
+  command_receipt_refs: Ref[];
+  package_check_receipt_refs: Ref[];
+}
+
 export interface ValidationResultV2 {
   schema: SchemaId;
   action_id: Id;
@@ -1091,6 +1245,54 @@ export interface ValidationResultV2 {
   submission: ValidationSubmissionV2;
 }
 
+export interface ValidationResultV3 {
+  schema: SchemaId;
+  action_id: Id;
+  assignment_id: Id;
+  validation_id: Id;
+  validation_key: Digest;
+  validation_attempt: number;
+  semantic_round: number;
+  run_revision: number;
+  workstream: Id;
+  role_id: Id;
+  mode: ModeId;
+  producer_assignment_ids: Id[];
+  exact_commit: GitOid;
+  exact_tree: GitOid;
+  assignment_path: Path;
+  assignment_digest: Digest;
+  context_manifest_path: Path;
+  context_manifest_digest: Digest;
+  authority_path: Path;
+  authority_digest: Digest;
+  prompt_path: Path;
+  prompt_digest: Digest;
+  spec_path: Path;
+  spec_digest: Digest;
+  spec_bytes: Bytes;
+  carrier_path: Path;
+  boundary_id: ContractId;
+  boundary_digest: Digest;
+  result_contract: ContractId;
+  result_contract_digest: Digest;
+  settings_digest: Digest;
+  skills_digest: Digest;
+  subscription_digest: Digest;
+  runtime_extension_digest: Digest;
+  terminal_profile_id: string;
+  tool_name: ToolName;
+  tool_schema_digest: Digest;
+  carrier_binding: Digest;
+  tool_call_id: string;
+  tool_audit_ref: Ref;
+  tool_audit_digest: Digest;
+  submission_digest: Digest;
+  submission: ValidationSubmissionV3;
+  verdict_digest: Digest;
+  verdict: ValidationVerdictV3;
+}
+
 export interface ValidationSubmissionV2 {
   schema: SchemaId;
   validation_id: Id;
@@ -1114,6 +1316,36 @@ export interface CriterionResultV2 {
   forward_edge_ids: Id[];
 }
 
+export interface ValidationSubmissionV3 {
+  schema: SchemaId;
+  criterion_results: CriterionResultV3[];
+  findings: FindingV3[];
+}
+
+export interface CriterionResultV3 {
+  criterion_id: Id;
+  verdict: CriterionVerdict;
+  citation_refs: Ref[];
+  finding_ids: Id[];
+}
+
+export interface FindingV3 {
+  finding_id: Id;
+  kind: FindingKindV2;
+  effect: FindingEffect;
+  summary: string;
+  detail: string;
+  criterion_ids: Id[];
+  citation_refs: Ref[];
+  source_locations: ValidationSourceLocation[];
+}
+
+export interface ValidationSourceLocation {
+  citation_ref: Ref;
+  start_line: number;
+  end_line: number;
+}
+
 export interface ValidationVerdict {
   assignment_id: Id;
   validation_scope: ValidationScope;
@@ -1130,6 +1362,29 @@ export interface CriterionResult {
   verdict: CriterionVerdict;
   evidence_refs: Ref[];
   finding_refs: Ref[];
+  covered_paths: Path[];
+  semantic_surface_ids: Id[];
+  forward_edge_ids: Id[];
+}
+
+export interface ValidationVerdictV3 {
+  schema: SchemaId;
+  validation_id: Id;
+  assignment_id: Id;
+  exact_commit: GitOid;
+  exact_tree: GitOid;
+  outcome: ValidationOutcomeV2;
+  criterion_results: NormalizedCriterionResultV3[];
+  findings: FindingV3[];
+}
+
+export interface NormalizedCriterionResultV3 {
+  criterion_id: Id;
+  verdict: CriterionVerdict;
+  model_citation_refs: Ref[];
+  command_receipt_refs: Ref[];
+  package_check_receipt_refs: Ref[];
+  finding_ids: Id[];
   covered_paths: Path[];
   semantic_surface_ids: Id[];
   forward_edge_ids: Id[];

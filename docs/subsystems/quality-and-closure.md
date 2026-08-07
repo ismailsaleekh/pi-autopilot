@@ -52,6 +52,15 @@ disposition records `repaired`, `no-defect`, `requires-new-authority`,
 independent gate, once. A second rejection is preserved as exhaustion rather than fed into a
 loop.
 
+Validation has three distinct dispositions. Malformed V3 model shape or semantic linkage stays in
+the same Validator session for at most three package-admitted value attempts. Assignment, Git,
+evidence-policy, receipt, carrier, audit, or provenance corruption is fatal and never enters
+Recovery. Only a fully admitted semantic blocker with an eligible typed finding may launch the one
+fresh Recovery Engineer; its output must return to the unchanged independent gate. Advisory-only
+findings cannot suppress or expand a real forward blocker. Repair diagnostics preserve original
+value-set counts/digests, redact rejected receipt-looking text, and use same-domain backlink diffs;
+the parent independently requires the result submission to equal Core's canonical admission.
+
 The model's blocker label cannot open delivery recovery by itself. Core requires the exact issued
 assignment and audit provenance plus mechanical Git and worktree facts. A
 `requires-new-authority` delivery is reconcilable only when a nonempty bounded denial ledger

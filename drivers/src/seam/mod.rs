@@ -458,8 +458,11 @@ fn resume_pending_validation_recovery(
             continue;
         }
         let result = read_validation_result(&validation)?;
-        let producer_id = result
-            .producer_assignment_ids
+        let producer_ids = match &result {
+            ReadValidationResult::V2(value) => &value.producer_assignment_ids,
+            ReadValidationResult::V3(value) => &value.producer_assignment_ids,
+        };
+        let producer_id = producer_ids
             .first()
             .ok_or_else(|| "recovery resume validation missing producer".to_owned())?;
         let recovery_id = idv(&format!("recovery-{}-a1", producer_id.0));
@@ -477,13 +480,30 @@ fn resume_pending_validation_recovery(
             )?;
             return controlled_spawn(id, action, state, "validation-recovery-reemit").map(Some);
         }
-        let blockers = validation_blockers(&result);
-        if result.submission.outcome == kernel::generated::ValidationOutcomeV2::FORWARDREADY
-            || blockers.is_empty()
-        {
-            return Err("recovery resume validation is not a blocked coherent verdict".into());
-        }
-        return repair_needed(id, &validation, &result, blockers, state).map(Some);
+        return match result {
+            ReadValidationResult::V2(result) => {
+                let blockers = validation_blockers(&result);
+                if result.submission.outcome == kernel::generated::ValidationOutcomeV2::FORWARDREADY
+                    || blockers.is_empty()
+                {
+                    return Err(
+                        "recovery resume validation is not a blocked coherent verdict".into(),
+                    );
+                }
+                repair_needed(id, &validation, &result, blockers, state).map(Some)
+            }
+            ReadValidationResult::V3(result) => {
+                let blockers = validation_blockers_v3(&result);
+                if result.verdict.outcome == kernel::generated::ValidationOutcomeV2::FORWARDREADY
+                    || blockers.is_empty()
+                {
+                    return Err(
+                        "recovery resume v3 validation is not a blocked coherent verdict".into(),
+                    );
+                }
+                repair_needed_v3(id, &validation, &result, blockers, state).map(Some)
+            }
+        };
     }
     Ok(None)
 }
@@ -1268,7 +1288,10 @@ fn route_task_completed(
         record_delivery_transcript(&binding, &carrier_text, state)?;
         return delivery_accepted(id, &binding, &accepted, validation_issue, state);
     }
-    if binding.result_contract.0 == "autopilot.validation_result.v2" {
+    if matches!(
+        binding.result_contract.0.as_str(),
+        "autopilot.validation_result.v2" | "autopilot.validation_result.v3"
+    ) {
         return validation_completed(id, &binding, &payload, state);
     }
     if binding.result_contract.0.starts_with("planning.") {
@@ -2669,18 +2692,373 @@ fn validate_validation_result_v2(
     Ok(())
 }
 
+enum ReadValidationResult {
+    V2(kernel::generated::ValidationResultV2),
+    V3(kernel::generated::ValidationResultV3),
+}
+
+fn validate_validation_result_v3(
+    result: &kernel::generated::ValidationResultV3,
+    binding: &runner::IssuedRunnerBinding,
+) -> Result<(), String> {
+    let binding_assignment_path = binding
+        .assignment_path
+        .as_deref()
+        .ok_or_else(|| "missing v3 binding assignment path".to_owned())?;
+    let binding_assignment_digest = binding
+        .assignment_digest
+        .as_deref()
+        .ok_or_else(|| "missing v3 binding assignment digest".to_owned())?;
+    if result.schema.0 != "autopilot.validation_result.v3"
+        || result.action_id != binding.action_id
+        || result.assignment_id != binding.assignment_id
+        || result.run_revision != binding.run_revision
+        || result.workstream != binding.workstream
+        || result.role_id != binding.role_id
+        || result.mode != binding.mode
+        || result.prompt_path.0 != binding.prompt_path
+        || result.prompt_digest.0 != binding.prompt_digest
+        || result.spec_path.0 != binding.spec_path
+        || result.spec_digest.0 != binding.spec_digest
+        || result.carrier_path.0 != binding.carrier_path
+        || result.boundary_id != binding.boundary_id
+        || result.boundary_digest.0 != binding.boundary_digest
+        || result.result_contract != binding.result_contract
+        || result.result_contract_digest.0 != binding.result_contract_digest
+        || result.settings_digest.0 != binding.settings_digest
+        || result.skills_digest.0 != binding.skills_digest
+        || result.subscription_digest.0 != binding.subscription_digest
+        || result.assignment_path.0 != binding_assignment_path
+        || result.assignment_digest.0 != binding_assignment_digest
+    {
+        return Err("package-bound v3 validation identity/provenance drift".to_owned());
+    }
+    let prompt_bytes = runner::read_bounded_file(
+        Path::new(&binding.prompt_path),
+        runner::child::MAX_RENDERED_PROMPT_BYTES,
+    )
+    .map_err(|error| format!("v3 validation prompt read: {error}"))?;
+    if sha256_hex_local(&prompt_bytes) != binding.prompt_digest {
+        return Err("v3 validation prompt bytes/digest drift".to_owned());
+    }
+
+    let spec_bytes = result.spec_bytes.0.as_bytes();
+    if spec_bytes.len() > MAX_CARRIER_SPEC_BYTES
+        || sha256_hex_local(spec_bytes) != binding.spec_digest
+    {
+        return Err("v3 validation spec receipt drift".to_owned());
+    }
+    let spec: kernel::generated::AgentRunSpec =
+        serde_json::from_slice(spec_bytes).map_err(|error| error.to_string())?;
+    if spec.schema.0 != "autopilot.agent_run_spec.v4"
+        || spec.assignment_kind != kernel::generated::ValidationAssignmentKind::Validation
+        || spec.action_id != binding.action_id
+        || spec.assignment_id != binding.assignment_id
+        || spec.run_revision != binding.run_revision
+        || spec.workstream != binding.workstream
+        || spec.role_id != binding.role_id
+        || spec.mode != binding.mode
+        || spec.prompt_path.0 != binding.prompt_path
+        || spec.prompt_digest.0 != binding.prompt_digest
+        || spec.spec_path.0 != binding.spec_path
+        || spec.carrier_path.0 != binding.carrier_path
+        || spec.session_id != binding.session_id
+        || spec.boundary_id != binding.boundary_id
+        || spec.boundary_digest.0 != binding.boundary_digest
+        || spec.result_contract != binding.result_contract
+        || spec.result_contract_digest.0 != binding.result_contract_digest
+        || spec.settings_digest.0 != binding.settings_digest
+        || spec.context_digest.0 != binding.context_digest
+        || spec.skills_digest.0 != binding.skills_digest
+        || spec.subscription_digest.0 != binding.subscription_digest
+        || spec.assignment_path.as_ref() != Some(&result.assignment_path)
+        || spec.assignment_path.as_ref().map(|path| path.0.as_str())
+            != Some(binding_assignment_path)
+        || spec.assignment_digest.as_ref() != Some(&result.assignment_digest)
+        || spec
+            .assignment_digest
+            .as_ref()
+            .map(|digest| digest.0.as_str())
+            != Some(binding_assignment_digest)
+        || spec.context_manifest_path.as_ref() != Some(&result.context_manifest_path)
+        || spec.context_manifest_digest.as_ref() != Some(&result.context_manifest_digest)
+        || spec.validation_id.as_ref() != Some(&result.validation_id)
+        || spec.validation_attempt != Some(result.validation_attempt)
+        || spec.semantic_round != Some(result.semantic_round)
+        || spec.producer_assignment_ids.as_ref() != Some(&result.producer_assignment_ids)
+        || spec.lane_id != binding.lane_id
+        || spec.attempt != binding.attempt
+        || spec.base_commit != binding.base_commit
+        || spec.worktree.as_ref().map(|path| path.0.as_str()) != binding.worktree.as_deref()
+        || spec.required_focused_evidence != Some(binding.required_focused_evidence)
+        || spec.model_submission_path.is_none()
+        || spec.runtime_extension_path.is_none()
+        || spec
+            .runtime_extension_digest
+            .as_ref()
+            .map(|digest| digest.0.as_str())
+            != Some(kernel::generated::CHILD_ADDON_DIGEST)
+        || spec.terminal_profile_id.as_deref() != Some(result.terminal_profile_id.as_str())
+    {
+        return Err("v3 validation spec/binding/result provenance drift".to_owned());
+    }
+    let context_binding_digest = sha256_hex_local(
+        &serde_json::to_vec(&serde_json::json!({
+            "assignment_path": spec.assignment_path,
+            "assignment_digest": spec.assignment_digest,
+            "context_manifest_path": spec.context_manifest_path,
+            "context_manifest_digest": spec.context_manifest_digest,
+            "producer_assignment_ids": spec.producer_assignment_ids,
+            "validation_id": spec.validation_id,
+            "validation_attempt": spec.validation_attempt,
+            "semantic_round": spec.semantic_round,
+        }))
+        .map_err(|error| error.to_string())?,
+    );
+    if context_binding_digest != binding.context_digest {
+        return Err("v3 validation context binding digest drift".to_owned());
+    }
+    let runtime = runner::role_runtime(&binding.role_id.0).map_err(|error| error.to_string())?;
+    if spec.provider != runtime.provider
+        || spec.model != runtime.model
+        || spec.thinking.0 != runtime.thinking
+        || spec.route != "subscription"
+        || runtime.route != "subscription"
+    {
+        return Err("v3 validation subscription roster provenance drift".to_owned());
+    }
+    let profile = runner::terminal_profile_for(
+        &binding.role_id.0,
+        &binding.boundary_id.0,
+        &binding.result_contract.0,
+    )
+    .map_err(|error| error.to_string())?;
+    let resolved = runner::resolve_role_tools(&binding.role_id.0, profile.0)
+        .map_err(|error| error.to_string())?;
+    let active_tools = spec
+        .allowed_tools
+        .iter()
+        .map(|tool| tool.0.clone())
+        .collect::<Vec<_>>();
+    let unavailable_tools = spec
+        .unavailable_tools
+        .as_ref()
+        .map_or_else(Vec::new, |tools| {
+            tools.iter().map(|tool| tool.0.clone()).collect::<Vec<_>>()
+        });
+    let runtime_path = spec
+        .runtime_extension_path
+        .as_ref()
+        .ok_or_else(|| "v3 validation missing runtime add-on path".to_owned())?;
+    if result.terminal_profile_id != profile.0
+        || result.tool_name.0 != profile.1
+        || result.tool_schema_digest.0 != profile.4
+        || result.carrier_binding.0 != runner::child::carrier_binding(&spec)
+        || result.runtime_extension_digest.0 != kernel::generated::CHILD_ADDON_DIGEST
+        || runner::child_addon_digest_for_path(Path::new(&runtime_path.0))
+            .map_err(|error| error.to_string())?
+            != kernel::generated::CHILD_ADDON_DIGEST
+        || active_tools != resolved.active
+        || unavailable_tools != resolved.unavailable
+        || result.tool_call_id.trim().is_empty()
+    {
+        return Err("v3 validation terminal profile/tool schema/binding drift".to_owned());
+    }
+
+    let assignment_bytes = runner::read_bounded_file(
+        Path::new(&result.assignment_path.0),
+        kernel::generated::VALIDATION_ASSIGNMENT_V3_MAX_BYTES,
+    )
+    .map_err(|error| error.to_string())?;
+    if sha256_hex_local(&assignment_bytes) != result.assignment_digest.0 {
+        return Err("v3 validation assignment digest drift".to_owned());
+    }
+    let assignment: kernel::generated::ValidationAssignmentV3 =
+        serde_json::from_slice(&assignment_bytes).map_err(|error| error.to_string())?;
+    if serde_json::to_vec_pretty(&assignment).map_err(|error| error.to_string())?
+        != assignment_bytes
+    {
+        return Err("v3 validation assignment canonical-byte drift".to_owned());
+    }
+    let expected_key = sha256_hex_local(
+        format!(
+            "validation.v3\0{}\0{}\0{}",
+            assignment.validation_id.0, assignment.exact_commit.0, assignment.exact_tree.0
+        )
+        .as_bytes(),
+    );
+    if assignment.schema.0 != "autopilot.validation_assignment.v3"
+        || assignment.validation_id != result.validation_id
+        || assignment.validation_key != result.validation_key
+        || assignment.validation_attempt != result.validation_attempt
+        || assignment.semantic_round != result.semantic_round
+        || assignment.producer_assignment_ids != result.producer_assignment_ids
+        || assignment.exact_commit != result.exact_commit
+        || assignment.exact_tree != result.exact_tree
+        || assignment.action_id != result.action_id
+        || assignment.assignment_id != result.assignment_id
+        || assignment.workstream != result.workstream
+        || assignment.run_revision != result.run_revision
+        || assignment.role_id != result.role_id
+        || assignment.mode != result.mode
+        || assignment.context_path != result.context_manifest_path
+        || assignment.context_digest != result.context_manifest_digest
+        || assignment.authority_path != result.authority_path
+        || assignment.authority_digest != result.authority_digest
+        || assignment.candidate_root.0 != spec.cwd.0
+        || assignment.base_commit.0 != spec.base_commit.as_ref().map_or("", |sha| &sha.0)
+        || assignment.validation_key.0 != expected_key
+        || assignment.max_value_attempts != 3
+    {
+        return Err("v3 validation assignment/result/spec identity drift".to_owned());
+    }
+
+    let expectation = runner::validation_authority::ValidationAuthorityExpectation {
+        validation_id: &assignment.validation_id,
+        assignment_id: &assignment.assignment_id,
+        base_commit: &assignment.base_commit,
+        exact_commit: &assignment.exact_commit,
+        exact_tree: &assignment.exact_tree,
+        candidate_root: Path::new(&spec.cwd.0),
+    };
+    let authority = runner::validation_authority::ValidationAuthorityIndex::load_for(
+        Path::new(&result.authority_path.0),
+        &result.authority_digest.0,
+        &expectation,
+    )
+    .map_err(validation_authority_failure_text)?;
+
+    let context_bytes = runner::read_bounded_file(
+        Path::new(&result.context_manifest_path.0),
+        kernel::generated::VALIDATION_CONTEXT_V3_MAX_BYTES,
+    )
+    .map_err(|error| error.to_string())?;
+    if sha256_hex_local(&context_bytes) != result.context_manifest_digest.0 {
+        return Err("v3 validation context digest drift".to_owned());
+    }
+    let context: kernel::generated::ValidationContextV3 =
+        serde_json::from_slice(&context_bytes).map_err(|error| error.to_string())?;
+    if serde_json::to_vec_pretty(&context).map_err(|error| error.to_string())? != context_bytes
+        || authority.context_projection() != context
+    {
+        return Err("v3 validation context canonical authority projection drift".to_owned());
+    }
+
+    let submission_path = spec
+        .model_submission_path
+        .as_ref()
+        .ok_or_else(|| "v3 validation missing model submission path".to_owned())?;
+    let expected_submission_path = Path::new(&result.assignment_path.0)
+        .parent()
+        .ok_or_else(|| "v3 assignment path has no parent".to_owned())?
+        .join("model-submission.v3.json");
+    if Path::new(&submission_path.0) != expected_submission_path {
+        return Err("v3 model submission path drift".to_owned());
+    }
+    let raw_submission = runner::read_bounded_file(
+        Path::new(&submission_path.0),
+        kernel::generated::VALIDATION_SUBMISSION_V3_MAX_BYTES,
+    )
+    .map_err(|error| error.to_string())?;
+    if sha256_hex_local(&raw_submission) != result.submission_digest.0 {
+        return Err("v3 raw model submission digest drift".to_owned());
+    }
+    let raw_value: serde_json::Value =
+        serde_json::from_slice(&raw_submission).map_err(|error| error.to_string())?;
+    let result_submission_value =
+        serde_json::to_value(&result.submission).map_err(|error| error.to_string())?;
+    let canonical_raw_submission =
+        serde_json::to_vec(&raw_value).map_err(|error| error.to_string())?;
+    if raw_value != result_submission_value
+        || raw_submission != canonical_raw_submission
+        || sha256_hex_local(&canonical_raw_submission) != result.submission_digest.0
+    {
+        return Err("v3 raw/typed submission canonical content drift".to_owned());
+    }
+    let admitted = authority
+        .admit_raw(&raw_value, result.validation_attempt)
+        .map_err(validation_authority_failure_text)?;
+    if admitted.submission != result.submission {
+        return Err("v3 admitted canonical submission/result drift".to_owned());
+    }
+    let result_verdict_bytes =
+        serde_json::to_vec(&result.verdict).map_err(|error| error.to_string())?;
+    if admitted.verdict != result.verdict
+        || admitted.verdict_bytes != result_verdict_bytes
+        || sha256_hex_local(&admitted.verdict_bytes) != result.verdict_digest.0
+    {
+        return Err("v3 independently normalized verdict bytes/digest drift".to_owned());
+    }
+
+    let audit_path = PathBuf::from(&binding.carrier_path).with_extension("tool-audit.json");
+    let audit_bytes = runner::read_bounded_file(&audit_path, MAX_TOOL_AUDIT_BYTES)
+        .map_err(|error| error.to_string())?;
+    if result.tool_audit_ref.0 != audit_path.display().to_string()
+        || sha256_hex_local(&audit_bytes) != result.tool_audit_digest.0
+    {
+        return Err("v3 validation audit path/digest drift".to_owned());
+    }
+    let audit: ValidationToolAudit =
+        serde_json::from_slice(&audit_bytes).map_err(|error| error.to_string())?;
+    if audit.schema != "autopilot.tool_audit.v1"
+        || audit.tool_call_id != result.tool_call_id
+        || audit.profile_id != result.terminal_profile_id
+        || audit.tool_name != result.tool_name.0
+        || audit.boundary_id != result.boundary_id.0
+        || audit.result_contract != result.result_contract.0
+        || audit.schema_digest != result.tool_schema_digest.0
+        || audit.binding != result.carrier_binding.0
+        || audit.submission_digest != result.submission_digest.0
+    {
+        return Err("v3 validation tool-call audit content drift".to_owned());
+    }
+    Ok(())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ValidationToolAudit {
+    schema: String,
+    tool_call_id: String,
+    profile_id: String,
+    tool_name: String,
+    boundary_id: String,
+    result_contract: String,
+    schema_digest: String,
+    binding: String,
+    submission_digest: String,
+}
+
+fn validation_authority_failure_text(
+    failure: runner::validation_authority::AdmissionFailure,
+) -> String {
+    match failure.canonical_bytes() {
+        Ok(bytes) => String::from_utf8(bytes)
+            .unwrap_or_else(|error| format!("non-UTF-8 validation diagnostic: {error}")),
+        Err(error) => format!("validation diagnostic invariant failed: {error}"),
+    }
+}
 fn read_validation_result(
     binding: &runner::IssuedRunnerBinding,
-) -> Result<kernel::generated::ValidationResultV2, AnyError> {
+) -> Result<ReadValidationResult, AnyError> {
     let text = read_bounded_utf8(
         Path::new(&binding.carrier_path),
         MAX_TERMINAL_CARRIER_BYTES,
         "validation-carrier-read",
     )?;
-    let result = serde_json::from_str(&text)
-        .map_err(|error| format!("validation-carrier:{}:{error}", binding.carrier_path))?;
-    validate_validation_result_v2(&result, binding)?;
-    Ok(result)
+    if binding.result_contract.0 == "autopilot.validation_result.v2" {
+        let result: kernel::generated::ValidationResultV2 = serde_json::from_str(&text)
+            .map_err(|error| format!("validation-carrier:{}:{error}", binding.carrier_path))?;
+        validate_validation_result_v2(&result, binding)?;
+        return Ok(ReadValidationResult::V2(result));
+    }
+    if binding.result_contract.0 == "autopilot.validation_result.v3" {
+        let result: kernel::generated::ValidationResultV3 = serde_json::from_str(&text)
+            .map_err(|error| format!("validation-carrier:{}:{error}", binding.carrier_path))?;
+        validate_validation_result_v3(&result, binding)?;
+        return Ok(ReadValidationResult::V3(result));
+    }
+    Err("unknown validation result contract".into())
 }
 
 fn validation_blockers(result: &kernel::generated::ValidationResultV2) -> Vec<Id> {
@@ -2714,21 +3092,296 @@ fn validation_completed(
     let result = read_validation_result(binding)?;
     append_terminal_event(state, terminal, binding)?;
     record_task_completion_control(state, terminal)?;
-    let blockers = validation_blockers(&result);
-    if result.submission.outcome == kernel::generated::ValidationOutcomeV2::FORWARDREADY
+    match result {
+        ReadValidationResult::V2(result) => {
+            let blockers = validation_blockers(&result);
+            if result.submission.outcome == kernel::generated::ValidationOutcomeV2::FORWARDREADY
+                && blockers.is_empty()
+            {
+                integrate_validated_candidate_v2(id, binding, &result, state)
+            } else if result.submission.outcome
+                != kernel::generated::ValidationOutcomeV2::FORWARDREADY
+                && !blockers.is_empty()
+            {
+                repair_needed(id, binding, &result, blockers, state)
+            } else {
+                done(
+                    id,
+                    rejection("validation-verdict", "outcome/blocker incoherence"),
+                )
+            }
+        }
+        ReadValidationResult::V3(result) => validation_completed_v3(id, binding, &result, state),
+    }
+}
+
+fn validation_blockers_v3(result: &kernel::generated::ValidationResultV3) -> Vec<Id> {
+    result
+        .verdict
+        .criterion_results
+        .iter()
+        .filter(|criterion| criterion.verdict != kernel::generated::CriterionVerdict::PASS)
+        .map(|criterion| criterion.criterion_id.clone())
+        .chain(
+            result
+                .verdict
+                .findings
+                .iter()
+                .filter(|finding| {
+                    finding.effect == kernel::generated::FindingEffect::ForwardBlocking
+                })
+                .flat_map(|finding| finding.criterion_ids.clone()),
+        )
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn validation_completed_v3(
+    id: u64,
+    binding: &runner::IssuedRunnerBinding,
+    result: &kernel::generated::ValidationResultV3,
+    state: &mut CoreState,
+) -> Result<SeamEnvelope, AnyError> {
+    let blockers = validation_blockers_v3(result);
+    if result.verdict.outcome == kernel::generated::ValidationOutcomeV2::FORWARDREADY
         && blockers.is_empty()
     {
-        integrate_validated_candidate_v2(id, binding, &result, state)
-    } else if result.submission.outcome != kernel::generated::ValidationOutcomeV2::FORWARDREADY
+        return integrate_validated_candidate_v3(id, binding, result, state);
+    }
+    if result.verdict.outcome != kernel::generated::ValidationOutcomeV2::FORWARDREADY
         && !blockers.is_empty()
     {
-        repair_needed(id, binding, &result, blockers, state)
-    } else {
-        done(
-            id,
-            rejection("validation-verdict", "outcome/blocker incoherence"),
-        )
+        return repair_needed_v3(id, binding, result, blockers, state);
     }
+    done(
+        id,
+        rejection("validation-verdict", "v3 outcome/blocker incoherence"),
+    )
+}
+
+fn integrate_validated_candidate_v3(
+    id: u64,
+    binding: &runner::IssuedRunnerBinding,
+    result: &kernel::generated::ValidationResultV3,
+    state: &mut CoreState,
+) -> Result<SeamEnvelope, AnyError> {
+    let verdict = kernel::generated::ValidationVerdict {
+        assignment_id: result.assignment_id.clone(),
+        validation_scope: kernel::generated::ValidationScope("forward".to_owned()),
+        exact_commit: Sha(result.exact_commit.0.clone()),
+        exact_tree: Sha(result.exact_tree.0.clone()),
+        forward_verdict: Some(kernel::generated::ForwardVerdict::FORWARDREADY),
+        closure_verdict: None,
+        criterion_results: result
+            .verdict
+            .criterion_results
+            .iter()
+            .map(|criterion| kernel::generated::CriterionResult {
+                criterion_id: criterion.criterion_id.clone(),
+                verdict: criterion.verdict.clone(),
+                evidence_refs: criterion
+                    .model_citation_refs
+                    .iter()
+                    .chain(&criterion.command_receipt_refs)
+                    .chain(&criterion.package_check_receipt_refs)
+                    .cloned()
+                    .collect(),
+                finding_refs: criterion
+                    .finding_ids
+                    .iter()
+                    .map(|id| Ref(id.0.clone()))
+                    .collect(),
+                covered_paths: criterion.covered_paths.clone(),
+                semantic_surface_ids: criterion.semantic_surface_ids.clone(),
+                forward_edge_ids: criterion.forward_edge_ids.clone(),
+            })
+            .collect(),
+        finding_refs: result
+            .verdict
+            .findings
+            .iter()
+            .map(|finding| Ref(finding.finding_id.0.clone()))
+            .collect(),
+    };
+    integrate_validated_candidate(id, binding, &verdict, state)
+}
+
+fn repair_needed_v3(
+    id: u64,
+    binding: &runner::IssuedRunnerBinding,
+    result: &kernel::generated::ValidationResultV3,
+    blocker_ids: Vec<Id>,
+    state: &mut CoreState,
+) -> Result<SeamEnvelope, AnyError> {
+    let producer_id = result
+        .producer_assignment_ids
+        .first()
+        .ok_or_else(|| "v3 validation recovery missing producer assignment".to_owned())?;
+    let producer = issued_binding_for_assignment(state, producer_id)
+        .ok_or_else(|| "v3 validation recovery missing producer binding".to_owned())?;
+    let policy = crate::repair::SemanticRecoveryPolicy::package()?;
+    if producer.role_id.0 == "recovery-engineer" || result.semantic_round > policy.max_attempts {
+        state.append(
+            EventKind("recovery:exhausted".to_owned()),
+            vec![
+                Ref(binding.assignment_id.0.clone()),
+                Ref(format!("blockers={}", ids(&blocker_ids))),
+                Ref("semantic-recovery-exhausted".to_owned()),
+                lane_blocker_ref(binding)?,
+            ],
+        )?;
+        return done(
+            id,
+            rejection(
+                "recovery-exhausted",
+                &format!("blockers={}", ids(&blocker_ids)),
+            ),
+        );
+    }
+    let approved_units = read_delivery_assignment_units(&producer)?;
+    let findings = result
+        .verdict
+        .findings
+        .iter()
+        .filter(|finding| {
+            finding.effect == kernel::generated::FindingEffect::ForwardBlocking
+                && blocker_ids
+                    .iter()
+                    .any(|id| finding.criterion_ids.contains(id))
+        })
+        .collect::<Vec<_>>();
+    let inadmissible_kinds = findings
+        .iter()
+        .filter(|finding| {
+            matches!(
+                finding.kind,
+                kernel::generated::FindingKindV2::ContextGap
+                    | kernel::generated::FindingKindV2::UnsafeBoundary
+            )
+        })
+        .map(|finding| format!("{}:{:?}", finding.finding_id.0, finding.kind))
+        .collect::<Vec<_>>();
+    if findings.is_empty() || !inadmissible_kinds.is_empty() {
+        let detail = if findings.is_empty() {
+            "missing typed blocking finding".to_owned()
+        } else {
+            inadmissible_kinds.join(",")
+        };
+        let failure_ref = if findings
+            .iter()
+            .any(|finding| finding.kind == kernel::generated::FindingKindV2::UnsafeBoundary)
+        {
+            Ref("semantic-recovery-unsafe".to_owned())
+        } else if findings
+            .iter()
+            .any(|finding| finding.kind == kernel::generated::FindingKindV2::ContextGap)
+        {
+            Ref("semantic-recovery-new-authority".to_owned())
+        } else {
+            Ref("semantic-recovery-inadmissible".to_owned())
+        };
+        state.append(
+            EventKind("recovery:inadmissible".to_owned()),
+            vec![
+                Ref(binding.assignment_id.0.clone()),
+                Ref(format!("validation-recovery-inadmissible:{detail}")),
+                failure_ref,
+                lane_blocker_ref(binding)?,
+            ],
+        )?;
+        return done(id, rejection("validation-recovery-inadmissible", &detail));
+    }
+    let mut diagnosis_refs = vec![Ref(binding.carrier_path.clone())];
+    diagnosis_refs.extend(
+        findings
+            .iter()
+            .flat_map(|finding| finding.citation_refs.iter().cloned()),
+    );
+    let mut diagnosis_details = findings
+        .iter()
+        .map(|finding| {
+            let source_locations = finding
+                .source_locations
+                .iter()
+                .map(|location| {
+                    format!(
+                        "{}:{}-{}",
+                        location.citation_ref.0, location.start_line, location.end_line
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                "{}: {} — {}; source_locations=[{}]",
+                finding.finding_id.0, finding.summary, finding.detail, source_locations
+            )
+        })
+        .collect::<Vec<_>>();
+    if diagnosis_details.is_empty() {
+        diagnosis_details.push(format!("blocked criteria: {}", ids(&blocker_ids)));
+    }
+    let repair_mode = if findings
+        .iter()
+        .any(|finding| finding.kind == kernel::generated::FindingKindV2::TestDefect)
+    {
+        "failed-test"
+    } else if findings
+        .iter()
+        .any(|finding| finding.kind == kernel::generated::FindingKindV2::ContractDefect)
+    {
+        "conflict-resolution"
+    } else if findings
+        .iter()
+        .any(|finding| finding.kind == kernel::generated::FindingKindV2::EvidenceGap)
+    {
+        "closure-repair"
+    } else {
+        "forward-critical"
+    };
+    let directive = runner::RecoveryDirective {
+        schema: "autopilot.recovery_directive.v1".to_owned(),
+        trigger_phase: "validation".to_owned(),
+        repair_mode: ModeId(repair_mode.to_owned()),
+        trigger_assignment_id: binding.assignment_id.clone(),
+        diagnosis_refs,
+        diagnosis_ids: findings
+            .iter()
+            .map(|finding| finding.finding_id.clone())
+            .chain(
+                blocker_ids
+                    .iter()
+                    .map(|id| idv(&format!("criterion:{}", id.0))),
+            )
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
+        diagnosis_details,
+        original_gate: format!("validator:{}:semantic-round-1", binding.assignment_id.0),
+        attempt_budget: policy.max_attempts,
+    };
+    let pending_ref = Ref(format!(
+        "recovery-validation-pending:{}",
+        binding.assignment_id.0
+    ));
+    if !state.state.refs.contains_key(&pending_ref) {
+        state.append(
+            EventKind("recovery:pending".to_owned()),
+            vec![
+                pending_ref,
+                Ref(binding.assignment_id.0.clone()),
+                Ref(producer.assignment_id.0.clone()),
+            ],
+        )?;
+    }
+    let assignment = recovery_runner_assignment(
+        &producer,
+        Sha(result.exact_commit.0.clone()),
+        approved_units,
+        directive,
+        state.state.revision,
+    )?;
+    spawn_recovery_assignment(id, assignment, state, "validation:recovery-required")
 }
 
 fn integrate_validated_candidate_v2(
@@ -3407,7 +4060,7 @@ fn validation_issue_for_delivery(
     );
     let assignment_id = Id(format!("validator-{}", binding.assignment_id.0));
     let approved_units = read_delivery_assignment_units(binding)?;
-    runner::validation_issue(
+    runner::validation_issue_v3(
         &runner::ValidationRunnerRequest {
             workstream: binding.workstream.clone(),
             action_id: Id(format!("action-{}", assignment_id.0)),
@@ -3418,6 +4071,8 @@ fn validation_issue_for_delivery(
             exact_tree: accepted.package_tree.0.clone(),
             candidate_root: worktree.clone(),
             changed_paths: accepted.changed_paths.clone(),
+            unchanged_recovery: binding.role_id.0 == "recovery-engineer"
+                && accepted.changed_paths.is_empty(),
             execution_audit_ref: accepted.audit_ref.clone(),
             evidence_refs: accepted.focused_evidence_refs.clone(),
             lane_id,

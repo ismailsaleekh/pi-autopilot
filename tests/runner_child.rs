@@ -7,14 +7,15 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use drivers::allocation::{ApprovedCriterion, ApprovedUnit};
 use drivers::planning;
 use drivers::runner::{
-    RunnerAssignment, RunnerTransportFacts, child, delivery_issue_with_facts,
-    planning_context_digest, planning_paths, repository_authority_binding, role_runtime,
-    role_tool_names, session_id_for, settings_digest,
+    RunnerAssignment, RunnerTransportFacts, ValidationRunnerRequest, VerifiedCommandExecution,
+    approved_command_bindings, child, delivery_issue_with_facts, planning_context_digest,
+    planning_paths, repository_authority_binding, role_runtime, role_tool_names, session_id_for,
+    settings_digest, validation_issue_v3,
 };
 use drivers::seam::{self, CoreState};
 use drivers::vcs::GitVcs;
@@ -110,6 +111,36 @@ fn fake_pi_journey_writes_identity_carrier_and_isolated_exact_args() {
 }
 
 #[test]
+fn accepted_terminal_is_not_persisted_before_stderr_completion() {
+    let root = temp_root("runner-stderr-before-carrier");
+    let accepted = transcript("planning.task-atoms.v1");
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            concat!(
+                "const escaped = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 1500)'], ",
+                "{detached:true,stdio:['ignore','ignore','inherit']}); escaped.unref();"
+            ),
+            &format!("emitCarrier({accepted:?});"),
+        ),
+    );
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("incomplete stderr must reject the accepted terminal");
+    assert!(error.contains("stderr reader did not complete"), "{error}");
+    std::thread::sleep(Duration::from_millis(700));
+    match fs::remove_file(carrier_path(&root)) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(()) => panic!("carrier was persisted before stderr completion"),
+        Err(error) => panic!("carrier cleanup failed: {error}"),
+    }
+    let events = attempt_events(&root, "planning-main-task-extractor-01");
+    assert_eq!(events, ["started"]);
+}
+
+#[test]
 fn child_refuses_oversized_spec_and_prompt_before_parsing_or_launch() {
     let spec_root = temp_root("runner-oversized-spec");
     let oversized_spec = spec_root.join("oversized-spec.json");
@@ -163,6 +194,326 @@ fn child_refuses_oversized_spec_and_prompt_before_parsing_or_launch() {
     assert!(
         addon_error.contains("bounded read oversized"),
         "{addon_error}"
+    );
+}
+
+#[test]
+fn validation_v3_shape_and_value_repairs_are_three_attempt_bounded_and_receipt_redacted() {
+    let root = temp_root("runner-validation-v3-repair");
+    let worktree = delivery_worktree(&root, "validation-v3-repair");
+    let base_commit = git_stdout(&worktree, &["rev-parse", "--verify", "HEAD^{commit}"])
+        .trim()
+        .to_owned();
+    fs::create_dir_all(worktree.join("src")).expect("source dir");
+    fs::write(
+        worktree.join("src/main.rs"),
+        "fn main() { println!(\"ok\"); }\n",
+    )
+    .expect("candidate source");
+    git(&worktree, &["add", "src/main.rs"]);
+    git(&worktree, &["commit", "-m", "validation candidate"]);
+    let exact_commit = git_stdout(&worktree, &["rev-parse", "--verify", "HEAD^{commit}"])
+        .trim()
+        .to_owned();
+    let exact_tree = git_stdout(&worktree, &["rev-parse", "--verify", "HEAD^{tree}"])
+        .trim()
+        .to_owned();
+    let units = vec![delivery_approved_unit(
+        "U1",
+        &["src/main.rs"],
+        &["cargo test -q"],
+    )];
+    let command = approved_command_bindings(&units)
+        .into_iter()
+        .next()
+        .expect("approved command");
+    let request = ValidationRunnerRequest {
+        workstream: Id("main".to_owned()),
+        action_id: Id("action-validator-assignment-main-L1".to_owned()),
+        assignment_id: Id("validator-assignment-main-L1".to_owned()),
+        run_revision: 1,
+        producer_assignment_ids: vec![Id("assignment-main-L1".to_owned())],
+        exact_commit: exact_commit.clone(),
+        exact_tree,
+        candidate_root: worktree.clone(),
+        changed_paths: vec!["src/main.rs".to_owned()],
+        unchanged_recovery: false,
+        execution_audit_ref: kernel::generated::Ref("audit:delivery".to_owned()),
+        evidence_refs: vec![kernel::generated::Ref("evidence:delivery".to_owned())],
+        lane_id: Id("L1".to_owned()),
+        attempt: 1,
+        validation_attempt: 1,
+        semantic_round: 1,
+        base_commit: Sha(base_commit),
+        worktree: worktree.clone(),
+        approved_units: units,
+        producer_assignment_digest: "1".repeat(64),
+        approved_command_executions: vec![VerifiedCommandExecution {
+            execution_id: "execution-U1-1".to_owned(),
+            command_id: command.command_id,
+            command_digest: command.command_digest,
+            result_digest: "2".repeat(64),
+            scope_snapshot_digest: "3".repeat(64),
+        }],
+    };
+    let facts = RunnerTransportFacts::new(
+        std::env::current_exe().expect("current exe"),
+        std::env::current_exe().expect("current exe"),
+    )
+    .expect("transport facts");
+    let _cwd_guard = CWD_LOCK.lock().expect("cwd lock");
+    let previous = std::env::current_dir().expect("current dir");
+    std::env::set_current_dir(&worktree).expect("validation cwd");
+    let issue = with_env(
+        "AUTOPILOT_CHILD_ADDON_PATH",
+        child_addon_path().to_str().expect("addon utf8"),
+        || validation_issue_v3(&request, &facts),
+    )
+    .expect("v3 validation issue");
+    let spec_path = PathBuf::from(&issue.binding.spec_path);
+    let spec: kernel::generated::AgentRunSpec =
+        serde_json::from_slice(&fs::read(&spec_path).expect("v3 spec")).expect("v3 spec json");
+    let assignment: kernel::generated::ValidationAssignmentV3 = serde_json::from_slice(
+        &fs::read(&spec.assignment_path.as_ref().expect("assignment path").0)
+            .expect("assignment bytes"),
+    )
+    .expect("assignment json");
+    let context: kernel::generated::ValidationContextV3 = serde_json::from_slice(
+        &fs::read(&spec.context_manifest_path.as_ref().expect("context path").0)
+            .expect("context bytes"),
+    )
+    .expect("context json");
+    let criterion = context.criteria.first().expect("criterion");
+    let valid = json!({
+        "schema": "autopilot.validation_submission.v3",
+        "criterion_results": [{
+            "criterion_id": criterion.criterion_id,
+            "verdict": "PASS",
+            "citation_refs": [criterion.allowed_citation_refs[0]],
+            "finding_ids": []
+        }],
+        "findings": []
+    });
+    let malformed = json!({
+        "schema": "autopilot.validation_submission.v3",
+        "criterion_results": [],
+        "findings": [],
+        "receipt_refs": []
+    });
+    let mut semantic_mismatch = valid.clone();
+    semantic_mismatch["criterion_results"][0]["citation_refs"] =
+        json!(["validation-source:unknown"]);
+    let prompt_log = root.join("v3-repair-prompts.jsonl");
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            &format!("const v3RepairPromptLog = {:?};", prompt_log),
+            &format!(
+                concat!(
+                    "appendFileSync(v3RepairPromptLog, JSON.stringify({{count:promptCount,message:cmd.message}})+'\\n'); ",
+                    "if (promptCount === 1) emitCarrier({}); ",
+                    "else if (promptCount === 2) emitCarrier({}); ",
+                    "else emitCarrier({});"
+                ),
+                malformed, semantic_mismatch, valid
+            ),
+        ),
+    );
+    with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec_path.display().to_string()])
+    })
+    .expect("third v3 value attempt succeeds");
+    std::env::set_current_dir(&previous).expect("restore cwd");
+
+    let prompts = fs::read_to_string(&prompt_log)
+        .expect("v3 prompt log")
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("prompt row"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        prompts.len(),
+        3,
+        "exactly three same-session value attempts"
+    );
+    for prompt in &prompts {
+        let text = prompt["message"].as_str().expect("prompt text");
+        assert!(!text.contains("approved-command-receipt:"), "{text}");
+        assert!(!text.contains("package-check-receipt:"), "{text}");
+        assert!(!text.contains("\"command_receipts\""), "{text}");
+        assert!(!text.contains("\"receipt_json\""), "{text}");
+        assert!(!text.contains(&assignment.authority_path.0), "{text}");
+    }
+    assert!(
+        prompts[1]["message"]
+            .as_str()
+            .expect("shape repair")
+            .contains("autopilot.validation_admission_diagnostic.v1")
+    );
+    assert!(
+        prompts[1]["message"]
+            .as_str()
+            .expect("shape repair")
+            .contains("autopilot.validation_context.v3")
+    );
+    assert!(
+        prompts[1]["message"]
+            .as_str()
+            .expect("shape repair")
+            .contains("diff_path")
+    );
+
+    let event_path =
+        worktree.join(".pi/autopilot/runner/attempt-events/validator-assignment-main-L1.jsonl");
+    let events = fs::read_to_string(event_path).expect("attempt events");
+    assert_eq!(events.matches("\"event\":\"started\"").count(), 3);
+    assert_eq!(events.matches("\"event\":\"value-rejected\"").count(), 2);
+    assert_eq!(events.matches("\"event\":\"accepted\"").count(), 1);
+    let first_diagnostic: Value = serde_json::from_slice(
+        &fs::read(
+            Path::new(&spec.carrier_path.0)
+                .with_file_name("admission-diagnostic-v3-attempt-1.json"),
+        )
+        .expect("shape diagnostic"),
+    )
+    .expect("shape diagnostic json");
+    assert_eq!(first_diagnostic["phase"], "shape");
+    assert_eq!(first_diagnostic["disposition"], "repairable-model-value");
+    assert!(first_diagnostic["mismatch_count"].as_u64().unwrap_or(0) >= 2);
+    assert!(
+        first_diagnostic["mismatches"]
+            .as_array()
+            .expect("shape rows")
+            .iter()
+            .any(|row| row["field"] == "" && row["extra"] == json!(["receipt_refs"]))
+    );
+    assert!(
+        first_diagnostic["mismatches"]
+            .as_array()
+            .expect("shape rows")
+            .iter()
+            .any(|row| row["field"] == "/criterion_results")
+    );
+    let second_diagnostic: Value = serde_json::from_slice(
+        &fs::read(
+            Path::new(&spec.carrier_path.0)
+                .with_file_name("admission-diagnostic-v3-attempt-2.json"),
+        )
+        .expect("value diagnostic"),
+    )
+    .expect("value diagnostic json");
+    assert!(
+        second_diagnostic["mismatches"]
+            .as_array()
+            .expect("mismatch rows")
+            .iter()
+            .any(|row| {
+                row["code"] == "criterion-citation-refs"
+                    && row["field"] == "/criterion_results/0/citation_refs"
+                    && row["actual"] == json!(["validation-source:unknown"])
+            })
+    );
+    let carrier: kernel::generated::ValidationResultV3 =
+        serde_json::from_slice(&fs::read(&spec.carrier_path.0).expect("accepted v3 carrier"))
+            .expect("accepted v3 carrier json");
+    assert_eq!(
+        carrier.verdict.criterion_results[0]
+            .command_receipt_refs
+            .len(),
+        1
+    );
+
+    fs::remove_file(&spec.carrier_path.0).expect("remove accepted carrier for collision probe");
+    fs::remove_file(
+        spec.model_submission_path
+            .as_ref()
+            .expect("model submission path")
+            .0
+            .as_str(),
+    )
+    .expect("remove accepted model submission for collision probe");
+    let audit_path = PathBuf::from(&spec.carrier_path.0).with_extension("tool-audit.json");
+    fs::remove_file(&audit_path).expect("remove accepted audit for collision probe");
+    for attempt in 1..=3 {
+        let diagnostic = Path::new(&spec.carrier_path.0)
+            .with_file_name(format!("admission-diagnostic-v3-attempt-{attempt}.json"));
+        match fs::remove_file(diagnostic) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("remove prior diagnostic for collision probe: {error}"),
+        }
+    }
+    fs::remove_dir_all(&spec.session_dir.0).expect("remove prior fake Pi session");
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            "",
+            &format!(
+                "writeFileSync({:?}, 'raced audit'); emitCarrier({});",
+                audit_path, valid
+            ),
+        ),
+    );
+    std::env::set_current_dir(&worktree).expect("collision probe cwd");
+    let collision = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec_path.display().to_string()])
+    })
+    .expect_err("preexisting v3 audit must be fatal rather than value-repaired");
+    std::env::set_current_dir(&previous).expect("restore cwd after collision probe");
+    assert!(
+        collision.contains("v3 carrier/audit persistence or provenance failure"),
+        "{collision}"
+    );
+    assert!(!collision.contains("value repair exhausted"), "{collision}");
+
+    let model_path = PathBuf::from(
+        &spec
+            .model_submission_path
+            .as_ref()
+            .expect("model submission path")
+            .0,
+    );
+    for path in [PathBuf::from(&spec.carrier_path.0), model_path, audit_path] {
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("remove collision output {}: {error}", path.display()),
+        }
+    }
+    for attempt in 1..=3 {
+        let diagnostic = Path::new(&spec.carrier_path.0)
+            .with_file_name(format!("admission-diagnostic-v3-attempt-{attempt}.json"));
+        match fs::remove_file(diagnostic) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("remove collision diagnostic: {error}"),
+        }
+    }
+    fs::remove_dir_all(&spec.session_dir.0).expect("remove collision fake Pi session");
+    let exhaustion_log = root.join("v3-exhaustion-prompts.jsonl");
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            &format!("const exhaustionLog = {:?};", exhaustion_log),
+            &format!(
+                "appendFileSync(exhaustionLog, JSON.stringify({{count:promptCount}})+'\\n'); emitCarrier({});",
+                malformed
+            ),
+        ),
+    );
+    std::env::set_current_dir(&worktree).expect("exhaustion probe cwd");
+    let exhausted = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec_path.display().to_string()])
+    })
+    .expect_err("three malformed v3 attempts must exhaust");
+    std::env::set_current_dir(&previous).expect("restore cwd after exhaustion probe");
+    assert!(exhausted.contains("value repair exhausted"), "{exhausted}");
+    assert_eq!(
+        fs::read_to_string(exhaustion_log)
+            .expect("exhaustion prompt log")
+            .lines()
+            .count(),
+        3,
+        "v3 repair must never start a fourth model attempt"
     );
 }
 
@@ -2674,6 +3025,7 @@ fn rpc_fake_pi(setup: &str, on_prompt: &str) -> String {
     format!(
         r#"#!/usr/bin/env node
 import {{ createHash }} from 'node:crypto';
+import {{ spawn }} from 'node:child_process';
 import {{ appendFileSync, readFileSync, writeFileSync }} from 'node:fs';
 import {{ dirname, resolve }} from 'node:path';
 let promptCount = 0;
@@ -2778,9 +3130,21 @@ function deliveryPolicyReceipt() {{
   if (typeof driftDeliveryPolicyReceiptAuthority !== 'undefined' && driftDeliveryPolicyReceiptAuthority) receipt.assignment_digest = `drift-${{assignmentDigest}}`;
   return receipt;
 }}
+function validationEvidenceReceipt() {{
+  if (receiptProfile !== 'validation-status.v3') return undefined;
+  const contextPath = process.env.AUTOPILOT_VALIDATION_CONTEXT_PATH ?? '';
+  const contextDigest = process.env.AUTOPILOT_VALIDATION_CONTEXT_DIGEST ?? '';
+  const cwd = process.env.AUTOPILOT_VALIDATION_CWD ?? '';
+  const bytes = readFileSync(contextPath);
+  const context = JSON.parse(bytes.toString('utf8'));
+  return {{context_path:contextPath,context_digest:contextDigest,cwd,
+    evidence_count:context.citation_records.length,active_override:'read'}};
+}}
 const receiptData = {{self_digest:addonDigest(),profile_id:receiptProfile,tool_name:terminalTool,boundary_id:receiptBoundary,result_contract:receiptResultContract,schema_digest:receiptSchema,binding:process.env.AUTOPILOT_CARRIER_BINDING ?? '',active_tools:[...activeTools].sort()}};
 const deliveryReceipt = deliveryPolicyReceipt();
 if (deliveryReceipt !== undefined) receiptData.delivery_policy = deliveryReceipt;
+const validationReceipt = validationEvidenceReceipt();
+if (validationReceipt !== undefined) receiptData.validation_evidence_policy = validationReceipt;
 const durableReceipt = {{type:'custom',customType:'pi-autopilot:child-tools',data:receiptData,id:'receipt-1',parentId:null,timestamp:new Date(0).toISOString()}};
 if (addonPath !== undefined && !(typeof suppressReceipt !== 'undefined' && suppressReceipt) && !(typeof suppressStreamedReceipt !== 'undefined' && suppressStreamedReceipt)) {{
   const streamed = {{...durableReceipt,customType:typeof streamedReceiptCustomType === 'string' ? streamedReceiptCustomType : durableReceipt.customType,data:{{...receiptData,binding:typeof streamedReceiptBinding === 'string' ? streamedReceiptBinding : receiptData.binding}}}};
@@ -2813,7 +3177,10 @@ fn submit_bindings_js() -> String {
     for (profile_id, tool_name, boundary_id, result_contract, digest) in
         kernel::generated::TERMINAL_PROFILES
     {
-        if boundary_id.starts_with("planning.") || profile_id == "delivery-status.v2" {
+        if boundary_id.starts_with("planning.")
+            || profile_id == "delivery-status.v2"
+            || profile_id.starts_with("validation-status.")
+        {
             bindings.insert(
                 profile_id.to_owned(),
                 [
@@ -3085,12 +3452,12 @@ fn prose_is_never_accepted_at_any_attempt() {
 fn continuation_carrier_uses_identical_validation_path() {
     let source = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/runner/child.rs"))
         .expect("source");
-    assert!(source.contains("match write_carrier"));
+    assert!(source.contains("match prepare_carrier"));
     assert!(!source.contains("lenient_after_retry"));
 }
 
 #[test]
-fn exhausted_continuation_does_not_reach_write_carrier() {
+fn exhausted_continuation_does_not_reach_carrier_preparation() {
     let root = temp_root("terminalmiss-exhaust-no-carrier");
     terminalmiss_run(&root, "", "emitAssistant('');").expect_err("exhausts");
     assert!(!carrier_path(&root).exists());

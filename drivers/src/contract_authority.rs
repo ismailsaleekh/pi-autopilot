@@ -70,7 +70,9 @@ pub fn contract_digest(contract_id: &str) -> Result<String, ContractAuthorityErr
         Err(ContractAuthorityError::UnknownContract(_))
             if matches!(
                 contract_id,
-                "autopilot.delivery_result.v2" | "autopilot.validation_result.v2"
+                "autopilot.delivery_result.v2"
+                    | "autopilot.validation_result.v2"
+                    | "autopilot.validation_result.v3"
             ) =>
         {
             contract_id

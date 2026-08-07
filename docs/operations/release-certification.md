@@ -26,7 +26,7 @@ node scripts/certify-runtime-repair.mjs \
   --evidence-dir /absolute/external/evidence-dir
 ```
 
-The driver refuses metered credential variables, requires absolute clean package roots, writes evidence outside both repositories, and fails if package commit/tree identity changes during certification. Payload certification treats `extensions/autopilot.ts` as the package-declared Pi entrypoint and requires it alongside the Host source, bin wrappers, generated contracts/add-on files, and shipped binaries. The offline security scan allowlists only exact reviewed install-script packages and six Pi 0.84 SDK nested-lock integrity exceptions. TypeBox is a Pi-provided peer (`peerDependencies.typebox="*"`) plus dev-only `typebox@1.3.7` for local compile/type tests; it must not appear as a runtime or bundled dependency.
+The driver refuses metered credential variables, requires absolute clean package roots, writes evidence outside both repositories, and fails if package commit/tree identity changes during certification. Payload certification treats `extensions/autopilot.ts` as the package-declared Pi entrypoint and requires it alongside the Host source, bin wrappers, generated contracts/add-on files, and shipped binaries. The package `files` allowlist explicitly excludes the development-only `src/resolve-core-runtime.d.ts` shim while retaining its executable `src/resolve-core-runtime.js` consumer. The offline security scan allowlists only exact reviewed install-script packages and six Pi 0.84 SDK nested-lock integrity exceptions. TypeBox is a Pi-provided peer (`peerDependencies.typebox="*"`) plus dev-only `typebox@1.3.7` for local compile/type tests; it must not appear as a runtime or bundled dependency.
 
 ## Ledger IDs expected by the SMF validator
 
@@ -44,6 +44,24 @@ The certificate at `/tmp/smf-resolution/autopilot-runtime-repair-cert.v1.json` u
 10. `final-clean-identity`
 
 Each row has `status: PASS`, `command_sha256`, and `report_sha256`. The certificate also binds package names, versions, package OIDs/trees, intended loaded runtime source `../packages/pi-autopilot`, no-paid/no-network booleans, zero-metered-credentials proof, and a canonical self-hash.
+
+## Validator V3 release closure
+
+Before the source commit, archive a fresh independent adversarial review and close every critical or
+high finding within the declared Validator V3 ownership, transport, recovery, and packed-profile
+scope. Findings in unchanged legacy Seam, planning, replay, publication, or general filesystem
+surfaces are adjudicated separately rather than silently expanding this release. The package-local
+evidence must cover generated enum parity,
+diagnostic row/value summarization, exactly three same-session attempts, per-cycle RPC bounds,
+strict transport-limit parsing, latched hard stderr rejection plus mandatory reader completion before carrier persistence,
+pre-allocation source/diff reads, filtered-worktree source-byte binding with separate Git object
+identity, exact read aliases and image/text behavior, approved deletions, bounded recovery-package
+Git output with leader-exit descendant cleanup, explicit unchanged
+no-defect recovery, child/parent authority replay, and all shipped child profiles in the installed
+packed consumer. The packed zero-network claim requires an active OS network-denial sandbox plus
+an in-process canary; an unset marker alone is insufficient. Run the dedicated mutation matrix
+against that exact source state. Keep source/docs and the five rebuilt platform binaries in separate commits; binary
+parity is expected to remain red only between those two commits.
 
 ## What the certificate does not do
 

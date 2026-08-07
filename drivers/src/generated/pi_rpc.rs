@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const DEFAULT_MAX_TERMINAL_BYTES: usize = 2_097_152;
+pub const DEFAULT_MAX_TERMINAL_BYTES: usize = 4_194_304;
 pub const MAX_ENTRY_APPENDED_BYTES: usize = 16_384;
 pub const ENV_DENY: &[&str] = &[
     "OPENROUTER_API_KEY",

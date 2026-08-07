@@ -213,8 +213,8 @@ role "validator" {
   modes "forward-release" "deep-closure" "delta-revalidation" "conflict-review" "final-review"
   model_slot "review"
   thinking "xhigh"
-  tools "read" "grep" "find" "ls" "autopilot_request_test" "autopilot_emit_status"
-  repository "exact candidate/evidence read-only"
+  tools "read" "autopilot_request_test" "autopilot_emit_status"
+  repository "exact citation-bound evidence read-only"
   git "read-only"
   network "denied"
   package_state "denied"
@@ -223,7 +223,7 @@ role "validator" {
   result_contract "validator.v1"
   checkpoint_contract "agent-checkpoint.v1"
   terminal_path "autopilot_emit_status"
-  boundary_prompts "validation_verdict" "finding"
+  boundary_prompts "validation_submission_v3"
 }
 role "fixer-integrator" {
   schema "autopilot.role.v1"

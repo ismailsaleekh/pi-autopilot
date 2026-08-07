@@ -21,6 +21,7 @@ pub struct RpcSpawnConfig {
     pub terminal_profile: Option<String>,
     pub carrier_binding: Option<String>,
     pub delivery_policy: Option<DeliveryPolicyLaunchConfig>,
+    pub validation_evidence: Option<ValidationEvidenceLaunchConfig>,
     pub pi_executable: OsString,
     pub stderr_tail_bytes: usize,
     pub max_terminal_bytes: usize,
@@ -38,6 +39,13 @@ pub struct DeliveryPolicyLaunchConfig {
     pub attempt: u32,
     pub base_commit: String,
     pub policy_digest: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ValidationEvidenceLaunchConfig {
+    pub context_path: String,
+    pub context_digest: String,
+    pub cwd: String,
 }
 impl RpcSpawnConfig {
     #[must_use]
@@ -62,6 +70,7 @@ impl RpcSpawnConfig {
             terminal_profile: None,
             carrier_binding: None,
             delivery_policy: None,
+            validation_evidence: None,
             pi_executable: OsString::from("pi"),
             stderr_tail_bytes: DEFAULT_STDERR_TAIL_BYTES,
             max_terminal_bytes: super::DEFAULT_MAX_TERMINAL_BYTES,
@@ -117,6 +126,14 @@ pub enum RpcError {
         bytes: usize,
         limit: usize,
     },
+    StderrTooLarge {
+        bytes: usize,
+        limit: usize,
+    },
+    FrameTooLarge {
+        bytes: usize,
+        limit: usize,
+    },
     EntryAppendedTooLarge {
         bytes: usize,
         limit: usize,
@@ -152,6 +169,15 @@ impl std::fmt::Display for RpcError {
             Self::ProtocolViolation(v) => write!(f, "rpc protocol violation: {v}"),
             Self::TerminalPayloadTooLarge { bytes, limit } => {
                 write!(f, "rpc terminal payload too large: {bytes} > {limit}")
+            }
+            Self::StderrTooLarge { bytes, limit } => {
+                write!(f, "rpc stderr exceeded hard ceiling: {bytes} > {limit}")
+            }
+            Self::FrameTooLarge { bytes, limit } => {
+                write!(
+                    f,
+                    "rpc frame too large before allocation: {bytes} > {limit}"
+                )
             }
             Self::EntryAppendedTooLarge { bytes, limit } => {
                 write!(f, "rpc entry_appended payload too large: {bytes} > {limit}")

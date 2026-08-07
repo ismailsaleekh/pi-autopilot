@@ -1,9 +1,19 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  readFileSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+
+import { Compile } from "typebox/compile";
 
 import childExtension from "../../src/generated/child-extension.ts";
 import { registerSubmitTools } from "../../child-runtime/child-extension-runtime.ts";
@@ -11,9 +21,12 @@ import { SUBMIT_TOOLS } from "../../src/generated/tool-schemas.ts";
 
 interface RegisteredTool {
   name: string;
+  parameters?: unknown;
+  prepareArguments?: (params: unknown) => Record<string, unknown>;
   execute: (toolCallId: string, params: Record<string, unknown>) => Promise<{
-    details: Record<string, unknown>;
-    terminate: boolean;
+    content?: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
+    details?: Record<string, unknown>;
+    terminate?: boolean;
   }>;
 }
 
@@ -29,8 +42,14 @@ const DELIVERY_ENV_KEYS = [
   "AUTOPILOT_DELIVERY_BASE_COMMIT",
   "AUTOPILOT_DELIVERY_POLICY_DIGEST",
 ] as const;
+const VALIDATION_ENV_KEYS = [
+  "AUTOPILOT_VALIDATION_CONTEXT_PATH",
+  "AUTOPILOT_VALIDATION_CONTEXT_DIGEST",
+  "AUTOPILOT_VALIDATION_CWD",
+] as const;
 const DELIVERY_POLICY_VERSION = "autopilot.delivery_tool_policy.v3";
 const deliveryTempDirs: string[] = [];
+const validationTempDirs: string[] = [];
 
 test("parent planning registration excludes the Recovery Engineer child-only terminal", () => {
   const names: string[] = [];
@@ -100,6 +119,58 @@ function clearDeliveryPolicyEnv(): void {
   while (deliveryTempDirs.length > 0) rmSync(deliveryTempDirs.pop()!, { recursive: true, force: true });
 }
 
+function installValidationPolicyEnv(): { contextPath: string; contextDigest: string; authorityPath: string; worktree: string } {
+  const root = mkdtempSync(join(realpathSync.native(tmpdir()), "autopilot-validation-policy-"));
+  validationTempDirs.push(root);
+  const worktree = join(root, "worktree");
+  const evidence = join(worktree, "src.txt");
+  const image = join(worktree, "image.png");
+  const diff = join(root, "candidate.v3.diff");
+  const contextPath = join(root, "context.v3.json");
+  const authorityPath = join(root, "authority.v3.json");
+  mkdirSync(worktree);
+  writeFileSync(evidence, "source evidence\n");
+  writeFileSync(
+    image,
+    Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+      "base64",
+    ),
+  );
+  writeFileSync(diff, "diff evidence\n");
+  writeFileSync(join(worktree, "Capture’s.txt"), "unauthorized curly variant\n");
+  writeFileSync(join(worktree, "café.txt"), "unauthorized NFD variant\n");
+  writeFileSync(join(worktree, "Shot AM.png"), "unauthorized AM variant\n");
+  writeFileSync(authorityPath, '{"receipt_json":"must-not-reach-model"}\n');
+  const sourceDigest = createHash("sha256").update(readFileSync(evidence)).digest("hex");
+  const imageDigest = createHash("sha256").update(readFileSync(image)).digest("hex");
+  const diffDigest = createHash("sha256").update(readFileSync(diff)).digest("hex");
+  const context = {
+    schema: "autopilot.validation_context.v3",
+    validation_id: "validation-test",
+    assignment_id: "validator-assignment-test",
+    authority_digest: "0".repeat(64),
+    criteria: [],
+    citation_records: [
+      { evidence_ref: "validation-source:test", kind: "source-snapshot", source_path: "src.txt", blob_digest: sourceDigest, line_count: 1 },
+      { evidence_ref: "validation-source:image", kind: "source-snapshot", source_path: "image.png", blob_digest: imageDigest, line_count: 1 },
+      { evidence_ref: "validation-diff:test", kind: "candidate-diff", diff_digest: diffDigest, diff_path: diff },
+    ],
+  };
+  const bytes = Buffer.from(JSON.stringify(context, null, 2));
+  writeFileSync(contextPath, bytes);
+  const contextDigest = createHash("sha256").update(bytes).digest("hex");
+  process.env.AUTOPILOT_VALIDATION_CONTEXT_PATH = contextPath;
+  process.env.AUTOPILOT_VALIDATION_CONTEXT_DIGEST = contextDigest;
+  process.env.AUTOPILOT_VALIDATION_CWD = worktree;
+  return { contextPath, contextDigest, authorityPath, worktree };
+}
+
+function clearValidationPolicyEnv(): void {
+  for (const key of VALIDATION_ENV_KEYS) delete process.env[key];
+  while (validationTempDirs.length > 0) rmSync(validationTempDirs.pop()!, { recursive: true, force: true });
+}
+
 test("selected terminal profile registers exactly one same-name schema", { concurrency: false }, async () => {
   const previousProfile = process.env.AUTOPILOT_TERMINAL_PROFILE;
   const previousBinding = process.env.AUTOPILOT_CARRIER_BINDING;
@@ -109,12 +180,14 @@ test("selected terminal profile registers exactly one same-name schema", { concu
     const wrapperDigest = createHash("sha256")
       .update(Buffer.concat([readFileSync(wrapperUrl), Buffer.from([0]), readFileSync(runtimeUrl)]))
       .digest("hex");
-    assert.equal(SUBMIT_TOOLS.length, 10);
+    assert.equal(SUBMIT_TOOLS.length, 11);
     for (const expected of SUBMIT_TOOLS) {
       process.env.AUTOPILOT_TERMINAL_PROFILE = expected.profile_id;
       process.env.AUTOPILOT_CARRIER_BINDING = "binding-test";
       clearDeliveryPolicyEnv();
+      clearValidationPolicyEnv();
       const deliveryEnv = expected.profile_id === "delivery-status.v2" ? installDeliveryPolicyEnv() : undefined;
+      const validationEnv = expected.profile_id === "validation-status.v3" ? installValidationPolicyEnv() : undefined;
       const tools: RegisteredTool[] = [];
       const hooks = new Map<string, () => Promise<void>>();
       const entries: Array<{ type: string; data: Record<string, unknown> }> = [];
@@ -122,10 +195,11 @@ test("selected terminal profile registers exactly one same-name schema", { concu
         registerTool(tool: RegisteredTool) { tools.push(tool); },
         on(name: string, handler: () => Promise<void>) { hooks.set(name, handler); },
         appendEntry(type: string, data: Record<string, unknown>) { entries.push({ type, data }); },
-        getActiveTools() { return ["read", ...tools.map((tool) => tool.name)]; },
+        getActiveTools() { return [...new Set(["read", ...tools.map((tool) => tool.name)])]; },
       };
       const previousCwd = process.cwd();
       if (deliveryEnv) process.chdir(deliveryEnv.worktree);
+      if (validationEnv) process.chdir(validationEnv.worktree);
       try {
         childExtension(pi as never);
       } finally {
@@ -134,7 +208,7 @@ test("selected terminal profile registers exactly one same-name schema", { concu
       assert.equal(tools.map((tool) => tool.name).includes(expected.name), true);
       assert.equal(
         tools.length,
-        expected.profile_id === "delivery-status.v2" ? 4 : 1,
+        expected.profile_id === "delivery-status.v2" ? 4 : expected.profile_id === "validation-status.v3" ? 2 : 1,
       );
       const submitTool = tools.find((tool) => tool.name === expected.name)!;
       await hooks.get("session_start")!();
@@ -157,26 +231,79 @@ test("selected terminal profile registers exactly one same-name schema", { concu
           active_overrides: ["autopilot_run_approved_command", "edit", "write"],
         });
       }
-      const result = await submitTool.execute("opaque-call", {});
+      if (validationEnv) {
+        assert.deepEqual(entries[0]!.data.validation_evidence_policy, {
+          context_path: validationEnv.contextPath,
+          context_digest: validationEnv.contextDigest,
+          cwd: validationEnv.worktree,
+          evidence_count: 3,
+          active_override: "read",
+        });
+        const readTool = tools.find((tool) => tool.name === "read")!;
+        const readResult = await readTool.execute("read-source", { path: "src.txt" });
+        assert.match(readResult.content?.[0]?.text ?? "", /source evidence/);
+        const imageResult = await readTool.execute("read-image", { path: "image.png" });
+        assert.equal(
+          imageResult.content?.some((content) =>
+            content.type === "image" && content.mimeType === "image/png"),
+          true,
+          JSON.stringify(imageResult),
+        );
+        await assert.rejects(
+          readTool.execute("read-authority", { path: validationEnv.authorityPath }),
+          /outside citation authority/,
+        );
+        if (process.platform !== "win32") {
+          symlinkSync("src.txt", join(validationEnv.worktree, "src-alias.txt"));
+          await assert.rejects(
+            readTool.execute("read-symlink-alias", { path: "src-alias.txt" }),
+            /outside citation authority/,
+          );
+        }
+        for (const alias of ["Capture's.txt", "café.txt", "Shot AM.png"]) {
+          await assert.rejects(
+            readTool.execute("read-filename-variant", { path: alias }),
+            /outside citation authority/,
+          );
+        }
+        writeFileSync(join(validationEnv.worktree, "src.txt"), "tampered evidence\n");
+        await assert.rejects(
+          readTool.execute("read-tampered-source", { path: "src.txt" }),
+          /evidence content digest drift/,
+        );
+        writeFileSync(
+          join(validationEnv.worktree, "src.txt"),
+          "x".repeat(2 * 1024 * 1024 + 1),
+        );
+        await assert.rejects(
+          readTool.execute("read-oversized-source", { path: "src.txt" }),
+          /exceeds regular-file byte authority/,
+        );
+      }
+      const rawPayload = {};
+      const prepared = submitTool.prepareArguments?.(rawPayload) ?? rawPayload;
+      if (validationEnv) assert.equal(Compile(submitTool.parameters as never).Check(prepared), true);
+      const result = await submitTool.execute("opaque-call", prepared);
       assert.equal(result.terminate, true);
-      assert.equal(result.details.profile_id, expected.profile_id);
-      assert.equal(result.details.boundary_id, expected.boundary_id);
-      assert.equal(result.details.result_contract, expected.result_contract);
-      assert.equal(result.details.binding, "binding-test");
+      assert.equal(result.details?.profile_id, expected.profile_id);
+      assert.equal(result.details?.boundary_id, expected.boundary_id);
+      assert.equal(result.details?.result_contract, expected.result_contract);
+      assert.equal(result.details?.binding, "binding-test");
+      if (validationEnv) assert.deepEqual(result.details?.payload, rawPayload);
       if (deliveryEnv) {
-        assert.deepEqual(result.details.delivery_policy_denials, {
+        assert.deepEqual(result.details?.delivery_policy_denials, {
           schema: "autopilot.delivery_policy_denials.v2",
           overflowed: false,
           entries: [],
         });
-        assert.deepEqual(result.details.approved_command_executions, {
+        assert.deepEqual(result.details?.approved_command_executions, {
           schema: "autopilot.approved_command_executions.v1",
           overflowed: false,
           entries: [],
         });
       } else {
-        assert.equal(result.details.delivery_policy_denials, undefined);
-        assert.equal(result.details.approved_command_executions, undefined);
+        assert.equal(result.details?.delivery_policy_denials, undefined);
+        assert.equal(result.details?.approved_command_executions, undefined);
       }
     }
   } finally {
@@ -185,6 +312,7 @@ test("selected terminal profile registers exactly one same-name schema", { concu
     if (previousBinding === undefined) delete process.env.AUTOPILOT_CARRIER_BINDING;
     else process.env.AUTOPILOT_CARRIER_BINDING = previousBinding;
     clearDeliveryPolicyEnv();
+    clearValidationPolicyEnv();
   }
 });
 

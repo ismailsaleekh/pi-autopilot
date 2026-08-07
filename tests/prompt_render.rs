@@ -6,7 +6,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-const BOUNDARY_PROMPT: &str = "validation_verdict";
+const BOUNDARY_PROMPT: &str = "validation_submission_v3";
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[test]
@@ -62,7 +62,7 @@ fn parity_check_fails_when_generated_prompt_drifts_from_contract_source() {
         matches!(
             parity,
             Err(ref message) if message.contains(
-                "validation_verdict generated prompt file does not match data/contracts.kdl admits"
+                "validation_submission_v3 generated prompt file does not match data/contracts.kdl admits"
             )
         ),
         "mutated generated prompt unexpectedly matched contract source: {parity:?}"
@@ -100,7 +100,7 @@ fn prompt_matches_contract_admits(root: &Path, rendered: &str) -> Result<(), Str
         ));
     }
     let actual = rendered_boundary_prompt(rendered, BOUNDARY_PROMPT)?;
-    if actual == contract_prompt.markdown {
+    if actual == contract_prompt.markdown.trim_end() {
         Ok(())
     } else {
         Err(format!(
@@ -251,8 +251,7 @@ fn copy_prompt_fixture_root() -> Result<PathBuf, String> {
         "doctrine/global.md",
         "roles/validator/base.md",
         "roles/validator/modes/forward-release.md",
-        "generated/prompts/validation_verdict.md",
-        "generated/prompts/finding.md",
+        "generated/prompts/validation_submission_v3.md",
     ] {
         copy_fixture_file(&package, &temp, relative)?;
     }

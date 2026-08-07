@@ -1,5 +1,7 @@
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#![recursion_limit = "256"]
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -113,6 +115,165 @@ fn wrong_preexisting_run_main_before_execution_is_loud_and_not_adopted() {
 }
 
 #[test]
+fn v3_parent_seam_rejects_every_tampered_authority_and_provenance_surface() {
+    let _guard = CWD_LOCK.lock().expect("cwd lock");
+    for mutation in [
+        "authority",
+        "source",
+        "diff",
+        "context",
+        "submission",
+        "canonical-order",
+        "verdict",
+        "audit",
+    ] {
+        let fixture = AdvanceFixture::new(&format!("v3-parent-tamper-{mutation}"), 1, false);
+        let mut state = fixture.state();
+        let delivery_spawn = spawn_payload(send_command(&mut state, "autopilot main"));
+        let delivery_spec = fixture.delivery_spec(&delivery_spawn);
+        let worktree = PathBuf::from(delivery_spec["worktree"].as_str().expect("worktree"));
+        fs::write(worktree.join("l1.txt"), "candidate bytes\n").expect("candidate edit");
+        let delivery_carrier_path =
+            PathBuf::from(delivery_spec["carrier_path"].as_str().expect("carrier"));
+        fs::create_dir_all(delivery_carrier_path.parent().expect("delivery parent"))
+            .expect("delivery parent create");
+        fs::write(
+            &delivery_carrier_path,
+            serde_json::to_vec_pretty(&delivery_carrier(&delivery_spec, "l1.txt"))
+                .expect("delivery carrier"),
+        )
+        .expect("delivery carrier write");
+        let validation_spawn = spawn_payload(send_task_completed(
+            &mut state,
+            &format!("task-delivery-tamper-{mutation}"),
+            &delivery_spawn.action.action_id.0,
+            &delivery_spawn.action.assignment_id.0,
+        ));
+        let validation_spec = fixture.validation_spec(&worktree, &validation_spawn);
+        let mut carrier = if mutation == "canonical-order" {
+            validation_blocked_carrier(&validation_spec)
+        } else {
+            validation_carrier(&validation_spec)
+        };
+        let assignment: kernel::generated::ValidationAssignmentV3 = serde_json::from_slice(
+            &fs::read(
+                validation_spec["assignment_path"]
+                    .as_str()
+                    .expect("assignment path"),
+            )
+            .expect("assignment"),
+        )
+        .expect("assignment json");
+        match mutation {
+            "authority" => fs::OpenOptions::new()
+                .append(true)
+                .open(&assignment.authority_path.0)
+                .and_then(|mut file| std::io::Write::write_all(&mut file, b"\n"))
+                .expect("authority tamper"),
+            "source" => {
+                fs::write(worktree.join("l1.txt"), "post-validation drift\n").expect("source drift")
+            }
+            "diff" => fs::OpenOptions::new()
+                .append(true)
+                .open(
+                    Path::new(&assignment.authority_path.0)
+                        .parent()
+                        .expect("authority parent")
+                        .join("candidate.v3.diff"),
+                )
+                .and_then(|mut file| std::io::Write::write_all(&mut file, b"tamper"))
+                .expect("diff tamper"),
+            "context" => fs::OpenOptions::new()
+                .append(true)
+                .open(&assignment.context_path.0)
+                .and_then(|mut file| std::io::Write::write_all(&mut file, b"\n"))
+                .expect("context tamper"),
+            "submission" => fs::OpenOptions::new()
+                .append(true)
+                .open(
+                    validation_spec["model_submission_path"]
+                        .as_str()
+                        .expect("model submission path"),
+                )
+                .and_then(|mut file| std::io::Write::write_all(&mut file, b" "))
+                .expect("submission tamper"),
+            "canonical-order" => {
+                carrier["submission"]["findings"]
+                    .as_array_mut()
+                    .expect("submission findings")
+                    .reverse();
+                carrier["submission"]["criterion_results"][0]["finding_ids"]
+                    .as_array_mut()
+                    .expect("criterion finding ids")
+                    .reverse();
+                let submission_bytes =
+                    serde_json::to_vec(&carrier["submission"]).expect("reordered submission");
+                let submission_digest = sha256_hex(&submission_bytes);
+                fs::write(
+                    validation_spec["model_submission_path"]
+                        .as_str()
+                        .expect("model submission path"),
+                    &submission_bytes,
+                )
+                .expect("reordered submission write");
+                carrier["submission_digest"] = serde_json::json!(submission_digest);
+                let audit_path =
+                    PathBuf::from(carrier["tool_audit_ref"].as_str().expect("tool audit ref"));
+                let mut audit: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&audit_path).expect("tool audit bytes"))
+                        .expect("tool audit json");
+                audit["submission_digest"] = carrier["submission_digest"].clone();
+                let audit_bytes = serde_json::to_vec_pretty(&audit).expect("rebound audit");
+                fs::write(&audit_path, &audit_bytes).expect("rebound audit write");
+                carrier["tool_audit_digest"] = serde_json::json!(sha256_hex(&audit_bytes));
+            }
+            "verdict" => carrier["verdict"]["outcome"] = serde_json::json!("BLOCKED"),
+            "audit" => fs::OpenOptions::new()
+                .append(true)
+                .open(carrier["tool_audit_ref"].as_str().expect("audit path"))
+                .and_then(|mut file| std::io::Write::write_all(&mut file, b"\n"))
+                .expect("audit tamper"),
+            _ => unreachable!(),
+        }
+        let carrier_path = PathBuf::from(
+            validation_spec["carrier_path"]
+                .as_str()
+                .expect("carrier path"),
+        );
+        fs::create_dir_all(carrier_path.parent().expect("carrier parent"))
+            .expect("carrier parent create");
+        fs::write(
+            &carrier_path,
+            serde_json::to_vec_pretty(&carrier).expect("validation carrier"),
+        )
+        .expect("validation carrier write");
+        let frame = serde_json::json!({
+            "v":1,
+            "id":2,
+            "kind":"task-completed",
+            "payload":{
+                "task_id":format!("task-validation-tamper-{mutation}"),
+                "action_id":validation_spawn.action.action_id,
+                "assignment_id":validation_spawn.action.assignment_id,
+                "status":"completed"
+            }
+        });
+        let rejection = seam::handle_line(&frame.to_string(), &mut state)
+            .expect_err("tampered v3 parent seam must reject");
+        assert!(
+            !rejection.to_string().contains("recovery-required"),
+            "transport/authority tamper routed recovery for {mutation}: {rejection}"
+        );
+        let events = fs::read_to_string(&fixture.event_path).expect("tamper events");
+        assert!(
+            !events.contains("validation:recovery-required"),
+            "{mutation} routed semantic recovery: {events}"
+        );
+        drop(fixture);
+    }
+}
+
+#[test]
 fn sequential_plan_reaches_closure_and_result_ref() {
     let _guard = CWD_LOCK.lock().expect("cwd lock");
     let fixture = AdvanceFixture::new("closure", 2, false);
@@ -218,6 +379,14 @@ fn forward_validator_blocker_launches_one_context_bound_recovery_engineer() {
     assert_eq!(assignment["recovery"]["trigger_phase"], "validation");
     assert_eq!(assignment["recovery"]["repair_mode"], "forward-critical");
     assert_eq!(assignment["recovery"]["attempt_budget"], 1);
+    assert!(
+        !assignment["recovery"]["diagnosis_ids"]
+            .as_array()
+            .expect("diagnosis ids")
+            .iter()
+            .any(|id| id == "finding-validation-advisory"),
+        "an advisory unsafe-boundary finding must not suppress or enter source recovery"
+    );
     assert!(
         assignment["recovery"]["diagnosis_details"][0]
             .as_str()
@@ -930,92 +1099,149 @@ fn validation_carrier_with_outcome(
 ) -> serde_json::Value {
     let typed: kernel::generated::AgentRunSpec =
         serde_json::from_value(spec.clone()).expect("validation spec");
+    assert_eq!(typed.boundary_id.0, "autopilot.validation_submission.v3");
+    assert_eq!(typed.result_contract.0, "autopilot.validation_result.v3");
     let assignment_path = PathBuf::from(spec["assignment_path"].as_str().expect("assignment"));
     let assignment_bytes = fs::read(&assignment_path).expect("assignment bytes");
-    let assignment: kernel::generated::ValidationAssignmentV2 =
-        serde_json::from_slice(&assignment_bytes).expect("assignment json");
+    let assignment: kernel::generated::ValidationAssignmentV3 =
+        serde_json::from_slice(&assignment_bytes).expect("v3 assignment json");
     let context_path = PathBuf::from(
         spec["context_manifest_path"]
             .as_str()
             .expect("context manifest"),
     );
     let context_bytes = fs::read(&context_path).expect("context bytes");
-    let context: kernel::generated::ValidationContextV2 =
-        serde_json::from_slice(&context_bytes).expect("context json");
-    let evidence_ref = context
-        .evidence
-        .first()
-        .expect("validation evidence")
-        .evidence_ref
-        .0
-        .clone();
+    let context: kernel::generated::ValidationContextV3 =
+        serde_json::from_slice(&context_bytes).expect("v3 context json");
+    let source_refs = context
+        .citation_records
+        .iter()
+        .filter(|record| record.kind == "source-snapshot")
+        .map(|record| (record.evidence_ref.clone(), record.line_count.unwrap_or(0)))
+        .collect::<BTreeMap<_, _>>();
+    let blocked_criterion = context.criteria.first().expect("blocked criterion");
+    let blocked_source = blocked_criterion
+        .allowed_citation_refs
+        .iter()
+        .find(|reference| source_refs.contains_key(*reference))
+        .cloned()
+        .expect("blocked criterion source citation");
     let criterion_results = context
         .criteria
         .iter()
         .enumerate()
         .map(|(index, criterion)| {
-            let evidence_refs = std::iter::once(evidence_ref.clone())
-                .chain(
-                    criterion
-                        .commands
-                        .iter()
-                        .map(|command| command.evidence_ref.0.clone()),
-                )
-                .chain(
-                    criterion
-                        .package_checks
-                        .iter()
-                        .map(|check| check.evidence_ref.0.clone()),
-                )
-                .collect::<Vec<_>>();
+            let citation = if blocked && index == 0 {
+                blocked_source.clone()
+            } else {
+                criterion
+                    .allowed_citation_refs
+                    .first()
+                    .cloned()
+                    .expect("criterion citation")
+            };
+            let verdict = if blocked && index == 0 {
+                if matches!(
+                    finding_kind,
+                    "context-gap" | "evidence-gap" | "unsafe-boundary"
+                ) {
+                    "BLOCKED"
+                } else {
+                    "FAIL"
+                }
+            } else {
+                "PASS"
+            };
+            let finding_ids = if blocked && index == 0 && finding_kind == "source-defect" {
+                vec!["finding-validation-1", "finding-validation-advisory"]
+            } else if blocked && index == 0 {
+                vec!["finding-validation-1"]
+            } else {
+                Vec::<&str>::new()
+            };
             serde_json::json!({
                 "criterion_id": criterion.criterion_id,
-                "verdict": if blocked && index == 0 { "FAIL" } else { "PASS" },
-                "evidence_refs": evidence_refs,
-                "finding_ids": if blocked && index == 0 { vec!["finding-validation-1"] } else { Vec::<&str>::new() },
-                "covered_paths": criterion.covered_paths,
-                "semantic_surface_ids": criterion.semantic_surface_ids,
-                "forward_edge_ids": criterion.forward_edge_ids
+                "verdict": verdict,
+                "citation_refs": [citation],
+                "finding_ids": finding_ids,
             })
         })
         .collect::<Vec<_>>();
     let findings = if blocked {
-        let criterion = context.criteria.first().expect("blocked criterion");
-        vec![serde_json::json!({
+        let source_locations = if finding_kind == "source-defect" {
+            vec![serde_json::json!({
+                "citation_ref": blocked_source,
+                "start_line": 1,
+                "end_line": 1.min(*source_refs.get(&blocked_source).expect("source lines")),
+            })]
+        } else {
+            Vec::new()
+        };
+        let mut findings = vec![serde_json::json!({
             "finding_id":"finding-validation-1",
             "kind":finding_kind,
             "effect":"forward-blocking",
             "summary":"issued scope defect",
             "detail":"the exact issued criterion requires a surgical source repair",
-            "criterion_ids":[criterion.criterion_id],
-            "edge_ids":criterion.forward_edge_ids,
-            "evidence_refs":[evidence_ref],
-            "covered_paths":criterion.covered_paths,
-            "semantic_surface_ids":criterion.semantic_surface_ids
-        })]
+            "criterion_ids":[blocked_criterion.criterion_id],
+            "citation_refs":[blocked_source],
+            "source_locations":source_locations,
+        })];
+        if finding_kind == "source-defect" {
+            findings.push(serde_json::json!({
+                "finding_id":"finding-validation-advisory",
+                "kind":"unsafe-boundary",
+                "effect":"advisory",
+                "summary":"nonblocking advisory",
+                "detail":"this advisory kind must not suppress the admitted source-defect recovery",
+                "criterion_ids":[blocked_criterion.criterion_id],
+                "citation_refs":[blocked_source],
+                "source_locations":[],
+            }));
+        }
+        findings
     } else {
         Vec::new()
     };
     let submission = serde_json::json!({
-        "schema":"autopilot.validation_submission.v2",
-        "validation_id": assignment.validation_id,
-        "assignment_id": assignment.assignment_id,
-        "scope": assignment.scope,
-        "exact_commit": assignment.exact_commit,
-        "exact_tree": assignment.exact_tree,
-        "outcome":if blocked { "BLOCKED" } else { "FORWARD_READY" },
+        "schema":"autopilot.validation_submission.v3",
         "criterion_results": criterion_results,
-        "findings": findings
+        "findings": findings,
     });
-    let typed_submission: kernel::generated::ValidationSubmissionV2 =
-        serde_json::from_value(submission.clone()).expect("typed submission");
-    drivers::runner::child::admit_validation_submission(&typed, &typed_submission)
-        .expect("admitted validation submission");
-    let submission_digest = sha256_hex(&serde_json::to_vec(&submission).expect("submission"));
+    let typed_submission: kernel::generated::ValidationSubmissionV3 =
+        serde_json::from_value(submission).expect("typed v3 submission");
+    let (canonical_submission, _) = drivers::runner::child::canonical_validation_submission_v3(
+        &assignment,
+        &context,
+        &typed_submission,
+        assignment.validation_attempt,
+    )
+    .expect("canonical admitted v3 validation submission");
+    let (verdict, verdict_bytes) = drivers::runner::child::normalize_validation_submission_v3(
+        &assignment,
+        &context,
+        &canonical_submission,
+        assignment.validation_attempt,
+    )
+    .expect("normalized v3 validation submission");
+    let submission =
+        serde_json::to_value(&canonical_submission).expect("canonical submission value");
+    let submission_bytes = serde_json::to_vec(&submission).expect("canonical submission bytes");
+    let submission_digest = sha256_hex(&submission_bytes);
+    fs::write(
+        typed
+            .model_submission_path
+            .as_ref()
+            .expect("model submission path")
+            .0
+            .as_str(),
+        &submission_bytes,
+    )
+    .expect("model submission write");
     let profile = kernel::generated::TERMINAL_PROFILES
         .iter()
-        .find(|row| row.0 == "validation-status.v2")
-        .expect("validation profile");
+        .find(|row| row.0 == "validation-status.v3")
+        .expect("v3 validation profile");
     let binding = drivers::runner::child::carrier_binding(&typed);
     let tool_call_id = "validation-tool-call-advance";
     let audit = serde_json::json!({"schema":"autopilot.tool_audit.v1","tool_call_id":tool_call_id,"profile_id":profile.0,"tool_name":profile.1,"boundary_id":profile.2,"result_contract":profile.3,"schema_digest":profile.4,"binding":binding,"submission_digest":submission_digest});
@@ -1026,7 +1252,7 @@ fn validation_carrier_with_outcome(
     let spec_bytes =
         fs::read_to_string(spec["spec_path"].as_str().expect("spec path")).expect("spec bytes");
     serde_json::json!({
-        "schema":"autopilot.validation_result.v2",
+        "schema":"autopilot.validation_result.v3",
         "action_id":spec["action_id"],
         "assignment_id":spec["assignment_id"],
         "validation_id": assignment.validation_id,
@@ -1044,6 +1270,8 @@ fn validation_carrier_with_outcome(
         "assignment_digest": sha256_hex(&assignment_bytes),
         "context_manifest_path": spec["context_manifest_path"],
         "context_manifest_digest": sha256_hex(&context_bytes),
+        "authority_path": assignment.authority_path,
+        "authority_digest": assignment.authority_digest,
         "prompt_path":spec["prompt_path"],
         "prompt_digest":spec["prompt_digest"],
         "spec_path":spec["spec_path"],
@@ -1066,10 +1294,11 @@ fn validation_carrier_with_outcome(
         "tool_audit_ref":audit_path.display().to_string(),
         "tool_audit_digest":sha256_hex(&audit_bytes),
         "submission_digest":submission_digest,
-        "submission":submission
+        "submission":submission,
+        "verdict_digest":sha256_hex(&verdict_bytes),
+        "verdict":verdict,
     })
 }
-
 fn configure_runner_env() {
     unsafe {
         std::env::set_var(

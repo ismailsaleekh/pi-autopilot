@@ -19,7 +19,7 @@ The internal child-only forced-output/status tool made available by
 
 ## Signature
 
-The generated child add-on registers one parent-selected status profile. Delivery emits `autopilot.delivery_submission.v2`; Validation emits `autopilot.validation_submission.v2`. Core wraps the admitted payload in its package-owned v2 result with profile, schema, assignment-binding, and tool-call audit identity.
+The generated child add-on registers one parent-selected status profile. Delivery emits `autopilot.delivery_submission.v2`; production Validation emits the closed model-only `autopilot.validation_submission.v3`. Core independently binds v3 identity, exact candidate authority, coverage, receipts, and normalized outcome in `autopilot.validation_result.v3`; the retained v2 profile remains strict for legacy artifacts.
 
 ## Availability
 

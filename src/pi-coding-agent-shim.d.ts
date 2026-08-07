@@ -4,12 +4,9 @@ declare module "@earendil-works/pi-coding-agent" {
     emit(channel: string, data: unknown): void;
   }
 
-  export interface ExtensionContext {
-    readonly hasUI?: boolean;
-    readonly mode?: string;
+  export interface ExtensionContext { readonly hasUI?: boolean; readonly mode?: string;
     readonly ui: { notify(message: string, level?: string): void | Promise<void> };
-    readonly sessionManager: { getSessionId(): string };
-  }
+    readonly sessionManager: { getSessionId(): string }; }
 
   export interface ExtensionCommandContext extends ExtensionContext {}
 
@@ -25,6 +22,8 @@ declare module "@earendil-works/pi-coding-agent" {
 
   export type BashOperations = { exec(command: string, cwd: string, options: { onData(data: Buffer): void; signal?: AbortSignal; timeout?: number; env?: NodeJS.ProcessEnv }): Promise<{ exitCode: number | null }> };
   export type EditOperations = { readFile(path: string): Promise<Buffer>; writeFile(path: string, content: string): Promise<void>; access(path: string): Promise<void> };
+  export type ReadOperations = { readFile(path: string): Promise<Buffer>; access(path: string): Promise<void>;
+    detectImageMimeType?(path: string): Promise<string | null> };
   export type WriteOperations = { writeFile(path: string, content: string): Promise<void>; mkdir(path: string): Promise<void> };
 
   export interface ExtensionAPI {
@@ -41,6 +40,7 @@ declare module "@earendil-works/pi-coding-agent" {
   export type BashToolOptions = { operations?: BashOperations; exposeSessionEnvironment?: boolean };
   export function createBashTool(cwd: string, options?: BashToolOptions): ToolDefinition;
   export function createEditTool(cwd: string, options?: { operations?: EditOperations }): ToolDefinition;
+  export function createReadTool(cwd: string, options?: { operations?: ReadOperations }): ToolDefinition;
   export function createWriteTool(cwd: string, options?: { operations?: WriteOperations }): ToolDefinition;
   export function createLocalBashOperations(): BashOperations;
 }

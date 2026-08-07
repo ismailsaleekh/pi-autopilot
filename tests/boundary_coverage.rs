@@ -897,6 +897,82 @@ fn validation_package_check_receipts_are_exactly_bound_and_cannot_duplicate() {
     );
 }
 
+#[test]
+fn v3_validation_wire_is_closed_model_only_bounded_and_keeps_legacy_v2_exact_echo() {
+    let minimal = serde_json::json!({
+        "schema":"autopilot.validation_submission.v3",
+        "criterion_results":[{
+            "criterion_id":"AC1",
+            "verdict":"PASS",
+            "citation_refs":["validation-source:abc"],
+            "finding_ids":[]
+        }],
+        "findings":[]
+    });
+    serde_json::from_value::<kernel::generated::ValidationSubmissionV3>(minimal.clone())
+        .expect("closed minimal v3 submission");
+    for forbidden in [
+        "validation_id",
+        "assignment_id",
+        "exact_commit",
+        "exact_tree",
+        "outcome",
+        "covered_paths",
+        "command_receipt_refs",
+        "package_check_receipt_refs",
+        "evidence_refs",
+    ] {
+        let mut forged = minimal.clone();
+        forged[forbidden] = serde_json::json!("forbidden");
+        assert!(
+            serde_json::from_value::<kernel::generated::ValidationSubmissionV3>(forged).is_err(),
+            "v3 admitted Core-owned or mixed field {forbidden}"
+        );
+    }
+    const {
+        assert!(
+            kernel::generated::VALIDATION_EVIDENCE_AUTHORITY_MAX_BYTES
+                + kernel::generated::VALIDATION_ADMISSION_DIAGNOSTIC_MAX_BYTES
+                < drivers::runner::child::MAX_RENDERED_PROMPT_BYTES,
+            "generated worst-case authority plus diagnostic must fit the repair prompt data budget"
+        );
+    }
+    let tool_schema = include_str!("../src/generated/tool-schemas.ts");
+    assert!(tool_schema.contains("VALIDATION_SUBMISSION_V3_TOOL_PARAMETERS"));
+    assert!(tool_schema.contains("\"additionalProperties\": false"));
+    assert!(tool_schema.contains("\"const\": \"autopilot.validation_submission.v3\""));
+    assert!(tool_schema.contains("\"maxItems\": 256"));
+
+    let (_, context, mut legacy) =
+        validation_authority_bundle(validation_context_command_authority(
+            "cargo test -q",
+            "passes",
+            "no-effect",
+            vec![],
+            "none",
+            "Final Git-visible state remains limited to approved files.",
+        ));
+    legacy.criterion_results[0].evidence_refs.clear();
+    let assignment = validation_authority_bundle(validation_context_command_authority(
+        "cargo test -q",
+        "passes",
+        "no-effect",
+        vec![],
+        "none",
+        "Final Git-visible state remains limited to approved files.",
+    ))
+    .0;
+    assert!(
+        drivers::runner::child::admit_validation_submission_with_authority(
+            &legacy,
+            &assignment,
+            &context,
+        )
+        .is_err(),
+        "legacy v2 receipt omission must retain exact-echo rejection"
+    );
+}
+
 fn validation_context_command_authority(
     command: &str,
     expected: &str,

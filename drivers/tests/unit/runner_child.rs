@@ -1,6 +1,26 @@
 use super::*;
 
 #[test]
+fn terminal_byte_override_cannot_widen_the_generated_hard_ceiling() {
+    let ceiling = crate::generated::pi_rpc::DEFAULT_MAX_TERMINAL_BYTES;
+    assert_eq!(bounded_terminal_limit(1), Ok(1));
+    assert_eq!(bounded_terminal_limit(ceiling), Ok(ceiling));
+    assert!(bounded_terminal_limit(0).is_err());
+    assert!(bounded_terminal_limit(ceiling + 1).is_err());
+
+    let stderr_ceiling = crate::runner::rpc::MAX_STDERR_TAIL_BYTES;
+    assert_eq!(bounded_stderr_limit(0), Ok(0));
+    assert_eq!(bounded_stderr_limit(stderr_ceiling), Ok(stderr_ceiling));
+    assert!(bounded_stderr_limit(stderr_ceiling + 1).is_err());
+
+    assert_eq!(parse_usize_setting("LIMIT", None, 17), Ok(17));
+    assert_eq!(parse_usize_setting("LIMIT", Some("0"), 17), Ok(0));
+    assert_eq!(parse_usize_setting("LIMIT", Some("23"), 17), Ok(23));
+    assert!(parse_usize_setting("LIMIT", Some("invalid"), 17).is_err());
+    assert!(parse_usize_setting("LIMIT", Some("-1"), 17).is_err());
+}
+
+#[test]
 fn subscription_startup_stagger_is_bounded_and_spreads_wave_ordinals() {
     let policy = SubscriptionStartupStaggerPolicy::parse().expect("package policy");
     let delays = (1..=7)

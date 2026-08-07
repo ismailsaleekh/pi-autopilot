@@ -775,7 +775,7 @@ artifact "finding" schema="autopilot.finding.v1" producer="Model" model_produced
 }
 
 artifact "validation_assignment_v2" schema="autopilot.validation_assignment.v1" producer="Package" model_produced=#false {
-    doc "Package-produced independent Validator assignment. Production validation uses v2 submissions/results; v1 verdicts remain historical."
+    doc "Retained legacy Validator assignment. Already-issued v2 bindings preserve exact-echo admission; new production validation issuance uses v3."
     field "schema" type="schema-id" required=#true
     field "validation_id" type="id" required=#true
     field "validation_key" type="digest" required=#true
@@ -826,7 +826,7 @@ artifact "finding_v2" schema="autopilot.finding.v2" producer="Model" model_produ
 }
 
 artifact "validation_context_v2" schema="autopilot.validation_context.v1" producer="Package" model_produced=#false {
-    doc "Canonical fact-only Validator context. Forbidden producer reasoning/session classes are listed explicitly."
+    doc "Retained legacy fact-only Validator context for already-issued v2 bindings. Forbidden producer reasoning/session classes remain explicit."
     field "schema" type="schema-id" required=#true
     field "context_id" type="id" required=#true
     field "revision" type="u32" required=#true
@@ -893,7 +893,7 @@ artifact "validation_context_v2" schema="autopilot.validation_context.v1" produc
 }
 
 artifact "validation_submission_v2" schema="autopilot.validation_submission.v2" producer="Model" model_produced=#true {
-    doc "Only payload accepted by the Validator terminal tool. Assistant-text JSON without the terminal tool is not a carrier."
+    doc "Closed terminal payload retained for already-issued v2 Validator bindings. Assistant-text JSON without the terminal tool is not a carrier."
     admits "Call autopilot_emit_status exactly once with this closed JSON object. Verdict every required criterion exactly once, cite only declared evidence refs, embed every finding, and do not claim PASS/READY when Core would compute a material blocker."
     submit_tool "autopilot_emit_status" label="Submit validation status" profile="validation-status.v2" result_contract="autopilot.validation_result.v2" closed=#true
     field "schema" type="schema-id" required=#true
@@ -918,7 +918,7 @@ artifact "validation_submission_v2" schema="autopilot.validation_submission.v2" 
 }
 
 artifact "validation_result_v2" schema="autopilot.validation_result.v2" producer="Package" model_produced=#false {
-    doc "Package-bound Validator carrier written create-once after validating model submission and immutable runner binding."
+    doc "Retained legacy package-bound Validator carrier written create-once after exact-echo v2 admission and immutable runner binding."
     field "schema" type="schema-id" required=#true
     field "action_id" type="id" required=#true
     field "assignment_id" type="id" required=#true
@@ -962,6 +962,255 @@ artifact "validation_result_v2" schema="autopilot.validation_result.v2" producer
     field "submission" type="validation_submission_v2" required=#true
 }
 
+
+artifact "validation_evidence_authority" schema="autopilot.validation_evidence_authority.v1" producer="Package" model_produced=#false max_bytes=1048576 {
+    doc "Single digest-bound authority for v3 validation identity, exact candidate evidence, receipt bindings, coverage, and allowed model citations."
+    field "schema" type="schema-id" required=#true constant="autopilot.validation_evidence_authority.v1" max_bytes=64
+    field "validation_id" type="id" required=#true max_bytes=256
+    field "assignment_id" type="id" required=#true max_bytes=256
+    field "exact_commit" type="git-oid" required=#true max_bytes=64
+    field "exact_tree" type="git-oid" required=#true max_bytes=64
+    field "base_commit" type="git-oid" required=#true max_bytes=64
+    field "candidate_root" type="path" required=#true max_bytes=4096
+    field "unchanged_recovery" type="bool" required=#true
+    list "changed_paths" item="path" required=#true max_items=256 unique=#true
+    list "deleted_paths" item="path" required=#true max_items=256 unique=#true
+    field "diff_ref" type="ref" required=#true max_bytes=512
+    field "diff_digest" type="digest" required=#true max_bytes=64
+    field "diff_path" type="path" required=#true max_bytes=4096
+    list "source_records" item="validation_source_record" required=#true max_items=256 unique=#true
+    list "diff_records" item="validation_diff_record" required=#true min_items=1 max_items=1 unique=#true
+    list "command_receipts" item="validation_receipt_record" required=#true min_items=1 max_items=256 unique=#true
+    list "package_check_receipts" item="validation_receipt_record" required=#true max_items=256 unique=#true
+    list "criteria" item="validation_authority_criterion" required=#true min_items=1 max_items=256 unique=#true
+    field "authority_digest" type="digest" required=#true max_bytes=64
+    record "validation_source_record" {
+        field "evidence_ref" type="ref" required=#true max_bytes=512
+        field "kind" type="string" required=#true max_bytes=32
+        field "exact_commit" type="git-oid" required=#true max_bytes=64
+        field "exact_tree" type="git-oid" required=#true max_bytes=64
+        field "source_path" type="path" required=#true max_bytes=4096
+        field "git_blob_oid" type="git-oid" required=#true max_bytes=64
+        field "blob_digest" type="digest" required=#true max_bytes=64
+        field "mode" type="string" required=#true max_bytes=6
+        field "line_count" type="u32" required=#true
+    }
+    record "validation_diff_record" {
+        field "evidence_ref" type="ref" required=#true max_bytes=512
+        field "kind" type="string" required=#true max_bytes=32
+        field "exact_commit" type="git-oid" required=#true max_bytes=64
+        field "exact_tree" type="git-oid" required=#true max_bytes=64
+        field "base_commit" type="git-oid" required=#true max_bytes=64
+        field "diff_digest" type="digest" required=#true max_bytes=64
+        field "diff_path" type="path" required=#true max_bytes=4096
+        field "byte_length" type="u64" required=#true
+    }
+    record "validation_receipt_record" {
+        field "evidence_ref" type="ref" required=#true max_bytes=512
+        field "receipt_digest" type="digest" required=#true max_bytes=64
+        field "receipt_json" type="bytes" required=#true max_bytes=16384
+        field "kind" type="string" required=#true max_bytes=64
+        field "exact_commit" type="git-oid" required=#true max_bytes=64
+        field "exact_tree" type="git-oid" required=#true max_bytes=64
+        field "binding_id" type="id" required=#true max_bytes=256
+        field "unit_id" type="id" required=#true max_bytes=256
+        list "criterion_ids" item="id" required=#true min_items=1 max_items=256 unique=#true
+    }
+    record "validation_authority_criterion" {
+        field "criterion_id" type="id" required=#true max_bytes=256
+        field "unit_id" type="id" required=#true max_bytes=256
+        field "unit_criterion_ordinal" type="u32" required=#true
+        field "requirement_text" type="string" required=#true max_bytes=4096
+        list "covered_paths" item="path" required=#true min_items=1 max_items=256 unique=#true
+        list "semantic_surface_ids" item="id" required=#true max_items=256 unique=#true
+        list "forward_edge_ids" item="id" required=#true max_items=256 unique=#true
+        list "allowed_citation_refs" item="ref" required=#true min_items=1 max_items=256 unique=#true
+        list "command_receipt_refs" item="ref" required=#true min_items=1 max_items=256 unique=#true
+        list "package_check_receipt_refs" item="ref" required=#true max_items=256 unique=#true
+    }
+}
+
+artifact "validation_assignment_v3" schema="autopilot.validation_assignment.v3" producer="Package" model_produced=#false max_bytes=131072 {
+    doc "Package-issued v3 Validator assignment bound to one validation evidence authority."
+    field "schema" type="schema-id" required=#true constant="autopilot.validation_assignment.v3" max_bytes=64
+    field "validation_id" type="id" required=#true max_bytes=256
+    field "validation_key" type="digest" required=#true max_bytes=64
+    field "workstream" type="id" required=#true max_bytes=256
+    field "run_revision" type="u64" required=#true
+    field "role_id" type="id" required=#true max_bytes=256
+    field "mode" type="mode-id" required=#true max_bytes=256
+    field "assignment_id" type="id" required=#true max_bytes=256
+    field "action_id" type="id" required=#true max_bytes=256
+    field "validation_attempt" type="u32" required=#true
+    field "semantic_round" type="u32" required=#true
+    list "producer_assignment_ids" item="id" required=#true min_items=1 max_items=256 unique=#true
+    field "base_commit" type="git-oid" required=#true max_bytes=64
+    field "exact_commit" type="git-oid" required=#true max_bytes=64
+    field "exact_tree" type="git-oid" required=#true max_bytes=64
+    field "candidate_root" type="path" required=#true max_bytes=4096
+    field "context_path" type="path" required=#true max_bytes=4096
+    field "context_digest" type="digest" required=#true max_bytes=64
+    field "authority_path" type="path" required=#true max_bytes=4096
+    field "authority_digest" type="digest" required=#true max_bytes=64
+    field "max_value_attempts" type="u32" required=#true
+}
+
+artifact "validation_context_v3" schema="autopilot.validation_context.v3" producer="Package" model_produced=#false max_bytes=1048576 {
+    doc "Fact-only v3 Validator context. It projects readable exact source/diff citations but never asks the model to echo Core-owned receipts or coverage."
+    field "schema" type="schema-id" required=#true constant="autopilot.validation_context.v3" max_bytes=64
+    field "validation_id" type="id" required=#true max_bytes=256
+    field "assignment_id" type="id" required=#true max_bytes=256
+    field "authority_digest" type="digest" required=#true max_bytes=64
+    list "criteria" item="validation_context_v3_criterion" required=#true min_items=1 max_items=256 unique=#true
+    list "citation_records" item="validation_citation_record" required=#true min_items=1 max_items=257 unique=#true
+    record "validation_context_v3_criterion" {
+        field "criterion_id" type="id" required=#true max_bytes=256
+        field "requirement_text" type="string" required=#true max_bytes=4096
+        list "allowed_citation_refs" item="ref" required=#true min_items=1 max_items=256 unique=#true
+    }
+    record "validation_citation_record" {
+        field "evidence_ref" type="ref" required=#true max_bytes=512
+        field "kind" type="string" required=#true max_bytes=32
+        field "source_path" type="path" required=#false max_bytes=4096
+        field "blob_digest" type="digest" required=#false max_bytes=64
+        field "line_count" type="u32" required=#false
+        field "diff_digest" type="digest" required=#false max_bytes=64
+        field "diff_path" type="path" required=#false max_bytes=4096
+    }
+}
+
+artifact "validation_submission_v3" schema="autopilot.validation_submission.v3" producer="Model" model_produced=#true max_bytes=1048576 {
+    doc "Closed v3 Validator model payload. Core owns identity, candidate state, assigned coverage, receipts, and outcome; the model owns only semantic verdicts, citation selection, and findings."
+    admits "Call autopilot_emit_status exactly once with this closed v3 object. Submit only criterion semantic verdicts, allowed source/diff citation_refs, and findings. Do not include validation or assignment identity, commit/tree, outcome, covered paths/surfaces/edges, command/package receipts, or mixed evidence refs. Core derives canonical criterion/finding order and auto-binds exact receipt sets from the generated validation authority; receipt-looking citation refs are rejected. Citation and finding arrays may arrive in any order but must be duplicate-free. Inspect each supplied source/diff record only through the policy-confined read tool at its supplied path, cite only records authorized for the relevant criterion, and give every source-defect finding at least one cited in-range source_location."
+    submit_tool "autopilot_emit_status" label="Submit validation status" profile="validation-status.v3" result_contract="autopilot.validation_result.v3" closed=#true
+    field "schema" type="schema-id" required=#true constant="autopilot.validation_submission.v3" max_bytes=64
+    list "criterion_results" item="criterion_result_v3" required=#true min_items=1 max_items=256
+    list "findings" item="finding_v3" required=#true max_items=128
+    record "criterion_result_v3" {
+        field "criterion_id" type="id" required=#true max_bytes=256
+        field "verdict" type="criterion_verdict" required=#true max_bytes=16
+        list "citation_refs" item="ref" required=#true min_items=1 max_items=64 item_max_bytes=512
+        list "finding_ids" item="id" required=#true max_items=128 item_max_bytes=256
+    }
+    record "finding_v3" {
+        field "finding_id" type="id" required=#true max_bytes=256
+        field "kind" type="finding_kind_v2" required=#true max_bytes=32
+        field "effect" type="finding_effect" required=#true max_bytes=32
+        field "summary" type="string" required=#true max_bytes=512
+        field "detail" type="string" required=#true max_bytes=4096
+        list "criterion_ids" item="id" required=#true min_items=1 max_items=256 item_max_bytes=256
+        list "citation_refs" item="ref" required=#true min_items=1 max_items=64 item_max_bytes=512
+        list "source_locations" item="validation_source_location" required=#true max_items=64
+    }
+    record "validation_source_location" {
+        field "citation_ref" type="ref" required=#true max_bytes=512
+        field "start_line" type="u32" required=#true
+        field "end_line" type="u32" required=#true
+    }
+}
+
+artifact "validation_verdict_v3" schema="autopilot.validation_verdict.v3" producer="Package" model_produced=#false max_bytes=2097152 {
+    doc "Core-normalized v3 validation verdict. It keeps model citations separate from automatically bound command/package receipts and derives coverage and outcome."
+    field "schema" type="schema-id" required=#true constant="autopilot.validation_verdict.v3"
+    field "validation_id" type="id" required=#true
+    field "assignment_id" type="id" required=#true
+    field "exact_commit" type="git-oid" required=#true
+    field "exact_tree" type="git-oid" required=#true
+    field "outcome" type="validation_outcome_v2" required=#true
+    list "criterion_results" item="normalized_criterion_result_v3" required=#true
+    list "findings" item="finding_v3" required=#true
+    record "normalized_criterion_result_v3" {
+        field "criterion_id" type="id" required=#true
+        field "verdict" type="criterion_verdict" required=#true
+        list "model_citation_refs" item="ref" required=#true
+        list "command_receipt_refs" item="ref" required=#true
+        list "package_check_receipt_refs" item="ref" required=#true
+        list "finding_ids" item="id" required=#true
+        list "covered_paths" item="path" required=#true
+        list "semantic_surface_ids" item="id" required=#true
+        list "forward_edge_ids" item="id" required=#true
+    }
+}
+
+artifact "validation_admission_diagnostic" schema="autopilot.validation_admission_diagnostic.v1" producer="Package" model_produced=#false max_bytes=2097152 {
+    doc "Complete deterministic v3 validation admission diagnostic. Authority corruption is fatal; model shape and semantic-value mismatches are repaired together. Large value lists and excess rows are represented by deterministic count/digest summaries inside the generated repair-prompt byte ceiling without reclassifying model input as fatal; mismatch_count retains the complete pre-summary count."
+    field "schema" type="schema-id" required=#true constant="autopilot.validation_admission_diagnostic.v1" max_bytes=64
+    field "boundary_id" type="contract-id" required=#true max_bytes=64
+    field "validation_id" type="id" required=#true max_bytes=256
+    field "assignment_id" type="id" required=#true max_bytes=256
+    field "authority_digest" type="digest" required=#true max_bytes=64
+    field "value_attempt" type="u32" required=#true
+    field "phase" type="validation-admission-phase" required=#true max_bytes=16
+    field "disposition" type="validation-admission-disposition" required=#true max_bytes=32
+    field "complete" type="bool" required=#true
+    field "mismatch_count" type="u32" required=#true
+    list "mismatches" item="validation_admission_mismatch" required=#true min_items=1 max_items=2048
+    record "validation_admission_mismatch" {
+        field "code" type="string" required=#true max_bytes=128
+        field "field" type="string" required=#true max_bytes=1024
+        field "criterion_id" type="id" required=#false nullable=#true max_bytes=256
+        field "finding_id" type="id" required=#false nullable=#true max_bytes=256
+        field "comparison" type="validation-admission-comparison" required=#true max_bytes=32
+        list "expected" item="string" required=#true max_items=256 item_max_bytes=4096
+        list "actual" item="string" required=#true max_items=256 item_max_bytes=4096
+        list "missing" item="string" required=#true max_items=256 item_max_bytes=4096
+        list "extra" item="string" required=#true max_items=256 item_max_bytes=4096
+        list "duplicates" item="validation_admission_duplicate" required=#true max_items=256
+    }
+    record "validation_admission_duplicate" {
+        field "value" type="string" required=#true max_bytes=4096
+        field "count" type="u32" required=#true
+    }
+}
+
+artifact "validation_result_v3" schema="autopilot.validation_result.v3" producer="Package" model_produced=#false {
+    doc "Package-bound v3 Validator result preserving canonical admitted model semantics, exact authority binding, and Core-normalized verdict bytes. Raw tool arguments remain in the Pi session and attempt evidence rather than influencing carrier bytes."
+    field "schema" type="schema-id" required=#true constant="autopilot.validation_result.v3"
+    field "action_id" type="id" required=#true
+    field "assignment_id" type="id" required=#true
+    field "validation_id" type="id" required=#true
+    field "validation_key" type="digest" required=#true
+    field "validation_attempt" type="u32" required=#true
+    field "semantic_round" type="u32" required=#true
+    field "run_revision" type="u64" required=#true
+    field "workstream" type="id" required=#true
+    field "role_id" type="id" required=#true
+    field "mode" type="mode-id" required=#true
+    list "producer_assignment_ids" item="id" required=#true
+    field "exact_commit" type="git-oid" required=#true
+    field "exact_tree" type="git-oid" required=#true
+    field "assignment_path" type="path" required=#true
+    field "assignment_digest" type="digest" required=#true
+    field "context_manifest_path" type="path" required=#true
+    field "context_manifest_digest" type="digest" required=#true
+    field "authority_path" type="path" required=#true
+    field "authority_digest" type="digest" required=#true
+    field "prompt_path" type="path" required=#true
+    field "prompt_digest" type="digest" required=#true
+    field "spec_path" type="path" required=#true
+    field "spec_digest" type="digest" required=#true
+    field "spec_bytes" type="bytes" required=#true
+    field "carrier_path" type="path" required=#true
+    field "boundary_id" type="contract-id" required=#true
+    field "boundary_digest" type="digest" required=#true
+    field "result_contract" type="contract-id" required=#true
+    field "result_contract_digest" type="digest" required=#true
+    field "settings_digest" type="digest" required=#true
+    field "skills_digest" type="digest" required=#true
+    field "subscription_digest" type="digest" required=#true
+    field "runtime_extension_digest" type="digest" required=#true
+    field "terminal_profile_id" type="string" required=#true
+    field "tool_name" type="tool-name" required=#true
+    field "tool_schema_digest" type="digest" required=#true
+    field "carrier_binding" type="digest" required=#true
+    field "tool_call_id" type="string" required=#true
+    field "tool_audit_ref" type="ref" required=#true
+    field "tool_audit_digest" type="digest" required=#true
+    field "submission_digest" type="digest" required=#true
+    field "submission" type="validation_submission_v3" required=#true
+    field "verdict_digest" type="digest" required=#true
+    field "verdict" type="validation_verdict_v3" required=#true
+}
 
 artifact "seam_envelope" schema="autopilot.seam_envelope.v1" producer="Host" model_produced=#false {
     doc "D78 §3.1 newline-delimited JSON frame envelope over stdio."
@@ -1367,6 +1616,24 @@ enum "criterion_verdict" {
     value "PASS"
     value "FAIL"
     value "BLOCKED"
+}
+
+enum "validation-admission-phase" {
+    value "shape"
+    value "value"
+    value "authority"
+}
+
+enum "validation-admission-disposition" {
+    value "repairable-model-value"
+    value "fatal-authority"
+}
+
+enum "validation-admission-comparison" {
+    value "exact"
+    value "subset-of"
+    value "membership"
+    value "line-bounds"
 }
 
 enum "finding_effect" {

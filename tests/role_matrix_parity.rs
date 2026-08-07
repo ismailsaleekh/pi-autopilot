@@ -148,7 +148,7 @@ fn role_matrix_matches_d76_section_2_3_exactly() {
             "forward-release, deep-closure, delta-revalidation, conflict-review, final-review",
             "review",
             "xhigh",
-            "exact candidate/evidence read-only",
+            "exact citation-bound evidence read-only",
             "autopilot_emit_status",
         ),
     ];
@@ -163,9 +163,6 @@ fn validator_role_is_mechanically_read_only_and_context_modes_are_registered() {
         validator.tools,
         vec![
             "read".to_owned(),
-            "grep".to_owned(),
-            "find".to_owned(),
-            "ls".to_owned(),
             "autopilot_request_test".to_owned(),
             "autopilot_emit_status".to_owned(),
         ]
@@ -235,9 +232,9 @@ fn live_delivery_and_validation_profiles_are_exact_and_capability_backed() {
         ),
         (
             "validator",
-            "validation-status.v2",
-            "autopilot.validation_submission.v2",
-            "autopilot.validation_result.v2",
+            "validation-status.v3",
+            "autopilot.validation_submission.v3",
+            "autopilot.validation_result.v3",
             vec!["autopilot_request_test".to_owned()],
         ),
     ] {

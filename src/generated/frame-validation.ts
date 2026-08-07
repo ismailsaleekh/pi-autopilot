@@ -271,6 +271,21 @@ const FRAME_VALIDATION_DESCRIPTORS = {
       "fresh",
       "resume"
     ],
+    "validation-admission-comparison": [
+      "exact",
+      "subset-of",
+      "membership",
+      "line-bounds"
+    ],
+    "validation-admission-disposition": [
+      "repairable-model-value",
+      "fatal-authority"
+    ],
+    "validation-admission-phase": [
+      "shape",
+      "value",
+      "authority"
+    ],
     "validation_assignment_kind": [
       "planning-review",
       "delivery",

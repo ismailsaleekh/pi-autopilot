@@ -83,7 +83,7 @@ env_deny "OPENAI_BASE_URL"
 env_deny "ANTHROPIC_API_KEY"
 env_deny "ANTHROPIC_BASE_URL"
 env_deny "PI_API_KEY"
-size_limit "terminal" bytes=2097152
+size_limit "terminal" bytes=4194304
 size_limit "entry_appended" bytes=16384
 state "idle" terminal_ok=#true
 state "running"

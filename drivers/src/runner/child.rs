@@ -13,7 +13,7 @@ use crate::checkpoint::{
 use crate::runner::rpc::{
     AppendedEntry, CompactionReason, DeliveryPolicyLaunchConfig, RpcClient, RpcCommand,
     RpcCommandKind, RpcDiagnostics, RpcEvent, RpcFrame, RpcResponse, RpcSpawnConfig,
-    TerminalMessage, ToolCarrierDetails,
+    TerminalMessage, ToolCarrierDetails, ValidationEvidenceLaunchConfig,
 };
 
 use kernel::failure::{Failure, OperatorDecision, RetryPolicy};
@@ -38,6 +38,15 @@ struct ValueRejection {
     field: String,
     expected: String,
     got: String,
+    diagnostic: Option<Box<ValidationDiagnosticBinding>>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct ValidationDiagnosticBinding {
+    path: String,
+    digest: String,
+    mismatch_count: u32,
+    canonical_json: String,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -68,6 +77,7 @@ struct ChildToolReceipt {
     binding: String,
     active_tools: Vec<String>,
     delivery_policy: Option<ChildDeliveryPolicyReceipt>,
+    validation_evidence_policy: Option<ChildValidationEvidencePolicyReceipt>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
@@ -83,6 +93,8 @@ struct ChildToolReceiptData {
     active_tools: Vec<String>,
     #[serde(default)]
     delivery_policy: Option<ChildDeliveryPolicyReceipt>,
+    #[serde(default)]
+    validation_evidence_policy: Option<ChildValidationEvidencePolicyReceipt>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
@@ -97,6 +109,16 @@ struct ChildDeliveryPolicyReceipt {
     allowed_unit_file_count: usize,
     approved_command_count: usize,
     active_overrides: Vec<String>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChildValidationEvidencePolicyReceipt {
+    context_path: String,
+    context_digest: String,
+    cwd: String,
+    evidence_count: usize,
+    active_override: String,
 }
 
 pub(crate) const MAX_DELIVERY_POLICY_DENIALS: usize = 32;
@@ -223,6 +245,18 @@ enum CarrierSource {
 enum CarrierRejection {
     Identity(String),
     Value(ValueRejection),
+}
+
+#[derive(Debug)]
+enum PreparedArtifact {
+    JsonNew { path: String, value: Value },
+    ExactBytes { path: PathBuf, bytes: Vec<u8> },
+}
+
+#[derive(Debug)]
+struct PreparedCarrier {
+    carrier: Value,
+    artifacts: Vec<PreparedArtifact>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
@@ -601,11 +635,18 @@ pub fn main(args: &[String]) -> Result<(), String> {
         &spec,
         prompt,
     );
-    let shutdown = runner.shutdown();
-    if result.is_ok() {
-        shutdown?;
-    }
-    result
+    let (attempt, prepared) = match result {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            let _ = runner.shutdown();
+            return Err(error);
+        }
+    };
+    runner.shutdown()?;
+    persist_prepared_carrier(&spec, prepared)?;
+    append_attempt_event(&spec, attempt, "accepted", AttemptEventDetail::none())
+        .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 fn run_value_attempts(
@@ -616,7 +657,7 @@ fn run_value_attempts(
     spec_digest: &str,
     spec: &AgentRunSpec,
     prompt: String,
-) -> Result<(), String> {
+) -> Result<(u32, PreparedCarrier), String> {
     let mut attempt_prompt = prompt;
     for attempt in 1..=MAX_VALUE_ATTEMPTS {
         append_attempt_event(spec, attempt, "started", AttemptEventDetail::none())
@@ -624,12 +665,8 @@ fn run_value_attempts(
         let source =
             run_prompt_with_terminal_continuation(runner, spec, session, &attempt_prompt, attempt)
                 .map_err(TerminalContinuationError::into_message)?;
-        match write_carrier(spec_path, spec_bytes, spec_digest, spec, &source) {
-            Ok(()) => {
-                append_attempt_event(spec, attempt, "accepted", AttemptEventDetail::none())
-                    .map_err(|error| error.to_string())?;
-                return Ok(());
-            }
+        match prepare_carrier(spec_path, spec_bytes, spec_digest, spec, &source, attempt) {
+            Ok(prepared) => return Ok((attempt, prepared)),
             Err(CarrierRejection::Identity(detail)) => {
                 append_attempt_event(
                     spec,
@@ -1141,6 +1178,51 @@ fn validate_delivery_policy_receipt(
     Ok(())
 }
 
+fn validate_validation_evidence_policy_receipt(
+    spec: &AgentRunSpec,
+    receipt: Option<&ChildValidationEvidencePolicyReceipt>,
+) -> Result<(), String> {
+    if spec.boundary_id.0 != "autopilot.validation_submission.v3" {
+        return if receipt.is_none() {
+            Ok(())
+        } else {
+            Err("agent-run validation evidence policy receipt on non-v3 profile".to_owned())
+        };
+    }
+    let receipt =
+        receipt.ok_or_else(|| "agent-run missing validation evidence policy receipt".to_owned())?;
+    let context_path = spec
+        .context_manifest_path
+        .as_ref()
+        .ok_or_else(|| "agent-run v3 validation missing context_manifest_path".to_owned())?;
+    let context_digest = spec
+        .context_manifest_digest
+        .as_ref()
+        .ok_or_else(|| "agent-run v3 validation missing context_manifest_digest".to_owned())?;
+    let bytes = super::read_bounded_file(
+        Path::new(&context_path.0),
+        kernel::generated::VALIDATION_CONTEXT_V3_MAX_BYTES,
+    )
+    .map_err(|error| format!("agent-run validation evidence context read: {error}"))?;
+    let context: kernel::generated::ValidationContextV3 = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("agent-run validation evidence context json: {error}"))?;
+    if receipt.context_path != context_path.0
+        || receipt.context_digest != context_digest.0
+        || receipt.cwd != spec.cwd.0
+        || receipt.active_override != "read"
+        || receipt.evidence_count != context.citation_records.len()
+        || receipt.evidence_count == 0
+        || sha256_hex(&bytes) != context_digest.0
+        || context.citation_records.iter().any(|record| {
+            crate::runner::validation_authority::is_receipt_ref(&record.evidence_ref.0)
+                || (record.source_path.is_some() == record.diff_path.is_some())
+        })
+    {
+        return Err("agent-run validation evidence policy receipt drift".to_owned());
+    }
+    Ok(())
+}
+
 fn normalize_streamed_child_tool_receipt(
     entry: &AppendedEntry,
 ) -> Result<ChildToolReceipt, String> {
@@ -1167,6 +1249,7 @@ fn normalize_child_tool_receipt_data(
         binding,
         mut active_tools,
         delivery_policy,
+        validation_evidence_policy,
     } = serde_json::from_value(data)
         .map_err(|error| format!("agent-run child add-on receipt data malformed: {error}"))?;
     active_tools.sort();
@@ -1181,6 +1264,7 @@ fn normalize_child_tool_receipt_data(
         binding,
         active_tools,
         delivery_policy,
+        validation_evidence_policy,
     })
 }
 
@@ -1191,10 +1275,10 @@ impl RpcAssignment {
             .iter()
             .map(|tool| tool.0.clone())
             .collect::<Vec<_>>();
-        let stderr_limit = env_usize(
+        let stderr_limit = bounded_stderr_limit(env_usize(
             "AUTOPILOT_AGENT_RUN_MAX_STDERR_BYTES",
             DEFAULT_MAX_PI_STDERR_BYTES,
-        );
+        )?)?;
         let policy = CheckpointPolicy::parse()?;
         let mut config = RpcSpawnConfig::new(
             PathBuf::from(&spec.cwd.0),
@@ -1217,10 +1301,11 @@ impl RpcAssignment {
         // setting AUTOPILOT_AGENT_RUN_MAX_STDOUT_BYTES to 1024/4096 were ALREADY no-ops
         // at HEAD, because the old `.max(DEFAULT_MAX_PI_STDOUT_BYTES)` floor swallowed
         // any value below 1 MiB. Keeping a floor here would only re-couple the budgets.
-        config.max_terminal_bytes = env_usize(
+        let terminal_limit = env_usize(
             "AUTOPILOT_AGENT_RUN_MAX_TERMINAL_BYTES",
             crate::generated::pi_rpc::DEFAULT_MAX_TERMINAL_BYTES,
-        );
+        )?;
+        config.max_terminal_bytes = bounded_terminal_limit(terminal_limit)?;
         if let Some((path, _)) = runtime_addon(spec) {
             config.runtime_addon = Some(PathBuf::from(&path.0));
             config.terminal_profile = spec.terminal_profile_id.clone();
@@ -1268,6 +1353,19 @@ impl RpcAssignment {
                         &worktree.0,
                         &spec.cwd.0,
                     ),
+                });
+            }
+            if spec.boundary_id.0 == "autopilot.validation_submission.v3" {
+                let context_path = spec.context_manifest_path.as_ref().ok_or_else(|| {
+                    "agent-run v3 validation missing context_manifest_path".to_owned()
+                })?;
+                let context_digest = spec.context_manifest_digest.as_ref().ok_or_else(|| {
+                    "agent-run v3 validation missing context_manifest_digest".to_owned()
+                })?;
+                config.validation_evidence = Some(ValidationEvidenceLaunchConfig {
+                    context_path: context_path.0.clone(),
+                    context_digest: context_digest.0.clone(),
+                    cwd: spec.cwd.0.clone(),
                 });
             }
         }
@@ -1980,6 +2078,10 @@ impl RpcAssignment {
             ));
         }
         validate_delivery_policy_receipt(spec, durable.delivery_policy.as_ref())?;
+        validate_validation_evidence_policy_receipt(
+            spec,
+            durable.validation_evidence_policy.as_ref(),
+        )?;
         Ok(())
     }
 
@@ -3060,8 +3162,10 @@ fn validate_route_and_role(strict: &AgentRunSpec) -> Result<(), String> {
             if strict.boundary_id.0 == "autopilot.delivery_submission.v2"
                 && strict.result_contract.0 == "autopilot.delivery_result.v2" => {}
         kernel::generated::ValidationAssignmentKind::Validation
-            if strict.boundary_id.0 == "autopilot.validation_submission.v2"
-                && strict.result_contract.0 == "autopilot.validation_result.v2" => {}
+            if (strict.boundary_id.0 == "autopilot.validation_submission.v2"
+                && strict.result_contract.0 == "autopilot.validation_result.v2")
+                || (strict.boundary_id.0 == "autopilot.validation_submission.v3"
+                    && strict.result_contract.0 == "autopilot.validation_result.v3") => {}
         _ => {
             return Err(format!(
                 "agent-run assignment kind/boundary/result drift: {:?}/{}/{}",
@@ -3426,6 +3530,21 @@ fn validate_delivery_assignment_artifact(
 }
 
 fn validate_validation_spec_identity(strict: &AgentRunSpec) -> Result<(), String> {
+    match (
+        strict.boundary_id.0.as_str(),
+        strict.result_contract.0.as_str(),
+    ) {
+        ("autopilot.validation_submission.v2", "autopilot.validation_result.v2") => {
+            validate_validation_spec_identity_v2(strict)
+        }
+        ("autopilot.validation_submission.v3", "autopilot.validation_result.v3") => {
+            validate_validation_spec_identity_v3(strict)
+        }
+        _ => Err("agent-run validation issued boundary/result tuple is unknown".to_owned()),
+    }
+}
+
+fn validate_validation_spec_identity_v2(strict: &AgentRunSpec) -> Result<(), String> {
     let assignment_path = strict
         .assignment_path
         .as_ref()
@@ -3530,6 +3649,174 @@ fn validate_validation_spec_identity(strict: &AgentRunSpec) -> Result<(), String
         return Err("agent-run validation candidate commit/tree drift before prompt".to_owned());
     }
     Ok(())
+}
+
+fn validate_validation_spec_identity_v3(strict: &AgentRunSpec) -> Result<(), String> {
+    let assignment_path = strict
+        .assignment_path
+        .as_ref()
+        .ok_or_else(|| "agent-run v3 validation missing assignment_path".to_owned())?;
+    let assignment_digest = strict
+        .assignment_digest
+        .as_ref()
+        .ok_or_else(|| "agent-run v3 validation missing assignment_digest".to_owned())?;
+    let context_path = strict
+        .context_manifest_path
+        .as_ref()
+        .ok_or_else(|| "agent-run v3 validation missing context_manifest_path".to_owned())?;
+    let context_digest = strict
+        .context_manifest_digest
+        .as_ref()
+        .ok_or_else(|| "agent-run v3 validation missing context_manifest_digest".to_owned())?;
+    let model_submission_path = strict
+        .model_submission_path
+        .as_ref()
+        .ok_or_else(|| "agent-run v3 validation missing model_submission_path".to_owned())?;
+    let artifact_root = Path::new(&assignment_path.0)
+        .parent()
+        .ok_or_else(|| "agent-run v3 validation assignment path has no parent".to_owned())?;
+    let expected_assignment = artifact_root.join("assignment.v3.json");
+    let expected_context = artifact_root.join("context.v3.json");
+    let expected_authority = artifact_root.join("authority.v3.json");
+    let expected_submission = artifact_root.join("model-submission.v3.json");
+    if Path::new(&assignment_path.0) != expected_assignment
+        || Path::new(&context_path.0) != expected_context
+        || Path::new(&model_submission_path.0) != expected_submission
+    {
+        return Err("agent-run v3 validation artifact path drift".to_owned());
+    }
+    let mut output_paths = vec![
+        PathBuf::from(&model_submission_path.0),
+        PathBuf::from(&strict.carrier_path.0).with_extension("tool-audit.json"),
+    ];
+    output_paths.extend((1..=MAX_VALUE_ATTEMPTS).map(|attempt| {
+        PathBuf::from(&strict.carrier_path.0)
+            .with_file_name(format!("admission-diagnostic-v3-attempt-{attempt}.json"))
+    }));
+    for path in output_paths {
+        super::reject_link_components_for_path(&path).map_err(|error| error.to_string())?;
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => {
+                return Err(format!(
+                    "agent-run v3 validation stale package output refused at {}",
+                    path.display()
+                ));
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    let assignment_bytes = super::read_bounded_file(
+        Path::new(&assignment_path.0),
+        kernel::generated::VALIDATION_ASSIGNMENT_V3_MAX_BYTES,
+    )
+    .map_err(|error| format!("agent-run v3 assignment read: {error}"))?;
+    let context_bytes = super::read_bounded_file(
+        Path::new(&context_path.0),
+        kernel::generated::VALIDATION_CONTEXT_V3_MAX_BYTES,
+    )
+    .map_err(|error| format!("agent-run v3 context read: {error}"))?;
+    if sha256_hex(&assignment_bytes) != assignment_digest.0
+        || sha256_hex(&context_bytes) != context_digest.0
+    {
+        return Err("agent-run v3 validation assignment/context digest drift".to_owned());
+    }
+    let assignment: kernel::generated::ValidationAssignmentV3 =
+        serde_json::from_slice(&assignment_bytes)
+            .map_err(|error| format!("agent-run v3 assignment json: {error}"))?;
+    let context: kernel::generated::ValidationContextV3 = serde_json::from_slice(&context_bytes)
+        .map_err(|error| format!("agent-run v3 context json: {error}"))?;
+    if serde_json::to_vec_pretty(&assignment).map_err(|error| error.to_string())?
+        != assignment_bytes
+        || serde_json::to_vec_pretty(&context).map_err(|error| error.to_string())? != context_bytes
+    {
+        return Err("agent-run v3 validation artifacts are not canonical bytes".to_owned());
+    }
+    let validation_id = strict
+        .validation_id
+        .as_ref()
+        .ok_or_else(|| "agent-run v3 validation missing validation_id".to_owned())?;
+    let producer_ids = strict
+        .producer_assignment_ids
+        .as_ref()
+        .ok_or_else(|| "agent-run v3 validation missing producer ids".to_owned())?;
+    let base_commit = strict
+        .base_commit
+        .as_ref()
+        .ok_or_else(|| "agent-run v3 validation missing base commit".to_owned())?;
+    let worktree = strict
+        .worktree
+        .as_ref()
+        .ok_or_else(|| "agent-run v3 validation missing worktree".to_owned())?;
+    if assignment.schema.0 != "autopilot.validation_assignment.v3"
+        || assignment.action_id != strict.action_id
+        || assignment.assignment_id != strict.assignment_id
+        || assignment.workstream != strict.workstream
+        || assignment.run_revision != strict.run_revision
+        || assignment.role_id != strict.role_id
+        || assignment.mode != strict.mode
+        || assignment.validation_id != *validation_id
+        || Some(assignment.validation_attempt) != strict.validation_attempt
+        || Some(assignment.semantic_round) != strict.semantic_round
+        || assignment.producer_assignment_ids != *producer_ids
+        || assignment.producer_assignment_ids.is_empty()
+        || assignment.base_commit.0 != base_commit.0
+        || assignment.candidate_root.0 != strict.cwd.0
+        || worktree.0 != strict.cwd.0
+        || assignment.context_path != *context_path
+        || assignment.context_digest != *context_digest
+        || Path::new(&assignment.authority_path.0) != expected_authority
+        || assignment.max_value_attempts != MAX_VALUE_ATTEMPTS
+        || strict.validation_attempt.is_none_or(|attempt| attempt == 0)
+        || strict.semantic_round.is_none_or(|round| round == 0)
+        || strict.lane_id.is_none()
+        || strict.attempt.is_none_or(|attempt| attempt == 0)
+        || strict.required_focused_evidence != Some(1)
+    {
+        return Err("agent-run v3 assignment/spec identity or authority drift".to_owned());
+    }
+    let expected_key = sha256_hex(
+        format!(
+            "validation.v3\0{}\0{}\0{}",
+            assignment.validation_id.0, assignment.exact_commit.0, assignment.exact_tree.0
+        )
+        .as_bytes(),
+    );
+    if assignment.validation_key.0 != expected_key {
+        return Err("agent-run v3 validation key drift".to_owned());
+    }
+    let expectation = crate::runner::validation_authority::ValidationAuthorityExpectation {
+        validation_id: &assignment.validation_id,
+        assignment_id: &assignment.assignment_id,
+        base_commit: &assignment.base_commit,
+        exact_commit: &assignment.exact_commit,
+        exact_tree: &assignment.exact_tree,
+        candidate_root: Path::new(&strict.cwd.0),
+    };
+    let index = crate::runner::validation_authority::ValidationAuthorityIndex::load_for(
+        Path::new(&assignment.authority_path.0),
+        &assignment.authority_digest.0,
+        &expectation,
+    )
+    .map_err(validation_failure_text)?;
+    if index.context_projection() != context
+        || context.validation_id != assignment.validation_id
+        || context.assignment_id != assignment.assignment_id
+        || context.authority_digest != assignment.authority_digest
+    {
+        return Err("agent-run v3 context is not the exact authority projection".to_owned());
+    }
+    Ok(())
+}
+
+fn validation_failure_text(
+    failure: crate::runner::validation_authority::AdmissionFailure,
+) -> String {
+    match failure.canonical_bytes() {
+        Ok(bytes) => String::from_utf8(bytes)
+            .unwrap_or_else(|error| format!("non-UTF-8 validation diagnostic: {error}")),
+        Err(error) => format!("validation diagnostic invariant failed: {error}"),
+    }
 }
 
 fn validate_planning_documents(strict: &AgentRunSpec) -> Result<(), String> {
@@ -3781,6 +4068,7 @@ fn value_rejection(
         field: field.into(),
         expected: expected.into(),
         got: got.into(),
+        diagnostic: None,
     }
 }
 
@@ -3809,7 +4097,168 @@ fn render_repair_prompt(
         prompt.push_str("\n\n");
         prompt.push_str(&delivery_submission_authority_for_spec(spec)?);
     }
+    if spec.boundary_id.0 == "autopilot.validation_submission.v3" {
+        let binding = rejection.diagnostic.as_ref().ok_or_else(|| {
+            value_rejection(
+                "validation_admission_diagnostic",
+                "canonical diagnostic binding",
+                "missing",
+            )
+        })?;
+        let bytes = super::read_bounded_file(
+            Path::new(&binding.path),
+            kernel::generated::VALIDATION_ADMISSION_DIAGNOSTIC_MAX_BYTES,
+        )
+        .map_err(|error| {
+            value_rejection(
+                "validation_admission_diagnostic",
+                "bounded canonical diagnostic artifact",
+                error.to_string(),
+            )
+        })?;
+        if sha256_hex(&bytes) != binding.digest || bytes != binding.canonical_json.as_bytes() {
+            return Err(value_rejection(
+                "validation_admission_diagnostic",
+                "exact diagnostic path/digest/content binding",
+                "drift",
+            ));
+        }
+        prompt.push_str(concat!(
+            "\n\nThe prior v3 model value was rejected. Correct every row in this complete ",
+            "canonical diagnostic in the same session.\n",
+        ));
+        prompt.push_str(&format!(
+            "diagnostic_path: {}\ndiagnostic_digest: {}\nmismatch_count: {}\n\n",
+            binding.path, binding.digest, binding.mismatch_count
+        ));
+        prompt.push_str(&crate::prompt::dynamic_data_fence_block(
+            "json autopilot.validation_admission_diagnostic.v1",
+            &binding.canonical_json,
+        ));
+        prompt.push_str("\n\n");
+        prompt.push_str(&validation_v3_authority_for_spec(spec)?);
+    }
     Ok(prompt)
+}
+
+fn validation_v3_authority_for_spec(spec: &AgentRunSpec) -> Result<String, ValueRejection> {
+    let assignment_path = spec
+        .assignment_path
+        .as_ref()
+        .ok_or_else(|| value_rejection("assignment_path", "v3 assignment", "missing"))?;
+    let assignment_digest = spec
+        .assignment_digest
+        .as_ref()
+        .ok_or_else(|| value_rejection("assignment_digest", "v3 assignment digest", "missing"))?;
+    let bytes =
+        super::read_bounded_file(Path::new(&assignment_path.0), MAX_VALIDATION_ARTIFACT_BYTES)
+            .map_err(|error| {
+                value_rejection(
+                    "assignment_path",
+                    "bounded v3 assignment",
+                    error.to_string(),
+                )
+            })?;
+    if sha256_hex(&bytes) != assignment_digest.0 {
+        return Err(value_rejection(
+            "assignment_digest",
+            "spec-bound v3 assignment digest",
+            "drift",
+        ));
+    }
+    let assignment: kernel::generated::ValidationAssignmentV3 = serde_json::from_slice(&bytes)
+        .map_err(|error| {
+            value_rejection("assignment", "closed v3 assignment", error.to_string())
+        })?;
+    let expectation = crate::runner::validation_authority::ValidationAuthorityExpectation {
+        validation_id: &assignment.validation_id,
+        assignment_id: &assignment.assignment_id,
+        base_commit: &assignment.base_commit,
+        exact_commit: &assignment.exact_commit,
+        exact_tree: &assignment.exact_tree,
+        candidate_root: Path::new(&assignment.candidate_root.0),
+    };
+    let authority = crate::runner::validation_authority::ValidationAuthorityIndex::load_for(
+        Path::new(&assignment.authority_path.0),
+        &assignment.authority_digest.0,
+        &expectation,
+    )
+    .map_err(|failure| {
+        value_rejection(
+            "validation_authority",
+            "verified v3 authority",
+            validation_failure_text(failure),
+        )
+    })?;
+    if spec.context_manifest_path.as_ref() != Some(&assignment.context_path)
+        || spec.context_manifest_digest.as_ref() != Some(&assignment.context_digest)
+    {
+        return Err(value_rejection(
+            "validation_context",
+            "spec-bound redacted v3 context",
+            "binding drift",
+        ));
+    }
+    let context_bytes = super::read_bounded_file(
+        Path::new(&assignment.context_path.0),
+        kernel::generated::VALIDATION_CONTEXT_V3_MAX_BYTES,
+    )
+    .map_err(|error| {
+        value_rejection(
+            "validation_context",
+            "bounded redacted v3 context",
+            error.to_string(),
+        )
+    })?;
+    if sha256_hex(&context_bytes) != assignment.context_digest.0 {
+        return Err(value_rejection(
+            "validation_context",
+            "assignment-bound redacted v3 context digest",
+            "digest drift",
+        ));
+    }
+    let context: kernel::generated::ValidationContextV3 = serde_json::from_slice(&context_bytes)
+        .map_err(|error| {
+            value_rejection(
+                "validation_context",
+                "closed redacted v3 context",
+                error.to_string(),
+            )
+        })?;
+    if authority.context_projection() != context
+        || serde_json::to_vec_pretty(&context).map_err(|error| {
+            value_rejection(
+                "validation_context",
+                "serializable redacted v3 context",
+                error.to_string(),
+            )
+        })? != context_bytes
+    {
+        return Err(value_rejection(
+            "validation_context",
+            "exact canonical authority projection",
+            "projection drift",
+        ));
+    }
+    let context_text = String::from_utf8(context_bytes)
+        .map_err(|error| value_rejection("validation_context", "UTF-8", error.to_string()))?;
+    let contract =
+        crate::contract_authority::render_contract_authority("autopilot.validation_submission.v3")
+            .map_err(|error| {
+                value_rejection(
+                    "validation_contract",
+                    "package-generated v3 admission authority",
+                    error.to_string(),
+                )
+            })?;
+    Ok(format!(
+        "{contract}\n\nCore-owned receipt authority remains redacted. Authority digest: {}\n{}\n",
+        assignment.authority_digest.0,
+        crate::prompt::dynamic_data_fence_block(
+            "json autopilot.validation_context.v3",
+            &context_text
+        )
+    ))
 }
 
 fn planning_task_source_manifest_for_spec(spec: &AgentRunSpec) -> Result<String, ValueRejection> {
@@ -3980,8 +4429,17 @@ fn paused_after_exhaustion(spec: &AgentRunSpec, rejection: &ValueRejection) -> S
     let failure = Failure::Paused {
         needs: OperatorDecision::ChooseAfterExhaustion,
     };
+    let diagnostic = rejection.diagnostic.as_ref().map_or_else(
+        || "diagnostic=none".to_owned(),
+        |binding| {
+            format!(
+                "diagnostic_path={} diagnostic_digest={} mismatch_count={}",
+                binding.path, binding.digest, binding.mismatch_count
+            )
+        },
+    );
     format!(
-        "agent-run value repair exhausted taxonomy=D77 variant={failure:?} assignment={} attempts={} field={} expected={} got={}",
+        "agent-run value repair exhausted taxonomy=D77 variant={failure:?} assignment={} attempts={} field={} expected={} got={} {diagnostic}",
         spec.assignment_id.0,
         MAX_VALUE_ATTEMPTS,
         rejection.field,
@@ -4178,6 +4636,10 @@ fn append_attempt_event(
             "field": value.field.clone(),
             "expected": value.expected.clone(),
             "got": value.got.clone(),
+            "diagnostic_path": value.diagnostic.as_ref().map(|binding| binding.path.clone()),
+            "diagnostic_digest": value.diagnostic.as_ref().map(|binding| binding.digest.clone()),
+            "diagnostic_mismatch_count": value.diagnostic.as_ref().map(|binding| binding.mismatch_count),
+            "diagnostic_canonical_json": value.diagnostic.as_ref().map(|binding| binding.canonical_json.clone()),
         })),
         "terminal_failure": detail.terminal_failure.map(|value| serde_json::json!({
             "stopReason": value.stop_reason.clone(),
@@ -4245,13 +4707,14 @@ fn ensure_carrier_absent(spec: &AgentRunSpec) -> Result<(), String> {
     }
 }
 
-fn write_carrier(
+fn prepare_carrier(
     spec_path: &Path,
     spec_bytes: &str,
     spec_digest: &str,
     spec: &AgentRunSpec,
     source: &CarrierSource,
-) -> Result<(), CarrierRejection> {
+    value_attempt: u32,
+) -> Result<PreparedCarrier, CarrierRejection> {
     let CarrierSource::Tool(terminal) = source;
     let profile = super::terminal_profile_for(
         &spec.role_id.0,
@@ -4293,7 +4756,7 @@ fn write_carrier(
                 )
             })?;
         validate_delivery_submission(spec, &submission)?;
-        let carrier = package_tool_result(
+        return package_tool_result(
             spec_path,
             spec_bytes,
             spec_digest,
@@ -4307,42 +4770,104 @@ fn write_carrier(
                 )
             })?,
             "autopilot.delivery_result.v2",
-        )?;
-        return write_json_new(&spec.carrier_path.0, &carrier)
-            .map_err(|error| value_rejection("carrier_path", "create-once carrier", error))
-            .map_err(Into::into);
+        )
+        .map_err(Into::into);
     }
     if matches!(
         spec.assignment_kind,
         kernel::generated::ValidationAssignmentKind::Validation
     ) {
-        let submission: kernel::generated::ValidationSubmissionV2 =
-            serde_json::from_value(terminal.details.payload.clone()).map_err(|error| {
-                value_rejection(
-                    "payload",
-                    "closed autopilot.validation_submission.v2",
-                    error.to_string(),
-                )
-            })?;
-        validate_validation_submission(spec, &submission)?;
-        let carrier = package_tool_result(
-            spec_path,
-            spec_bytes,
-            spec_digest,
-            spec,
-            terminal,
-            serde_json::to_value(&submission).map_err(|error| {
-                value_rejection(
-                    "payload",
-                    "serializable validation submission",
-                    error.to_string(),
-                )
-            })?,
-            "autopilot.validation_result.v2",
-        )?;
-        return write_json_new(&spec.carrier_path.0, &carrier)
-            .map_err(|error| value_rejection("carrier_path", "create-once carrier", error))
+        if spec.boundary_id.0 == "autopilot.validation_submission.v2" {
+            let submission: kernel::generated::ValidationSubmissionV2 =
+                serde_json::from_value(terminal.details.payload.clone()).map_err(|error| {
+                    value_rejection(
+                        "payload",
+                        "closed autopilot.validation_submission.v2",
+                        error.to_string(),
+                    )
+                })?;
+            validate_validation_submission(spec, &submission)?;
+            return package_tool_result(
+                spec_path,
+                spec_bytes,
+                spec_digest,
+                spec,
+                terminal,
+                serde_json::to_value(&submission).map_err(|error| {
+                    value_rejection(
+                        "payload",
+                        "serializable validation submission",
+                        error.to_string(),
+                    )
+                })?,
+                "autopilot.validation_result.v2",
+            )
             .map_err(Into::into);
+        }
+        if spec.boundary_id.0 == "autopilot.validation_submission.v3" {
+            let (submission, admitted) = match admit_validation_submission_v3(
+                spec,
+                &terminal.details.payload,
+                value_attempt,
+            ) {
+                Ok(value) => value,
+                Err(ValidationV3AdmissionError::Value(rejection)) => {
+                    return Err(rejection.into());
+                }
+                Err(ValidationV3AdmissionError::Fatal(detail)) => {
+                    return Err(CarrierRejection::Identity(detail));
+                }
+            };
+            let canonical_submission = serde_json::to_value(&submission).map_err(|error| {
+                CarrierRejection::Identity(format!(
+                    "canonical v3 submission serialization failed: {error}"
+                ))
+            })?;
+            let mut prepared = package_tool_result(
+                spec_path,
+                spec_bytes,
+                spec_digest,
+                spec,
+                terminal,
+                canonical_submission,
+                "autopilot.validation_result.v3",
+            )
+            .map_err(|rejection| {
+                CarrierRejection::Identity(format!(
+                    "v3 carrier/audit persistence or provenance failure: field={} expected={} got={}",
+                    rejection.field, rejection.expected, rejection.got
+                ))
+            })?;
+            let object = prepared
+                .carrier
+                .as_object_mut()
+                .expect("v3 validation carrier object");
+            object.insert(
+                "verdict_digest".to_owned(),
+                serde_json::json!(sha256_hex(&admitted.verdict_bytes)),
+            );
+            object.insert(
+                "verdict".to_owned(),
+                serde_json::to_value(admitted.verdict).map_err(|error| {
+                    CarrierRejection::Identity(format!(
+                        "normalized v3 verdict serialization failed: {error}"
+                    ))
+                })?,
+            );
+            let _: kernel::generated::ValidationResultV3 =
+                serde_json::from_value(prepared.carrier.clone()).map_err(|error| {
+                    CarrierRejection::Identity(format!(
+                        "generated closed v3 carrier rejected package output: {error}"
+                    ))
+                })?;
+            return Ok(prepared);
+        }
+        return Err(value_rejection(
+            "boundary_id",
+            "issued v2 or v3 validation boundary",
+            spec.boundary_id.0.clone(),
+        )
+        .into());
     }
     crate::runner::validate_child_boundary(spec, &raw_output).map_err(|error| {
         value_rejection(
@@ -4381,11 +4906,10 @@ fn write_carrier(
         "carrier_binding": terminal.details.binding,
         "raw_output": raw_output,
     });
-    write_json_new(&spec.carrier_path.0, &carrier)
-        .map_err(|error| {
-            value_rejection("carrier_path", "create-once writable carrier path", error)
-        })
-        .map_err(Into::into)
+    Ok(PreparedCarrier {
+        carrier,
+        artifacts: Vec::new(),
+    })
 }
 
 fn validate_delivery_submission(
@@ -4455,6 +4979,65 @@ pub fn admit_validation_submission_with_authority(
 ) -> Result<(), String> {
     validate_validation_submission_against(submission, assignment, context)
         .map_err(format_value_rejection)
+}
+
+pub fn canonical_validation_submission_v3(
+    assignment: &kernel::generated::ValidationAssignmentV3,
+    context: &kernel::generated::ValidationContextV3,
+    submission: &kernel::generated::ValidationSubmissionV3,
+    value_attempt: u32,
+) -> Result<(kernel::generated::ValidationSubmissionV3, Vec<u8>), String> {
+    let expectation = crate::runner::validation_authority::ValidationAuthorityExpectation {
+        validation_id: &assignment.validation_id,
+        assignment_id: &assignment.assignment_id,
+        base_commit: &assignment.base_commit,
+        exact_commit: &assignment.exact_commit,
+        exact_tree: &assignment.exact_tree,
+        candidate_root: Path::new(&assignment.candidate_root.0),
+    };
+    let index = crate::runner::validation_authority::ValidationAuthorityIndex::load_for(
+        Path::new(&assignment.authority_path.0),
+        &assignment.authority_digest.0,
+        &expectation,
+    )
+    .map_err(validation_failure_text)?;
+    if index.context_projection() != *context {
+        return Err("v3 context is not the exact authority projection".to_owned());
+    }
+    let admitted = index
+        .admit(submission, value_attempt)
+        .map_err(validation_failure_text)?;
+    let bytes = serde_json::to_vec(&admitted.submission).map_err(|error| error.to_string())?;
+    Ok((admitted.submission, bytes))
+}
+
+pub fn normalize_validation_submission_v3(
+    assignment: &kernel::generated::ValidationAssignmentV3,
+    context: &kernel::generated::ValidationContextV3,
+    submission: &kernel::generated::ValidationSubmissionV3,
+    value_attempt: u32,
+) -> Result<(kernel::generated::ValidationVerdictV3, Vec<u8>), String> {
+    let expectation = crate::runner::validation_authority::ValidationAuthorityExpectation {
+        validation_id: &assignment.validation_id,
+        assignment_id: &assignment.assignment_id,
+        base_commit: &assignment.base_commit,
+        exact_commit: &assignment.exact_commit,
+        exact_tree: &assignment.exact_tree,
+        candidate_root: Path::new(&assignment.candidate_root.0),
+    };
+    let index = crate::runner::validation_authority::ValidationAuthorityIndex::load_for(
+        Path::new(&assignment.authority_path.0),
+        &assignment.authority_digest.0,
+        &expectation,
+    )
+    .map_err(validation_failure_text)?;
+    if index.context_projection() != *context {
+        return Err("v3 context is not the exact authority projection".to_owned());
+    }
+    let admitted = index
+        .admit(submission, value_attempt)
+        .map_err(validation_failure_text)?;
+    Ok((admitted.verdict, admitted.verdict_bytes))
 }
 
 fn format_value_rejection(rejection: ValueRejection) -> String {
@@ -4915,6 +5498,175 @@ fn validate_validation_submission_against(
     Ok(())
 }
 
+enum ValidationV3AdmissionError {
+    Fatal(String),
+    Value(ValueRejection),
+}
+
+fn admit_validation_submission_v3(
+    spec: &AgentRunSpec,
+    payload: &Value,
+    value_attempt: u32,
+) -> Result<
+    (
+        kernel::generated::ValidationSubmissionV3,
+        crate::runner::validation_authority::AdmittedValidationV3,
+    ),
+    ValidationV3AdmissionError,
+> {
+    let assignment_path = spec.assignment_path.as_ref().ok_or_else(|| {
+        ValidationV3AdmissionError::Fatal("missing v3 validation assignment path".to_owned())
+    })?;
+    let assignment_digest = spec.assignment_digest.as_ref().ok_or_else(|| {
+        ValidationV3AdmissionError::Fatal("missing v3 validation assignment digest".to_owned())
+    })?;
+    let context_path = spec.context_manifest_path.as_ref().ok_or_else(|| {
+        ValidationV3AdmissionError::Fatal("missing v3 validation context path".to_owned())
+    })?;
+    let context_digest = spec.context_manifest_digest.as_ref().ok_or_else(|| {
+        ValidationV3AdmissionError::Fatal("missing v3 validation context digest".to_owned())
+    })?;
+    let assignment_bytes = super::read_bounded_file(
+        Path::new(&assignment_path.0),
+        kernel::generated::VALIDATION_ASSIGNMENT_V3_MAX_BYTES,
+    )
+    .map_err(|error| ValidationV3AdmissionError::Fatal(format!("v3 assignment read: {error}")))?;
+    let context_bytes = super::read_bounded_file(
+        Path::new(&context_path.0),
+        kernel::generated::VALIDATION_CONTEXT_V3_MAX_BYTES,
+    )
+    .map_err(|error| ValidationV3AdmissionError::Fatal(format!("v3 context read: {error}")))?;
+    if sha256_hex(&assignment_bytes) != assignment_digest.0
+        || sha256_hex(&context_bytes) != context_digest.0
+    {
+        return Err(ValidationV3AdmissionError::Fatal(
+            "v3 assignment/context digest drift".to_owned(),
+        ));
+    }
+    let assignment: kernel::generated::ValidationAssignmentV3 =
+        serde_json::from_slice(&assignment_bytes).map_err(|error| {
+            ValidationV3AdmissionError::Fatal(format!("v3 assignment parse: {error}"))
+        })?;
+    let context: kernel::generated::ValidationContextV3 = serde_json::from_slice(&context_bytes)
+        .map_err(|error| ValidationV3AdmissionError::Fatal(format!("v3 context parse: {error}")))?;
+    let validation_id = spec.validation_id.as_ref().ok_or_else(|| {
+        ValidationV3AdmissionError::Fatal("missing spec-bound v3 validation id".to_owned())
+    })?;
+    let base_commit = spec.base_commit.as_ref().ok_or_else(|| {
+        ValidationV3AdmissionError::Fatal("missing spec-bound v3 base commit".to_owned())
+    })?;
+    if assignment.schema.0 != "autopilot.validation_assignment.v3"
+        || assignment.validation_id != *validation_id
+        || assignment.assignment_id != spec.assignment_id
+        || assignment.action_id != spec.action_id
+        || assignment.workstream != spec.workstream
+        || assignment.run_revision != spec.run_revision
+        || assignment.role_id != spec.role_id
+        || assignment.mode != spec.mode
+        || assignment.producer_assignment_ids
+            != spec.producer_assignment_ids.clone().ok_or_else(|| {
+                ValidationV3AdmissionError::Fatal("missing v3 producer ids".to_owned())
+            })?
+        || assignment.validation_attempt != spec.validation_attempt.unwrap_or(0)
+        || assignment.semantic_round != spec.semantic_round.unwrap_or(0)
+        || assignment.base_commit.0 != base_commit.0
+        || assignment.candidate_root.0 != spec.cwd.0
+        || assignment.context_path != *context_path
+        || assignment.context_digest != *context_digest
+        || assignment.max_value_attempts != MAX_VALUE_ATTEMPTS
+    {
+        return Err(ValidationV3AdmissionError::Fatal(
+            "v3 assignment/spec identity or authority drift".to_owned(),
+        ));
+    }
+    let expectation = crate::runner::validation_authority::ValidationAuthorityExpectation {
+        validation_id: &assignment.validation_id,
+        assignment_id: &assignment.assignment_id,
+        base_commit: &assignment.base_commit,
+        exact_commit: &assignment.exact_commit,
+        exact_tree: &assignment.exact_tree,
+        candidate_root: Path::new(&spec.cwd.0),
+    };
+    let index = crate::runner::validation_authority::ValidationAuthorityIndex::load_for(
+        Path::new(&assignment.authority_path.0),
+        &assignment.authority_digest.0,
+        &expectation,
+    )
+    .map_err(|failure| {
+        persist_v3_diagnostic(spec, value_attempt, &failure)
+            .map(|binding| {
+                ValidationV3AdmissionError::Fatal(format!(
+                    "fatal v3 authority diagnostic path={} digest={} mismatch_count={}: {}",
+                    binding.path, binding.digest, binding.mismatch_count, binding.canonical_json
+                ))
+            })
+            .unwrap_or_else(ValidationV3AdmissionError::Fatal)
+    })?;
+    if index.context_projection() != context {
+        return Err(ValidationV3AdmissionError::Fatal(
+            "v3 context is not the exact authority projection".to_owned(),
+        ));
+    }
+    match index.admit_raw(payload, value_attempt) {
+        Ok(admitted) => Ok((admitted.submission.clone(), admitted)),
+        Err(failure) => {
+            let binding = persist_v3_diagnostic(spec, value_attempt, &failure)
+                .map_err(ValidationV3AdmissionError::Fatal)?;
+            if failure.fatal_authority {
+                return Err(ValidationV3AdmissionError::Fatal(format!(
+                    "fatal v3 admission diagnostic path={} digest={} mismatch_count={}: {}",
+                    binding.path, binding.digest, binding.mismatch_count, binding.canonical_json
+                )));
+            }
+            Err(ValidationV3AdmissionError::Value(ValueRejection {
+                field: "validation_admission_diagnostic".to_owned(),
+                expected: "correct every row in the complete canonical v3 diagnostic".to_owned(),
+                got: "model value mismatches; see bound diagnostic fields".to_owned(),
+                diagnostic: Some(Box::new(binding)),
+            }))
+        }
+    }
+}
+
+fn persist_v3_diagnostic(
+    spec: &AgentRunSpec,
+    value_attempt: u32,
+    failure: &crate::runner::validation_authority::AdmissionFailure,
+) -> Result<ValidationDiagnosticBinding, String> {
+    let mut diagnostic = failure.diagnostic.clone();
+    diagnostic["value_attempt"] = serde_json::json!(value_attempt);
+    let rebound = crate::runner::validation_authority::AdmissionFailure {
+        diagnostic,
+        fatal_authority: failure.fatal_authority,
+    };
+    let bytes = rebound.canonical_bytes()?;
+    let typed: kernel::generated::ValidationAdmissionDiagnostic = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("canonical diagnostic typed validation: {error}"))?;
+    if typed.value_attempt != value_attempt {
+        return Err("canonical diagnostic attempt binding drift".to_owned());
+    }
+    let path = PathBuf::from(&spec.carrier_path.0).with_file_name(format!(
+        "admission-diagnostic-v3-attempt-{value_attempt}.json"
+    ));
+    super::write_parent_file_create_once_exact(&path, &bytes)
+        .map_err(|error| format!("diagnostic create-once write: {error}"))?;
+    let stored = super::read_bounded_file(
+        &path,
+        kernel::generated::VALIDATION_ADMISSION_DIAGNOSTIC_MAX_BYTES,
+    )
+    .map_err(|error| format!("diagnostic reread: {error}"))?;
+    if stored != bytes {
+        return Err("diagnostic create-once content drift".to_owned());
+    }
+    Ok(ValidationDiagnosticBinding {
+        path: path.display().to_string(),
+        digest: sha256_hex(&bytes),
+        mismatch_count: typed.mismatch_count,
+        canonical_json: String::from_utf8(bytes)
+            .map_err(|error| format!("canonical diagnostic UTF-8: {error}"))?,
+    })
+}
+
 fn terminal_delivery_denial_ledger(
     spec: &AgentRunSpec,
     terminal: &ToolTerminal,
@@ -4997,6 +5749,22 @@ fn terminal_approved_command_execution_ledger(
     }
 }
 
+fn insert_serialized<T: serde::Serialize>(
+    object: &mut serde_json::Map<String, Value>,
+    key: &str,
+    value: &T,
+) -> Result<(), ValueRejection> {
+    let value = serde_json::to_value(value).map_err(|error| {
+        value_rejection(
+            "assignment",
+            "serializable typed validation assignment",
+            error.to_string(),
+        )
+    })?;
+    object.insert(key.to_owned(), value);
+    Ok(())
+}
+
 fn package_tool_result(
     spec_path: &Path,
     spec_bytes: &str,
@@ -5005,7 +5773,7 @@ fn package_tool_result(
     terminal: &ToolTerminal,
     submission: Value,
     schema: &str,
-) -> Result<Value, ValueRejection> {
+) -> Result<PreparedCarrier, ValueRejection> {
     let (_, runtime_digest) = runtime_addon(spec)
         .ok_or_else(|| value_rejection(RUNTIME_ADDON_DIGEST_FIELD, "digest", "missing"))?;
     let denial_ledger = terminal_delivery_denial_ledger(spec, terminal)?;
@@ -5013,6 +5781,7 @@ fn package_tool_result(
     let submission_bytes = serde_json::to_vec(&submission)
         .map_err(|error| value_rejection("submission", "serializable", error.to_string()))?;
     let submission_digest = sha256_hex(&submission_bytes);
+    let mut artifacts = Vec::new();
     if matches!(
         spec.assignment_kind,
         kernel::generated::ValidationAssignmentKind::Validation
@@ -5024,13 +5793,33 @@ fn package_tool_result(
                 "missing",
             )
         })?;
-        write_json_new(&path.0, &submission).map_err(|error| {
-            value_rejection(
-                "model_submission_path",
-                "create-once model submission",
-                error,
-            )
-        })?;
+        if spec.boundary_id.0 == "autopilot.validation_submission.v3" {
+            ensure_exact_artifact_admissible(Path::new(&path.0), &submission_bytes).map_err(
+                |error| {
+                    value_rejection(
+                        "model_submission_path",
+                        "create-once canonical raw v3 model submission",
+                        error,
+                    )
+                },
+            )?;
+            artifacts.push(PreparedArtifact::ExactBytes {
+                path: PathBuf::from(&path.0),
+                bytes: submission_bytes.clone(),
+            });
+        } else {
+            ensure_carrier_clear(Path::new(&path.0)).map_err(|error| {
+                value_rejection(
+                    "model_submission_path",
+                    "create-once model submission",
+                    error,
+                )
+            })?;
+            artifacts.push(PreparedArtifact::JsonNew {
+                path: path.0.clone(),
+                value: submission.clone(),
+            });
+        }
     }
     let audit_schema = if matches!(
         spec.assignment_kind,
@@ -5087,13 +5876,15 @@ fn package_tool_result(
     let audit_bytes = serde_json::to_vec_pretty(&audit)
         .map_err(|error| value_rejection("tool_audit", "serializable", error.to_string()))?;
     let audit_path = PathBuf::from(&spec.carrier_path.0).with_extension("tool-audit.json");
-    write_json_new(
-        audit_path
-            .to_str()
-            .ok_or_else(|| value_rejection("tool_audit", "UTF-8 path", "non-UTF-8"))?,
-        &audit,
-    )
-    .map_err(|error| value_rejection("tool_audit", "create-once audit", error))?;
+    let audit_path_text = audit_path
+        .to_str()
+        .ok_or_else(|| value_rejection("tool_audit", "UTF-8 path", "non-UTF-8"))?;
+    ensure_carrier_clear(&audit_path)
+        .map_err(|error| value_rejection("tool_audit", "create-once audit", error))?;
+    artifacts.push(PreparedArtifact::JsonNew {
+        path: audit_path_text.to_owned(),
+        value: audit.clone(),
+    });
     let mut carrier = serde_json::json!({
         "schema": schema,
         "action_id": spec.action_id,
@@ -5154,14 +5945,16 @@ fn package_tool_result(
             serde_json::to_value(&spec.context_digest).unwrap(),
         );
     } else {
-        let assignment_path = spec
-            .assignment_path
-            .as_ref()
-            .expect("validated assignment path");
-        let assignment_digest = spec
-            .assignment_digest
-            .as_ref()
-            .expect("validated assignment digest");
+        let assignment_path = spec.assignment_path.as_ref().ok_or_else(|| {
+            value_rejection("assignment_path", "validated assignment path", "missing")
+        })?;
+        let assignment_digest = spec.assignment_digest.as_ref().ok_or_else(|| {
+            value_rejection(
+                "assignment_digest",
+                "validated assignment digest",
+                "missing",
+            )
+        })?;
         let assignment_bytes =
             super::read_bounded_file(Path::new(&assignment_path.0), MAX_VALIDATION_ARTIFACT_BYTES)
                 .map_err(|error| {
@@ -5174,59 +5967,125 @@ fn package_tool_result(
                 "digest drift",
             ));
         }
-        let assignment: kernel::generated::ValidationAssignmentV2 =
-            serde_json::from_slice(&assignment_bytes)
-                .map_err(|error| value_rejection("assignment", "valid", error.to_string()))?;
-        for (key, value) in [
-            (
-                "validation_id",
-                serde_json::to_value(&assignment.validation_id).unwrap(),
-            ),
-            (
-                "validation_key",
-                serde_json::to_value(&assignment.validation_key).unwrap(),
-            ),
-            (
-                "validation_attempt",
-                serde_json::json!(assignment.validation_attempt),
-            ),
-            (
-                "semantic_round",
-                serde_json::json!(assignment.semantic_round),
-            ),
-            (
-                "producer_assignment_ids",
-                serde_json::to_value(&assignment.producer_assignment_ids).unwrap(),
-            ),
-            (
-                "exact_commit",
-                serde_json::to_value(&assignment.exact_commit).unwrap(),
-            ),
-            (
-                "exact_tree",
-                serde_json::to_value(&assignment.exact_tree).unwrap(),
-            ),
-            (
-                "assignment_path",
-                serde_json::to_value(spec.assignment_path.as_ref().unwrap()).unwrap(),
-            ),
-            (
-                "assignment_digest",
-                serde_json::to_value(spec.assignment_digest.as_ref().unwrap()).unwrap(),
-            ),
-            (
-                "context_manifest_path",
-                serde_json::to_value(spec.context_manifest_path.as_ref().unwrap()).unwrap(),
-            ),
-            (
+        match spec.boundary_id.0.as_str() {
+            "autopilot.validation_submission.v2" => {
+                let assignment: kernel::generated::ValidationAssignmentV2 =
+                    serde_json::from_slice(&assignment_bytes).map_err(|error| {
+                        value_rejection(
+                            "assignment",
+                            "strict closed v2 validation assignment",
+                            error.to_string(),
+                        )
+                    })?;
+                insert_serialized(object, "validation_id", &assignment.validation_id)?;
+                insert_serialized(object, "validation_key", &assignment.validation_key)?;
+                object.insert(
+                    "validation_attempt".to_owned(),
+                    serde_json::json!(assignment.validation_attempt),
+                );
+                object.insert(
+                    "semantic_round".to_owned(),
+                    serde_json::json!(assignment.semantic_round),
+                );
+                insert_serialized(
+                    object,
+                    "producer_assignment_ids",
+                    &assignment.producer_assignment_ids,
+                )?;
+                insert_serialized(object, "exact_commit", &assignment.exact_commit)?;
+                insert_serialized(object, "exact_tree", &assignment.exact_tree)?;
+            }
+            "autopilot.validation_submission.v3" => {
+                let assignment: kernel::generated::ValidationAssignmentV3 =
+                    serde_json::from_slice(&assignment_bytes).map_err(|error| {
+                        value_rejection(
+                            "assignment",
+                            "strict closed v3 validation assignment",
+                            error.to_string(),
+                        )
+                    })?;
+                if assignment.action_id != spec.action_id
+                    || assignment.assignment_id != spec.assignment_id
+                    || assignment.workstream != spec.workstream
+                    || assignment.run_revision != spec.run_revision
+                    || assignment.role_id != spec.role_id
+                    || assignment.mode != spec.mode
+                    || Some(&assignment.context_path) != spec.context_manifest_path.as_ref()
+                    || Some(&assignment.context_digest) != spec.context_manifest_digest.as_ref()
+                {
+                    return Err(value_rejection(
+                        "assignment",
+                        "exact spec-bound v3 assignment identity/context",
+                        "drift",
+                    ));
+                }
+                insert_serialized(object, "validation_id", &assignment.validation_id)?;
+                insert_serialized(object, "validation_key", &assignment.validation_key)?;
+                object.insert(
+                    "validation_attempt".to_owned(),
+                    serde_json::json!(assignment.validation_attempt),
+                );
+                object.insert(
+                    "semantic_round".to_owned(),
+                    serde_json::json!(assignment.semantic_round),
+                );
+                insert_serialized(
+                    object,
+                    "producer_assignment_ids",
+                    &assignment.producer_assignment_ids,
+                )?;
+                insert_serialized(object, "exact_commit", &assignment.exact_commit)?;
+                insert_serialized(object, "exact_tree", &assignment.exact_tree)?;
+                insert_serialized(object, "authority_path", &assignment.authority_path)?;
+                insert_serialized(object, "authority_digest", &assignment.authority_digest)?;
+            }
+            other => {
+                return Err(value_rejection(
+                    "boundary_id",
+                    "issued v2 or v3 validation boundary",
+                    other,
+                ));
+            }
+        }
+        let context_path = spec.context_manifest_path.as_ref().ok_or_else(|| {
+            value_rejection("context_manifest_path", "validated context path", "missing")
+        })?;
+        let context_digest = spec.context_manifest_digest.as_ref().ok_or_else(|| {
+            value_rejection(
                 "context_manifest_digest",
-                serde_json::to_value(spec.context_manifest_digest.as_ref().unwrap()).unwrap(),
-            ),
-        ] {
-            object.insert(key.to_owned(), value);
+                "validated context digest",
+                "missing",
+            )
+        })?;
+        insert_serialized(object, "assignment_path", assignment_path)?;
+        insert_serialized(object, "assignment_digest", assignment_digest)?;
+        insert_serialized(object, "context_manifest_path", context_path)?;
+        insert_serialized(object, "context_manifest_digest", context_digest)?;
+    }
+    Ok(PreparedCarrier { carrier, artifacts })
+}
+
+fn ensure_exact_artifact_admissible(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    match super::read_bounded_file_optional(path, bytes.len().max(1))
+        .map_err(|error| error.to_string())?
+    {
+        None => Ok(()),
+        Some(existing) if existing == bytes => Ok(()),
+        Some(_) => Err(format!("create-once exact artifact collision at {path:?}")),
+    }
+}
+
+fn persist_prepared_carrier(spec: &AgentRunSpec, prepared: PreparedCarrier) -> Result<(), String> {
+    for artifact in prepared.artifacts {
+        match artifact {
+            PreparedArtifact::JsonNew { path, value } => write_json_new(&path, &value)?,
+            PreparedArtifact::ExactBytes { path, bytes } => {
+                super::write_parent_file_create_once_exact(&path, &bytes)
+                    .map_err(|error| error.to_string())?;
+            }
         }
     }
-    Ok(carrier)
+    write_json_new(&spec.carrier_path.0, &prepared.carrier)
 }
 
 fn write_json_new(path: &str, value: &impl serde::Serialize) -> Result<(), String> {
@@ -5289,11 +6148,42 @@ fn validate_id(label: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn env_usize(name: &str, default: usize) -> usize {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(default)
+fn bounded_stderr_limit(value: usize) -> Result<usize, String> {
+    if value > crate::runner::rpc::MAX_STDERR_TAIL_BYTES {
+        return Err(format!(
+            "AUTOPILOT_AGENT_RUN_MAX_STDERR_BYTES must be <= {}, got {value}",
+            crate::runner::rpc::MAX_STDERR_TAIL_BYTES
+        ));
+    }
+    Ok(value)
+}
+
+fn bounded_terminal_limit(value: usize) -> Result<usize, String> {
+    let ceiling = crate::generated::pi_rpc::DEFAULT_MAX_TERMINAL_BYTES;
+    if value == 0 || value > ceiling {
+        return Err(format!(
+            "AUTOPILOT_AGENT_RUN_MAX_TERMINAL_BYTES must be within 1..={ceiling}, got {value}"
+        ));
+    }
+    Ok(value)
+}
+
+fn env_usize(name: &str, default: usize) -> Result<usize, String> {
+    match std::env::var(name) {
+        Ok(value) => parse_usize_setting(name, Some(&value), default),
+        Err(std::env::VarError::NotPresent) => parse_usize_setting(name, None, default),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err(format!("{name} must contain Unicode decimal digits"))
+        }
+    }
+}
+
+fn parse_usize_setting(name: &str, value: Option<&str>, default: usize) -> Result<usize, String> {
+    value.map_or(Ok(default), |value| {
+        value
+            .parse::<usize>()
+            .map_err(|error| format!("{name} must be an unsigned integer: {error}"))
+    })
 }
 
 fn sha256_hex(data: &[u8]) -> String {
