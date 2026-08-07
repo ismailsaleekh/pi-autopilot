@@ -95,7 +95,7 @@ function main() {
     run('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund', '--legacy-peer-deps', tarball], consumer, env, 300_000);
     const publicPi = readPackageJson(join(GLOBAL_PI_ROOT, 'package.json'), 'global Pi public alias package.json');
     const publicTypebox = readPackageJson(join(GLOBAL_TYPEBOX_ROOT, 'package.json'), 'global TypeBox public alias package.json');
-    if (publicPi.name !== '@earendil-works/pi-coding-agent' || publicPi.version !== '0.84.0') fail(`global Pi public alias must be 0.84.0, got ${publicPi.name}@${publicPi.version}`);
+    if (publicPi.name !== '@earendil-works/pi-coding-agent' || publicPi.version !== '0.84.1') fail(`global Pi public alias must be 0.84.1, got ${publicPi.name}@${publicPi.version}`);
     if (publicTypebox.name !== 'typebox' || publicTypebox.version !== '1.3.7') fail(`global TypeBox public alias must be 1.3.7, got ${publicTypebox.name}@${publicTypebox.version}`);
     mkdirSync(join(consumer, 'node_modules', '@earendil-works'), { recursive: true });
     symlinkSync(GLOBAL_PI_ROOT, join(consumer, 'node_modules', '@earendil-works', 'pi-coding-agent'), 'dir');

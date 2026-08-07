@@ -178,7 +178,7 @@ test("Pi 0.84 package metadata keeps Pi SDK and TypeBox as public peers only", a
   });
   assert.equal(isRecord(pkg.dependencies) && "typebox" in pkg.dependencies, false, "typebox must not be a runtime dependency");
   assert.equal(Array.isArray(pkg.bundledDependencies) && pkg.bundledDependencies.includes("typebox"), false, "typebox must not be bundled");
-  assert.equal((pkg.devDependencies as Record<string, unknown>)["@earendil-works/pi-coding-agent"], "0.84.0");
+  assert.equal((pkg.devDependencies as Record<string, unknown>)["@earendil-works/pi-coding-agent"], "0.84.1");
   assert.equal((pkg.devDependencies as Record<string, unknown>).typebox, "1.3.7");
 
   assert.equal(isRecord(lock.packages), true, "lock.packages must be an object");
@@ -186,9 +186,9 @@ test("Pi 0.84 package metadata keeps Pi SDK and TypeBox as public peers only", a
   const rootLock = packages[""]!;
   assert.deepEqual(rootLock.peerDependencies, pkg.peerDependencies);
   assert.equal(isRecord(rootLock.dependencies) && "typebox" in rootLock.dependencies, false, "lock root must not have runtime typebox");
-  assert.equal((rootLock.devDependencies as Record<string, unknown>)["@earendil-works/pi-coding-agent"], "0.84.0");
+  assert.equal((rootLock.devDependencies as Record<string, unknown>)["@earendil-works/pi-coding-agent"], "0.84.1");
   assert.equal((rootLock.devDependencies as Record<string, unknown>).typebox, "1.3.7");
-  assert.equal(packages["node_modules/@earendil-works/pi-coding-agent"]?.version, "0.84.0");
+  assert.equal(packages["node_modules/@earendil-works/pi-coding-agent"]?.version, "0.84.1");
   assert.equal(packages["node_modules/typebox"]?.version, "1.3.7");
   assert.equal(packages["node_modules/@earendil-works/pi-coding-agent/node_modules/typebox"]?.version, "1.3.7");
 });

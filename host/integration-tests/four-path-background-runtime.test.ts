@@ -54,7 +54,7 @@ after(() => {
 
 for (const candidate of packageSets) {
   test(`four-path command reaches real background event-bus runtime without ctx.bg_run (${candidate.label})`, { timeout: 90000 }, async () => {
-    assert.equal(PI_SDK_VERSION, "0.84.0", `runtime integration must use real Pi 0.84.0 SDK, got ${PI_SDK_VERSION}`);
+    assert.equal(PI_SDK_VERSION, "0.84.1", `runtime integration must use real Pi 0.84.1 SDK, got ${PI_SDK_VERSION}`);
     assertPackageCandidate(candidate.packageRoot, "pi-autopilot");
     assertBackgroundCandidate(candidate.backgroundRoot);
     assertCoreBinaryPresent(candidate.packageRoot);

@@ -262,6 +262,89 @@ fn validation_tool_schema_embeds_named_finding_shape() {
 }
 
 #[test]
+fn every_terminal_profile_uses_its_own_closedness_and_matches_rust() {
+    let temp = fixture();
+    codegen_command()
+        .current_dir(temp.path())
+        .assert()
+        .success();
+    let generated = fs::read_to_string(temp.path().join("src/generated/tool-schemas.ts"))
+        .expect("read generated tool schemas");
+    let kernel = fs::read_to_string(temp.path().join("kernel/src/generated/mod.rs"))
+        .expect("read generated kernel contracts");
+
+    let schema = |name: &str| {
+        let prefix = format!("export const {name} = ");
+        let json = generated
+            .split_once(&prefix)
+            .unwrap_or_else(|| panic!("missing schema declaration {name}"))
+            .1
+            .split_once(" as TSchema;")
+            .unwrap_or_else(|| panic!("missing schema terminator {name}"))
+            .0;
+        serde_json::from_str::<serde_json::Value>(json)
+            .unwrap_or_else(|error| panic!("invalid schema JSON {name}: {error}"))
+    };
+    let open_work_map = schema("WORK_MAP_TOOL_PARAMETERS");
+    let closed_work_map = schema("WORK_MAP_CLOSED_TOOL_PARAMETERS");
+    assert_eq!(open_work_map["additionalProperties"], true);
+    assert_eq!(closed_work_map["additionalProperties"], false);
+    assert_eq!(
+        closed_work_map["properties"]["units"]["items"]["additionalProperties"],
+        false
+    );
+
+    let terminal_profiles = kernel
+        .split_once("pub const TERMINAL_PROFILES")
+        .expect("Rust terminal profile authority")
+        .1;
+    let rows = generated
+        .lines()
+        .filter(|line| line.trim_start().starts_with("{ profile_id: \""))
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 11, "all terminal profiles must be checked");
+    for row in rows {
+        let profile_id = row
+            .split_once("profile_id: \"")
+            .expect("profile field")
+            .1
+            .split_once('"')
+            .expect("profile terminator")
+            .0;
+        let digest_name = row
+            .split_once("schema_digest: ")
+            .expect("digest field")
+            .1
+            .split_once(',')
+            .expect("digest terminator")
+            .0;
+        let digest = generated
+            .split_once(&format!("export const {digest_name} = \""))
+            .unwrap_or_else(|| panic!("missing digest declaration {digest_name}"))
+            .1
+            .split_once('"')
+            .expect("digest value terminator")
+            .0;
+        let rust_row = terminal_profiles
+            .split_once(&format!("\"{profile_id}\""))
+            .unwrap_or_else(|| panic!("missing Rust terminal profile {profile_id}"))
+            .1
+            .lines()
+            .take(6)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            rust_row.contains(digest),
+            "Rust/TypeBox digest drift for terminal profile {profile_id}"
+        );
+        if profile_id == "recovery-work-map.v1" {
+            assert!(row.contains("WORK_MAP_CLOSED_TOOL_SCHEMA_DIGEST"));
+            assert!(row.contains("WORK_MAP_CLOSED_TOOL_PARAMETERS"));
+        }
+    }
+}
+
+#[test]
 fn host_runtime_generation_and_mutations_fail_loudly() {
     let temp = fixture();
     codegen_command()

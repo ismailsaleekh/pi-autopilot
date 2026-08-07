@@ -622,34 +622,66 @@ pub fn emit_tool_schemas(contracts: &Contracts) -> Result<String> {
         .iter()
         .filter(|artifact| artifact.model_produced && !artifact.submit_tools.is_empty())
     {
-        let closed = artifact
+        let default_closed = artifact
             .submit_tools
             .first()
             .is_some_and(|tool| tool.closed);
-        let schema = json_schema_for_items(&artifact.items, &shapes, &enum_values, closed)?;
-        let schema_json = serde_json::to_string_pretty(&schema)
-            .map_err(|error| Error::input(format!("json schema emit failed: {error}")))?;
-        let digest = sha256_hex(json_string(&schema, "json schema digest")?.as_bytes());
-        let const_name = format!("{}_TOOL_PARAMETERS", screaming_name(&artifact.name));
-        let digest_name = format!("{}_TOOL_SCHEMA_DIGEST", screaming_name(&artifact.name));
-        out.push_str(&format!(
-            "export const {const_name} = {schema_json} as TSchema;\n"
-        ));
-        out.push_str(&format!("export const {digest_name} = \"{digest}\";\n\n"));
-        descriptors.push((
-            artifact.schema.clone(),
-            const_name,
-            digest_name,
-            artifact.submit_tools.clone(),
-        ));
+        let mut closed_modes = vec![default_closed];
+        if artifact
+            .submit_tools
+            .iter()
+            .any(|tool| tool.closed != default_closed)
+        {
+            closed_modes.push(!default_closed);
+        }
+        let mut schema_names = BTreeMap::new();
+        for closed in closed_modes {
+            let suffix = if closed == default_closed {
+                ""
+            } else if closed {
+                "_CLOSED"
+            } else {
+                "_OPEN"
+            };
+            let schema = json_schema_for_items(&artifact.items, &shapes, &enum_values, closed)?;
+            let schema_json = serde_json::to_string_pretty(&schema)
+                .map_err(|error| Error::input(format!("json schema emit failed: {error}")))?;
+            let digest = sha256_hex(json_string(&schema, "json schema digest")?.as_bytes());
+            let const_name = format!("{}{suffix}_TOOL_PARAMETERS", screaming_name(&artifact.name));
+            let digest_name = format!(
+                "{}{suffix}_TOOL_SCHEMA_DIGEST",
+                screaming_name(&artifact.name)
+            );
+            out.push_str(&format!(
+                "export const {const_name} = {schema_json} as TSchema;\n"
+            ));
+            out.push_str(&format!("export const {digest_name} = \"{digest}\";\n\n"));
+            schema_names.insert(closed, (const_name, digest_name));
+        }
+        let (const_name, digest_name) = schema_names
+            .get(&default_closed)
+            .cloned()
+            .ok_or_else(|| Error::input("default terminal schema was not generated"))?;
+        let tools = artifact
+            .submit_tools
+            .iter()
+            .map(|tool| {
+                let (parameters, digest) = schema_names
+                    .get(&tool.closed)
+                    .cloned()
+                    .ok_or_else(|| Error::input("terminal profile schema was not generated"))?;
+                Ok((tool.clone(), parameters, digest))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        descriptors.push((artifact.schema.clone(), const_name, digest_name, tools));
     }
     out.push_str("export const TERMINAL_TOOL_SCHEMAS = {\n");
     for (boundary, const_name, digest_name, _) in &descriptors {
         out.push_str(&format!("  \"{}\": {{ boundary_id: \"{}\", schema_digest: {digest_name}, parameters: {const_name} }},\n", escape_ts_string(boundary), escape_ts_string(boundary)));
     }
     out.push_str("} as const satisfies Record<string, ToolSchemaDescriptor>;\n\nexport const PLANNING_TOOL_SCHEMAS = Object.fromEntries(Object.entries(TERMINAL_TOOL_SCHEMAS).filter(([boundary]) => boundary.startsWith(\"planning.\"))) as Record<string, ToolSchemaDescriptor>;\n\n");
-    let mut rows = descriptors.iter().flat_map(|(boundary, params, digest, tools)| {
-        tools.iter().map(move |tool| format!("  {{ profile_id: \"{}\", name: \"{}\", label: \"{}\", boundary_id: \"{}\", result_contract: \"{}\", schema_digest: {digest}, parameters: {params} }},", escape_ts_string(&tool.profile), escape_ts_string(&tool.name), escape_ts_string(&tool.label), escape_ts_string(boundary), escape_ts_string(&tool.result_contract)))
+    let mut rows = descriptors.iter().flat_map(|(boundary, _, _, tools)| {
+        tools.iter().map(move |(tool, params, digest)| format!("  {{ profile_id: \"{}\", name: \"{}\", label: \"{}\", boundary_id: \"{}\", result_contract: \"{}\", schema_digest: {digest}, parameters: {params} }},", escape_ts_string(&tool.profile), escape_ts_string(&tool.name), escape_ts_string(&tool.label), escape_ts_string(boundary), escape_ts_string(&tool.result_contract)))
     }).collect::<Vec<_>>();
     rows.sort();
     out.push_str(&format!("export interface SubmitToolDescriptor {{\n  profile_id: string;\n  name: string;\n  label: string;\n  boundary_id: string;\n  result_contract: string;\n  schema_digest: string;\n  parameters: TSchema;\n}}\n\nexport const SUBMIT_TOOLS: readonly SubmitToolDescriptor[] = [\n{}\n] as const;\n", rows.join("\n")));

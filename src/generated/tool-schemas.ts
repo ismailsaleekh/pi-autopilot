@@ -368,6 +368,237 @@ export const WORK_MAP_TOOL_PARAMETERS = {
 } as TSchema;
 export const WORK_MAP_TOOL_SCHEMA_DIGEST = "21befdaeb971231d9745babef8203da8a0e6fca63f74c91c3068627aae0748cf";
 
+export const WORK_MAP_CLOSED_TOOL_PARAMETERS = {
+  "additionalProperties": false,
+  "properties": {
+    "recovery": {
+      "additionalProperties": false,
+      "description": "Recovery Engineer diagnosis and surgical-change evidence; omitted by initial compilers and synthesizers.",
+      "properties": {
+        "actions": {
+          "description": "Surgical corrections performed, or the evidence-backed reason no correction is admissible.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "affected_unit_ids": {
+          "description": "Exact units changed; empty only for no-defect or a fail-closed disposition.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "diagnosis_refs": {
+          "description": "Exact rejected-review or runtime-diagnosis evidence inspected independently.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "disposition": {
+          "description": "Typed conclusion after independent diagnosis: repaired/no-defect may return to the same gate; authority, infrastructure, and unsafe outcomes fail closed.",
+          "enum": [
+            "repaired",
+            "no-defect",
+            "requires-new-authority",
+            "infrastructure-blocked",
+            "unsafe-blocked"
+          ],
+          "type": "string"
+        },
+        "preserved_authority": {
+          "description": "Original authority, scope, tests, gates, and unaffected behavior preserved.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "repair_evidence_refs": {
+          "description": "Evidence supporting the disposition and same-gate revalidation or fail-closed result.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "root_cause": {
+          "description": "Evidence-backed root cause; may correct rather than repeat the runtime diagnosis.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "disposition",
+        "diagnosis_refs",
+        "root_cause",
+        "affected_unit_ids",
+        "actions",
+        "preserved_authority",
+        "repair_evidence_refs"
+      ],
+      "type": "object"
+    },
+    "units": {
+      "description": "Executable implementation units only.",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "commands": {
+            "description": "Nonempty pre-package child verification commands/tests tied to this unit; commands may not require or create the Core-owned package commit.",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "command": {
+                  "type": "string"
+                },
+                "effect": {
+                  "description": "Closed Git-visible persistent repository effect classification; no-effect means the final command leaves no persistent Git-visible repo state.",
+                  "enum": [
+                    "no-effect",
+                    "declared-predictable",
+                    "unknown-generated"
+                  ],
+                  "type": "string"
+                },
+                "expected": {
+                  "type": "string"
+                },
+                "generated_paths": {
+                  "description": "Exact normalized repo-relative Git-visible persistent generated artifact paths only, empty unless effect is declared-predictable; external temporary paths are not generated_paths.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "handling": {
+                  "description": "Closed handling authority for Git-visible generated artifacts; no-effect requires none, unknown-generated requires run-isolated.",
+                  "enum": [
+                    "none",
+                    "run-isolated",
+                    "exact-cleanup-before-scope-gate",
+                    "block-if-created"
+                  ],
+                  "type": "string"
+                },
+                "scope_preservation": {
+                  "description": "Nonempty final-scope-check statement proving verification leaves final Git-visible state inside approved unit files.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "command",
+                "expected",
+                "effect",
+                "generated_paths",
+                "handling",
+                "scope_preservation"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "criteria": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "depends_on": {
+            "description": "Exact declared predecessor unit ids; package must never invent positional dependencies.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "files": {
+            "description": "Nonempty declared relevant path scope for this executable delivery unit.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "description": "Closed delivery disposition: the only legal value is implementation. Context gates belong in non-pass plan review evidence; verification belongs in criteria and commands.",
+            "enum": [
+              "implementation"
+            ],
+            "type": "string"
+          },
+          "links": {
+            "description": "Each item must equal exactly one bound atom registry atoms[].id byte-for-byte; no `atoms:` prefix, range, comma group, task/source/scout/context/artifact ref, placeholder, or inferred expansion.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "objective": {
+            "type": "string"
+          },
+          "package_checks": {
+            "description": "Explicit Core-owned post-package checks tied to this unit; [] is valid when no criterion names package state.",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "check_id": {
+                  "description": "Stable unit-local package-check identity.",
+                  "type": "string"
+                },
+                "criterion_ordinals": {
+                  "description": "Nonempty unique 1-based ordinals of this unit's criteria proved by the package check.",
+                  "items": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "type": "array"
+                },
+                "expected": {
+                  "description": "Nonempty criterion-facing expectation proved by the package check receipt.",
+                  "type": "string"
+                },
+                "kind": {
+                  "description": "Closed Core-owned package invariant; arbitrary model-authored post-commit shell is forbidden.",
+                  "enum": [
+                    "clean-exact-package-tip"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "check_id",
+                "kind",
+                "criterion_ordinals",
+                "expected"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "objective",
+          "criteria",
+          "depends_on",
+          "files",
+          "commands",
+          "package_checks",
+          "links"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "units"
+  ],
+  "type": "object"
+} as TSchema;
+export const WORK_MAP_CLOSED_TOOL_SCHEMA_DIGEST = "93edee92cf98f71223d9b3f3fdd3d52d4df5642c36110a98468b4cd9574ff051";
+
 export const PLAN_REVIEW_TOOL_PARAMETERS = {
   "additionalProperties": true,
   "properties": {
@@ -887,7 +1118,7 @@ export const SUBMIT_TOOLS: readonly SubmitToolDescriptor[] = [
   { profile_id: "planning.task-atoms.v1:autopilot_submit_atoms", name: "autopilot_submit_atoms", label: "Submit task atoms", boundary_id: "planning.task-atoms.v1", result_contract: "planning.task-atoms.v1", schema_digest: TASK_ATOMS_TOOL_SCHEMA_DIGEST, parameters: TASK_ATOMS_TOOL_PARAMETERS },
   { profile_id: "planning.work-map.v1:autopilot_submit_plan_cluster", name: "autopilot_submit_plan_cluster", label: "Submit work map", boundary_id: "planning.work-map.v1", result_contract: "planning.work-map.v1", schema_digest: WORK_MAP_TOOL_SCHEMA_DIGEST, parameters: WORK_MAP_TOOL_PARAMETERS },
   { profile_id: "planning.work-map.v1:autopilot_submit_synthesis", name: "autopilot_submit_synthesis", label: "Submit synthesized work map", boundary_id: "planning.work-map.v1", result_contract: "planning.work-map.v1", schema_digest: WORK_MAP_TOOL_SCHEMA_DIGEST, parameters: WORK_MAP_TOOL_PARAMETERS },
-  { profile_id: "recovery-work-map.v1", name: "autopilot_emit_status", label: "Submit recovered work map", boundary_id: "planning.work-map.v1", result_contract: "planning.work-map.v1", schema_digest: WORK_MAP_TOOL_SCHEMA_DIGEST, parameters: WORK_MAP_TOOL_PARAMETERS },
+  { profile_id: "recovery-work-map.v1", name: "autopilot_emit_status", label: "Submit recovered work map", boundary_id: "planning.work-map.v1", result_contract: "planning.work-map.v1", schema_digest: WORK_MAP_CLOSED_TOOL_SCHEMA_DIGEST, parameters: WORK_MAP_CLOSED_TOOL_PARAMETERS },
   { profile_id: "validation-status.v2", name: "autopilot_emit_status", label: "Submit validation status", boundary_id: "autopilot.validation_submission.v2", result_contract: "autopilot.validation_result.v2", schema_digest: VALIDATION_SUBMISSION_V2_TOOL_SCHEMA_DIGEST, parameters: VALIDATION_SUBMISSION_V2_TOOL_PARAMETERS },
   { profile_id: "validation-status.v3", name: "autopilot_emit_status", label: "Submit validation status", boundary_id: "autopilot.validation_submission.v3", result_contract: "autopilot.validation_result.v3", schema_digest: VALIDATION_SUBMISSION_V3_TOOL_SCHEMA_DIGEST, parameters: VALIDATION_SUBMISSION_V3_TOOL_PARAMETERS },
 ] as const;

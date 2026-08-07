@@ -51,6 +51,34 @@ const DELIVERY_POLICY_VERSION = "autopilot.delivery_tool_policy.v3";
 const deliveryTempDirs: string[] = [];
 const validationTempDirs: string[] = [];
 
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
+  }
+  const encoded = JSON.stringify(value);
+  if (encoded === undefined) throw new Error("terminal schema contains a non-JSON value");
+  return encoded;
+}
+
+test("terminal profiles carry the exact per-profile schema digest", () => {
+  assert.equal(SUBMIT_TOOLS.length, 11);
+  for (const descriptor of SUBMIT_TOOLS) {
+    const digest = createHash("sha256").update(canonicalJson(descriptor.parameters)).digest("hex");
+    assert.equal(descriptor.schema_digest, digest, descriptor.profile_id);
+  }
+  const regular = SUBMIT_TOOLS.find(
+    (tool) => tool.profile_id === "planning.work-map.v1:autopilot_submit_synthesis",
+  );
+  const recovery = SUBMIT_TOOLS.find((tool) => tool.profile_id === "recovery-work-map.v1");
+  assert.ok(regular);
+  assert.ok(recovery);
+  assert.equal((regular.parameters as Record<string, unknown>).additionalProperties, true);
+  assert.equal((recovery.parameters as Record<string, unknown>).additionalProperties, false);
+  assert.notEqual(recovery.schema_digest, regular.schema_digest);
+});
+
 test("parent planning registration excludes the Recovery Engineer child-only terminal", () => {
   const names: string[] = [];
   registerSubmitTools(
