@@ -3403,12 +3403,12 @@ fn validate_delivery_identity(strict: &AgentRunSpec) -> Result<(), String> {
             worktree.0, strict.cwd.0
         ));
     }
-    let expected_assignment = format!("assignment-{}-{}", strict.workstream.0, lane_id.0);
-    let expected_action = format!("action-{}-{}", strict.workstream.0, lane_id.0);
-    if strict.assignment_id.0 != expected_assignment || strict.action_id.0 != expected_action {
+    let (expected_action, expected_assignment) =
+        super::expected_delivery_identity(&strict.workstream, lane_id, &strict.role_id, attempt);
+    if strict.assignment_id != expected_assignment || strict.action_id != expected_action {
         return Err(format!(
-            "agent-run delivery action/assignment drift: expected {expected_action}/{expected_assignment}, got {}/{}",
-            strict.action_id.0, strict.assignment_id.0
+            "agent-run delivery action/assignment drift: expected {}/{}, got {}/{}",
+            expected_action.0, expected_assignment.0, strict.action_id.0, strict.assignment_id.0
         ));
     }
     let bytes = super::read_bounded_file(
@@ -3443,6 +3443,11 @@ fn validate_delivery_assignment_artifact(
     {
         return Err("agent-run delivery assignment authority drift".to_owned());
     }
+    super::validate_delivery_recovery_binding(
+        &strict.role_id,
+        &strict.mode,
+        artifact.recovery.as_ref(),
+    )?;
     super::validate_approved_command_bindings(artifact)?;
     let mut previous = BTreeSet::new();
     let mut ids = BTreeSet::new();

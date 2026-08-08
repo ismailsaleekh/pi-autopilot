@@ -2656,12 +2656,46 @@ fn validate_accepted_planning_artifacts(
     Ok(())
 }
 
+pub(crate) fn expected_delivery_identity(
+    workstream: &Id,
+    lane_id: &Id,
+    role_id: &Id,
+    attempt: u32,
+) -> (Id, Id) {
+    if role_id.0 == "recovery-engineer" {
+        let assignment_id = Id(format!(
+            "recovery-assignment-{}-{}-a{attempt}",
+            workstream.0, lane_id.0
+        ));
+        return (Id(format!("action-{}", assignment_id.0)), assignment_id);
+    }
+    (
+        Id(format!("action-{}-{}", workstream.0, lane_id.0)),
+        Id(format!("assignment-{}-{}", workstream.0, lane_id.0)),
+    )
+}
+
 fn validate_delivery_assignment(assignment: &RunnerAssignment) -> Result<(), RunnerError> {
     let runtime = role_runtime(&assignment.role_id.0)?;
     if !runtime.modes.iter().any(|mode| mode == &assignment.mode.0) {
         return Err(RunnerError::InvalidSpec(format!(
             "role/mode drift: {}/{}",
             assignment.role_id.0, assignment.mode.0
+        )));
+    }
+    let (expected_action, expected_assignment) = expected_delivery_identity(
+        &assignment.workstream,
+        &assignment.lane_id,
+        &assignment.role_id,
+        assignment.attempt,
+    );
+    if assignment.action_id != expected_action || assignment.assignment_id != expected_assignment {
+        return Err(RunnerError::InvalidSpec(format!(
+            "delivery action/assignment drift: expected {}/{}, got {}/{}",
+            expected_action.0,
+            expected_assignment.0,
+            assignment.action_id.0,
+            assignment.assignment_id.0
         )));
     }
     terminal_profile_for(
@@ -3656,29 +3690,20 @@ pub fn validate_approved_command_bindings(
     Ok(())
 }
 
-fn delivery_assignment_artifact(
-    assignment: &RunnerAssignment,
-    worktree: &str,
-) -> Result<DeliveryAssignmentArtifact, RunnerError> {
-    if assignment.approved_units.is_empty() {
-        return Err(RunnerError::InvalidSpec(
-            "delivery assignment has no approved unit authority".to_owned(),
-        ));
-    }
-    for unit in &assignment.approved_units {
-        validate_approved_unit_for_runner(unit)?;
-    }
-    let recovery_budget = crate::repair::SemanticRecoveryPolicy::package()
-        .map_err(RunnerError::InvalidSpec)?
-        .max_attempts;
-    match (&assignment.role_id.0[..], assignment.recovery.as_ref()) {
+fn validate_delivery_recovery_binding(
+    role_id: &Id,
+    mode: &ModeId,
+    recovery: Option<&RecoveryDirective>,
+) -> Result<(), String> {
+    let recovery_budget = crate::repair::SemanticRecoveryPolicy::package()?.max_attempts;
+    match (&role_id.0[..], recovery) {
         ("recovery-engineer", Some(recovery)) => {
             if recovery.schema != "autopilot.recovery_directive.v1"
                 || !matches!(
                     recovery.trigger_phase.as_str(),
                     "execution" | "validation" | "integration" | "closure"
                 )
-                || recovery.repair_mode != assignment.mode
+                || recovery.repair_mode != *mode
                 || !matches!(
                     recovery.repair_mode.0.as_str(),
                     "forward-critical" | "closure-repair" | "failed-test" | "conflict-resolution"
@@ -3694,24 +3719,41 @@ fn delivery_assignment_artifact(
                 || recovery.original_gate.trim().is_empty()
                 || recovery.attempt_budget != recovery_budget
             {
-                return Err(RunnerError::InvalidSpec(
+                return Err(
                     "recovery delivery assignment has incomplete or unsupported directive"
                         .to_owned(),
-                ));
+                );
             }
         }
         ("recovery-engineer", None) => {
-            return Err(RunnerError::InvalidSpec(
-                "recovery delivery assignment is missing its directive".to_owned(),
-            ));
+            return Err("recovery delivery assignment is missing its directive".to_owned());
         }
         (_, Some(_)) => {
-            return Err(RunnerError::InvalidSpec(
-                "non-recovery delivery assignment carries a recovery directive".to_owned(),
-            ));
+            return Err("non-recovery delivery assignment carries a recovery directive".to_owned());
         }
         (_, None) => {}
     }
+    Ok(())
+}
+
+fn delivery_assignment_artifact(
+    assignment: &RunnerAssignment,
+    worktree: &str,
+) -> Result<DeliveryAssignmentArtifact, RunnerError> {
+    if assignment.approved_units.is_empty() {
+        return Err(RunnerError::InvalidSpec(
+            "delivery assignment has no approved unit authority".to_owned(),
+        ));
+    }
+    for unit in &assignment.approved_units {
+        validate_approved_unit_for_runner(unit)?;
+    }
+    validate_delivery_recovery_binding(
+        &assignment.role_id,
+        &assignment.mode,
+        assignment.recovery.as_ref(),
+    )
+    .map_err(RunnerError::InvalidSpec)?;
     Ok(DeliveryAssignmentArtifact {
         schema: "autopilot.delivery_assignment.v3".to_owned(),
         workstream: assignment.workstream.clone(),

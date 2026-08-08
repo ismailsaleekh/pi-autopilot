@@ -12,14 +12,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use drivers::allocation::{ApprovedCriterion, ApprovedUnit};
 use drivers::planning;
 use drivers::runner::{
-    RunnerAssignment, RunnerTransportFacts, ValidationRunnerRequest, VerifiedCommandExecution,
-    approved_command_bindings, child, delivery_issue_with_facts, planning_context_digest,
-    planning_paths, repository_authority_binding, role_runtime, role_tool_names, session_id_for,
-    settings_digest, validation_issue_v3,
+    RecoveryDirective, RunnerAssignment, RunnerTransportFacts, ValidationRunnerRequest,
+    VerifiedCommandExecution, approved_command_bindings, child, delivery_issue_with_facts,
+    planning_context_digest, planning_paths, repository_authority_binding, role_runtime,
+    role_tool_names, session_id_for, settings_digest, validation_issue_v3,
 };
 use drivers::seam::{self, CoreState};
 use drivers::vcs::GitVcs;
-use kernel::generated::{ContractId, Id, ModeId, SeamEnvelope, Sha, TaskDocument};
+use kernel::generated::{ContractId, Id, ModeId, Ref, SeamEnvelope, Sha, TaskDocument};
 use serde_json::{Value, json};
 use sha2::{Digest as ShaDigest, Sha256};
 
@@ -593,6 +593,43 @@ fn delivery_child_policy_receipt_is_required_before_first_prompt() {
             "{label} wrote a carrier after invalid delivery policy receipt"
         );
     }
+}
+
+#[test]
+fn bug_187_recovery_delivery_child_accepts_package_owned_recovery_identity() {
+    let root = temp_root("bug-187-recovery-delivery-identity");
+    let worktree = delivery_worktree(&root, "recovery");
+    let blocked = recovery_blocked_payload();
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi("", &format!("emitCarrier({blocked:?});")),
+    );
+    let spec_path = write_recovery_delivery_spec(&root, &worktree);
+    let spec: Value = serde_json::from_slice(&fs::read(&spec_path).expect("recovery spec"))
+        .expect("recovery spec json");
+
+    with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec_path.display().to_string()])
+    })
+    .expect("BUG-187: package-issued Recovery Engineer identity must reach Pi");
+
+    let carrier_path = PathBuf::from(spec["carrier_path"].as_str().expect("carrier path"));
+    let carrier: Value =
+        serde_json::from_slice(&fs::read(carrier_path).expect("carrier")).expect("carrier json");
+    assert_eq!(
+        carrier["action_id"],
+        "action-recovery-assignment-main-L1-a1"
+    );
+    assert_eq!(carrier["assignment_id"], "recovery-assignment-main-L1-a1");
+    assert_eq!(carrier["role_id"], "recovery-engineer");
+    assert_eq!(
+        carrier["submission"]["recovery_disposition"],
+        "infrastructure-blocked"
+    );
+    assert_eq!(
+        attempt_events(&worktree, "recovery-assignment-main-L1-a1"),
+        ["started", "accepted"]
+    );
 }
 
 #[test]
@@ -2586,6 +2623,61 @@ fn write_delivery_spec(root: &Path, worktree: &Path, mutate: impl Fn(Value) -> V
     spec_path
 }
 
+fn write_recovery_delivery_spec(root: &Path, worktree: &Path) -> PathBuf {
+    let base_commit = Sha(
+        git_stdout(worktree, &["rev-parse", "--verify", "HEAD^{commit}"])
+            .trim()
+            .to_owned(),
+    );
+    let repair_mode = ModeId("failed-test".to_owned());
+    let assignment = RunnerAssignment {
+        workstream: Id("main".to_owned()),
+        action_id: Id("action-recovery-assignment-main-L1-a1".to_owned()),
+        assignment_id: Id("recovery-assignment-main-L1-a1".to_owned()),
+        role_id: Id("recovery-engineer".to_owned()),
+        mode: repair_mode.clone(),
+        run_revision: 2,
+        lane_id: Id("L1".to_owned()),
+        attempt: 1,
+        base_commit,
+        worktree: worktree.to_path_buf(),
+        session_file: root.join("recovery-session.json"),
+        roster_assignment: "package-roster/reasoning".to_owned(),
+        approved_units: vec![delivery_approved_unit(
+            "U1",
+            &["README.md"],
+            &["printf approved"],
+        )],
+        recovery: Some(RecoveryDirective {
+            schema: "autopilot.recovery_directive.v1".to_owned(),
+            trigger_phase: "validation".to_owned(),
+            repair_mode,
+            trigger_assignment_id: Id("validator-assignment-main-L1".to_owned()),
+            diagnosis_refs: vec![Ref("validation-carrier:main-L1".to_owned())],
+            diagnosis_ids: vec![Id("F-source-defect".to_owned())],
+            diagnosis_details: vec!["validator found a bounded source defect".to_owned()],
+            original_gate: "validator:validator-assignment-main-L1:semantic-round-1".to_owned(),
+            attempt_budget: 1,
+        }),
+    };
+    let facts = RunnerTransportFacts::new(
+        std::env::current_exe().expect("current exe"),
+        std::env::current_exe().expect("current exe"),
+    )
+    .expect("transport facts");
+    let _guard = CWD_LOCK.lock().expect("cwd lock");
+    let previous = std::env::current_dir().expect("current dir");
+    std::env::set_current_dir(root).expect("recovery delivery cwd");
+    let issue = with_env(
+        "AUTOPILOT_CHILD_ADDON_PATH",
+        child_addon_path().to_str().expect("addon utf8"),
+        || delivery_issue_with_facts(&assignment, &facts),
+    )
+    .expect("recovery delivery issue");
+    std::env::set_current_dir(previous).expect("restore cwd");
+    PathBuf::from(issue.binding.spec_path)
+}
+
 fn delivery_approved_unit(id: &str, files: &[&str], commands: &[&str]) -> ApprovedUnit {
     let criterion = Id(format!("criterion-{id}"));
     ApprovedUnit {
@@ -2632,6 +2724,19 @@ fn delivery_blocked_payload() -> String {
         "terminal_status": "blocked",
         "hard_boundary_violations": ["approved command expected a different checkout root; no mutation performed"],
         "blocker_class": "semantic-repairable"
+    })
+    .to_string()
+}
+
+fn recovery_blocked_payload() -> String {
+    json!({
+        "actual_changed_paths": [],
+        "execution_audit_ref": "audit:recovery-blocked",
+        "focused_evidence_refs": ["evidence:0", "evidence:1"],
+        "terminal_status": "blocked",
+        "hard_boundary_violations": ["subscription runtime unavailable during bounded recovery"],
+        "blocker_class": "infrastructure",
+        "recovery_disposition": "infrastructure-blocked"
     })
     .to_string()
 }

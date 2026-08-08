@@ -3758,20 +3758,23 @@ fn recovery_runner_assignment(
             .clone()
             .ok_or_else(|| "recovery source binding missing worktree".to_owned())?,
     );
-    let assignment_id = idv(&format!("recovery-{}-a1", source.assignment_id.0));
+    let role_id = idv("recovery-engineer");
+    let attempt = 1;
+    let (action_id, assignment_id) =
+        runner::expected_delivery_identity(&source.workstream, &lane_id, &role_id, attempt);
     let session_file = PathBuf::from(format!(
         ".pi/autopilot/{}/{}.session.json",
         source.workstream.0, assignment_id.0
     ));
     Ok(RunnerAssignment {
         workstream: source.workstream.clone(),
-        action_id: idv(&format!("action-{}", assignment_id.0)),
+        action_id,
         assignment_id,
-        role_id: idv("recovery-engineer"),
+        role_id,
         mode: directive.repair_mode.clone(),
         run_revision,
         lane_id,
-        attempt: 1,
+        attempt,
         base_commit,
         worktree,
         session_file,
