@@ -32,7 +32,7 @@ import { Type } from "typebox";
 import type { SubmitToolDescriptor } from "../src/generated/tool-schemas.ts";
 
 export const CHILD_RECEIPT_ENTRY = "pi-autopilot:child-tools";
-export const DELIVERY_POLICY_VERSION = "autopilot.delivery_tool_policy.v3";
+export const DELIVERY_POLICY_VERSION = "autopilot.delivery_tool_policy.v4";
 export const APPROVED_COMMAND_TOOL = "autopilot_run_approved_command";
 export const DELIVERY_POLICY_OVERRIDES = [APPROVED_COMMAND_TOOL, "edit", "write"] as const;
 
@@ -44,6 +44,7 @@ const MAX_APPROVED_COMMAND_EXECUTIONS = 64;
 const MAX_SCOPE_SNAPSHOT_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_SCOPE_SNAPSHOT_TOTAL_BYTES = 256 * 1024 * 1024;
 const SCOPE_SNAPSHOT_DOMAIN = "autopilot.delivery_scope_snapshot.v1\0";
+const SCOPE_SNAPSHOT_FAILURE_DOMAIN = "autopilot.delivery_scope_snapshot_failure.v1\0";
 const DELIVERY_ENV_KEYS = [
   "AUTOPILOT_DELIVERY_ASSIGNMENT_PATH",
   "AUTOPILOT_DELIVERY_ASSIGNMENT_DIGEST",
@@ -297,6 +298,7 @@ export class DeliveryPolicy {
     command: ApprovedCommand,
     outcome: "succeeded" | "failed",
     result: unknown,
+    scopeSnapshotDigest: string,
   ): void {
     if (this.executionEntries.length >= MAX_APPROVED_COMMAND_EXECUTIONS) {
       this.executionOverflowed = true;
@@ -308,13 +310,13 @@ export class DeliveryPolicy {
       command_digest: command.command_digest,
       outcome,
       result_digest: sha256Hex(Buffer.from(canonicalJson(result), "utf8")),
-      scope_snapshot_digest: approvedScopeSnapshotDigest(this),
+      scope_snapshot_digest: scopeSnapshotDigest,
     });
   }
 
   commandDescription(): string {
     const listed = JSON.stringify([...this.approvedCommands.keys()]);
-    return `Run approved command_id only; no shell text/cwd/env/timeout. IDs: ${listed}. Use read/grep/find/ls.`;
+    return `Run approved verification command_id; no shell/cwd/env/timeout. IDs: ${listed}. Use read/grep/find/ls.`;
   }
 
   denialLedger(): DeliveryPolicyDenialLedger {
@@ -388,6 +390,7 @@ export function registerDeliveryPolicyTools(pi: ExtensionAPI, policy: DeliveryPo
     promptGuidelines: [
       "Pass only a command_id listed in the delivery assignment; never provide shell text.",
       "Use read, grep, find, and ls for inspection. This tool is only for approved verification commands.",
+      "Verification only: never bootstrap, author, copy, vendor, regenerate, repair, or implement files.",
     ],
     parameters: Type.Object(
       { command_id: Type.String({ description: "Package-generated approved command identifier" }) },
@@ -408,14 +411,47 @@ export function registerDeliveryPolicyTools(pi: ExtensionAPI, policy: DeliveryPo
         throw new Error("Approved command reference denied pre-effect; no command ran");
       }
       return policy.queue.run(async () => {
+        const snapshotBefore = approvedScopeSnapshotDigest(policy);
         let result: unknown;
         try {
           result = await shellExecutor.execute(id, { command: approved.command }, signal, onUpdate, ctx);
         } catch (error) {
-          policy.recordExecution(approved, "failed", commandErrorReceipt(error));
+          let snapshotAfter: string;
+          try {
+            snapshotAfter = approvedScopeSnapshotDigest(policy);
+          } catch (snapshotError) {
+            policy.recordExecution(
+              approved,
+              "failed",
+              { command: commandErrorReceipt(error), snapshot: commandErrorReceipt(snapshotError) },
+              scopeSnapshotFailureDigest(snapshotBefore, snapshotError),
+            );
+            throw new Error("Approved command left the declared delivery snapshot invalid before failing");
+          }
+          policy.recordExecution(approved, "failed", commandErrorReceipt(error), snapshotAfter);
+          if (snapshotAfter !== snapshotBefore) {
+            throw new Error("Approved command changed the declared delivery snapshot before failing");
+          }
           throw error;
         }
-        policy.recordExecution(approved, "succeeded", result);
+        let snapshotAfter: string;
+        try {
+          snapshotAfter = approvedScopeSnapshotDigest(policy);
+        } catch (snapshotError) {
+          policy.recordExecution(
+            approved,
+            "failed",
+            commandErrorReceipt(snapshotError),
+            scopeSnapshotFailureDigest(snapshotBefore, snapshotError),
+          );
+          throw new Error("Approved command left the declared delivery snapshot invalid");
+        }
+        if (snapshotAfter !== snapshotBefore) {
+          const error = new Error("Approved command changed the declared delivery snapshot");
+          policy.recordExecution(approved, "failed", commandErrorReceipt(error), snapshotAfter);
+          throw error;
+        }
+        policy.recordExecution(approved, "succeeded", result, snapshotAfter);
         return result;
       });
     },
@@ -981,7 +1017,14 @@ function requiredNumber(object: Record<string, unknown>, key: string): number {
 }
 
 function isSafeRelativeUnitPath(value: string): boolean {
-  if (value === "" || value.includes("\0") || value.includes("\\") || path.isAbsolute(value)) return false;
+  if (
+    value === "" ||
+    value.trim() !== value ||
+    value.includes("\0") ||
+    value.includes("\\") ||
+    [..."*?[]{}"].some((character) => value.includes(character)) ||
+    path.isAbsolute(value)
+  ) return false;
   return value
     .split("/")
     .every((part) => part !== "" && part !== "." && part !== ".." && part !== ".git" && part !== ".pi");
@@ -1120,6 +1163,13 @@ function approvedScopeSnapshotDigest(policy: DeliveryPolicy): string {
     }
   }
   return digest.digest("hex");
+}
+
+function scopeSnapshotFailureDigest(before: string, error: unknown): string {
+  return sha256Hex(Buffer.from(
+    `${SCOPE_SNAPSHOT_FAILURE_DOMAIN}${before}\0${canonicalJson(commandErrorReceipt(error))}`,
+    "utf8",
+  ));
 }
 
 function commandErrorReceipt(error: unknown): Record<string, string> {

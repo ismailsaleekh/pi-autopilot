@@ -3462,15 +3462,12 @@ fn validate_delivery_assignment_artifact(
                 unit.id.0
             ));
         }
-        let mut file_paths = BTreeSet::new();
-        if unit.files.iter().any(|path| {
-            !crate::allocation::approved_path_is_safe(path) || !file_paths.insert(path.0.as_str())
-        }) {
-            return Err(format!(
-                "agent-run delivery unit has unsafe or duplicate files: {}",
+        crate::allocation::validate_exact_unit_file_authority(&unit.files).map_err(|error| {
+            format!(
+                "agent-run delivery unit has invalid exact file authority: {}: {error}",
                 unit.id.0
-            ));
-        }
+            )
+        })?;
         let criterion_ids = unit
             .criterion_text
             .iter()
@@ -3526,6 +3523,13 @@ fn validate_delivery_assignment_artifact(
         })?;
         previous.insert(unit.id.clone());
     }
+    crate::allocation::validate_exact_plan_file_union(
+        artifact
+            .ordered_units
+            .iter()
+            .flat_map(|unit| unit.files.iter()),
+    )
+    .map_err(|error| format!("agent-run delivery plan file authority drift: {error}"))?;
     Ok(())
 }
 

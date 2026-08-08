@@ -1,6 +1,7 @@
 use drivers::allocation::{
     AllocationError, AllocationPolicy, AllocationSubmission, ApprovedUnit, BOUNDARY_ID, FutureUnit,
-    accept_lane_proposal, validate_allocation, validate_package_check_closure_authority,
+    accept_lane_proposal, validate_allocation, validate_exact_plan_file_union,
+    validate_exact_unit_file_authority, validate_package_check_closure_authority,
 };
 use kernel::boundary::{BoundaryMode, Producer, boundary_by_id};
 use kernel::generated::{
@@ -71,6 +72,42 @@ fn totality_requires_exact_assignment_or_future_reason() {
         validate_allocation(&four_units, &partial, policy()).expect_err("blank future rejected"),
         AllocationError::FutureWithoutReason(id("u4"))
     );
+}
+
+#[test]
+fn bug_186_exact_file_authority_rejects_tree_scope_without_filename_heuristics() {
+    for accepted in [
+        "README",
+        "products/depthprint/server/PURPOSE",
+        ".github/CODEOWNERS",
+    ] {
+        validate_exact_unit_file_authority(&[ContractPath(accepted.to_owned())]).unwrap_or_else(
+            |error| panic!("extensionless exact file {accepted} rejected: {error}"),
+        );
+    }
+    for rejected in [
+        "vendor/**",
+        "vendor/",
+        "vendor//schema.json",
+        ".git/config",
+        ".pi/state",
+        " vendor/schema.json",
+    ] {
+        assert!(
+            validate_exact_unit_file_authority(&[ContractPath(rejected.to_owned())]).is_err(),
+            "BUG-186 tree/reserved/non-normalized scope was admitted: {rejected}"
+        );
+    }
+    let ancestor = [
+        ContractPath("vendor".to_owned()),
+        ContractPath("vendor/schema.json".to_owned()),
+    ];
+    assert!(validate_exact_unit_file_authority(&ancestor).is_err());
+
+    let first = ContractPath("fixtures".to_owned());
+    let interleaved = ContractPath("fixtures-other".to_owned());
+    let second = ContractPath("fixtures/positive/example.json".to_owned());
+    assert!(validate_exact_plan_file_union([&first, &interleaved, &second]).is_err());
 }
 
 #[test]

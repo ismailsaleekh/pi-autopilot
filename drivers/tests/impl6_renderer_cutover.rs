@@ -221,7 +221,20 @@ fn full_planning_run_renders_no_mandatory_or_required_context_gaps() {
         repo.join(".pi/autopilot/ws/planning/prompts/planning-ws-plan-reviewer-01.md");
     assert!(reviewer_prompt.exists(), "reviewer prompt was not rendered");
     for prompt_path in issued_prompts {
-        let manifest = context_manifest_from_prompt(&fs::read_to_string(&prompt_path).unwrap());
+        let prompt_text = fs::read_to_string(&prompt_path).unwrap();
+        if prompt_path == reviewer_prompt {
+            assert!(
+                prompt_text.contains(
+                    "every `units[].files` value is one exact repository-relative regular-file leaf"
+                ) && prompt_text.contains(
+                    "no directory, ancestor/prefix, wildcard pattern, placeholder, or inferred expansion remains"
+                ) && prompt_text.contains(
+                    "must never serve as bootstrap/authoring/copy/vendoring/regeneration/repair channels"
+                ),
+                "reviewer prompt omitted exact leaf-file or verification-only authority: {prompt_text}"
+            );
+        }
+        let manifest = context_manifest_from_prompt(&prompt_text);
         let blocking = manifest["gaps"]
             .as_array()
             .unwrap()

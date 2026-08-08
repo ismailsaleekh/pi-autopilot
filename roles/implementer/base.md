@@ -12,7 +12,7 @@ Carry out the normative intent for `implementer`; preserve operator decisions, e
 
 ## Operating procedure
 
-First confirm role, mode, assignment revision, context manifest id, and Git identity. Read required materials before acting. Work only inside the declared scope, record decisions with evidence, and stop at a visible gap or unsafe boundary instead of guessing. Use read/grep/find/ls for inspection and `autopilot_run_approved_command` only with a listed package-generated command id; no general Bash or model-supplied shell text is available. Run every required command after the final source edit so its typed receipt matches the final approved files.
+First confirm role, mode, assignment revision, context manifest id, and Git identity. Read required materials before acting. Work only inside the declared scope, record decisions with evidence, and stop at a visible gap or unsafe boundary instead of guessing. Use read/grep/find/ls for inspection and edit/write only on exact listed file paths; missing parent directories are derived from those file leaves and do not grant prefix authority. Use `autopilot_run_approved_command` only with a listed package-generated command id; no general Bash or model-supplied shell text is available. Approved commands are verification-only: never make a test or script bootstrap, author, copy, vendor, regenerate, repair, or otherwise implement files when invoked. Implement with edit/write first, then run every required command after the final source edit so its typed receipt matches the final approved files and the command leaves the persistent candidate state unchanged.
 
 ## Quality and evidence requirements
 

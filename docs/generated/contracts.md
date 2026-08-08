@@ -475,7 +475,7 @@ Sources: `data/contracts.kdl`.
 | work_map | field | plan_unit.objective | string | true |  |  |
 | work_map | list | plan_unit.criteria | string | true |  |  |
 | work_map | list | plan_unit.depends_on | id | true |  | Exact declared predecessor unit ids; package must never invent positional dependencies. |
-| work_map | list | plan_unit.files | path | true |  | Nonempty declared relevant path scope for this executable delivery unit. |
+| work_map | list | plan_unit.files | path | true |  | Nonempty exact normalized repository-relative regular-file destinations. Every future leaf is enumerated explicitly; directory, ancestor/prefix, wildcard-pattern, reserved, and inferred expansion authority is forbidden. Suffix-free regular files are valid. |
 | work_map | list | plan_unit.commands | plan_unit_command | true |  | Nonempty pre-package child verification commands/tests tied to this unit; commands may not require or create the Core-owned package commit. |
 | work_map | list | plan_unit.package_checks | plan_unit_package_check | true |  | Explicit Core-owned post-package checks tied to this unit; [] is valid when no criterion names package state. |
 | work_map | list | plan_unit.links | id | true |  | Each item must equal exactly one bound atom registry atoms[].id byte-for-byte; no `atoms:` prefix, range, comma group, task/source/scout/context/artifact ref, placeholder, or inferred expansion. |

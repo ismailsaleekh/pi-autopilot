@@ -204,31 +204,41 @@ fn work_map_boundary_rejects_non_delivery_kinds_and_empty_scope_or_commands() {
     for (label, raw) in [
         (
             "context gate kind",
-            serde_json::json!({"units":[{"id":"U1","kind":"context-gate","objective":"ctx","criteria":["c"],"depends_on":[],"files":["src/lib.rs"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"links":["W1"]}]}).to_string(),
+            serde_json::json!({"units":[{"id":"U1","kind":"context-gate","objective":"ctx","criteria":["c"],"depends_on":[],"files":["src/lib.rs"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"package_checks":[],"links":["W1"]}]}).to_string(),
         ),
         (
             "verification kind",
-            serde_json::json!({"units":[{"id":"U1","kind":"verification","objective":"verify","criteria":["c"],"depends_on":[],"files":["src/lib.rs"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"links":["W1"]}]}).to_string(),
+            serde_json::json!({"units":[{"id":"U1","kind":"verification","objective":"verify","criteria":["c"],"depends_on":[],"files":["src/lib.rs"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"package_checks":[],"links":["W1"]}]}).to_string(),
         ),
         (
             "missing files",
-            serde_json::json!({"units":[{"id":"U1","kind":"implementation","objective":"impl","criteria":["c"],"depends_on":[],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"links":["W1"]}]}).to_string(),
+            serde_json::json!({"units":[{"id":"U1","kind":"implementation","objective":"impl","criteria":["c"],"depends_on":[],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"package_checks":[],"links":["W1"]}]}).to_string(),
         ),
         (
             "absolute file",
-            serde_json::json!({"units":[{"id":"U1","kind":"implementation","objective":"impl","criteria":["c"],"depends_on":[],"files":["/tmp/escape"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"links":["W1"]}]}).to_string(),
+            serde_json::json!({"units":[{"id":"U1","kind":"implementation","objective":"impl","criteria":["c"],"depends_on":[],"files":["/tmp/escape"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"package_checks":[],"links":["W1"]}]}).to_string(),
         ),
         (
             "parent file",
-            serde_json::json!({"units":[{"id":"U1","kind":"implementation","objective":"impl","criteria":["c"],"depends_on":[],"files":["../escape"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"links":["W1"]}]}).to_string(),
+            serde_json::json!({"units":[{"id":"U1","kind":"implementation","objective":"impl","criteria":["c"],"depends_on":[],"files":["../escape"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"package_checks":[],"links":["W1"]}]}).to_string(),
         ),
         (
             "duplicate files",
-            serde_json::json!({"units":[{"id":"U1","kind":"implementation","objective":"impl","criteria":["c"],"depends_on":[],"files":["src/lib.rs","src/lib.rs"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"links":["W1"]}]}).to_string(),
+            serde_json::json!({"units":[{"id":"U1","kind":"implementation","objective":"impl","criteria":["c"],"depends_on":[],"files":["src/lib.rs","src/lib.rs"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"package_checks":[],"links":["W1"]}]}).to_string(),
+        ),
+        (
+            // BUG-186: delivery authority is exact regular-file identity, never glob scope.
+            "glob file scope",
+            serde_json::json!({"units":[{"id":"U1","kind":"implementation","objective":"impl","criteria":["c"],"depends_on":[],"files":["products/depthprint/contracts/vendor/**"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"package_checks":[],"links":["W1"]}]}).to_string(),
+        ),
+        (
+            // BUG-186: a directory/prefix cannot coexist with a claimed exact descendant file.
+            "ancestor directory scope",
+            serde_json::json!({"units":[{"id":"U1","kind":"implementation","objective":"impl","criteria":["c"],"depends_on":[],"files":["products/depthprint/contracts/vendor","products/depthprint/contracts/vendor/schema.json"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"package_checks":[],"links":["W1"]}]}).to_string(),
         ),
         (
             "empty commands",
-            serde_json::json!({"units":[{"id":"U1","kind":"implementation","objective":"impl","criteria":["c"],"depends_on":[],"files":["src/lib.rs"],"commands":[],"links":["W1"]}]}).to_string(),
+            serde_json::json!({"units":[{"id":"U1","kind":"implementation","objective":"impl","criteria":["c"],"depends_on":[],"files":["src/lib.rs"],"commands":[],"package_checks":[],"links":["W1"]}]}).to_string(),
         ),
     ] {
         assert!(
@@ -1113,6 +1123,18 @@ fn prompt_guidance_names_command_effect_authority() {
     assert!(admits.contains("declared-predictable"), "{admits}");
     assert!(admits.contains("run-isolated"), "{admits}");
     assert!(admits.contains("final-scope preservation"), "{admits}");
+    assert!(
+        admits.contains("one exact normalized repository-relative regular-file destination"),
+        "{admits}"
+    );
+    assert!(
+        admits.contains("Directory, ancestor/prefix, and wildcard-pattern authority is forbidden"),
+        "{admits}"
+    );
+    assert!(
+        admits.contains("verification-only: never use an approved command"),
+        "{admits}"
+    );
     assert!(
         admits.contains("strictly pre-package child evidence"),
         "{admits}"

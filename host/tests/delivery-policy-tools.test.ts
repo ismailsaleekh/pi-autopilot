@@ -160,6 +160,66 @@ test("delivery policy confines edit/write and package-approved command reference
   }
 });
 
+test("BUG-186 approved commands cannot receive success for authoring delivery files", { concurrency: false }, async () => {
+  const command = `node -e ${JSON.stringify("const fs=require('node:fs');fs.mkdirSync('src',{recursive:true});fs.writeFileSync('src/generated.rs','smuggled\\n')")}`;
+  const fixture = makeUnitFixture(["src/generated.rs"], { commands: [command] });
+  try {
+    const approvedCommand = fixture.tools.get(APPROVED_COMMAND_TOOL)!;
+    await assert.rejects(
+      () => approvedCommand.execute("command-mutation", { command_id: "CMD-U1-1" }),
+      /approved command changed the declared delivery snapshot/i,
+    );
+    const entry = fixture.policy.executionLedger().entries.at(-1);
+    assert.equal(entry?.outcome, "failed", "the effected command must never receive a success receipt");
+    assert.match(entry?.scope_snapshot_digest ?? "", /^[0-9a-f]{64}$/);
+  } finally {
+    cleanup();
+  }
+});
+
+test("BUG-186 failed commands record whether candidate state changed", { concurrency: false }, async () => {
+  const unchanged = makeUnitFixture(["src/generated.rs"], {
+    commands: [`node -e ${JSON.stringify("process.exit(7)")}`],
+  });
+  try {
+    await assert.rejects(
+      () => unchanged.tools.get(APPROVED_COMMAND_TOOL)!.execute("failed-unchanged", { command_id: "CMD-U1-1" }),
+    );
+    assert.equal(unchanged.policy.executionLedger().entries.at(-1)?.outcome, "failed");
+  } finally {
+    cleanup();
+  }
+
+  const changed = makeUnitFixture(["src/generated.rs"], {
+    commands: [`node -e ${JSON.stringify("const fs=require('node:fs');fs.mkdirSync('src',{recursive:true});fs.writeFileSync('src/generated.rs','changed\\n');process.exit(7)")}`],
+  });
+  try {
+    await assert.rejects(
+      () => changed.tools.get(APPROVED_COMMAND_TOOL)!.execute("failed-changed", { command_id: "CMD-U1-1" }),
+      /changed the declared delivery snapshot before failing/i,
+    );
+    assert.equal(changed.policy.executionLedger().entries.at(-1)?.outcome, "failed");
+  } finally {
+    cleanup();
+  }
+});
+
+test("BUG-186 invalid post-command topology still receives a failed audit row", { concurrency: false }, async () => {
+  const command = `node -e ${JSON.stringify("require('node:fs').mkdirSync('vendor')")}`;
+  const fixture = makeUnitFixture(["vendor"], { commands: [command] });
+  try {
+    await assert.rejects(
+      () => fixture.tools.get(APPROVED_COMMAND_TOOL)!.execute("directory-mutation", { command_id: "CMD-U1-1" }),
+      /left the declared delivery snapshot invalid/i,
+    );
+    const entry = fixture.policy.executionLedger().entries.at(-1);
+    assert.equal(entry?.outcome, "failed");
+    assert.match(entry?.scope_snapshot_digest ?? "", /^[0-9a-f]{64}$/);
+  } finally {
+    cleanup();
+  }
+});
+
 test("delivery policy denial ledger is bounded and reports overflow", { concurrency: false }, async () => {
   const fixture = makeFixture();
   try {
@@ -267,6 +327,28 @@ test("delivery policy rejects duplicate unit file authority but permits repeated
     registerDeliveryPolicyTools({ registerTool(tool: RegisteredTool) { tools.set(tool.name, tool); } } as never, policy);
     const result = await tools.get(APPROVED_COMMAND_TOOL)!.execute("repeat-ok", { command_id: "CMD-U1-1" }) as { content: Array<{ text: string }> };
     assert.equal(result.content[0]!.text, "repeat");
+  } finally {
+    cleanup();
+  }
+});
+
+test("delivery exact file authority rejects glob and directory syntax", { concurrency: false }, () => {
+  const root = mkdtempSync(join(realpathSync.native(tmpdir()), "autopilot-policy-file-shape-"));
+  roots.push(root);
+  const worktree = join(root, "worktree");
+  mkdirSync(worktree);
+  try {
+    for (const [label, files] of [
+      ["glob", ["vendor/**"]],
+      ["trailing directory separator", ["vendor/"]],
+      ["reserved", [".git/config"]],
+    ] as const) {
+      assert.throws(
+        () => loadDeliveryPolicyFromEnv(makeEnv({ root, worktree, files: [...files] }).env as never, worktree),
+        /unsafe unit file path|ancestor\/prefix/,
+        label,
+      );
+    }
   } finally {
     cleanup();
   }
@@ -556,7 +638,14 @@ function makeEnv(input: { root: string; worktree: string; files: string[]; comma
     attempt: 1,
     base_commit: "0123456789abcdef0123456789abcdef01234567",
     worktree: input.worktree,
-    ordered_units: [{ id: "U1", kind: "implementation", files: input.files, commands: commands.map((command) => ({ command, expected: `Command ${command} exits successfully.` })), package_checks: [{ check_id: "PKG-U1-TIP", kind: "clean-exact-package-tip", criterion_ordinals: [1], expected: "Core proves the exact clean package tip." }] }],
+    ordered_units: [{ id: "U1", kind: "implementation", files: input.files, commands: commands.map((command) => ({
+      command,
+      expected: `Command ${command} exits successfully.`,
+      effect: "no-effect",
+      generated_paths: [],
+      handling: "none",
+      scope_preservation: "The persistent candidate worktree is unchanged by verification.",
+    })), package_checks: [{ check_id: "PKG-U1-TIP", kind: "clean-exact-package-tip", criterion_ordinals: [1], expected: "Core proves the exact clean package tip." }] }],
     approved_commands: commands.map((command, index) => ({
       command_id: `CMD-U1-${index + 1}`,
       unit_id: "U1",
@@ -579,7 +668,7 @@ function makeEnv(input: { root: string; worktree: string; files: string[]; comma
     AUTOPILOT_DELIVERY_BASE_COMMIT: assignment.base_commit,
     AUTOPILOT_DELIVERY_POLICY_DIGEST: deliveryPolicyDigest({ assignmentPath, assignmentDigest, worktree: input.worktree, cwd: input.worktree }),
   };
-  assert.equal(DELIVERY_POLICY_VERSION, "autopilot.delivery_tool_policy.v3");
+  assert.equal(DELIVERY_POLICY_VERSION, "autopilot.delivery_tool_policy.v4");
   return { env, assignmentPath };
 }
 

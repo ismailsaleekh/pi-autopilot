@@ -909,7 +909,9 @@ fn delivery_command_receipt_replay_rejects_worktree_drift_after_terminal() {
 }
 
 #[test]
-fn lane_delivery_core_rejects_changed_path_outside_approved_unit_scope() {
+fn bug_186_core_rejects_command_or_model_residue_outside_exact_file_authority() {
+    // BUG-186: child-local snapshots are exact-file scoped; Core owns the complete
+    // Git join and must reject any persistent undeclared command/model residue.
     let (mut core, spawn, spec, carrier_path, worktree) =
         launched_core_delivery("outside-approved-scope");
     fs::write(worktree.join("outside.txt"), "out-of-scope delivery\n").expect("outside edit");

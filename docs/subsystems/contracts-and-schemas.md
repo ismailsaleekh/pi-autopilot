@@ -54,6 +54,10 @@ generated from production code.
 
 ## Semantic validation
 
+`planning.work-map.v1` defines `units[].files` as exact normalized repository-relative regular-file destinations, not directory or prefix scopes. Extensionless files are valid; glob syntax, reserved components, ancestor/descendant collisions, and inferred expansion are not. Parent directory creation is derived from enumerated leaves by the delivery policy. The plan reviewer must block a semantically directory-shaped future path even when that missing path cannot yet be distinguished from a file mechanically; incomplete future leaf knowledge is a context gap.
+
+Approved commands carry closed effect authority but remain verification-only. Every handling class must restore persistent candidate state on success and failure; the delivery policy and Core audit jointly prevent command receipts from becoming implementation authority.
+
 Semantic validation covers role/verdict coherence, owned-path status changes,
 fake-green command rejection, declared-command and witness coverage, evidence
 metadata, receipt hashes, provider/request-profile identity, output freshness,

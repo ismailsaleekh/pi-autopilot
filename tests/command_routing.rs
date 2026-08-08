@@ -415,6 +415,10 @@ fn real_plan_compiler_prompt_renders_full_work_map_authority_and_atom_manifest()
     }
     for required in [
         "Each units[].links array item MUST equal exactly one atoms[].id",
+        "Each units[].files element must name one exact normalized repository-relative regular-file destination",
+        "Directory, ancestor/prefix, and wildcard-pattern authority is forbidden",
+        "enumerate every leaf file, including each vendored, fixture, generated-evidence, manifest, README, and suffix-free destination",
+        "never use an approved command to bootstrap, author, copy, vendor, regenerate, repair, or otherwise implement delivery files",
         "Do not use an `atoms:` prefix",
         "Do not use ranges",
         "Do not use comma groups",

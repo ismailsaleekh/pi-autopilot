@@ -47,7 +47,7 @@ const VALIDATION_ENV_KEYS = [
   "AUTOPILOT_VALIDATION_CONTEXT_DIGEST",
   "AUTOPILOT_VALIDATION_CWD",
 ] as const;
-const DELIVERY_POLICY_VERSION = "autopilot.delivery_tool_policy.v3";
+const DELIVERY_POLICY_VERSION = "autopilot.delivery_tool_policy.v4";
 const deliveryTempDirs: string[] = [];
 const validationTempDirs: string[] = [];
 
@@ -112,7 +112,7 @@ function installDeliveryPolicyEnv(): { assignmentPath: string; assignmentDigest:
     base_commit: "0123456789abcdef0123456789abcdef01234567",
     worktree,
     ordered_units: [
-      { id: "U1", kind: "implementation", files: ["README.md"], commands: [{ command, expected: "Command exits successfully." }], package_checks: [{ check_id: "PKG-U1-TIP", kind: "clean-exact-package-tip", criterion_ordinals: [1], expected: "Core proves the exact clean package tip." }] },
+      { id: "U1", kind: "implementation", files: ["README.md"], commands: [{ command, expected: "Command exits successfully.", effect: "no-effect", generated_paths: [], handling: "none", scope_preservation: "The persistent candidate worktree is unchanged by verification." }], package_checks: [{ check_id: "PKG-U1-TIP", kind: "clean-exact-package-tip", criterion_ordinals: [1], expected: "Core proves the exact clean package tip." }] },
     ],
     approved_commands: [{
       command_id: "CMD-U1-1",

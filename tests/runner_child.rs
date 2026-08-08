@@ -3117,12 +3117,12 @@ function deliveryPolicyReceipt() {{
   const bytes = readFileSync(assignmentPath);
   const artifact = JSON.parse(bytes.toString('utf8'));
   const receipt = {{
-    version:'autopilot.delivery_tool_policy.v3',
+    version:'autopilot.delivery_tool_policy.v4',
     assignment_path:assignmentPath,
     assignment_digest:assignmentDigest,
     worktree,
     cwd,
-    policy_digest:sha256HexBytes(Buffer.from(`autopilot.delivery_tool_policy.v3\0${{assignmentPath}}\0${{assignmentDigest}}\0${{worktree}}\0${{cwd}}`, 'utf8')),
+    policy_digest:sha256HexBytes(Buffer.from(`autopilot.delivery_tool_policy.v4\0${{assignmentPath}}\0${{assignmentDigest}}\0${{worktree}}\0${{cwd}}`, 'utf8')),
     allowed_unit_file_count:new Set(artifact.ordered_units.flatMap(unit => unit.files)).size,
     approved_command_count:artifact.approved_commands.length,
     active_overrides:['autopilot_run_approved_command','edit','write'],

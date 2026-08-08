@@ -279,7 +279,7 @@ export const WORK_MAP_TOOL_PARAMETERS = {
             "type": "array"
           },
           "files": {
-            "description": "Nonempty declared relevant path scope for this executable delivery unit.",
+            "description": "Nonempty exact normalized repository-relative regular-file destinations. Every future leaf is enumerated explicitly; directory, ancestor/prefix, wildcard-pattern, reserved, and inferred expansion authority is forbidden. Suffix-free regular files are valid.",
             "items": {
               "type": "string"
             },
@@ -366,7 +366,7 @@ export const WORK_MAP_TOOL_PARAMETERS = {
   ],
   "type": "object"
 } as TSchema;
-export const WORK_MAP_TOOL_SCHEMA_DIGEST = "21befdaeb971231d9745babef8203da8a0e6fca63f74c91c3068627aae0748cf";
+export const WORK_MAP_TOOL_SCHEMA_DIGEST = "f687b98000113e794d38368ebb55d903214d2cc25b3f4f5d3b0e578c6118e0b7";
 
 export const WORK_MAP_CLOSED_TOOL_PARAMETERS = {
   "additionalProperties": false,
@@ -510,7 +510,7 @@ export const WORK_MAP_CLOSED_TOOL_PARAMETERS = {
             "type": "array"
           },
           "files": {
-            "description": "Nonempty declared relevant path scope for this executable delivery unit.",
+            "description": "Nonempty exact normalized repository-relative regular-file destinations. Every future leaf is enumerated explicitly; directory, ancestor/prefix, wildcard-pattern, reserved, and inferred expansion authority is forbidden. Suffix-free regular files are valid.",
             "items": {
               "type": "string"
             },
@@ -597,7 +597,7 @@ export const WORK_MAP_CLOSED_TOOL_PARAMETERS = {
   ],
   "type": "object"
 } as TSchema;
-export const WORK_MAP_CLOSED_TOOL_SCHEMA_DIGEST = "93edee92cf98f71223d9b3f3fdd3d52d4df5642c36110a98468b4cd9574ff051";
+export const WORK_MAP_CLOSED_TOOL_SCHEMA_DIGEST = "b6b5f80aedcf8382f840f311bac4fdf1a6db5d83e0cf25eb46840e90043f8493";
 
 export const PLAN_REVIEW_TOOL_PARAMETERS = {
   "additionalProperties": true,

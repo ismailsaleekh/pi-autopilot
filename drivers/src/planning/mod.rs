@@ -1328,13 +1328,13 @@ pub fn accept_questions(raw: &str, runtime: &BoundaryRuntime) -> Result<String, 
     validate_questions_shape(&questions, runtime)?;
     Ok(raw.to_owned())
 }
-#[acceptance_boundary(id = "planning.work-map.v1", producer = Producer::Model, visible = true, admits = "Plan compiler, synthesizer, and Recovery Engineer output must contain one or more executable implementation units only. Each unit kind must be exactly implementation. Never emit context-gate or verification units: unresolved context must be recorded as review-blocking evidence, and independent verification must be folded into exact criteria plus nonempty focused commands on the owning implementation unit. Each units[].links element must equal exactly one bound atom registry atoms[].id byte-for-byte: no `atoms:` prefix, ranges, comma groups, task/source/scout/context/artifact refs, placeholders, or inferred expansion. Commands are strictly pre-package child evidence and must be executable without creating or requiring a commit. A criterion about the Core-owned committed tip, exact package tree, base ancestry, clean package worktree, or exact base-to-package changed paths must use units[].package_checks with kind clean-exact-package-tip and must never be represented as a child command. Package checks are closed Core-owned obligations, are verified after an admitted child submission, and are forwarded as package evidence to the unchanged independent Validator. Each command must declare closed Git-visible effect authority: no-effect with empty generated_paths and none handling; declared-predictable with nonempty exact normalized repo-relative Git-visible persistent generated_paths and isolation, exact cleanup before the scope gate, or block-if-created handling; or unknown-generated with empty generated_paths and run-isolated handling. External temporary paths are not generated_paths; commands leaving no persistent Git-visible repo state use no-effect + [] + none even if they temporarily write outside the repo and clean up. Approved commands execute later inside a package-assigned delivery worktree/candidate root; the planning checkout absolute identity/path is not future execution authority. Command, expected, and scope_preservation text must use repository-relative facts plus typed base commit/tree/worktree authority and must not bake the planning checkout root as expected delivery identity. Exact command strings are transported unchanged; allocation and delivery must not rewrite them. If an approved command conflicts with the later assigned worktree, the implementer must submit the typed blocked outcome and stop rather than seeking another checkout. Every command must include a nonempty final-scope preservation statement proving verification leaves Git-visible state inside approved unit files. Each unit must have a nonempty objective, criteria, depends_on array, files array, commands array, an explicit package_checks array (which may be empty), and traceable links by real atom id. Every package check must name the exact unique 1-based criterion_ordinals it proves. A Recovery Engineer must preserve all unaffected units and authority links and include recovery evidence that verifies the runtime diagnosis rather than blindly accepting it. Call the parent-selected terminal tool exactly once: autopilot_submit_plan_cluster for a compiler, autopilot_submit_synthesis for a synthesizer, or autopilot_emit_status for a Recovery Engineer.", mode = BoundaryMode::Enforce)]
+#[acceptance_boundary(id = "planning.work-map.v1", producer = Producer::Model, visible = true, admits = "Plan compiler, synthesizer, and Recovery Engineer output must contain one or more executable implementation units only. Each unit kind must be exactly implementation. Never emit context-gate or verification units: unresolved context must be recorded as review-blocking evidence, and independent verification must be folded into exact criteria plus nonempty focused commands on the owning implementation unit. Each units[].links element must equal exactly one bound atom registry atoms[].id byte-for-byte: no `atoms:` prefix, ranges, comma groups, task/source/scout/context/artifact refs, placeholders, or inferred expansion. Each units[].files element must name one exact normalized repository-relative regular-file destination. Directory, ancestor/prefix, and wildcard-pattern authority is forbidden: enumerate every leaf file, including each vendored, fixture, generated-evidence, manifest, README, and suffix-free destination; directories exist only as parent chains derived from those leaves. If the complete future leaf set cannot be established from authority and repository evidence, surface a context gap instead of widening scope. Commands are strictly pre-package child evidence and must be executable without creating or requiring a commit. They are verification-only: never use an approved command to bootstrap, author, copy, vendor, regenerate, repair, or otherwise implement delivery files. On success and failure the persistent Git-visible candidate state must equal the state before invocation; effect handling may isolate or exactly clean temporary outputs but may not leave implementation changes. A criterion about the Core-owned committed tip, exact package tree, base ancestry, clean package worktree, or exact base-to-package changed paths must use units[].package_checks with kind clean-exact-package-tip and must never be represented as a child command. Package checks are closed Core-owned obligations, are verified after an admitted child submission, and are forwarded as package evidence to the unchanged independent Validator. Each command must declare closed Git-visible effect authority: no-effect with empty generated_paths and none handling; declared-predictable with nonempty exact normalized repo-relative Git-visible persistent generated_paths and isolation, exact cleanup before the scope gate, or block-if-created handling; or unknown-generated with empty generated_paths and run-isolated handling. External temporary paths are not generated_paths; commands leaving no persistent Git-visible repo state use no-effect + [] + none even if they temporarily write outside the repo and clean up. Approved commands execute later inside a package-assigned delivery worktree/candidate root; the planning checkout absolute identity/path is not future execution authority. Command, expected, and scope_preservation text must use repository-relative facts plus typed base commit/tree/worktree authority and must not bake the planning checkout root as expected delivery identity. Exact command strings are transported unchanged; allocation and delivery must not rewrite them. If an approved command conflicts with the later assigned worktree, the implementer must submit the typed blocked outcome and stop rather than seeking another checkout. Every command must include a nonempty final-scope preservation statement proving verification leaves Git-visible state inside approved unit files. Each unit must have a nonempty objective, criteria, depends_on array, files array, commands array, an explicit package_checks array (which may be empty), and traceable links by real atom id. Every package check must name the exact unique 1-based criterion_ordinals it proves. A unit with any package check is a closure unit and its files must include the complete union of files declared by every work-map unit, so final integrated repair remains inside original mechanically declared authority. A Recovery Engineer must preserve all unaffected units and authority links and include recovery evidence that verifies the runtime diagnosis rather than blindly accepting it. Call the parent-selected terminal tool exactly once: autopilot_submit_plan_cluster for a compiler, autopilot_submit_synthesis for a synthesizer, or autopilot_emit_status for a Recovery Engineer.", mode = BoundaryMode::Enforce)]
 pub fn accept_work_map(raw: &str, runtime: &BoundaryRuntime) -> Result<String, Rejection> {
     let work_map = parse_model_payload::<WorkMap>(raw, runtime, "planning.work-map.v1")?;
     validate_work_map_shape(&work_map, runtime)?;
     Ok(raw.to_owned())
 }
-#[acceptance_boundary(id = "planning.plan-review.v1", producer = Producer::Model, visible = true, admits = "Plan review output must assign exactly one verdict to each required approval criterion and no others: review.mandatory-input-accounting, review.authority-fidelity, review.completeness-and-traceability, review.internal-consistency-and-scheduling, review.context-sufficiency, review.verification-strength, review.forward-validation. Execution is approved only when all seven exact criteria pass. On the first full review, an admitted non-pass verdict triggers exactly one fresh Recovery Engineer assignment over the rejected work map and complete finding evidence; the unchanged full-review gate then runs again. A non-pass rereview is terminal for this run. Missing, duplicate, or unknown criterion shapes remain boundary rejections and are not semantic recovery authority. Call autopilot_submit_review as the final action.", mode = BoundaryMode::Enforce)]
+#[acceptance_boundary(id = "planning.plan-review.v1", producer = Producer::Model, visible = true, admits = "Plan review output must assign exactly one verdict to each required approval criterion and no others: review.mandatory-input-accounting, review.authority-fidelity, review.completeness-and-traceability, review.internal-consistency-and-scheduling, review.context-sufficiency, review.verification-strength, review.forward-validation. Authority-fidelity and forward-validation pass only when every units[].files value is one exact regular-file leaf, all required future destinations are enumerated, no directory/ancestor/wildcard-pattern scope remains, and commands are verification-only rather than an implementation channel. Execution is approved only when all seven exact criteria pass. On the first full review, an admitted non-pass verdict triggers exactly one fresh Recovery Engineer assignment over the rejected work map and complete finding evidence; the unchanged full-review gate then runs again. A non-pass rereview is terminal for this run. Missing, duplicate, or unknown criterion shapes remain boundary rejections and are not semantic recovery authority. Call autopilot_submit_review as the final action.", mode = BoundaryMode::Enforce)]
 pub fn accept_plan_review(raw: &str, runtime: &BoundaryRuntime) -> Result<String, Rejection> {
     let review = parse_model_payload::<PlanReview>(raw, runtime, "planning.plan-review.v1")?;
     validate_plan_review_shape(&review, runtime)?;
@@ -2255,36 +2255,18 @@ fn validate_work_map_shape(work_map: &WorkMap, runtime: &BoundaryRuntime) -> Res
                 "Attach criteria that make the unit verifiable.",
             )?;
         }
-        if unit.files.is_empty() {
+        if let Err(error) = crate::allocation::validate_exact_unit_file_authority(&unit.files) {
             reject_value(
                 runtime,
                 "planning.work-map.v1",
                 "units.files",
-                "one or more repository-relative paths",
-                "[]",
-                "Declare the exact path scope for this executable unit.",
+                "one or more unique exact repository-relative regular-file destinations",
+                &format!("files={:?}; {error}", unit.files),
+                concat!(
+                    "Enumerate every leaf file. Remove directory, ancestor/prefix, wildcard-pattern, ",
+                    "reserved, absolute, parent, current-directory, empty, or duplicate authority.",
+                ),
             )?;
-        }
-        let mut file_paths = BTreeSet::new();
-        for file in &unit.files {
-            let path = Path::new(&file.0);
-            let safe = !file.0.trim().is_empty()
-                && !file.0.contains('\\')
-                && !path.is_absolute()
-                && path
-                    .components()
-                    .all(|component| matches!(component, Component::Normal(_)))
-                && file_paths.insert(file.0.as_str());
-            if !safe {
-                reject_value(
-                    runtime,
-                    "planning.work-map.v1",
-                    "units.files",
-                    "unique normalized repository-relative paths",
-                    &file.0,
-                    "Remove absolute, parent, current-directory, empty, or duplicate path components.",
-                )?;
-            }
         }
         if unit.commands.is_empty() {
             reject_value(
@@ -2339,6 +2321,18 @@ fn validate_work_map_shape(work_map: &WorkMap, runtime: &BoundaryRuntime) -> Res
                 "Link the unit to accepted atom ids.",
             )?;
         }
+    }
+    if let Err(error) = crate::allocation::validate_exact_plan_file_union(
+        work_map.units.iter().flat_map(|unit| unit.files.iter()),
+    ) {
+        reject_value(
+            runtime,
+            "planning.work-map.v1",
+            "units.files",
+            "a plan-wide union of non-overlapping exact regular-file destinations",
+            &error,
+            "Remove every directory/ancestor entry and retain only its explicitly enumerated leaf files.",
+        )?;
     }
     if let Err(error) = crate::allocation::validate_package_check_closure_authority(
         work_map.units.iter().map(|unit| {

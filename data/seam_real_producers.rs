@@ -780,14 +780,13 @@ fn parse_approved_units(raw: &str) -> Result<Vec<ApprovedUnit>, String> {
 }
 fn approved_units_from_work_map(work_map: &kernel::generated::WorkMap) -> Result<Vec<ApprovedUnit>, String> {
     validate_work_map_graph(work_map)?;
+    allocation::validate_exact_plan_file_union(work_map.units.iter().flat_map(|unit| unit.files.iter()))?;
     allocation::validate_package_check_closure_authority(work_map.units.iter().map(|unit| {
         (&unit.id, unit.files.as_slice(), !unit.package_checks.is_empty())
     }))?;
     work_map.units.iter().enumerate().map(|(index, unit)| {
         if unit.id.0.trim().is_empty() || unit.objective.trim().is_empty() || unit.criteria.is_empty() { return Err(format!("unit {} missing criteria/objective", unit.id.0)); }
-        if unit.files.is_empty() { return Err(format!("unit {} missing files", unit.id.0)); }
-        let mut file_paths = BTreeSet::new();
-        if unit.files.iter().any(|path| !allocation::approved_path_is_safe(path) || !file_paths.insert(path.0.as_str())) { return Err(format!("unit {} has unsafe or duplicate files", unit.id.0)); }
+        allocation::validate_exact_unit_file_authority(&unit.files).map_err(|error| format!("unit {} has invalid exact file authority: {error}", unit.id.0))?;
         if unit.commands.is_empty() { return Err(format!("unit {} missing commands", unit.id.0)); }
         for command in &unit.commands { allocation::validate_plan_unit_command_effect_authority(command).map_err(|error| format!("unit {} has incomplete command authority: {error}", unit.id.0))?; }
         allocation::validate_plan_unit_package_checks(&unit.package_checks, unit.criteria.len()).map_err(|error| format!("unit {} has incomplete package-check authority: {error}", unit.id.0))?;
@@ -832,8 +831,7 @@ fn validate_approved_units(units: &[ApprovedUnit]) -> Result<(), AnyError> {
         if unit.kind != kernel::generated::PlanUnitKind::Implementation || unit.objective.trim().is_empty() || unit.criteria.is_empty() || unit.criterion_text.is_empty() || unit.files.is_empty() || unit.commands.is_empty() {
             return Err(format!("approved unit {} incomplete", unit.id.0).into());
         }
-        let mut file_paths = BTreeSet::new();
-        if unit.files.iter().any(|path| !allocation::approved_path_is_safe(path) || !file_paths.insert(path.0.as_str())) { return Err(format!("approved unit {} has unsafe or duplicate files", unit.id.0).into()); }
+        allocation::validate_exact_unit_file_authority(&unit.files).map_err(|error| -> AnyError { format!("approved unit {} has invalid exact file authority: {error}", unit.id.0).into() })?;
         let criterion_ids = unit.criterion_text.iter().map(|criterion| criterion.id.clone()).collect::<Vec<_>>();
         if criterion_ids != unit.criteria { return Err(format!("approved unit {} criteria/criterion_text drift", unit.id.0).into()); }
         let mut criterion_seen = BTreeSet::new();
@@ -844,6 +842,7 @@ fn validate_approved_units(units: &[ApprovedUnit]) -> Result<(), AnyError> {
         for command in &unit.commands { allocation::validate_plan_unit_command_effect_authority(command).map_err(|error| -> AnyError { format!("approved unit {} has malformed command authority: {error}", unit.id.0).into() })?; }
         allocation::validate_plan_unit_package_checks(&unit.package_checks, unit.criteria.len()).map_err(|error| -> AnyError { format!("approved unit {} has malformed package-check authority: {error}", unit.id.0).into() })?;
     }
+    allocation::validate_exact_plan_file_union(units.iter().flat_map(|unit| unit.files.iter())).map_err(|error| -> AnyError { error.into() })?;
     allocation::validate_package_check_closure_authority(units.iter().map(|unit| {
         (&unit.id, unit.files.as_slice(), !unit.package_checks.is_empty())
     })).map_err(|error| -> AnyError { error.into() })?;

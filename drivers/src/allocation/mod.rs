@@ -39,26 +39,73 @@ pub struct ApprovedCriterion {
 }
 
 pub fn approved_path_is_safe(path: &kernel::generated::Path) -> bool {
-    !path.0.trim().is_empty()
-        && !path.0.contains('\\')
-        && !Path::new(&path.0).is_absolute()
-        && Path::new(&path.0)
+    let raw = path.0.as_str();
+    !raw.is_empty()
+        && raw.trim() == raw
+        && !raw
+            .chars()
+            .any(|character| matches!(character, '\0' | '\\' | '*' | '?' | '[' | ']' | '{' | '}'))
+        && !Path::new(raw).is_absolute()
+        && raw.split('/').all(|component| {
+            !component.is_empty()
+                && component != "."
+                && component != ".."
+                && component != ".git"
+                && component != ".pi"
+        })
+        && Path::new(raw)
             .components()
             .all(|component| matches!(component, Component::Normal(_)))
 }
 
+pub fn validate_exact_unit_file_authority(paths: &[ContractPath]) -> Result<(), String> {
+    if paths.is_empty() {
+        return Err(
+            "unit file authority must enumerate at least one exact regular-file destination"
+                .to_owned(),
+        );
+    }
+    let mut exact = BTreeSet::new();
+    for path in paths {
+        if !approved_path_is_safe(path) || !exact.insert(path.0.as_str()) {
+            return Err(format!(
+                "unsafe, duplicate, or non-exact regular-file destination: {}",
+                path.0
+            ));
+        }
+    }
+    reject_ancestor_file_authority(&exact)
+}
+
+pub fn validate_exact_plan_file_union<'a>(
+    paths: impl IntoIterator<Item = &'a ContractPath>,
+) -> Result<(), String> {
+    let exact = paths
+        .into_iter()
+        .map(|path| path.0.as_str())
+        .collect::<BTreeSet<_>>();
+    if exact.is_empty() {
+        return Err("plan file authority is empty".to_owned());
+    }
+    reject_ancestor_file_authority(&exact)
+}
+
+fn reject_ancestor_file_authority(paths: &BTreeSet<&str>) -> Result<(), String> {
+    for descendant in paths {
+        for (separator, _) in descendant.match_indices('/') {
+            let ancestor = &descendant[..separator];
+            if paths.contains(ancestor) {
+                return Err(format!(
+                    "file authority path {ancestor} is an ancestor/prefix of exact file {descendant}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn command_generated_path_is_safe(path: &kernel::generated::Path) -> bool {
-    let raw = path.0.as_str();
-    !raw.is_empty()
-        && raw.trim() == raw
-        && !raw.contains('\\')
-        && !Path::new(raw).is_absolute()
-        && raw
-            .split('/')
-            .all(|component| !component.is_empty() && component != "." && component != "..")
-        && Path::new(raw)
-            .components()
-            .all(|component| matches!(component, Component::Normal(_)))
+    approved_path_is_safe(path)
 }
 
 pub fn validate_command_effect_authority_parts(
@@ -84,6 +131,10 @@ pub fn validate_command_effect_authority_parts(
                 path.0
             ));
         }
+    }
+
+    if !generated_paths.is_empty() {
+        validate_exact_plan_file_union(generated_paths.iter())?;
     }
 
     match (effect, handling) {
@@ -161,6 +212,15 @@ pub fn validate_package_check_closure_authority<'a>(
     units: impl IntoIterator<Item = (&'a Id, &'a [ContractPath], bool)>,
 ) -> Result<(), String> {
     let units = units.into_iter().collect::<Vec<_>>();
+    for (unit_id, files, _) in &units {
+        validate_exact_unit_file_authority(files).map_err(|error| {
+            format!(
+                "package-check unit {} has invalid exact file authority: {error}",
+                unit_id.0
+            )
+        })?;
+    }
+    validate_exact_plan_file_union(units.iter().flat_map(|(_, files, _)| files.iter()))?;
     let all_files = units
         .iter()
         .flat_map(|(_, files, _)| files.iter().map(|path| path.0.as_str()))
