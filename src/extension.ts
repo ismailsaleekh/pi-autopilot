@@ -2,7 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 
 import { PiBackgroundTaskClient, type BgTaskSnapshot } from "./background-tasks.ts";
 import { registerAutopilotCommands, applyAndRecord, type RegisterCommandOptions } from "./commands.ts";
-import type { OperatorMessageLevel, OperatorMessageSink } from "./effects.ts";
+import type { BackgroundLaunchGate, OperatorMessageLevel, OperatorMessageSink } from "./effects.ts";
 import {
   AutopilotActivation,
   pruneActivationRecord,
@@ -12,7 +12,13 @@ import {
 } from "./activation.ts";
 import type { ResolveCoreOptions } from "./resolve-core.ts";
 import { CoreTransport } from "./transport.ts";
-import type { BackgroundAction } from "./generated/index.ts";
+import {
+  startChildControlBroker,
+  stopChildControlBroker,
+  type BlockedGateApplication,
+  type ChildControlBroker,
+} from "./child-control-broker.ts";
+import type { BackgroundAction, ChildControlBlockedGate } from "./generated/index.ts";
 import { AUTOPILOT_STATUS_CUSTOM_TYPE, buildAutopilotStatusEntryData } from "./status-channel.ts";
 
 export interface AutopilotExtensionOptions extends ResolveCoreOptions {
@@ -28,6 +34,8 @@ export interface AutopilotExtensionOptions extends ResolveCoreOptions {
    * tools lazily. Throwing here fails activation and rolls it back.
    */
   readonly onActivated?: () => void | Promise<void>;
+  /** Test/lifecycle seam; production uses the sole AF_UNIX broker factory. */
+  readonly startChildControlBroker?: typeof startChildControlBroker;
 }
 
 const MAX_UNMATCHED_TERMINALS = 100;
@@ -37,10 +45,22 @@ interface TaskBinding {
   readonly action: BackgroundAction;
 }
 
+class SessionLaunchGate implements BackgroundLaunchGate {
+  private closed = false;
+
+  close(): void { this.closed = true; }
+  assertOpen(): void {
+    if (this.closed) throw new Error("Autopilot launch gate is closed by a blocked workstream");
+  }
+}
+
 export default function autopilotExtension(pi: ExtensionAPI, options: AutopilotExtensionOptions = {}): void {
   const operatorMessage = operatorMessageSink(pi);
   const statusEntry = async (status: string) => pi.appendEntry(AUTOPILOT_STATUS_CUSTOM_TYPE, buildAutopilotStatusEntryData(status));
   const taskBindings = new Map<string, TaskBinding>();
+  // This append-only map is the sole cancellation jurisdiction source. A
+  // terminal removes its pending completion binding, never its launch fact.
+  const ownedTaskBindings = new Map<string, TaskBinding>();
   const unmatchedTerminalTasks = new Map<string, BgTaskSnapshot>();
   /**
    * Every task id Autopilot itself launched, append-only for the session. This
@@ -51,14 +71,33 @@ export default function autopilotExtension(pi: ExtensionAPI, options: AutopilotE
   const droppedForeignTerminals: string[] = [];
   let currentCtx: ExtensionContext | undefined;
   let unsubscribeTerminal: (() => void) | undefined;
+  let broker: ChildControlBroker | undefined;
+  const launchGate = new SessionLaunchGate();
 
   const activationDeps: ActivationDeps = activationDepsFrom(options);
 
   // Subscription is established INSIDE activation and BEFORE any command frame
   // can be sent, so no Autopilot-owned launch can precede its own subscription.
   const activation = new AutopilotActivation(pi, activationDeps, async (services) => {
-    unsubscribeTerminal = services.backgroundTasks.onTerminal(handleTerminal);
-    await options.onActivated?.();
+    const startBroker = options.startChildControlBroker ?? startChildControlBroker;
+    const started = await startBroker({
+      transport: services.transport,
+      applyBlockedGate: async (gate) => applyBlockedGate(gate, services.backgroundTasks),
+    });
+    try {
+      // Do this before any command can cause Core launch. The current Core
+      // handshake deliberately fails loud on first launch rather than receive
+      // an unused broker capability.
+      if (services.transport instanceof CoreTransport) services.transport.bindChildControlBroker(started.launchFacts);
+      broker = started;
+      unsubscribeTerminal = services.backgroundTasks.onTerminal(handleTerminal);
+      await options.onActivated?.();
+    } catch (error) {
+      unsubscribeTerminal?.();
+      unsubscribeTerminal = undefined;
+      await stopChildControlBroker(started).catch(() => {});
+      throw error;
+    }
   });
 
   function commandOptions(services: ActivationServices): RegisterCommandOptions {
@@ -68,17 +107,50 @@ export default function autopilotExtension(pi: ExtensionAPI, options: AutopilotE
       operatorMessage,
       statusEntry,
       onSpawn: rememberSpawn,
+      launchGate,
     };
   }
 
   async function rememberSpawn({ action, task }: { readonly action: BackgroundAction; readonly task: BgTaskSnapshot }): Promise<void> {
     const binding = bindTaskToAction(task, action);
     taskBindings.set(task.id, binding);
+    ownedTaskBindings.set(task.id, binding);
     launchedTaskIds.add(task.id);
     const buffered = unmatchedTerminalTasks.get(task.id);
     if (buffered === undefined) return;
     unmatchedTerminalTasks.delete(task.id);
     await handleTerminal(buffered);
+  }
+
+  async function applyBlockedGate(
+    gate: ChildControlBlockedGate,
+    backgroundTasks: PiBackgroundTaskClient,
+  ): Promise<BlockedGateApplication> {
+    // The durable Core latch was committed before this typed directive. Close
+    // the local process gate before looking at any task or issuing any kill.
+    launchGate.close();
+    const nonReporterTaskIds: string[] = [];
+    let reporterCount = 0;
+    const seen = new Set<string>();
+    for (const cancellation of gate.cancellations) {
+      if (seen.has(cancellation.task_id)) throw new Error(`blocked gate repeats task id ${cancellation.task_id}`);
+      seen.add(cancellation.task_id);
+      if (!ownedTaskBindings.has(cancellation.task_id)) {
+        throw new Error(`blocked gate named task outside Host Autopilot jurisdiction: ${cancellation.task_id}`);
+      }
+      if (cancellation.reporter) reporterCount += 1;
+      else nonReporterTaskIds.push(cancellation.task_id);
+    }
+    if (reporterCount !== 1) throw new Error("blocked gate must identify exactly one reporter task");
+
+    return {
+      async afterChildResponseWritten(): Promise<void> {
+        // No status/enumeration/inference: only the exact Core-derived ids are
+        // sent through the existing correlated kill operation. Reporter-last
+        // remains pending for the generated blocked-result-observed handshake.
+        await backgroundTasks.killMany(nonReporterTaskIds);
+      },
+    };
   }
 
   async function handleTerminal(task: BgTaskSnapshot): Promise<void> {
@@ -217,6 +289,10 @@ export default function autopilotExtension(pi: ExtensionAPI, options: AutopilotE
       await applyAndRecord(frame, ctx, commandOptions(services));
     } finally {
       try {
+        // Stop accepting/fail broker calls before tearing down the EventBus or
+        // Core transport. This is idempotent for repeated session shutdown.
+        await stopChildControlBroker(broker);
+        broker = undefined;
         // Partition first, then emit the single bounded foreign diagnostic.
         await reportUnmatchedTerminals();
         await reportForeignTerminalDiagnostic(operatorMessage, droppedForeignTerminals);

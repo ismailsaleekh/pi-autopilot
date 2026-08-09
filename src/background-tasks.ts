@@ -78,6 +78,24 @@ export class PiBackgroundTaskClient {
     return requireTaskSnapshot(isRecord(result) && "task" in result ? result.task : result, isRecord(result) && "task" in result ? "kill.task" : "kill result");
   }
 
+  /**
+   * Cancels only caller-supplied task ids through the existing correlated kill
+   * request path. It never calls status()/enumeration to discover work.
+   */
+  async killMany(taskIds: readonly string[]): Promise<readonly BgTaskSnapshot[]> {
+    const ids = [...new Set(taskIds)];
+    for (const taskId of ids) nonEmptyString(taskId, "killMany task id", PiBackgroundTaskError);
+    const results = await Promise.all(ids.map(async (taskId) => {
+      try {
+        return await this.kill(taskId);
+      } catch (error) {
+        if (isIdempotentKillFailure(error)) return undefined;
+        throw error;
+      }
+    }));
+    return results.filter((task): task is BgTaskSnapshot => task !== undefined);
+  }
+
   onTerminal(handler: TerminalHandler): () => void {
     if (this.closed) throw new PiBackgroundTaskError("pi-background-tasks client is closed");
     if (this.protocolError !== undefined) throw this.protocolError;
@@ -194,6 +212,19 @@ function requireTaskStatus(value: unknown, label: string, terminal: boolean): Bg
   const status = nonEmptyString(value, label, PiBackgroundTaskError);
   if ((allowed as readonly string[]).includes(status)) return status as BgTaskStatus;
   throw new PiBackgroundTaskError(`${label} must be one of ${allowed.join(", ")}; got ${status}`);
+}
+
+function isIdempotentKillFailure(error: unknown): boolean {
+  const message = errorMessage(error).toLowerCase();
+  return [
+    "already terminal",
+    "already dead",
+    "already killed",
+    "task not found",
+    "unknown task",
+    "no such task",
+    "not running",
+  ].some((marker) => message.includes(marker));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }

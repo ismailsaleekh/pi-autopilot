@@ -151,6 +151,133 @@ test("BUG-184 T3+T4: activation subscribes exactly once, before the first Core r
   }
 });
 
+test("Unified Submit Host broker is activation-scoped, precedes Core, and stops at final shutdown", async () => {
+  const state = tempStateRoot();
+  const pi = recordingPi();
+  const calls = [];
+  let brokerOptions;
+  let stops = 0;
+  const transport = fakeTransport(calls);
+  const background = fakeBackgroundTasks(calls);
+  try {
+    autopilotExtension(pi as never, {
+      transport,
+      backgroundTasks: background,
+      stateRoot: state.root,
+      processIdentity: PROCESS_IDENTITY,
+      async startChildControlBroker(options) {
+        calls.push("broker:start");
+        brokerOptions = options;
+        return {
+          socketPath: "/tmp/.pi-ap/0123456789/s",
+          launchFacts: { socketPath: "/tmp/.pi-ap/0123456789/s", capability: "a".repeat(64) },
+          async reconcileBlockedGate() {},
+          async stop() { stops += 1; calls.push("broker:stop"); },
+        };
+      },
+    } as never);
+
+    assert.equal(calls.includes("broker:start"), false, "broker must not start at module load");
+    await pi.emit("session_start", { reason: "startup" }, ctxFor(SESSION_A));
+    await pi.commands.get("autopilot-plan").handler("main A.md B.md C.md CTX.md", commandCtx(SESSION_A));
+
+    assert.equal(calls.filter((entry) => entry === "broker:start").length, 1);
+    assert.ok(calls.indexOf("broker:start") < calls.indexOf("bg:onTerminal"));
+    assert.ok(calls.indexOf("broker:start") < calls.findIndex((entry) => entry.startsWith("core:")));
+    assert.equal(typeof brokerOptions.applyBlockedGate, "function", "lifecycle injects the Host-only gate hook");
+
+    await pi.emit("session_shutdown", { reason: "quit" }, ctxFor(SESSION_A));
+    assert.equal(stops, 1, "final shutdown stops the one session broker");
+  } finally {
+    state.cleanup();
+  }
+});
+
+test("blocked gate closes launches, cancels only exact owned nonreporters after response, and rejects foreign ids", async () => {
+  const state = tempStateRoot();
+  const pi = recordingPi();
+  const first = terminalAction("action-1", "assignment-1", "first", "node first");
+  const second = terminalAction("action-2", "assignment-2", "second", "node second");
+  const third = terminalAction("action-3", "assignment-3", "third", "node third");
+  const actions = [first, second, third];
+  const kills = [];
+  const runs = [];
+  let gateHook;
+  const transport = {
+    calls: [],
+    async request(kind, payload, timeoutMs) {
+      this.calls.push(timeoutMs === undefined ? { kind, payload } : { kind, payload, timeoutMs });
+      if (kind === "command") {
+        const action = actions.shift();
+        return action === undefined
+          ? { v: 1, id: this.calls.length, kind: "done", payload: { status: "ok" } }
+          : { v: 1, id: this.calls.length, kind: "spawn", payload: { action } };
+      }
+      return { v: 1, id: this.calls.length, kind: "done", payload: { status: "ok" } };
+    },
+    close() {},
+  };
+  const background = {
+    async capabilities() { return { api_version: 1, run: true, run_is_agent: true, run_completion_trigger: true, status: true, logs: true, logs_bounded: true, kill: true }; },
+    async run(descriptor) {
+      runs.push(descriptor.command);
+      const id = descriptor === first.bg_run ? "task-1" : descriptor === second.bg_run ? "task-2" : "task-3";
+      return { id, name: descriptor.name, command: descriptor.command, status: "running", outputPath: `/tmp/${id}`, isAgent: descriptor.isAgent, notifyOnCompletion: descriptor.notifyOnCompletion, triggerOnCompletion: descriptor.triggerOnCompletion };
+    },
+    async killMany(ids) { kills.push(...ids); return []; },
+    onTerminal() { return () => {}; },
+    async close() {},
+  };
+  try {
+    autopilotExtension(pi as never, {
+      transport,
+      backgroundTasks: background,
+      stateRoot: state.root,
+      processIdentity: PROCESS_IDENTITY,
+      async startChildControlBroker(options) {
+        gateHook = options.applyBlockedGate;
+        return {
+          socketPath: "/tmp/.pi-ap/0123456789/s",
+          launchFacts: { socketPath: "/tmp/.pi-ap/0123456789/s", capability: "b".repeat(64) },
+          async reconcileBlockedGate() {},
+          async stop() {},
+        };
+      },
+    } as never);
+    await pi.emit("session_start", { reason: "startup" }, ctxFor(SESSION_A));
+    await pi.commands.get("autopilot-plan").handler("main A.md B.md C.md CTX.md", commandCtx(SESSION_A));
+    await pi.commands.get("autopilot").handler("main", commandCtx(SESSION_A));
+    assert.deepEqual(runs, [first.bg_run.command, second.bg_run.command]);
+
+    const application = await gateHook({
+      schema: "autopilot.child_control_blocked_gate.v1",
+      latch_id: "latch-1",
+      run_id: "run-1",
+      cancellations: [
+        { task_id: "task-1", reporter: false },
+        { task_id: "task-2", reporter: true },
+      ],
+    });
+    assert.deepEqual(kills, [], "gate validation must precede the post-ACCEPT callback");
+    await application.afterChildResponseWritten();
+    assert.deepEqual(kills, ["task-1"], "reporter remains pending for blocked-result-observed");
+
+    await assert.rejects(
+      () => pi.commands.get("autopilot").handler("main", commandCtx(SESSION_A)),
+      /launch gate is closed/u,
+    );
+    assert.deepEqual(runs, [first.bg_run.command, second.bg_run.command], "closed gate is checked immediately before run");
+
+    await assert.rejects(
+      () => gateHook({ schema: "autopilot.child_control_blocked_gate.v1", latch_id: "latch-2", run_id: "run-1", cancellations: [{ task_id: "foreign", reporter: true }] }),
+      /outside Host Autopilot jurisdiction/u,
+    );
+    assert.deepEqual(kills, ["task-1"], "foreign task ids are never killed");
+  } finally {
+    state.cleanup();
+  }
+});
+
 test("BUG-184 T10: concurrent and repeated activation yields one subscription and one Core child", async () => {
   const state = tempStateRoot();
   const pi = recordingPi();

@@ -11,7 +11,8 @@ export type OperatorMessageLevel = "info" | "warning" | "error";
 export type OperatorMessageSink = (message: string, level: OperatorMessageLevel) => unknown | Promise<unknown>;
 export type StatusEntrySink = (status: string) => unknown | Promise<unknown>;
 export type HostEffectContext = Pick<ExtensionContext, "ui" | "hasUI" | "mode">;
-export interface HostEffectServices { readonly backgroundTasks: Pick<PiBackgroundTaskClient, "run">; readonly operatorMessage: OperatorMessageSink; readonly statusEntry: StatusEntrySink; }
+export interface BackgroundLaunchGate { assertOpen(): void; }
+export interface HostEffectServices { readonly backgroundTasks: Pick<PiBackgroundTaskClient, "run">; readonly launchGate?: BackgroundLaunchGate; readonly operatorMessage: OperatorMessageSink; readonly statusEntry: StatusEntrySink; }
 export interface LaunchedBackgroundTask { readonly action: BackgroundAction; readonly task: BgTaskSnapshot; }
 export interface BackgroundLaunchFailure { readonly action: BackgroundAction; readonly diagnostic: string; }
 export type CoreEffectResult = { readonly kind: "spawn"; readonly acknowledge: boolean; readonly launched: readonly LaunchedBackgroundTask[]; readonly failures: readonly BackgroundLaunchFailure[] } | undefined;
@@ -24,7 +25,7 @@ export async function applyCoreEffect(frame: CoreToHostFrame, ctx: HostEffectCon
   const effect = effectFor(validFrame.kind);
   switch (validFrame.kind) {
     case "ui": await applyUiEffect(validFrame.payload, effect.operator_level_default, ctx, services); return undefined;
-    case "spawn": return { kind: "spawn", acknowledge: effect.acknowledge, launched: [{ action: validFrame.payload.action, task: await services.backgroundTasks.run(validFrame.payload.action.bg_run) }], failures: [] };
+    case "spawn": return { kind: "spawn", acknowledge: effect.acknowledge, launched: [{ action: validFrame.payload.action, task: await launchBackground(validFrame.payload.action, services) }], failures: [] };
     case "spawn-wave": return launchWave(validFrame.payload.actions, effect.acknowledge, services);
     case "session": await failClosed(ctx, services, `Autopilot requested unsupported Pi session effect ${validFrame.payload.session_action}. The installed Pi ExtensionCommandContext has only explicit session-control methods; Autopilot stopped instead of calling a fictional generic session API.`); return undefined;
     case "log": await emitOperatorMessage(ctx, services, `Autopilot log: ${validFrame.payload.line}`, effect.operator_level_default); return undefined;
@@ -40,7 +41,7 @@ function effectFor(kind: string) {
 }
 
 async function launchWave(actions: readonly BackgroundAction[], acknowledge: boolean, services: HostEffectServices): Promise<CoreEffectResult> {
-  const settled = await Promise.allSettled(actions.map((action) => Promise.resolve().then(() => services.backgroundTasks.run(action.bg_run))));
+  const settled = await Promise.allSettled(actions.map((action) => Promise.resolve().then(() => launchBackground(action, services))));
   const launched: LaunchedBackgroundTask[] = [];
   const failures: BackgroundLaunchFailure[] = [];
   for (let index = 0; index < settled.length; index += 1) {
@@ -51,6 +52,13 @@ async function launchWave(actions: readonly BackgroundAction[], acknowledge: boo
     else failures.push({ action, diagnostic: boundedDiagnostic(outcome.reason) });
   }
   return { kind: "spawn", acknowledge, launched, failures };
+}
+
+function launchBackground(action: BackgroundAction, services: HostEffectServices): Promise<BgTaskSnapshot> {
+  // This is deliberately immediately adjacent to run(): no singular or wave
+  // launch can pass a Host-closed blocked gate between check and invocation.
+  services.launchGate?.assertOpen();
+  return services.backgroundTasks.run(action.bg_run);
 }
 
 async function applyUiEffect(payload: CoreToHostUiPayload, level: OperatorMessageLevel, ctx: HostEffectContext, services: HostEffectServices): Promise<void> {

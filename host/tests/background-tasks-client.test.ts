@@ -166,6 +166,40 @@ test("PiBackgroundTaskClient rejects null timeout instead of forwarding it", asy
   await client.close();
 });
 
+test("PiBackgroundTaskClient killMany sends only supplied correlated kill requests and tolerates already-terminal tasks", async () => {
+  const bus = eventBus();
+  const operations = [];
+  bus.on(BG_REQUEST_CHANNEL, (request) => {
+    operations.push({ operation: request.operation, request_id: request.request_id, taskId: request.payload.taskId });
+    assert.equal(request.operation, "kill");
+    if (request.payload.taskId === "already-terminal") {
+      bus.emit(BG_RESPONSE_CHANNEL, {
+        schema_version: BG_RESPONSE_SCHEMA,
+        request_id: request.request_id,
+        operation: "kill",
+        ok: false,
+        error: "task already terminal",
+      });
+      return;
+    }
+    bus.emit(BG_RESPONSE_CHANNEL, {
+      schema_version: BG_RESPONSE_SCHEMA,
+      request_id: request.request_id,
+      operation: "kill",
+      ok: true,
+      result: taskSnapshot("killed"),
+    });
+  });
+
+  const client = new PiBackgroundTaskClient(bus);
+  const killed = await client.killMany(["task-1", "already-terminal", "task-1"]);
+  assert.deepEqual(operations.map((entry) => entry.operation), ["kill", "kill"], "killMany must not enumerate/status tasks");
+  assert.deepEqual(operations.map((entry) => entry.taskId), ["task-1", "already-terminal"]);
+  assert.notEqual(operations[0].request_id, operations[1].request_id, "each kill retains EventBus request correlation");
+  assert.deepEqual(killed, [taskSnapshot("killed")]);
+  await client.close();
+});
+
 test("unavailableCapabilities is fail-closed and contains no silent partial fallback", () => {
   assert.deepEqual(unavailableCapabilities(), {
     api_version: 1,
