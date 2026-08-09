@@ -183,7 +183,6 @@ function allowedRuntimePath(path, binEntries) {
   if (path.startsWith('docs/generated/') && path.endsWith('.md')) return true;
   if (path === 'binaries/MANIFEST.json') return true;
   if (/^binaries\/(darwin-arm64|darwin-x64|linux-arm64|linux-x64)\/autopilot-core$/u.test(path)) return true;
-  if (path === 'binaries/win32-x64/autopilot-core.exe') return true;
   return false;
 }
 

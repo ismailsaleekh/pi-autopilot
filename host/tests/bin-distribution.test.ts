@@ -52,12 +52,23 @@ test("H8 fresh npm pack install resolves packaged platform binary", () => {
   }
 });
 
-test("H9 unsupported platform reports typed error naming platform", () => {
+test("H9 unsupported platforms report typed error naming platform", () => {
   const root = fixturePackage("darwin", "arm64");
   try {
     assert.throws(
       () => resolveCoreBinary({ packageJsonPath: root + "/package.json", platform: "freebsd", arch: "riscv64" }),
-      (error) => error instanceof CoreInstallError && /unsupported platform freebsd-riscv64/.test(error.message),
+      (error) => error instanceof CoreInstallError
+        && error.code === "unsupported-platform"
+        && error.platformKey === "freebsd-riscv64"
+        && /unsupported platform freebsd-riscv64/.test(error.message),
+    );
+
+    assert.throws(
+      () => resolveCoreBinary({ packageJsonPath: root + "/package.json", platform: "win32", arch: "x64" }),
+      (error) => error instanceof CoreInstallError
+        && error.code === "unsupported-platform"
+        && error.platformKey === "win32-x64"
+        && /unsupported platform win32-x64/.test(error.message),
     );
   } finally {
     rmSync(root, { recursive: true, force: true });

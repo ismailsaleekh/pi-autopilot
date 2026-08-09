@@ -12,7 +12,10 @@ export const CORE_BIN_ENTRY = "bin/autopilot-core.mjs";
 export const AGENT_RUNNER_BIN_ENTRY = "bin/autopilot-agent-run.mjs";
 export const CHILD_ADDON_ENTRY = "src/generated/child-extension.ts";
 export const SUPPORTED_CORE_BINARIES = Object.freeze({
-  "darwin-arm64": "autopilot-core", "darwin-x64": "autopilot-core", "linux-arm64": "autopilot-core", "linux-x64": "autopilot-core", "win32-x64": "autopilot-core.exe",
+  "darwin-arm64": "autopilot-core",
+  "darwin-x64": "autopilot-core",
+  "linux-arm64": "autopilot-core",
+  "linux-x64": "autopilot-core",
 });
 
 export function corePlatformKey(options = {}) { return `${options.platform ?? process.platform}-${options.arch ?? process.arch}`; }

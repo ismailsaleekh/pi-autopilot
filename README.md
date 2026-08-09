@@ -11,7 +11,7 @@
 - Pi extension entry: `./extensions/autopilot.ts` (which delegates to `./src/extension.ts`).
 - Slash commands: `/autopilot-plan`, `/autopilot`, `/autopilot-onboard`, `/autopilot-inject`, `/autopilot-status`, `/autopilot-config`, `/autopilot-handoff`, `/autopilot-close`, `/autopilot-abort`.
 - Bins: `autopilot-core` (`bin/autopilot-core.mjs`) and `autopilot-agent-run` (`bin/autopilot-agent-run.mjs`).
-- Shipped Rust binaries: `binaries/{darwin-arm64,darwin-x64,linux-arm64,linux-x64,win32-x64}/` with `binaries/MANIFEST.json` parity.
+- Shipped Rust binaries: `binaries/{darwin-arm64,darwin-x64,linux-arm64,linux-x64}/` with `binaries/MANIFEST.json` parity.
 
 ## Current architecture
 
