@@ -14,29 +14,37 @@ const GLOBAL_PI_ROOT = realpathSync('/usr/local/lib/node_modules/@earendil-works
 const GLOBAL_TYPEBOX_ROOT = realpathSync(join(GLOBAL_PI_ROOT, 'node_modules', 'typebox'));
 const CANONICAL_TMP_ROOT = realpathSync(tmpdir());
 const EXPECTED_COMMANDS = Object.freeze(['autopilot-plan', 'autopilot', 'autopilot-onboard', 'autopilot-inject', 'autopilot-status', 'autopilot-config', 'autopilot-handoff', 'autopilot-close', 'autopilot-abort', 'autopilot-answer']);
-const DELIVERY_POLICY_VERSION = 'autopilot.delivery_tool_policy.v4';
+const DELIVERY_POLICY_VERSION = 'autopilot.delivery_tool_policy.v5';
 const DELIVERY_ENV_KEYS = Object.freeze([
   'AUTOPILOT_DELIVERY_ASSIGNMENT_PATH', 'AUTOPILOT_DELIVERY_ASSIGNMENT_DIGEST',
   'AUTOPILOT_DELIVERY_WORKTREE', 'AUTOPILOT_DELIVERY_CWD', 'AUTOPILOT_DELIVERY_ASSIGNMENT_ID',
   'AUTOPILOT_DELIVERY_WORKSTREAM', 'AUTOPILOT_DELIVERY_LANE_ID', 'AUTOPILOT_DELIVERY_ATTEMPT',
   'AUTOPILOT_DELIVERY_BASE_COMMIT', 'AUTOPILOT_DELIVERY_POLICY_DIGEST',
 ]);
-const EXPECTED_CHILD_PROFILE_BINDINGS = Object.freeze({
-  'delivery-status.v2': { tool: 'autopilot_emit_status', boundary: 'autopilot.delivery_submission.v2', result: 'autopilot.delivery_result.v2', tools: ['autopilot_run_approved_command', 'edit', 'write', 'autopilot_emit_status'] },
-  'planning.plan-review.v1:autopilot_submit_review': { tool: 'autopilot_submit_review', boundary: 'planning.plan-review.v1' },
-  'planning.questions.v1:autopilot_submit_resolution': { tool: 'autopilot_submit_resolution', boundary: 'planning.questions.v1' },
-  'planning.scout-dossier.v1:autopilot_submit_context': { tool: 'autopilot_submit_context', boundary: 'planning.scout-dossier.v1' },
-  'planning.scout-dossier.v1:autopilot_submit_scout_report': { tool: 'autopilot_submit_scout_report', boundary: 'planning.scout-dossier.v1' },
-  'planning.task-atoms.v1:autopilot_submit_atoms': { tool: 'autopilot_submit_atoms', boundary: 'planning.task-atoms.v1' },
-  'planning.work-map.v1:autopilot_submit_plan_cluster': { tool: 'autopilot_submit_plan_cluster', boundary: 'planning.work-map.v1' },
-  'planning.work-map.v1:autopilot_submit_synthesis': { tool: 'autopilot_submit_synthesis', boundary: 'planning.work-map.v1' },
-  'recovery-work-map.v1': { tool: 'autopilot_emit_status', boundary: 'planning.work-map.v1' },
-  'validation-status.v2': { tool: 'autopilot_emit_status', boundary: 'autopilot.validation_submission.v2', result: 'autopilot.validation_result.v2' },
-  'validation-status.v3': { tool: 'autopilot_emit_status', boundary: 'autopilot.validation_submission.v3', result: 'autopilot.validation_result.v3', tools: ['read', 'autopilot_emit_status'] },
-});
-const EXPECTED_CHILD_PROFILES = Object.freeze(Object.keys(EXPECTED_CHILD_PROFILE_BINDINGS));
+// Independent literal authority: do not derive expected descriptors from the shipped schema.
+const EXPECTED_CHILD_PROFILE_TUPLES = Object.freeze([
+  Object.freeze(['delivery-status.v2', 'autopilot_emit_status', 'autopilot.delivery_submission.v2', 'autopilot.delivery_result.v2']),
+  Object.freeze(['planning.plan-review.v1:autopilot_submit_review', 'autopilot_submit_review', 'planning.plan-review.v1', 'planning.plan-review.v1']),
+  Object.freeze(['planning.questions.v1:autopilot_submit_resolution', 'autopilot_submit_resolution', 'planning.questions.v1', 'planning.questions.v1']),
+  Object.freeze(['planning.scout-dossier.v1:autopilot_submit_context', 'autopilot_submit_context', 'planning.scout-dossier.v1', 'planning.scout-dossier.v1']),
+  Object.freeze(['planning.scout-dossier.v1:autopilot_submit_scout_report', 'autopilot_submit_scout_report', 'planning.scout-dossier.v1', 'planning.scout-dossier.v1']),
+  Object.freeze(['planning.task-atoms.v1:autopilot_submit_atoms', 'autopilot_submit_atoms', 'planning.task-atoms.v1', 'planning.task-atoms.v1']),
+  Object.freeze(['planning.work-map.v1:autopilot_submit_plan_cluster', 'autopilot_submit_plan_cluster', 'planning.work-map.v1', 'planning.work-map.v1']),
+  Object.freeze(['planning.work-map.v1:autopilot_submit_synthesis', 'autopilot_submit_synthesis', 'planning.work-map.v1', 'planning.work-map.v1']),
+  Object.freeze(['planning.work-map.v2:autopilot_submit_plan_cluster', 'autopilot_submit_plan_cluster', 'planning.work-map.v2', 'planning.work-map.v2']),
+  Object.freeze(['planning.work-map.v2:autopilot_submit_synthesis', 'autopilot_submit_synthesis', 'planning.work-map.v2', 'planning.work-map.v2']),
+  Object.freeze(['recovery-work-map.v1', 'autopilot_emit_status', 'planning.work-map.v1', 'planning.work-map.v1']),
+  Object.freeze(['recovery-work-map.v2', 'autopilot_emit_status', 'planning.work-map.v2', 'planning.work-map.v2']),
+  Object.freeze(['validation-status.v2', 'autopilot_emit_status', 'autopilot.validation_submission.v2', 'autopilot.validation_result.v2']),
+  Object.freeze(['validation-status.v3', 'autopilot_emit_status', 'autopilot.validation_submission.v3', 'autopilot.validation_result.v3']),
+]);
 function fail(message) { throw new Error(`packed-consumer-invalid: ${message}`); }
 function sha256(bytes) { return `sha256:${createHash('sha256').update(bytes).digest('hex')}`; }
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value !== null && typeof value === 'object') return `{${Object.entries(value).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)).map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(',')}}`;
+  return JSON.stringify(value) ?? 'null';
+}
 function under(parent, candidate) { const rel = relative(parent, candidate); return rel === '' || (!rel.startsWith(`..${sep}`) && rel !== '..' && !isAbsolute(rel)); }
 function checkedRun(command, args, cwd, env) {
   const result = spawnSync(command, args, { cwd, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
@@ -87,6 +95,30 @@ function validPayload(boundary) {
     'planning.scout-dossier.v1': { findings: [{ path: 'src/extension.ts', observation: 'loaded', evidence_ref: 'packed#1' }] },
     'planning.questions.v1': { questions: [{ class: 'dod-hole', evidence: 'criterion', consequence: 'blocked' }] },
     'planning.work-map.v1': { units: [{ id: 'unit-1', objective: 'prove aliases', criteria: ['green'], links: ['atom-1'] }] },
+    'planning.work-map.v2': {
+      schema: 'planning.work-map.v2',
+      units: [{
+        id: 'unit-v2-1',
+        kind: 'implementation',
+        objective: 'prove the packed V2 terminal accepts complete no-vendor authority',
+        criteria: ['The V2 terminal accepts the complete explicit no-vendor unit.'],
+        depends_on: [],
+        files: ['host/tests/pi084-typebox-compat.test.ts'],
+        package_scope_files: [],
+        commands: [{
+          command: 'node --experimental-strip-types --test host/tests/pi084-typebox-compat.test.ts',
+          expected: 'Pi 0.84 TypeBox compatibility coverage passes.',
+          effect: 'no-effect',
+          generated_paths: [],
+          handling: 'none',
+          scope_preservation: 'The verification command leaves no Git-visible repository state.',
+        }],
+        package_proofs: [],
+        vendor_bindings: [],
+        provenance_manifest_destination: null,
+        links: ['atom-1'],
+      }],
+    },
     'planning.plan-review.v1': { verdicts: [{ criterion_id: 'criterion-1', verdict: 'pass', finding: 'covered' }] },
     'autopilot.delivery_submission.v2': { actual_changed_paths: ['package.json'], execution_audit_ref: 'report.md', focused_evidence_refs: ['packed'], terminal_status: 'PASS', hard_boundary_violations: [] },
     'autopilot.validation_submission.v2': { schema: 'autopilot.validation_submission.v2', validation_id: 'validation-1', assignment_id: 'assignment-1', scope: 'final', exact_commit: 'HEAD', exact_tree: 'tree', outcome: 'PASS', criterion_results: [{ criterion_id: 'criterion-1', verdict: 'PASS', evidence_refs: ['packed'], finding_ids: [], covered_paths: ['package.json'], semantic_surface_ids: [], forward_edge_ids: [] }], findings: [] },
@@ -115,24 +147,16 @@ async function loadRegisterInvokeMain(factory, stateRoot) {
   const activating = commandDefs.get('autopilot-plan');
   if (activating === undefined || typeof activating.handler !== 'function') fail('autopilot-plan activating command was not registered');
   await activating.handler('main TASK-A.md TASK-B.md TASK-C.md CONTEXT.md', { hasUI: false, mode: 'json', sessionManager: { getSessionId: () => '019faf00-0000-7000-8000-000000000083' } });
-  if (tools.length !== 7) fail(`main extension registered ${tools.length} planning submit tools after activation, expected 7`);
-  for (const tool of tools) {
-    const result = await tool.execute('packed-main-tool-call', validPayload(tool.details?.boundary_id ?? tool.parameters?.boundary_id ?? inferBoundaryFromToolName(tool.name)));
-    if (result?.terminate !== true) fail(`main planning tool ${tool.name} did not terminate`);
-  }
-  return { command_count: commands.length, planning_tool_count: tools.length, command_frame_count: transport.calls.length };
-}
-function inferBoundaryFromToolName(name) {
-  const map = {
-    autopilot_submit_atoms: 'planning.task-atoms.v1',
-    autopilot_submit_context: 'planning.scout-dossier.v1',
-    autopilot_submit_scout_report: 'planning.scout-dossier.v1',
-    autopilot_submit_resolution: 'planning.questions.v1',
-    autopilot_submit_plan_cluster: 'planning.work-map.v1',
-    autopilot_submit_synthesis: 'planning.work-map.v1',
-    autopilot_submit_review: 'planning.plan-review.v1',
+  if (tools.length !== 0) fail(`main extension registered ${tools.length} planning/terminal tools after activation, expected 0`);
+  const expectedFrame = {
+    kind: 'command',
+    payload: {
+      raw: 'autopilot-plan main TASK-A.md TASK-B.md TASK-C.md CONTEXT.md',
+      background_capabilities: { api_version: 1, run: true, run_is_agent: true, run_completion_trigger: true, status: true, logs: true, logs_bounded: true, kill: true },
+    },
   };
-  const boundary = map[name]; if (boundary === undefined) fail(`unknown planning tool ${name}`); return boundary;
+  if (JSON.stringify(transport.calls) !== JSON.stringify([expectedFrame])) fail(`main extension command transport frame drift: ${JSON.stringify(transport.calls)}`);
+  return { command_count: commands.length, planning_tool_count: tools.length, command_frame_count: transport.calls.length, command_frame: transport.calls[0] };
 }
 async function loadRegisterInvokeChildren(factory) {
   const previousProfile = process.env.AUTOPILOT_TERMINAL_PROFILE;
@@ -142,19 +166,30 @@ async function loadRegisterInvokeChildren(factory) {
   const previousPolicy = Object.fromEntries(policyKeys.map((key) => [key, process.env[key]]));
   const roots = []; const results = [];
   try {
-    for (const profile of EXPECTED_CHILD_PROFILES) {
+    for (const [profile, expectedTool, expectedBoundary, expectedResult] of EXPECTED_CHILD_PROFILE_TUPLES) {
       process.env.AUTOPILOT_TERMINAL_PROFILE = profile;
       process.env.AUTOPILOT_CARRIER_BINDING = 'packed-public-alias-binding';
       for (const key of policyKeys) delete process.env[key];
+      let deliveryFixture;
       if (profile === 'delivery-status.v2') {
-        const root = mkdtempSync(join(CANONICAL_TMP_ROOT, 'pi-autopilot-packed-delivery-policy-')); roots.push(root);
-        const assignmentPath = join(root, 'assignment.v3.json'); const worktree = process.cwd(); const command = 'true';
-        mkdirSync(join(worktree, 'packed-proof'));
-        writeFileSync(join(worktree, 'packed-proof/policy.txt'), 'initial\n');
-        const assignment = { schema: 'autopilot.delivery_assignment.v3', workstream: 'packed', assignment_id: 'assignment-packed-L1', lane_id: 'L1', attempt: 1, base_commit: '0123456789abcdef0123456789abcdef01234567', worktree, ordered_units: [{ id: 'U1', kind: 'implementation', files: ['packed-proof/policy.txt'], commands: [{ command, expected: 'Command exits successfully.', effect: 'no-effect', generated_paths: [], handling: 'none', scope_preservation: 'The persistent candidate worktree is unchanged by verification.' }], package_checks: [{ check_id: 'PKG-U1-TIP', kind: 'clean-exact-package-tip', criterion_ordinals: [1], expected: 'Core proves the exact clean package tip.' }] }], approved_commands: [{ command_id: 'CMD-U1-1', unit_id: 'U1', command_ordinal: 1, command_digest: createHash('sha256').update(`autopilot.approved_command.v1\0U1\0${1}\0${command}`).digest('hex') }] };
-        const assignmentBytes = Buffer.from(JSON.stringify(assignment, null, 2)); writeFileSync(assignmentPath, assignmentBytes); const assignmentDigest = createHash('sha256').update(assignmentBytes).digest('hex');
+        // This is the exact no-vendor V4/V5 authority shape used by
+        // delivery-policy-tools.test.ts::makeV4Fixture(true): Core's canonical
+        // empty materialization receipt remains authoritative even with no
+        // protected vendored leaves.
+        const root = mkdtempSync(join(CANONICAL_TMP_ROOT, 'pi-autopilot-packed-delivery-policy-v5-')); roots.push(root);
+        const worktree = join(root, 'worktree'); const foreign = join(root, 'foreign');
+        mkdirSync(join(worktree, 'src'), { recursive: true }); mkdirSync(join(worktree, 'vendor'), { recursive: true }); mkdirSync(foreign);
+        const command = 'printf v5'; const files = ['src/authored.rs'];
+        const rows = [{ unit_id: 'U1', provenance_manifest_destination: null, vendor_bindings: [] }];
+        const baseline = [];
+        const receiptPath = join(root, 'receipt.json'); const intentionPath = join(root, 'intention.json'); const intentionDigest = 'b'.repeat(64);
+        const receipt = { schema: 'autopilot.core_materialization_receipt.v1', intention_path: intentionPath, intention_digest: intentionDigest, workstream: 'main', assignment_id: 'assignment-main-L1', lane_id: 'L1', attempt: 1, base_commit: '0123456789abcdef0123456789abcdef01234567', worktree, completed_baseline: baseline };
+        const receiptBytes = Buffer.from(canonicalJson(receipt)); writeFileSync(receiptPath, receiptBytes); const receiptDigest = createHash('sha256').update(receiptBytes).digest('hex');
+        const assignment = { schema: 'autopilot.delivery_assignment.v4', workstream: 'main', assignment_id: 'assignment-main-L1', lane_id: 'L1', attempt: 1, base_commit: receipt.base_commit, worktree, ordered_units: [{ id: 'U1', kind: 'implementation', files, commands: [{ command, expected: 'prints v5' }], package_checks: [] }], approved_commands: [{ command_id: 'CMD-U1-1', unit_id: 'U1', command_ordinal: 1, command_digest: createHash('sha256').update(`autopilot.approved_command.v1\0U1\0${1}\0${command}`).digest('hex') }], recovery: null, approved_plan_binding_path: join(root, 'binding.json'), approved_plan_binding_digest: 'c'.repeat(64), approved_image_digest: 'd'.repeat(64), selected_vendoring: rows, materialization: { intention_path: intentionPath, intention_digest: intentionDigest, receipt_path: receiptPath, receipt_digest: receiptDigest, baseline } };
+        const assignmentPath = join(root, 'assignment-v4.json'); const assignmentBytes = Buffer.from(JSON.stringify(assignment, null, 2)); writeFileSync(assignmentPath, assignmentBytes); const assignmentDigest = createHash('sha256').update(assignmentBytes).digest('hex');
         const policyDigest = createHash('sha256').update(`${DELIVERY_POLICY_VERSION}\0${assignmentPath}\0${assignmentDigest}\0${worktree}\0${worktree}`).digest('hex');
         Object.assign(process.env, { AUTOPILOT_DELIVERY_ASSIGNMENT_PATH: assignmentPath, AUTOPILOT_DELIVERY_ASSIGNMENT_DIGEST: assignmentDigest, AUTOPILOT_DELIVERY_WORKTREE: worktree, AUTOPILOT_DELIVERY_CWD: worktree, AUTOPILOT_DELIVERY_ASSIGNMENT_ID: assignment.assignment_id, AUTOPILOT_DELIVERY_WORKSTREAM: assignment.workstream, AUTOPILOT_DELIVERY_LANE_ID: assignment.lane_id, AUTOPILOT_DELIVERY_ATTEMPT: String(assignment.attempt), AUTOPILOT_DELIVERY_BASE_COMMIT: assignment.base_commit, AUTOPILOT_DELIVERY_POLICY_DIGEST: policyDigest });
+        deliveryFixture = { worktree, assignmentPath, assignmentDigest, policyDigest, receiptDigest };
       }
       if (profile === 'validation-status.v3') {
         const root = mkdtempSync(join(CANONICAL_TMP_ROOT, 'pi-autopilot-packed-v3-policy-')); roots.push(root);
@@ -168,31 +203,63 @@ async function loadRegisterInvokeChildren(factory) {
       }
       const tools = []; const hooks = new Map(); const entries = [];
       const host = { registerTool: (tool) => { tools.push(tool); }, on: (name, handler) => { hooks.set(name, handler); }, appendEntry: (type, data) => { entries.push({ type, data }); }, getActiveTools: () => [...new Set(['read', ...tools.map((tool) => tool.name)])] };
-      await factory(host);
-      const expected = EXPECTED_CHILD_PROFILE_BINDINGS[profile];
-      if (expected === undefined) fail(`child profile ${profile} has no independent expected binding`);
-      const expectedTools = expected.tools ?? [expected.tool];
+      const factoryCwd = process.cwd();
+      try {
+        if (deliveryFixture !== undefined) process.chdir(deliveryFixture.worktree);
+        await factory(host);
+      } finally {
+        process.chdir(factoryCwd);
+      }
+      const expectedTools = profile === 'delivery-status.v2'
+        ? ['autopilot_run_approved_command', 'edit', 'write', expectedTool]
+        : profile === 'validation-status.v3' ? ['read', expectedTool] : [expectedTool];
       const actualTools = tools.map((tool) => tool.name);
       if (JSON.stringify(actualTools) !== JSON.stringify(expectedTools)) fail(`child profile ${profile} registered ${actualTools.join(',')}, expected ${expectedTools.join(',')}`);
       await hooks.get('session_start')?.();
       if (entries.length !== 1) fail(`child profile ${profile} did not append exactly one session_start receipt`);
       const receipt = entries[0].data;
-      const expectedResult = expected.result ?? expected.boundary;
-      if (receipt.profile_id !== profile || receipt.tool_name !== expected.tool || receipt.boundary_id !== expected.boundary || receipt.result_contract !== expectedResult) fail(`child profile ${profile} receipt identity drift`);
-      const terminal = tools.find((tool) => tool.name === expected.tool);
-      if (terminal === undefined) fail(`child profile ${profile} omitted exact terminal ${expected.tool}`);
+      if (receipt.profile_id !== profile || receipt.tool_name !== expectedTool || receipt.boundary_id !== expectedBoundary || receipt.result_contract !== expectedResult) fail(`child profile ${profile} receipt identity drift`);
+      const terminal = tools.find((tool) => tool.name === expectedTool);
+      if (terminal === undefined) fail(`child profile ${profile} omitted exact terminal ${expectedTool}`);
       if (profile === 'delivery-status.v2') {
+        if (deliveryFixture === undefined) fail('delivery fixture disappeared');
+        const expectedDeliveryReceipt = {
+          version: DELIVERY_POLICY_VERSION,
+          assignment_path: deliveryFixture.assignmentPath,
+          assignment_digest: deliveryFixture.assignmentDigest,
+          worktree: deliveryFixture.worktree,
+          cwd: deliveryFixture.worktree,
+          policy_digest: deliveryFixture.policyDigest,
+          approved_command_count: 1,
+          active_overrides: ['autopilot_run_approved_command', 'edit', 'write'],
+          allowed_unit_file_count: 1,
+          mutable_authored_leaf_count: 1,
+          protected_core_leaf_count: 0,
+          baseline_digest: deliveryFixture.receiptDigest,
+        };
+        if (JSON.stringify(receipt.delivery_policy) !== JSON.stringify(expectedDeliveryReceipt)) fail(`delivery child V5 materialization authority receipt drift: ${JSON.stringify(receipt.delivery_policy)}`);
+        if (JSON.stringify(receipt.active_tools) !== JSON.stringify(['autopilot_emit_status', 'autopilot_run_approved_command', 'edit', 'read', 'write'])) fail(`delivery child active tools drift: ${JSON.stringify(receipt.active_tools)}`);
         const byName = new Map(tools.map((tool) => [tool.name, tool]));
-        await byName.get('write').execute('packed-delivery-write', { path: 'packed-proof/policy.txt', content: 'written\n' });
-        await byName.get('edit').execute('packed-delivery-edit', { path: 'packed-proof/policy.txt', edits: [{ oldText: 'written', newText: 'edited' }] });
-        await byName.get('autopilot_run_approved_command').execute('packed-delivery-command', { command_id: 'CMD-U1-1' });
-        if (readFileSync('packed-proof/policy.txt', 'utf8') !== 'edited\n') fail('delivery policy tools did not effect the exact approved consumer path');
+        const write = byName.get('write'); const edit = byName.get('edit'); const approvedCommand = byName.get('autopilot_run_approved_command');
+        if (write === undefined || edit === undefined || approvedCommand === undefined) fail('delivery child omitted a V5 policy tool');
+        await write.execute('packed-delivery-write', { path: 'src/authored.rs', content: 'written\n' });
+        await edit.execute('packed-delivery-edit', { path: 'src/authored.rs', edits: [{ oldText: 'written', newText: 'edited' }] });
+        await approvedCommand.execute('packed-delivery-command', { command_id: 'CMD-U1-1' });
+        if (readFileSync(join(deliveryFixture.worktree, 'src/authored.rs'), 'utf8') !== 'edited\n') fail('delivery V5 policy tools did not effect the sole mutable authored leaf exactly');
       }
-      const raw = validPayload(expected.boundary); const prepared = terminal.prepareArguments?.(raw) ?? raw;
+      const raw = validPayload(expectedBoundary);
+      let prepared;
+      if (profile === 'validation-status.v3') {
+        if (typeof terminal.prepareArguments !== 'function') fail('v3 terminal omitted raw transport preparation');
+        prepared = terminal.prepareArguments(raw);
+      } else {
+        if (terminal.prepareArguments !== undefined) fail(`child profile ${profile} introduced unexpected payload routing`);
+        prepared = raw;
+      }
       const result = await terminal.execute('packed-child-tool-call', prepared);
-      if (result?.terminate !== true || result.details?.boundary_id !== expected.boundary) fail(`child profile ${profile} did not return terminating boundary ${expected.boundary}`);
+      if (result?.terminate !== true || result.details?.profile_id !== profile || result.details?.tool_name !== expectedTool || result.details?.boundary_id !== expectedBoundary || result.details?.result_contract !== expectedResult) fail(`child profile ${profile} did not return its exact terminating tuple`);
       if (profile === 'validation-status.v3' && JSON.stringify(result.details?.payload) !== JSON.stringify(raw)) fail('v3 raw transport changed the model payload');
-      results.push({ profile, tool: terminal.name, boundary: expected.boundary });
+      results.push({ profile, tool: terminal.name, boundary: expectedBoundary, result_contract: expectedResult, ...(profile === 'delivery-status.v2' ? { delivery_policy: receipt.delivery_policy } : {}) });
     }
   } finally {
     if (previousProfile === undefined) delete process.env.AUTOPILOT_TERMINAL_PROFILE; else process.env.AUTOPILOT_TERMINAL_PROFILE = previousProfile;
@@ -249,13 +316,15 @@ async function main() {
     const extracted = join(root, 'extracted'); mkdirSync(extracted, { mode: 0o700 }); checkedRun('tar', ['-xzf', tarball, '-C', extracted], root, env);
     const installedManifest = assertInstalledManifest(join(extracted, 'package'), installedRoot, manifestValue[0].files);
     const restore = installNetworkCanary(networkMarker); const previousCwd = process.cwd();
-    let mainProof; let childProof; let coreStatusProbe;
+    let mainProof; let childProof; let deliveryV5Authority; let coreStatusProbe;
     try {
       process.chdir(project);
       const peerRequire = createRequire(join(projectNodeModules, '@earendil-works', 'pi-coding-agent', 'package.json'));
       const { createJiti } = peerRequire('jiti'); const jiti = createJiti(import.meta.url, { moduleCache: false });
       mainProof = await loadRegisterInvokeMain(await jiti.import(join(installedRoot, 'extensions', 'autopilot.ts'), { default: true }), join(root, 'main-state'));
       childProof = await loadRegisterInvokeChildren(await jiti.import(join(installedRoot, 'src', 'generated', 'child-extension.ts'), { default: true }));
+      deliveryV5Authority = childProof.find((entry) => entry.profile === 'delivery-status.v2')?.delivery_policy;
+      if (deliveryV5Authority === undefined) fail('delivery V5 authority receipt was not reported by the loaded child');
       coreStatusProbe = runStatusFrameLaunch({ command: join(project, 'node_modules', '.bin', 'autopilot-core'), cwd: project, env, requestId: 1, timeoutMs: 30_000, maxBuffer: 64 * 1024 * 1024 });
       const agentUsage = spawnSync(join(project, 'node_modules', '.bin', 'autopilot-agent-run'), ['--help'], { cwd: project, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
       if (agentUsage.error !== undefined || agentUsage.signal !== null || agentUsage.status !== 1 || !/usage: autopilot-core agent-run --spec <absolute-spec\.json>/u.test(agentUsage.stderr)) fail(`installed autopilot-agent-run usage probe did not reach contained core status=${String(agentUsage.status)} signal=${String(agentUsage.signal)} error=${agentUsage.error?.message ?? '<none>'}\n${agentUsage.stderr}`);
@@ -264,7 +333,7 @@ async function main() {
       process.chdir(previousCwd);
       restore();
     }
-    summary = { schema_version: 'autopilot.packed_consumer_witness.v3', candidate_tarball: { path: tarball, byte_count: tarInfo.size, sha256: sha256(readFileSync(tarball)) }, pi_peer: { source: 'global-public-alias', name: publicAliases.pi.name, version: publicAliases.pi.version, package_json_sha256: sha256(readFileSync(join(GLOBAL_PI_ROOT, 'package.json'))) }, typebox_peer: { source: 'global-pi-public-alias', name: publicAliases.typebox.name, version: publicAliases.typebox.version, package_json_sha256: sha256(readFileSync(join(GLOBAL_TYPEBOX_ROOT, 'package.json'))) }, installed_manifest: installedManifest, runtime_private_peer_copies: 0, commands: EXPECTED_COMMANDS, main_public_alias_proof: mainProof, child_public_alias_profiles: childProof, core_status_probe: coreStatusProbe, agent_run_usage: true, network_enforcement: 'darwin-sandbox-exec-deny-network', network_calls: 0, passed: true };
+    summary = { schema_version: 'autopilot.packed_consumer_witness.v3', candidate_tarball: { path: tarball, byte_count: tarInfo.size, sha256: sha256(readFileSync(tarball)) }, pi_peer: { source: 'global-public-alias', name: publicAliases.pi.name, version: publicAliases.pi.version, package_json_sha256: sha256(readFileSync(join(GLOBAL_PI_ROOT, 'package.json'))) }, typebox_peer: { source: 'global-pi-public-alias', name: publicAliases.typebox.name, version: publicAliases.typebox.version, package_json_sha256: sha256(readFileSync(join(GLOBAL_TYPEBOX_ROOT, 'package.json'))) }, installed_manifest: installedManifest, runtime_private_peer_copies: 0, commands: EXPECTED_COMMANDS, main_public_alias_proof: mainProof, child_public_alias_profiles: childProof, delivery_v5_authority: deliveryV5Authority, core_status_probe: coreStatusProbe, agent_run_usage: true, network_enforcement: 'darwin-sandbox-exec-deny-network', network_calls: 0, passed: true };
   } finally { rmSync(root, { recursive: true, force: false }); }
   process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
 }
