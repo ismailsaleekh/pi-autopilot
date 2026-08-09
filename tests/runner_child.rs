@@ -2015,6 +2015,149 @@ fn work_map_v2_value_repair_repeats_exact_v2_authority_and_atom_manifest() {
 }
 
 #[test]
+fn work_map_v2_semantic_proof_ordinal_errors_repair_before_carrier_sealing() {
+    let _cwd_guard = CWD_LOCK.lock().expect("cwd lock");
+    for (label, bad_ordinals) in [
+        ("zero", json!([0])),
+        ("duplicate", json!([1, 1])),
+        ("out-of-range", json!([2])),
+    ] {
+        let root = temp_root(&format!("runner-workmap-v2-proof-ordinal-{label}"));
+        let prompt_log = terminalmiss_prompt_log(&root);
+        let mut accepted: Value =
+            serde_json::from_str(&work_map_v2_payload("planning.work-map.v2"))
+                .expect("valid V2 payload");
+        accepted["units"][0]["package_scope_files"] = json!(["src/lib.rs"]);
+        accepted["units"][0]["package_proofs"] = json!([{
+            "proof_id":"clean-tip",
+            "kind":"clean-exact-package-tip",
+            "criterion_ordinals":[1],
+            "expected":"Core proves the exact clean package tip.",
+            "vendor_binding_ids":[]
+        }]);
+        let accepted = accepted.to_string();
+        let mut invalid: Value = serde_json::from_str(&accepted).expect("accepted V2 JSON");
+        invalid["units"][0]["package_proofs"][0]["criterion_ordinals"] = bad_ordinals;
+        let invalid = invalid.to_string();
+        write_fake_pi(
+            &root,
+            &rpc_fake_pi(
+                &format!("const repairPromptLog = {prompt_log:?};"),
+                &format!(
+                    "appendFileSync(repairPromptLog, JSON.stringify({{count:promptCount,message:cmd.message}})+'\\n'); emitCarrier(promptCount === 1 ? {invalid:?} : {accepted:?});"
+                ),
+            ),
+        );
+        let spec = issue_work_map_v2_spec(&root, "plan-compiler");
+
+        with_fake_path(&root, || {
+            child::main(&["--spec".to_owned(), spec.display().to_string()])
+        })
+        .unwrap_or_else(|error| panic!("{label} ordinal should repair in-session: {error}"));
+
+        let rows = terminalmiss_prompt_rows(&root);
+        assert_eq!(rows.len(), 2, "{label}: initial plus repair prompt");
+        let repair = rows[1]["message"].as_str().expect("repair prompt");
+        assert!(
+            repair.contains("duplicate, zero, or out-of-range criterion ordinal"),
+            "{label}: repair omitted exact semantic diagnosis: {repair}"
+        );
+        let carrier: Value = serde_json::from_slice(
+            &fs::read(work_map_carrier_path(&root)).expect("repaired V2 carrier"),
+        )
+        .expect("repaired V2 carrier JSON");
+        assert_eq!(
+            carrier["raw_output"], accepted,
+            "{label}: bad payload sealed"
+        );
+    }
+}
+
+#[test]
+fn work_map_v2_atom_registry_drift_during_model_turn_is_fatal_not_value_repair() {
+    let _cwd_guard = CWD_LOCK.lock().expect("cwd lock");
+    let root = temp_root("runner-workmap-v2-registry-turn-drift");
+    let prompt_log = terminalmiss_prompt_log(&root);
+    let registry_path = root.join(".pi/autopilot/main/planning/atom-registry.json");
+    let accepted = work_map_v2_payload("planning.work-map.v2");
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            &format!(
+                "const repairPromptLog = {prompt_log:?}; const registryPath = {registry_path:?};"
+            ),
+            &format!(
+                "appendFileSync(repairPromptLog, JSON.stringify({{count:promptCount,message:cmd.message}})+'\\n'); writeFileSync(registryPath, 'drifted-during-model-turn'); emitCarrier({accepted:?});"
+            ),
+        ),
+    );
+    let spec = issue_work_map_v2_spec(&root, "plan-compiler");
+
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("registry authority drift must be fatal");
+    assert!(
+        error.contains("carrier identity rejected before value repair")
+            && error.contains("V2 atom registry authority rejected"),
+        "unexpected registry drift failure: {error}"
+    );
+    assert_eq!(
+        terminalmiss_prompt_rows(&root).len(),
+        1,
+        "registry authority drift must not receive a model-value retry"
+    );
+    assert!(
+        !work_map_carrier_path(&root).exists(),
+        "registry drift must not seal a carrier"
+    );
+}
+
+#[test]
+fn work_map_v2_package_authority_stays_parent_fatal_not_child_value_repair() {
+    let _cwd_guard = CWD_LOCK.lock().expect("cwd lock");
+    let root = temp_root("runner-workmap-v2-parent-package-authority");
+    let prompt_log = terminalmiss_prompt_log(&root);
+    let mut payload: Value = serde_json::from_str(&work_map_v2_payload("planning.work-map.v2"))
+        .expect("valid V2 payload");
+    payload["units"][0]["package_proofs"] = json!([{
+        "proof_id":"clean-tip",
+        "kind":"clean-exact-package-tip",
+        "criterion_ordinals":[1],
+        "expected":"Core proves the exact clean package tip.",
+        "vendor_binding_ids":[]
+    }]);
+    // Shape-valid, but invalid derived package authority: a proof-bearing final
+    // closure must name the global owner-file set in package_scope_files.
+    let payload = payload.to_string();
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            &format!("const repairPromptLog = {prompt_log:?};"),
+            &format!(
+                "appendFileSync(repairPromptLog, JSON.stringify({{count:promptCount,message:cmd.message}})+'\\n'); emitCarrier({payload:?});"
+            ),
+        ),
+    );
+    let spec = issue_work_map_v2_spec(&root, "plan-compiler");
+
+    with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect("shape-valid map reaches strict parent package-authority admission");
+    assert_eq!(
+        terminalmiss_prompt_rows(&root).len(),
+        1,
+        "derived package-authority failure must not be reclassified as child value repair"
+    );
+    let carrier: Value = serde_json::from_slice(
+        &fs::read(work_map_carrier_path(&root)).expect("V2 carrier for parent admission"),
+    )
+    .expect("V2 carrier JSON");
+    assert_eq!(carrier["raw_output"], payload);
+}
+
+#[test]
 fn work_map_v2_missing_or_drifted_registry_fails_before_fake_pi() {
     let _cwd_guard = CWD_LOCK.lock().expect("cwd lock");
     for (label, mutate) in [
@@ -3649,7 +3792,30 @@ fn work_map_carrier_path(root: &Path) -> PathBuf {
 }
 
 fn work_map_v2_payload(schema: &str) -> String {
-    json!({"schema":schema,"units":[]}).to_string()
+    json!({
+        "schema":schema,
+        "units":[{
+            "id":"U1",
+            "kind":"implementation",
+            "objective":"Deliver the accepted V2 work unit.",
+            "criteria":["The focused V2 acceptance path passes."],
+            "depends_on":[],
+            "files":["src/lib.rs"],
+            "package_scope_files":[],
+            "commands":[{
+                "command":"cargo test -q",
+                "expected":"pass",
+                "effect":"no-effect",
+                "generated_paths":[],
+                "handling":"none",
+                "scope_preservation":"Final Git-visible state remains limited to the approved unit files."
+            }],
+            "package_proofs":[],
+            "vendor_bindings":[],
+            "provenance_manifest_destination":null,
+            "links":["TE01-001"]
+        }]
+    }).to_string()
 }
 
 fn work_map_payload(

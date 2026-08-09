@@ -493,23 +493,11 @@ pub fn admit_work_map_v2(
     context: WorkMapV2AdmissionContext<'_>,
 ) -> Result<ApprovedWorkMapV2, String> {
     validate_v2_artifact_confinement(source_carrier, &context)?;
-    if raw.len() > kernel::generated::WORK_MAP_V2_MAX_BYTES {
-        return Err(format!(
-            "work-map-v2:raw artifact exceeds {} bytes: got {}",
-            kernel::generated::WORK_MAP_V2_MAX_BYTES,
-            raw.len()
-        ));
-    }
+    validate_work_map_v2_raw_size(raw)?;
     if raw != source_carrier.raw_work_map_payload.as_slice() {
         return Err("work-map-v2 raw payload does not exactly match source carrier".to_owned());
     }
-    let text = std::str::from_utf8(raw)
-        .map_err(|error| format!("work-map-v2:raw artifact is not UTF-8: {error}"))?;
-    let work_map: WorkMapV2 = serde_json::from_str(text)
-        .map_err(|error| format!("work-map-v2:strict JSON parse: {error}"))?;
-    if work_map.schema.0 != "planning.work-map.v2" {
-        return Err(format!("work-map-v2:wrong schema {}", work_map.schema.0));
-    }
+    let work_map = parse_work_map_v2_model_value(raw)?;
     let atom_ids =
         load_v2_atom_registry_ids(context.atom_registry_path, context.atom_registry_digest)?;
     validate_work_map_v2_shape(&work_map, &atom_ids)?;
@@ -551,6 +539,42 @@ pub fn admit_work_map_v2(
         vendoring,
         package_authority,
     })
+}
+
+/// Assignment-bound model-value validation runs inside `agent-run` before a
+/// V2 carrier is sealed. It shares strict map shape, atom-link, topology, and
+/// ownership checks with final admission. Carrier/spec identity, authenticated
+/// recovery-subject comparison, and derived package authority remain strict
+/// parent checks and are never reclassified as repairable model value.
+pub(crate) fn validate_work_map_v2_model_value(
+    raw: &[u8],
+    atom_ids: &BTreeSet<Id>,
+) -> Result<(), String> {
+    let work_map = parse_work_map_v2_model_value(raw)?;
+    validate_work_map_v2_shape(&work_map, atom_ids)
+}
+
+fn parse_work_map_v2_model_value(raw: &[u8]) -> Result<WorkMapV2, String> {
+    validate_work_map_v2_raw_size(raw)?;
+    let text = std::str::from_utf8(raw)
+        .map_err(|error| format!("work-map-v2:raw artifact is not UTF-8: {error}"))?;
+    let work_map: WorkMapV2 = serde_json::from_str(text)
+        .map_err(|error| format!("work-map-v2:strict JSON parse: {error}"))?;
+    if work_map.schema.0 != "planning.work-map.v2" {
+        return Err(format!("work-map-v2:wrong schema {}", work_map.schema.0));
+    }
+    Ok(work_map)
+}
+
+fn validate_work_map_v2_raw_size(raw: &[u8]) -> Result<(), String> {
+    if raw.len() > kernel::generated::WORK_MAP_V2_MAX_BYTES {
+        return Err(format!(
+            "work-map-v2:raw artifact exceeds {} bytes: got {}",
+            kernel::generated::WORK_MAP_V2_MAX_BYTES,
+            raw.len()
+        ));
+    }
+    Ok(())
 }
 
 fn validate_v2_artifact_confinement(
@@ -1263,7 +1287,10 @@ fn package_authority_from_work_map_v2(
         .collect()
 }
 
-fn load_v2_atom_registry_ids(path: &Path, expected_digest: &str) -> Result<BTreeSet<Id>, String> {
+pub(crate) fn load_v2_atom_registry_ids(
+    path: &Path,
+    expected_digest: &str,
+) -> Result<BTreeSet<Id>, String> {
     reject_artifact_path(path, "atom registry")?;
     if expected_digest.len() != 64
         || !expected_digest

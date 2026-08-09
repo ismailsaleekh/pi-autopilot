@@ -6954,10 +6954,22 @@ fn git_failure_message(
     message
 }
 
-pub(crate) fn validate_child_boundary(
+#[derive(Debug)]
+pub(crate) enum ChildBoundaryValidationError {
+    Identity(String),
+    Value(kernel::boundary::Rejection),
+}
+
+impl From<kernel::boundary::Rejection> for ChildBoundaryValidationError {
+    fn from(error: kernel::boundary::Rejection) -> Self {
+        Self::Value(error)
+    }
+}
+
+pub(crate) fn validate_child_boundary_for_carrier(
     spec: &AgentRunSpec,
     raw: &str,
-) -> Result<String, kernel::boundary::Rejection> {
+) -> Result<String, ChildBoundaryValidationError> {
     let boundary = spec.boundary_id.0.as_str();
     let mut runtime = boundary_runtime(match boundary {
         "planning.task-atoms.v1" => "planning.task-atoms.v1",
@@ -6969,7 +6981,36 @@ pub(crate) fn validate_child_boundary(
         _ => "planning.questions.v1",
     });
     runtime.flip_to_enforce();
-    match boundary {
+    if boundary == "planning.work-map.v2" {
+        let path = spec
+            .atom_registry_path
+            .as_ref()
+            .map(|path| path.0.as_str())
+            .ok_or_else(|| {
+                ChildBoundaryValidationError::Identity(
+                    "agent-run V2 atom registry path is missing after spec admission".to_owned(),
+                )
+            })?;
+        let digest = spec
+            .atom_registry_digest
+            .as_ref()
+            .map(|digest| digest.0.as_str())
+            .ok_or_else(|| {
+                ChildBoundaryValidationError::Identity(
+                    "agent-run V2 atom registry digest is missing after spec admission".to_owned(),
+                )
+            })?;
+        let atom_ids =
+            crate::planning::work_map_v2::load_v2_atom_registry_ids(Path::new(path), digest)
+                .map_err(|error| {
+                    ChildBoundaryValidationError::Identity(format!(
+                        "agent-run V2 atom registry authority rejected before value repair: {error}"
+                    ))
+                })?;
+        return crate::planning::accept_work_map_v2_for_assignment(raw, &runtime, &atom_ids)
+            .map_err(ChildBoundaryValidationError::Value);
+    }
+    let result = match boundary {
         "planning.task-atoms.v1" => {
             let Some(prefix) = spec.atom_id_prefix.as_deref() else {
                 runtime.reject("boundary_id=planning.task-atoms.v1; field=atoms.id; expected=runner-issued atom id prefix; got=missing; hint=refuse unbound task atom assignment".to_owned())?;
@@ -6993,11 +7034,33 @@ pub(crate) fn validate_child_boundary(
             };
             crate::planning::accept_work_map_for_atoms(raw, &runtime, &atom_ids, digest)
         }
-        "planning.work-map.v2" => crate::planning::accept_work_map_v2(raw, &runtime),
+        "planning.work-map.v2" => unreachable!("V2 handled by the typed authority branch"),
         "planning.plan-review.v1" => crate::planning::accept_plan_review(raw, &runtime),
         other => {
             runtime.reject(format!("unknown-boundary:{other}"))?;
             Ok(raw.to_owned())
+        }
+    };
+    result.map_err(ChildBoundaryValidationError::Value)
+}
+
+/// Generic planning seam retained for package-internal callers that consume a
+/// boundary rejection. The child carrier path uses the typed variant above so
+/// authority drift can never enter model-value repair.
+pub(crate) fn validate_child_boundary(
+    spec: &AgentRunSpec,
+    raw: &str,
+) -> Result<String, kernel::boundary::Rejection> {
+    match validate_child_boundary_for_carrier(spec, raw) {
+        Ok(value) => Ok(value),
+        Err(ChildBoundaryValidationError::Value(error)) => Err(error),
+        Err(ChildBoundaryValidationError::Identity(detail)) => {
+            let mut runtime = boundary_runtime("planning.work-map.v2");
+            runtime.flip_to_enforce();
+            runtime.reject(format!(
+                "boundary_id=planning.work-map.v2; field=atom_registry; expected=unchanged spec-bound authority; got={detail}; hint=refuse carrier and repair package authority"
+            ))?;
+            unreachable!("enforced boundary rejection must return Err")
         }
     }
 }

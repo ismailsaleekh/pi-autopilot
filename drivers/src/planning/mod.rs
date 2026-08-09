@@ -1390,6 +1390,23 @@ pub fn accept_work_map_v2(raw: &str, runtime: &BoundaryRuntime) -> Result<String
     let _: WorkMapV2 = parse_model_payload(raw, runtime, "planning.work-map.v2")?;
     Ok(raw.to_owned())
 }
+
+/// Child-side V2 model-value gate. The terminal tool schema checks only the
+/// closed JSON shape; this assignment-bound pass applies Core's strict map,
+/// atom-link, topology, and ownership semantics before the carrier becomes
+/// durable, so ordinary value errors enter the existing same-session repair.
+pub(crate) fn accept_work_map_v2_for_assignment(
+    raw: &str,
+    runtime: &BoundaryRuntime,
+    atom_ids: &BTreeSet<Id>,
+) -> Result<String, Rejection> {
+    if let Err(error) = work_map_v2::validate_work_map_v2_model_value(raw.as_bytes(), atom_ids) {
+        runtime.reject(format!(
+            "boundary_id=planning.work-map.v2; field=payload; expected=strict V2 model shape, atom-link, topology, and ownership semantics against the spec-bound atom registry; got={error}; hint=repair the named value violation and resubmit the complete V2 work map"
+        ))?;
+    }
+    Ok(raw.to_owned())
+}
 #[acceptance_boundary(id = "planning.plan-review.v1", producer = Producer::Model, visible = true, admits = "Plan review output must assign exactly one verdict to each required approval criterion and no others: review.mandatory-input-accounting, review.authority-fidelity, review.completeness-and-traceability, review.internal-consistency-and-scheduling, review.context-sufficiency, review.verification-strength, review.forward-validation. Authority-fidelity and forward-validation pass only when every units[].files value is one exact regular-file leaf, all required future destinations are enumerated, no directory/ancestor/wildcard-pattern scope remains, and commands are verification-only rather than an implementation channel. Execution is approved only when all seven exact criteria pass. On the first full review, an admitted non-pass verdict triggers exactly one fresh Recovery Engineer assignment over the rejected work map and complete finding evidence; the unchanged full-review gate then runs again. A non-pass rereview is terminal for this run. Missing, duplicate, or unknown criterion shapes remain boundary rejections and are not semantic recovery authority. Call autopilot_submit_review as the final action.", mode = BoundaryMode::Enforce)]
 pub fn accept_plan_review(raw: &str, runtime: &BoundaryRuntime) -> Result<String, Rejection> {
     let review = parse_model_payload::<PlanReview>(raw, runtime, "planning.plan-review.v1")?;

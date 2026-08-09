@@ -5010,12 +5010,18 @@ fn prepare_carrier(
         )
         .into());
     }
-    crate::runner::validate_child_boundary(spec, &raw_output).map_err(|error| {
-        value_rejection(
-            "payload",
-            format!("{} admitted value", error.boundary_id()),
-            error.actual().to_owned(),
-        )
+    crate::runner::validate_child_boundary_for_carrier(spec, &raw_output).map_err(|error| {
+        match error {
+            crate::runner::ChildBoundaryValidationError::Identity(detail) => {
+                CarrierRejection::Identity(detail)
+            }
+            crate::runner::ChildBoundaryValidationError::Value(error) => value_rejection(
+                "payload",
+                format!("{} admitted value", error.boundary_id()),
+                error.actual().to_owned(),
+            )
+            .into(),
+        }
     })?;
     let v2_route = spec
         .terminal_route

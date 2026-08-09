@@ -1,8 +1,8 @@
 {
   "schema_version": "autopilot.docs_semantic_attestation.v2",
   "doc_id": "subsystems/runner-and-forced-output",
-  "reviewed_body_hash": "sha256:d236b76a0c1aa1ea31d34f22373b79b6b3a041b4ebff8d608a1b944493757f2f",
-  "reviewed_doc_sha256": "sha256:e9c83c32043df507e348472f2f06edd20a7991ef11de1f099a6eafaeb6312e84",
+  "reviewed_body_hash": "sha256:09b5b07dfbb155e250a5bbef9d8c3041b7ce72973190c6fdd7b8318643303457",
+  "reviewed_doc_sha256": "sha256:ecc59727ce0c211895a88596f1ccc6601b6964f43eeda42c830cfa00f070f697",
   "covers_sources": [
     "data/control.kdl",
     "data/seam_real_producers.rs",
@@ -14,7 +14,7 @@
     "src/resolve-core.ts"
   ],
   "verdict": "PASS",
-  "reviewer": "openai-codex/gpt-5.6-terra independent audit beb4e14f7",
-  "reviewed_at": "2026-08-09T17:11:36.430Z",
-  "notes": "PASS: independent r3 review found H-01 and M-01 remediated and confirmed the repository-free vendoring paragraph matches current planning, lane materialization, source-free replay, protected-baseline, and package-proof behavior."
+  "reviewer": "anthropic/claude-opus-4-6 audit d3356884334df6b70df6ad905c1087cd1; Fusion validate ca370cb0 corroboration",
+  "reviewed_at": "2026-08-09T19:11:34.197Z",
+  "notes": "PASS: independent inspection found no critical/high/medium defect and confirmed V2 child value repair catches map-shape, atom-link, topology, ownership, and proof-ordinal errors before sealing while registry identity, recovery-subject, and derived package authority remain fatal or parent-owned. Two Fusion candidates independently returned no findings; the operator adjudicated the timed-out third candidate as nonblocking."
 }
