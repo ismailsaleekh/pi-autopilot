@@ -873,11 +873,6 @@ export const WORK_MAP_V2_TOOL_PARAMETERS = {
                   "maxLength": 4096,
                   "type": "string"
                 },
-                "origin_anchor": {
-                  "description": "Immutable whole-file origin anchor; Core V2 admission requires a nonempty value.",
-                  "maxLength": 4096,
-                  "type": "string"
-                },
                 "origin_path": {
                   "description": "Exact normalized repository-relative origin path.",
                   "maxLength": 4096,
@@ -887,8 +882,7 @@ export const WORK_MAP_V2_TOOL_PARAMETERS = {
               "required": [
                 "binding_id",
                 "origin_path",
-                "destination",
-                "origin_anchor"
+                "destination"
               ],
               "type": "object"
             },
@@ -923,7 +917,7 @@ export const WORK_MAP_V2_TOOL_PARAMETERS = {
   ],
   "type": "object"
 } as TSchema;
-export const WORK_MAP_V2_TOOL_SCHEMA_DIGEST = "07750be5a58112e8b3f956f261d33ef75e3a71b9b13b75be2192cfc43adbbc9a";
+export const WORK_MAP_V2_TOOL_SCHEMA_DIGEST = "4f341cc4aade90ac13c4584898f29b42d054d4ea4b5c126117841550e680ae75";
 
 export const WORK_MAP_V2_CLOSED_TOOL_PARAMETERS = {
   "additionalProperties": false,
@@ -1199,11 +1193,6 @@ export const WORK_MAP_V2_CLOSED_TOOL_PARAMETERS = {
                   "maxLength": 4096,
                   "type": "string"
                 },
-                "origin_anchor": {
-                  "description": "Immutable whole-file origin anchor; Core V2 admission requires a nonempty value.",
-                  "maxLength": 4096,
-                  "type": "string"
-                },
                 "origin_path": {
                   "description": "Exact normalized repository-relative origin path.",
                   "maxLength": 4096,
@@ -1213,8 +1202,7 @@ export const WORK_MAP_V2_CLOSED_TOOL_PARAMETERS = {
               "required": [
                 "binding_id",
                 "origin_path",
-                "destination",
-                "origin_anchor"
+                "destination"
               ],
               "type": "object"
             },
@@ -1249,7 +1237,7 @@ export const WORK_MAP_V2_CLOSED_TOOL_PARAMETERS = {
   ],
   "type": "object"
 } as TSchema;
-export const WORK_MAP_V2_CLOSED_TOOL_SCHEMA_DIGEST = "3efc6b230002a7216a3e471441a755672f2a750658483e7882b1fa3edb549495";
+export const WORK_MAP_V2_CLOSED_TOOL_SCHEMA_DIGEST = "4b254caa4e21953efdc3102cb86c35c3238dfadc57b83fb083f5cbb49065857c";
 
 export const PLAN_REVIEW_TOOL_PARAMETERS = {
   "additionalProperties": true,

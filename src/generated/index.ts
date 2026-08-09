@@ -172,10 +172,6 @@ export interface AgentRunSpec {
   atom_registry_digest?: Digest | null;
   planning_inputs_path?: Path | null;
   planning_inputs_digest?: Digest | null;
-  repository_manifest_path?: Path | null;
-  repository_manifest_digest?: Digest | null;
-  repository_head_commit?: Sha | null;
-  repository_head_tree?: Sha | null;
 }
 
 export interface AllocationLaneProposal {
@@ -1477,7 +1473,6 @@ export interface PlanUnitVendorBindingV2 {
   binding_id: Id;
   origin_path: Path;
   destination: Path;
-  origin_anchor: string;
 }
 
 export interface WorkMapRecoveryV2 {

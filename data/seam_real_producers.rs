@@ -3,20 +3,19 @@ impl TaskAuthority for TaskFiles { fn input_set(&self) -> Result<planning::TaskI
 struct InlineTask(String);
 impl TaskAuthority for InlineTask { fn input_set(&self) -> Result<planning::TaskInputSet, planning::PlanningError> { planning::inline_task_input(self.0.clone()) } }
 
-struct RepoGrounding { repo: PathBuf }
+/// Planning grounds only the already-admitted task atoms.  It must not inspect
+/// the checkout, enumerate a tree, or bind a Git tip before execution creates
+/// the run main and lane worktree.
+struct RepoGrounding;
 impl planning::RepositoryEvidence for RepoGrounding {
     fn facts_for_atoms(&self, atoms: &[planning::Atom]) -> Result<Vec<String>, planning::PlanningError> {
-        let tip = git_stdout(&self.repo, &["rev-parse", "--verify", "HEAD"]).map_err(planning::PlanningError::ContextGap)?;
-        let files = git_stdout(&self.repo, &["ls-files"]).map_err(planning::PlanningError::ContextGap)?;
-        let mut facts = Vec::new();
-        for file in files.lines().filter(|line| !line.trim().is_empty()).take(64) {
-            let path = self.repo.join(file);
-            let body = fs::read_to_string(&path).map_err(|error| planning::PlanningError::ContextGap(format!("read:{}:{error}", path.display())))?;
-            let summary = body.lines().find(|line| !line.trim().is_empty()).unwrap_or("").trim();
-            if !summary.is_empty() { facts.push(format!("repo-file:{file}:head={}:line={summary}", tip.trim())); }
+        if atoms.is_empty() {
+            return Err(planning::PlanningError::NoRepositoryEvidence);
         }
-        if facts.is_empty() || atoms.is_empty() { return Err(planning::PlanningError::NoRepositoryEvidence); }
-        Ok(facts)
+        Ok(atoms
+            .iter()
+            .map(|atom| format!("task-authority:{}", atom.id))
+            .collect())
     }
 }
 
@@ -66,21 +65,11 @@ struct ApprovedPlanV2ReadyRootV1 {
     final_review_run_revision: u64,
 }
 
-/// The durable, deliberately unversioned legacy authority. Its historical
-/// serde behavior (including unknown-field acceptance) is unchanged.
+/// Explicit legacy work-map authority. V1 compatibility contains only units;
+/// it carries no planning repository state.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ApprovedPlanArtifactV1 {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub repository_authority: Option<ApprovedRepositoryAuthority>,
     pub units: Vec<ApprovedUnit>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ApprovedRepositoryAuthority {
-    pub manifest_path: String,
-    pub manifest_digest: String,
-    pub head_commit: Sha,
-    pub head_tree: Sha,
 }
 
 pub const REQUIRED_PLAN_REVIEW_CRITERIA: [&str; 7] =
@@ -264,7 +253,7 @@ fn planning_action_from_binding(binding: &runner::IssuedRunnerBinding) -> Result
 }
 
 fn validate_reemit_spec_binding(spec: &kernel::generated::AgentRunSpec, binding: &runner::IssuedRunnerBinding) -> Result<(), AnyError> {
-    if spec.action_id != binding.action_id || spec.assignment_id != binding.assignment_id || spec.run_revision != binding.run_revision || spec.workstream != binding.workstream || spec.role_id != binding.role_id || spec.mode != binding.mode || spec.boundary_id != binding.boundary_id || spec.result_contract != binding.result_contract || spec.prompt_path.0 != binding.prompt_path || spec.prompt_digest.0 != binding.prompt_digest || spec.spec_path.0 != binding.spec_path || spec.carrier_path.0 != binding.carrier_path || spec.session_id != binding.session_id || spec.boundary_digest.0 != binding.boundary_digest || spec.result_contract_digest.0 != binding.result_contract_digest || spec.settings_digest.0 != binding.settings_digest || spec.context_digest.0 != binding.context_digest || spec.skills_digest.0 != binding.skills_digest || spec.subscription_digest.0 != binding.subscription_digest || spec.assignment_path.as_ref().map(|path| path.0.as_str()) != binding.assignment_path.as_deref() || spec.assignment_digest.as_ref().map(|digest| digest.0.as_str()) != binding.assignment_digest.as_deref() || spec.repository_manifest_path.as_ref().map(|path| path.0.as_str()) != binding.repository_manifest_path.as_deref() || spec.repository_manifest_digest.as_ref().map(|digest| digest.0.as_str()) != binding.repository_manifest_digest.as_deref() || spec.repository_head_commit.as_ref().map(|sha| sha.0.as_str()) != binding.repository_head_commit.as_ref().map(|sha| sha.0.as_str()) || spec.repository_head_tree.as_ref().map(|sha| sha.0.as_str()) != binding.repository_head_tree.as_ref().map(|sha| sha.0.as_str()) {
+    if spec.action_id != binding.action_id || spec.assignment_id != binding.assignment_id || spec.run_revision != binding.run_revision || spec.workstream != binding.workstream || spec.role_id != binding.role_id || spec.mode != binding.mode || spec.boundary_id != binding.boundary_id || spec.result_contract != binding.result_contract || spec.prompt_path.0 != binding.prompt_path || spec.prompt_digest.0 != binding.prompt_digest || spec.spec_path.0 != binding.spec_path || spec.carrier_path.0 != binding.carrier_path || spec.session_id != binding.session_id || spec.boundary_digest.0 != binding.boundary_digest || spec.result_contract_digest.0 != binding.result_contract_digest || spec.settings_digest.0 != binding.settings_digest || spec.context_digest.0 != binding.context_digest || spec.skills_digest.0 != binding.skills_digest || spec.subscription_digest.0 != binding.subscription_digest || spec.assignment_path.as_ref().map(|path| path.0.as_str()) != binding.assignment_path.as_deref() || spec.assignment_digest.as_ref().map(|digest| digest.0.as_str()) != binding.assignment_digest.as_deref() {
         return Err(format!("CONTEXT_GAP:planning-reemit:spec-binding-drift:{}:{}:{}", binding.assignment_id.0, binding.action_id.0, binding.run_revision).into());
     }
     Ok(())
@@ -579,8 +568,8 @@ fn write_immutable_work_map(path: &Path, raw: &str, label: &str) -> Result<(), A
 }
 fn write_work_map(workstream: &str, raw: &str) -> Result<(), AnyError> { write_immutable_work_map(&work_map_path(workstream), raw, "work-map") }
 fn write_recovery_work_map(workstream: &str, raw: &str) -> Result<(), AnyError> { write_immutable_work_map(&recovery_work_map_path(workstream), raw, "recovery-work-map") }
-fn write_approved_plan(workstream: &str, repository_authority: ApprovedRepositoryAuthority, units: &[ApprovedUnit]) -> Result<(), AnyError> {
-    let artifact = ApprovedPlanArtifactV1 { repository_authority: Some(repository_authority), units: units.to_vec() };
+fn write_approved_plan(workstream: &str, units: &[ApprovedUnit]) -> Result<(), AnyError> {
+    let artifact = ApprovedPlanArtifactV1 { units: units.to_vec() };
     write_approved_plan_v1_legacy(&plan_path(workstream), &artifact)
         .map(|_| ())
         .map_err(|error| format!("CONTEXT_GAP:approved-plan:{error}").into())
@@ -654,13 +643,6 @@ enum ApprovedPlanAuthority {
 }
 
 impl ApprovedPlanAuthority {
-    fn repository_authority(&self) -> Option<&ApprovedRepositoryAuthority> {
-        match self {
-            Self::V1(artifact) => artifact.repository_authority.as_ref(),
-            Self::V2 { artifact, .. } => Some(&artifact.repository_authority),
-        }
-    }
-
     fn units(&self) -> &[ApprovedUnit] {
         match self {
             Self::V1(artifact) => &artifact.units,
@@ -818,11 +800,6 @@ fn read_approved_plan_artifact(
             return Err("approved-plan-v2 ready root binding/image authority drift".to_owned());
         }
         let artifact = read_approved_plan_v2(Path::new(&root.binding_path), &root.binding_sha256)?;
-        if artifact.repository_authority.manifest_path
-            != PathBuf::from(&artifact.repository_authority.manifest_path).display().to_string()
-        {
-            return Err("approved-plan-v2 repository authority path is not stable".to_owned());
-        }
         return Ok(ApprovedPlanAuthority::V2 { artifact, root });
     }
 
@@ -853,74 +830,12 @@ fn read_approved_plan_artifact(
     )
     .map(ApprovedPlanAuthority::V1)
 }
-fn read_verified_agent_carrier_v2(
-    binding: &runner::IssuedRunnerBinding,
-) -> Result<planning::work_map_v2::VerifiedWorkMapV2ActualCarrier, String> {
-    let manifest_path = binding
-        .repository_manifest_path
-        .as_deref()
-        .ok_or_else(|| "V2 binding lacks repository manifest path".to_owned())?;
-    let manifest_digest = binding
-        .repository_manifest_digest
-        .as_deref()
-        .ok_or_else(|| "V2 binding lacks repository manifest digest".to_owned())?;
-    let repository = runner::read_repository_authority_binding(Path::new(manifest_path), manifest_digest)
-        .map_err(|error| format!("V2 binding repository authority: {error}"))?;
-    let run_root = runner::repository_authority_run_root(&repository)
-        .map_err(|error| format!("V2 binding repository/run authority: {error}"))?;
-    let verified = planning::work_map_v2::verify_work_map_v2_actual_carrier_authority(
-        Path::new(&binding.carrier_path),
-        &run_root,
-        Path::new(&binding.spec_path),
-        &binding.spec_digest,
-    )?;
+fn read_verified_agent_carrier_v2(binding: &runner::IssuedRunnerBinding) -> Result<planning::work_map_v2::VerifiedWorkMapV2ActualCarrier, String> {
+    let carrier_path = Path::new(&binding.carrier_path);
+    let run_root = carrier_path.parent().and_then(Path::parent).and_then(Path::parent).ok_or_else(|| "V2 carrier lacks run root".to_owned())?;
+    let verified = planning::work_map_v2::verify_work_map_v2_actual_carrier_authority(carrier_path, run_root, Path::new(&binding.spec_path), &binding.spec_digest)?;
     let carrier = &verified.authority;
-    if carrier.action_id != binding.action_id.0
-        || carrier.assignment_id != binding.assignment_id.0
-        || carrier.run_revision != binding.run_revision
-        || carrier.workstream != binding.workstream.0
-        || carrier.role_id != binding.role_id.0
-        || carrier.mode != binding.mode.0
-        || carrier.boundary_id != binding.boundary_id.0
-        || carrier.result_contract != binding.result_contract.0
-        || carrier.prompt_path != binding.prompt_path
-        || carrier.prompt_digest != binding.prompt_digest
-        || carrier.boundary_digest != binding.boundary_digest
-        || carrier.result_contract_digest != binding.result_contract_digest
-        || carrier.settings_digest != binding.settings_digest
-        || carrier.context_digest != binding.context_digest
-        || carrier.skills_digest != binding.skills_digest
-        || carrier.subscription_digest != binding.subscription_digest
-        || carrier.spec_path != binding.spec_path
-        || carrier.spec_digest != binding.spec_digest
-        || carrier.carrier_path != binding.carrier_path
-    {
-        return Err("V2 carrier issued binding drift".to_owned());
-    }
-    let route = binding
-        .terminal_route
-        .as_ref()
-        .ok_or_else(|| "V2 binding lacks terminal route".to_owned())?;
-    let expected_route = runner::terminal_route_for(
-        &binding.role_id.0,
-        &binding.boundary_id.0,
-        &binding.result_contract.0,
-    )
-    .map_err(|error| format!("V2 role/profile mapping: {error}"))?;
-    if route != &expected_route || carrier.terminal_route != expected_route {
-        return Err("V2 carrier terminal route role/profile tuple drift".to_owned());
-    }
-    if binding.repository_manifest_path.as_deref()
-        != Some(carrier.repository_manifest_path.as_str())
-        || binding.repository_manifest_digest.as_deref()
-            != Some(carrier.repository_manifest_digest.as_str())
-        || binding.repository_head_commit.as_ref().map(|value| value.0.as_str())
-            != Some(carrier.repository_head_commit.as_str())
-        || binding.repository_head_tree.as_ref().map(|value| value.0.as_str())
-            != Some(carrier.repository_head_tree.as_str())
-    {
-        return Err("V2 carrier binding repository authority drift".to_owned());
-    }
+    if carrier.action_id != binding.action_id.0 || carrier.assignment_id != binding.assignment_id.0 || carrier.run_revision != binding.run_revision || carrier.workstream != binding.workstream.0 || carrier.role_id != binding.role_id.0 || carrier.mode != binding.mode.0 || carrier.boundary_id != binding.boundary_id.0 || carrier.result_contract != binding.result_contract.0 || carrier.prompt_path != binding.prompt_path || carrier.prompt_digest != binding.prompt_digest || carrier.spec_path != binding.spec_path || carrier.spec_digest != binding.spec_digest || carrier.carrier_path != binding.carrier_path { return Err("V2 carrier issued binding drift".to_owned()); }
     Ok(verified)
 }
 
@@ -964,47 +879,11 @@ fn v2_subject_binding(
     }
 }
 
-fn admit_v2_work_map(
-    state: &CoreState,
-    binding: &runner::IssuedRunnerBinding,
-    permit_recovery: bool,
-) -> Result<planning::ApprovedWorkMapV2, String> {
+fn admit_v2_work_map(state: &CoreState, binding: &runner::IssuedRunnerBinding, permit_recovery: bool) -> Result<planning::ApprovedWorkMapV2, String> {
     let verified = read_verified_agent_carrier_v2(binding)?;
     let carrier = &verified.authority;
-    let repository = runner::read_repository_authority_binding(
-        Path::new(&carrier.repository_manifest_path),
-        &carrier.repository_manifest_digest,
-    )
-    .map_err(|error| format!("V2 carrier repository authority: {error}"))?;
-    if repository.manifest.head_commit != carrier.repository_head_commit
-        || repository.manifest.head_tree != carrier.repository_head_tree
-    {
-        return Err("V2 carrier repository head/tree drift".to_owned());
-    }
-    let recovery_subject = if carrier.role_id == "recovery-engineer" {
-        if !permit_recovery || carrier.mode != "planning-repair" || carrier.terminal_route.profile_id != "recovery-work-map.v2" {
-            return Err("V2 recovery role/mode/profile drift".to_owned());
-        }
-        let subject_binding = v2_subject_binding(state, binding)?;
-        Some(admit_v2_work_map(state, &subject_binding, false)?)
-    } else {
-        if carrier.terminal_route.profile_id == "recovery-work-map.v2" || !permit_recovery && carrier.role_id == "recovery-engineer" {
-            return Err("V2 typed subject/recovery role mixing".to_owned());
-        }
-        None
-    };
-    planning::work_map_v2::admit_work_map_v2_verified_carrier(
-        verified.source.raw_work_map_payload(),
-        verified.source.path(),
-        verified.source.raw_bytes(),
-        planning::WorkMapV2AdmissionContext {
-            atom_registry_path: Path::new(&carrier.atom_registry_path),
-            atom_registry_digest: &carrier.atom_registry_digest,
-            repository_authority: &repository,
-            recovery_subject: recovery_subject.as_ref(),
-        },
-    )
-    .map_err(|error| format!("V2 strict Core admission: {error}"))
+    let recovery_subject = if carrier.role_id == "recovery-engineer" { if !permit_recovery { return Err("V2 recovery is not permitted".to_owned()); } Some(admit_v2_work_map(state, &v2_subject_binding(state, binding)?, false)?) } else { None };
+    planning::work_map_v2::admit_work_map_v2_verified_carrier(verified.source.raw_work_map_payload(), verified.source.path(), verified.source.raw_bytes(), planning::WorkMapV2AdmissionContext { atom_registry_path: Path::new(&carrier.atom_registry_path), atom_registry_digest: &carrier.atom_registry_digest, recovery_subject: recovery_subject.as_ref() }).map_err(|error| format!("V2 strict Core admission: {error}"))
 }
 
 fn promote_v2_review_subject(
@@ -1013,29 +892,12 @@ fn promote_v2_review_subject(
 ) -> Result<ApprovedPlanV2Promotion, String> {
     let subject = v2_subject_binding(state, review_binding)?;
     let admitted = admit_v2_work_map(state, &subject, true)?;
-    let root = PathBuf::from(&admitted.repository_authority().manifest.repo_root)
-        .join(".pi/autopilot")
-        .join(&review_binding.workstream.0);
+    let root = std::env::current_dir().map_err(|error| error.to_string())?.join(".pi/autopilot").join(&review_binding.workstream.0);
     let image = root.join("approved-plan.v2.json");
     let binding = root.join("approved-plan.v2-binding.json");
     write_approved_plan_v2(&review_binding.workstream.0, &image, &binding, &admitted)
 }
 
-fn approved_repository_authority_for_carrier(carrier: &AgentCarrier) -> Result<ApprovedRepositoryAuthority, String> {
-    let spec_bytes = fs::read(&carrier.spec_path).map_err(|error| format!("spec-read:{}:{error}", carrier.spec_path))?;
-    let spec_digest = sha256_hex_local(&spec_bytes);
-    if spec_digest != carrier.spec_digest { return Err(format!("spec-digest:expected={} got={spec_digest}", carrier.spec_digest)); }
-    let spec: kernel::generated::AgentRunSpec = serde_json::from_slice(&spec_bytes).map_err(|error| format!("spec-json:{error}"))?;
-    let path = spec.repository_manifest_path.as_ref().ok_or_else(|| "missing repository_manifest_path".to_owned())?;
-    let digest = spec.repository_manifest_digest.as_ref().ok_or_else(|| "missing repository_manifest_digest".to_owned())?;
-    let head_commit = spec.repository_head_commit.as_ref().ok_or_else(|| "missing repository_head_commit".to_owned())?;
-    let head_tree = spec.repository_head_tree.as_ref().ok_or_else(|| "missing repository_head_tree".to_owned())?;
-    let binding = runner::read_repository_authority_binding(Path::new(&path.0), &digest.0).map_err(|error| error.to_string())?;
-    if binding.manifest.head_commit != head_commit.0 || binding.manifest.head_tree != head_tree.0 {
-        return Err(format!("repository manifest head/tree drift: manifest {}/{} spec {}/{}", binding.manifest.head_commit, binding.manifest.head_tree, head_commit.0, head_tree.0));
-    }
-    Ok(ApprovedRepositoryAuthority { manifest_path: binding.path, manifest_digest: binding.digest, head_commit: Sha(binding.manifest.head_commit), head_tree: Sha(binding.manifest.head_tree) })
-}
 #[derive(Debug)]
 enum PlanningRecoveryAdmission {
     Continue,
@@ -1206,8 +1068,7 @@ fn apply_planning_side_effects(carrier: &AgentCarrier, binding: &runner::IssuedR
         let work_map = planning_subject_raw(binding)
             .map_err(|error| format!("CONTEXT_GAP:approved-plan:subject:{error}"))?;
         let units = parse_approved_units(&work_map).map_err(|error| format!("CONTEXT_GAP:approved-plan:{error}"))?;
-        let repository_authority = approved_repository_authority_for_carrier(carrier).map_err(|error| format!("CONTEXT_GAP:approved-plan:repository-authority:{error}"))?;
-        write_approved_plan(&carrier.workstream, repository_authority, &units).map_err(|error| format!("CONTEXT_GAP:approved-plan:{error}"))?;
+        write_approved_plan(&carrier.workstream, &units).map_err(|error| format!("CONTEXT_GAP:approved-plan:{error}"))?;
     }
     Ok(())
 }

@@ -37,21 +37,21 @@ const COMPILER: ExpectedTuple = ExpectedTuple {
     mode: "initial-plan",
     profile: "planning.work-map.v2:autopilot_submit_plan_cluster",
     tool: "autopilot_submit_plan_cluster",
-    schema_digest: "07750be5a58112e8b3f956f261d33ef75e3a71b9b13b75be2192cfc43adbbc9a",
+    schema_digest: "4f341cc4aade90ac13c4584898f29b42d054d4ea4b5c126117841550e680ae75",
 };
 const SYNTHESIZER: ExpectedTuple = ExpectedTuple {
     role: "plan-synthesizer",
     mode: "initial-plan",
     profile: "planning.work-map.v2:autopilot_submit_synthesis",
     tool: "autopilot_submit_synthesis",
-    schema_digest: "07750be5a58112e8b3f956f261d33ef75e3a71b9b13b75be2192cfc43adbbc9a",
+    schema_digest: "4f341cc4aade90ac13c4584898f29b42d054d4ea4b5c126117841550e680ae75",
 };
 const RECOVERY: ExpectedTuple = ExpectedTuple {
     role: "recovery-engineer",
     mode: "planning-repair",
     profile: "recovery-work-map.v2",
     tool: "autopilot_emit_status",
-    schema_digest: "3efc6b230002a7216a3e471441a755672f2a750658483e7882b1fa3edb549495",
+    schema_digest: "4b254caa4e21953efdc3102cb86c35c3238dfadc57b83fb083f5cbb49065857c",
 };
 
 static PROCESS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -112,10 +112,6 @@ struct StrictCarrierV2 {
     terminal_route: TerminalRoute,
     atom_registry_path: String,
     atom_registry_digest: String,
-    repository_manifest_path: String,
-    repository_manifest_digest: String,
-    repository_head_commit: String,
-    repository_head_tree: String,
     raw_output: String,
 }
 
@@ -153,10 +149,6 @@ struct CaptureRecord {
     session_id: String,
     atom_registry_path: String,
     atom_registry_digest: String,
-    repository_manifest_path: String,
-    repository_manifest_digest: String,
-    repository_head_commit: String,
-    repository_head_tree: String,
     approved_binding_path: String,
     approved_binding_digest: String,
     approved_image_digest: String,
@@ -290,72 +282,6 @@ fn capture_report_is_closed_and_destination_sorted() {
 }
 
 #[test]
-fn fixture_runtime_ignores_are_exact_and_exclude_foreign_pi_residue() {
-    let temp = fs::canonicalize(env::temp_dir()).expect("canonical temp root");
-    let base = temp.join(format!(
-        "work-map-v2-capture-runtime-ignore-{}",
-        std::process::id()
-    ));
-    fs::create_dir(&base).expect("new runtime-ignore fixture root");
-    let root = base.join("repository");
-    create_fixture_repository(&root).expect("fixture repository");
-    let root = fs::canonicalize(root).expect("canonical fixture repository");
-    let _inputs = create_fixture_inputs(&root).expect("package fixture inputs");
-    write_new(
-        &root.join(".pi/tasks/capture-task.json"),
-        b"{}\n",
-        "fixture task runtime input",
-    )
-    .expect("package task runtime input");
-
-    let status = Command::new("git")
-        .current_dir(&root)
-        .args([
-            "status",
-            "--porcelain=v1",
-            "--ignored=matching",
-            "--untracked-files=all",
-            "--",
-            ".pi",
-        ])
-        .output()
-        .expect("fixture ignored status");
-    assert!(
-        status.status.success(),
-        "fixture ignored status: {}",
-        String::from_utf8_lossy(&status.stderr)
-    );
-    assert_eq!(
-        String::from_utf8(status.stdout).expect("fixture ignored status UTF-8"),
-        "!! .pi/autopilot/\n!! .pi/tasks/\n"
-    );
-    runner::repository_authority(&root)
-        .expect("repository authority accepts only package-owned fixture runtime paths");
-
-    write_new(
-        &root.join(".pi/foreign/residue.json"),
-        b"{}\n",
-        "foreign untracked residue",
-    )
-    .expect("foreign untracked residue");
-    let untracked = runner::repository_authority(&root)
-        .expect_err("foreign untracked residue must remain outside package authority")
-        .to_string();
-    assert!(
-        untracked.contains("?? .pi/foreign/residue.json"),
-        "{untracked}"
-    );
-
-    fs::write(root.join(".git/info/exclude"), b".pi/foreign/\n")
-        .expect("ignore foreign fixture residue");
-    let ignored = runner::repository_authority(&root)
-        .expect_err("foreign ignored residue must remain outside package authority")
-        .to_string();
-    assert!(ignored.contains("!! .pi/foreign/"), "{ignored}");
-    fs::remove_dir_all(base).expect("remove runtime-ignore fixture root");
-}
-
-#[test]
 fn declared_capture_planning_identities_are_exact_before_child_invocation() {
     for (expected, assignment_id, action_id, run_revision) in [
         (
@@ -452,8 +378,6 @@ fn genuine_work_map_v2_subscription_capture() {
     require_exact_pi_version(&selected_pi).expect("Pi 0.84.1 preflight");
 
     let _cwd = CurrentDirGuard::enter(&fixture_root).expect("enter capture fixture");
-    let repository_authority = runner::repository_authority_binding(&fixture_root, WORKSTREAM)
-        .expect("current fixture repository authority");
     let inputs = create_fixture_inputs(&fixture_root).expect("package-authored fixture inputs");
 
     let compiler_assignment = declared_assignment(COMPILER).expect("compiler declaration");
@@ -463,15 +387,8 @@ fn genuine_work_map_v2_subscription_capture() {
         vec![inputs.task_atoms.clone(), inputs.scout_findings.clone()],
     )
     .expect("closed compiler spec");
-    let compiler = capture_one(
-        &compiler_issue,
-        COMPILER,
-        &inputs,
-        &repository_authority,
-        None,
-        "01-plan-compiler",
-    )
-    .expect("genuine compiler WorkMap V2 carrier");
+    let compiler = capture_one(&compiler_issue, COMPILER, &inputs, None, "01-plan-compiler")
+        .expect("genuine compiler WorkMap V2 carrier");
     assert_simple_compiler_image(&compiler.record, &fixture_root)
         .expect("compiler emits one bounded no-vendor unit");
 
@@ -490,7 +407,6 @@ fn genuine_work_map_v2_subscription_capture() {
         &synthesizer_issue,
         SYNTHESIZER,
         &inputs,
-        &repository_authority,
         None,
         "02-plan-synthesizer",
     )
@@ -513,7 +429,6 @@ fn genuine_work_map_v2_subscription_capture() {
         &recovery_issue,
         RECOVERY,
         &inputs,
-        &repository_authority,
         Some(&synthesizer.admitted),
         "03-recovery-engineer",
     )
@@ -984,7 +899,6 @@ fn capture_one(
     issue: &runner::IssuedRunnerAction,
     expected: ExpectedTuple,
     inputs: &FixtureInputs,
-    repository_authority: &runner::RepositoryAuthorityBinding,
     recovery_subject: Option<&planning::ApprovedWorkMapV2>,
     approval_directory: &str,
 ) -> Result<CapturedOutput, String> {
@@ -992,13 +906,7 @@ fn capture_one(
     let spec_bytes = fs::read(&spec_path).map_err(|error| format!("read issued spec: {error}"))?;
     let spec: AgentRunSpec = serde_json::from_slice(&spec_bytes)
         .map_err(|error| format!("issued spec closed JSON: {error}"))?;
-    assert_spec_before_child(
-        &spec,
-        &issue.binding,
-        expected,
-        inputs,
-        repository_authority,
-    )?;
+    assert_spec_before_child(&spec, &issue.binding, expected, inputs)?;
 
     // This is intentionally the real child entry point.  There is no fake Pi,
     // model-output constructor, sidecar substitution, or output normalization.
@@ -1017,7 +925,6 @@ fn capture_one(
         &issue.binding,
         expected,
         inputs,
-        repository_authority,
     )?;
     let raw_output_digest = sha256_hex(carrier.raw_output.as_bytes());
     let work_map: WorkMapV2 = serde_json::from_str(&carrier.raw_output)
@@ -1049,15 +956,12 @@ fn capture_one(
         WorkMapV2AdmissionContext {
             atom_registry_path: &inputs.atom_registry_path,
             atom_registry_digest: &inputs.atom_registry_digest,
-            repository_authority,
             recovery_subject,
         },
     )
     .map_err(|error| format!("{} strict admission: {error}", expected.role))?;
 
-    let approval_root = PathBuf::from(&repository_authority.manifest.repo_root)
-        .join(".pi/autopilot")
-        .join(WORKSTREAM)
+    let approval_root = fixture_run_root(&issue.binding.spec_path)
         .join("capture-approvals")
         .join(approval_directory);
     let promotion = seam::write_approved_plan_v2_for_test_only(
@@ -1119,10 +1023,6 @@ fn capture_one(
             .ok_or_else(|| "atom registry path is not UTF-8".to_owned())?
             .to_owned(),
         atom_registry_digest: inputs.atom_registry_digest.clone(),
-        repository_manifest_path: repository_authority.path.clone(),
-        repository_manifest_digest: repository_authority.digest.clone(),
-        repository_head_commit: repository_authority.manifest.head_commit.clone(),
-        repository_head_tree: repository_authority.manifest.head_tree.clone(),
         approved_binding_path: path_to_string(&promotion.binding_path)?,
         approved_binding_digest: promotion.binding_sha256,
         approved_image_digest: promotion.approved_plan_sha256,
@@ -1140,7 +1040,6 @@ fn assert_spec_before_child(
     binding: &runner::IssuedRunnerBinding,
     expected: ExpectedTuple,
     inputs: &FixtureInputs,
-    repository_authority: &runner::RepositoryAuthorityBinding,
 ) -> Result<(), String> {
     let route = spec
         .terminal_route
@@ -1168,23 +1067,6 @@ fn assert_spec_before_child(
             .as_ref()
             .map(|digest| digest.0.as_str())
             != Some(inputs.atom_registry_digest.as_str())
-        || spec
-            .repository_manifest_path
-            .as_ref()
-            .map(|path| path.0.as_str())
-            != Some(repository_authority.path.as_str())
-        || spec
-            .repository_manifest_digest
-            .as_ref()
-            .map(|digest| digest.0.as_str())
-            != Some(repository_authority.digest.as_str())
-        || spec
-            .repository_head_commit
-            .as_ref()
-            .map(|sha| sha.0.as_str())
-            != Some(repository_authority.manifest.head_commit.as_str())
-        || spec.repository_head_tree.as_ref().map(|sha| sha.0.as_str())
-            != Some(repository_authority.manifest.head_tree.as_str())
         || spec.runtime_extension_digest.is_none()
     {
         return Err(format!(
@@ -1218,7 +1100,6 @@ fn assert_carrier_after_child(
     binding: &runner::IssuedRunnerBinding,
     expected: ExpectedTuple,
     inputs: &FixtureInputs,
-    repository_authority: &runner::RepositoryAuthorityBinding,
 ) -> Result<(), String> {
     assert_exact_tuple(expected, &carrier.mode, &carrier.terminal_route)?;
     let spec_path = Path::new(&binding.spec_path);
@@ -1260,10 +1141,6 @@ fn assert_carrier_after_child(
                 .to_str()
                 .ok_or_else(|| "atom registry path is not UTF-8".to_owned())?
         || carrier.atom_registry_digest != inputs.atom_registry_digest
-        || carrier.repository_manifest_path != repository_authority.path
-        || carrier.repository_manifest_digest != repository_authority.digest
-        || carrier.repository_head_commit != repository_authority.manifest.head_commit
-        || carrier.repository_head_tree != repository_authority.manifest.head_tree
         || carrier.raw_output.is_empty()
         || carrier_bytes.is_empty()
     {
@@ -1431,10 +1308,6 @@ fn report_record(destination: &str, expected: ExpectedTuple) -> CaptureRecord {
         session_id: "capture-session".to_owned(),
         atom_registry_path: "/outside/atoms.json".to_owned(),
         atom_registry_digest: "c".repeat(64),
-        repository_manifest_path: "/outside/repository-authority.v1.json".to_owned(),
-        repository_manifest_digest: "d".repeat(64),
-        repository_head_commit: "e".repeat(40),
-        repository_head_tree: "f".repeat(40),
         approved_binding_path: format!("/outside/{destination}/binding.json"),
         approved_binding_digest: "0".repeat(64),
         approved_image_digest: "1".repeat(64),
@@ -1475,6 +1348,15 @@ fn atomic_write_create_once(path: &Path, bytes: &[u8]) -> Result<(), String> {
     File::open(parent)
         .and_then(|directory| directory.sync_all())
         .map_err(|error| format!("sync capture report directory: {error}"))
+}
+
+fn fixture_run_root(spec_path: &str) -> PathBuf {
+    Path::new(spec_path)
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .expect("planning spec has a workstream run root")
+        .to_path_buf()
 }
 
 fn path_to_string(path: &Path) -> Result<String, String> {

@@ -394,8 +394,8 @@ fn min_bytes_is_not_a_contract_feature() {
     fs::write(
         &contracts,
         source.replace(
-            "field \"origin_anchor\" type=\"string\" required=#true max_bytes=4096",
-            "field \"origin_anchor\" type=\"string\" required=#true min_bytes=1 max_bytes=4096",
+            "field \"origin_path\" type=\"path\" required=#true max_bytes=4096",
+            "field \"origin_path\" type=\"path\" required=#true min_bytes=1 max_bytes=4096",
         ),
     )
     .expect("write min_bytes contract");
@@ -554,8 +554,8 @@ fn v2_package_scope_codegen_mutation_regenerates_closed_schema_and_profiles() {
     );
     // These are the independently captured post-mutation contracts. Do not
     // derive an expected digest from the regenerated schema under test.
-    const OPEN_DIGEST: &str = "b87f4bf193429c33fd3fb69a14ec51c6e7aff6ae00c3c1d749be6c4d4e2903df";
-    const CLOSED_DIGEST: &str = "cb37f9af541a7eae8dd1577a4e7315a202fb0162da18562ac276bd71f5429198";
+    const OPEN_DIGEST: &str = "013fd1091fc0992bf066dacbb48f093e65c666d50725d21611e1a9f5992d547b";
+    const CLOSED_DIGEST: &str = "d8e8d6702062514a649d174c4e5dd17b4cae43c25aece52ce74f480e312ba807";
     assert!(ts.contains(&format!(
         "export const WORK_MAP_V2_TOOL_SCHEMA_DIGEST = \"{OPEN_DIGEST}\";"
     )));

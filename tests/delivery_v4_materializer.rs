@@ -1,7 +1,7 @@
 #![cfg(unix)]
 
 use std::fs;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, chown, symlink};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -109,6 +109,24 @@ fn git_text(root: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
+fn set_exact_special_mode(path: &Path, mode: u32) {
+    let group_probe = std::env::temp_dir().join(format!(
+        "autopilot-v4-mode-group-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::write(&group_probe, b"group probe").unwrap();
+    let effective_group = fs::metadata(&group_probe).unwrap().gid();
+    fs::remove_file(&group_probe).unwrap();
+    chown(path, None, Some(effective_group)).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    assert_eq!(
+        fs::metadata(path).unwrap().permissions().mode() & 0o7777,
+        mode,
+        "test fixture must retain the requested special mode"
+    );
+}
+
 fn repository() -> PathBuf {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../target/v4-materializer-fixtures")
@@ -120,6 +138,11 @@ fn repository() -> PathBuf {
     fs::create_dir_all(root.join("upstream")).unwrap();
     fs::create_dir_all(root.join("src")).unwrap();
     fs::write(root.join("upstream/source.bin"), b"immutable\0non-utf8\xff").unwrap();
+    fs::set_permissions(
+        root.join("upstream/source.bin"),
+        fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
     fs::write(
         root.join("upstream/executable.bin"),
         b"executable\0non-utf8\xfe",
@@ -161,7 +184,6 @@ fn atom_registry(root: &Path) -> (PathBuf, String) {
 }
 
 fn actual_carrier_named(root: &Path, name: &str, raw: &str) -> PathBuf {
-    let authority = runner::repository_authority_binding(root, "main").unwrap();
     let (atom_path, atom_digest) = atom_registry(root);
     let assignment_id = Id(format!("planning-v4-{}", name.replace('.', "-")));
     let paths = runner::planning_paths(root, "main", &assignment_id);
@@ -176,7 +198,7 @@ fn actual_carrier_named(root: &Path, name: &str, raw: &str) -> PathBuf {
         boundary_id: ContractId("planning.work-map.v2".into()),
         result_contract: ContractId("planning.work-map.v2".into()),
         schema_digest: ContractDigest(
-            "07750be5a58112e8b3f956f261d33ef75e3a71b9b13b75be2192cfc43adbbc9a".into(),
+            "4f341cc4aade90ac13c4584898f29b42d054d4ea4b5c126117841550e680ae75".into(),
         ),
     };
     let spec = AgentRunSpec {
@@ -248,10 +270,6 @@ fn actual_carrier_named(root: &Path, name: &str, raw: &str) -> PathBuf {
         atom_registry_digest: Some(ContractDigest(atom_digest.clone())),
         planning_inputs_path: None,
         planning_inputs_digest: None,
-        repository_manifest_path: Some(ContractPath(authority.path.clone())),
-        repository_manifest_digest: Some(ContractDigest(authority.digest.clone())),
-        repository_head_commit: Some(Sha(authority.manifest.head_commit.clone())),
-        repository_head_tree: Some(Sha(authority.manifest.head_tree.clone())),
     };
     let spec_bytes = serde_json::to_vec(&spec).unwrap();
     fs::write(&paths.spec_path, &spec_bytes).unwrap();
@@ -265,8 +283,7 @@ fn actual_carrier_named(root: &Path, name: &str, raw: &str) -> PathBuf {
         "spec_digest":sha(&spec_bytes), "spec_path":paths.spec_path, "carrier_path":paths.carrier_path, "carrier_channel":"tool",
         "tool_name":route.tool_name.0, "tool_schema_digest":route.schema_digest.0, "carrier_binding":runner::child::carrier_binding(&spec),
         "pi_version":"pi test-only 0.84.1", "terminal_route":route, "atom_registry_path":atom_path, "atom_registry_digest":atom_digest,
-        "repository_manifest_path":authority.path, "repository_manifest_digest":authority.digest,
-        "repository_head_commit":authority.manifest.head_commit, "repository_head_tree":authority.manifest.head_tree, "raw_output":raw,
+        "raw_output":raw,
     });
     fs::write(&paths.carrier_path, serde_json::to_vec(&carrier).unwrap()).unwrap();
     paths.carrier_path
@@ -276,7 +293,7 @@ fn command() -> serde_json::Value {
     serde_json::json!({"command":"true","expected":"passes","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"leaves no state"})
 }
 
-fn plan(root: &Path, empty: bool) -> String {
+fn plan(_root: &Path, empty: bool) -> String {
     if empty {
         return serde_json::json!({"schema":"planning.work-map.v2","units":[{
             "id":"U1","kind":"implementation","objective":"author mutable leaf","criteria":["authored"],"depends_on":[],
@@ -284,32 +301,20 @@ fn plan(root: &Path, empty: bool) -> String {
             "package_proofs":[],"vendor_bindings":[],"provenance_manifest_destination":null,"links":["atom-1"]
         }]}).to_string();
     }
-    let authority = runner::repository_authority_binding(root, "main").unwrap();
-    let anchor = |path: &str| {
-        authority
-            .manifest
-            .tracked_sources
-            .iter()
-            .find(|source| source.path == path)
-            .unwrap()
-            .whole_file_anchor
-            .clone()
-    };
     serde_json::json!({"schema":"planning.work-map.v2","units":[{
         "id":"U1","kind":"implementation","objective":"materialize binary sources and author mutable leaf","criteria":["exact"],"depends_on":[],
         "files":["vendor/z.bin","vendor/a.bin","manifests/provenance.tsv","src/authored.rs"],
         "package_scope_files":["vendor/z.bin","vendor/a.bin","manifests/provenance.tsv","src/authored.rs"],"commands":[command()],
         "package_proofs":[{"proof_id":"clean","kind":"clean-exact-package-tip","criterion_ordinals":[1],"expected":"clean exact tip","vendor_binding_ids":[]},{"proof_id":"vendor","kind":"vendored-bytes-match-origin","criterion_ordinals":[1],"expected":"exact bytes","vendor_binding_ids":["binding-a","binding-z"]}],
         "vendor_bindings":[
-          {"binding_id":"binding-z","origin_path":"upstream/source.bin","destination":"vendor/z.bin","origin_anchor":anchor("upstream/source.bin")},
-          {"binding_id":"binding-a","origin_path":"upstream/executable.bin","destination":"vendor/a.bin","origin_anchor":anchor("upstream/executable.bin")}
+          {"binding_id":"binding-z","origin_path":"upstream/source.bin","destination":"vendor/z.bin"},
+          {"binding_id":"binding-a","origin_path":"upstream/executable.bin","destination":"vendor/a.bin"}
         ],"provenance_manifest_destination":"manifests/provenance.tsv","links":["atom-1"]
     }]}).to_string()
 }
 
 fn fixture(empty: bool) -> Fixture {
     let root = repository();
-    let authority = runner::repository_authority_binding(&root, "main").unwrap();
     let (atoms, atom_digest) = atom_registry(&root);
     let raw = plan(&root, empty);
     let carrier = actual_carrier_named(&root, if empty { "empty" } else { "vendor" }, &raw);
@@ -318,7 +323,6 @@ fn fixture(empty: bool) -> Fixture {
         WorkMapV2AdmissionContext {
             atom_registry_path: &atoms,
             atom_registry_digest: &atom_digest,
-            repository_authority: &authority,
             recovery_subject: None,
         },
     )
@@ -345,6 +349,19 @@ fn fixture(empty: bool) -> Fixture {
         ],
     );
     let worktree = fs::canonicalize(worktree).unwrap();
+    // Materialization reads the lane worktree, so make its fixture sources
+    // explicitly satisfy the only supported regular-file modes even under a
+    // restrictive parent umask.
+    fs::set_permissions(
+        worktree.join("upstream/source.bin"),
+        fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    fs::set_permissions(
+        worktree.join("upstream/executable.bin"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
     let request = CoreMaterializationRequestV4 {
         workstream: Id("main".into()),
         assignment_id: Id("assignment-main-L1".into()),
@@ -505,6 +522,7 @@ fn actual_v2_materializes_exact_bytes_modes_manifest_and_replays_under_restricti
     let manifest = fs::read(fixture.worktree.join("manifests/provenance.tsv")).unwrap();
     let digest_a = sha(b"executable\0non-utf8\xfe");
     let digest_z = sha(b"immutable\0non-utf8\xff");
+    let manifest_digest = sha(&manifest);
     assert_eq!(manifest, format!("upstream/executable.bin\tvendor/a.bin\tsha256:{digest_a}\nupstream/source.bin\tvendor/z.bin\tsha256:{digest_z}\n").into_bytes());
     let intention: runner::CoreMaterializationIntentionV1 =
         serde_json::from_slice(&fs::read(&binding.intention_path).unwrap()).unwrap();
@@ -529,6 +547,27 @@ fn actual_v2_materializes_exact_bytes_modes_manifest_and_replays_under_restricti
     assert_eq!(receipt.intention_digest, binding.intention_digest);
     assert_eq!(receipt.completed_baseline, binding.baseline);
     assert_eq!(
+        binding
+            .baseline
+            .iter()
+            .map(|leaf| (
+                leaf.destination.0.as_str(),
+                leaf.mode.as_str(),
+                leaf.bytes_sha256.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                "manifests/provenance.tsv",
+                "100644",
+                manifest_digest.as_str()
+            ),
+            ("vendor/a.bin", "100755", digest_a.as_str()),
+            ("vendor/z.bin", "100644", digest_z.as_str()),
+        ],
+        "the receipt records exact lane-worktree bytes and modes"
+    );
+    assert_eq!(
         materialize(&fixture),
         binding,
         "only a complete pair replays idempotently"
@@ -547,6 +586,68 @@ fn actual_v2_materializes_exact_bytes_modes_manifest_and_replays_under_restricti
         helper.status.success(),
         "umask helper stderr: {}",
         String::from_utf8_lossy(&helper.stderr)
+    );
+}
+
+#[test]
+fn materialization_replay_uses_receipted_baseline_without_reading_origins() {
+    let fixture = fixture(false);
+    let binding = materialize(&fixture);
+    let artifact = ordinary_artifact(&fixture, binding);
+    fs::remove_file(fixture.worktree.join("upstream/source.bin")).unwrap();
+    fs::remove_file(fixture.worktree.join("upstream/executable.bin")).unwrap();
+
+    assert!(
+        runner::materializer_v4::replay_v4_materialization(&artifact).is_ok(),
+        "receipt replay validates protected baseline leaves without reopening origins"
+    );
+}
+
+#[test]
+fn materializer_reads_only_exact_lane_worktree_sources_and_rejects_unsafe_leaves() {
+    for label in [
+        "symlink",
+        "directory",
+        "missing",
+        "oversized",
+        "setuid",
+        "setgid",
+        "sticky",
+    ] {
+        let fixture = fixture(false);
+        let source = fixture.worktree.join("upstream/executable.bin");
+        match label {
+            "symlink" => {
+                fs::remove_file(&source).unwrap();
+                symlink(fixture.root.join("foreign-tracked.txt"), &source).unwrap();
+            }
+            "directory" => {
+                fs::remove_file(&source).unwrap();
+                fs::create_dir(&source).unwrap();
+            }
+            "missing" => fs::remove_file(&source).unwrap(),
+            "oversized" => {
+                fs::write(&source, vec![b'x'; runner::MAX_AUTHORITY_SOURCE_BYTES + 1]).unwrap();
+                fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            "setuid" => set_exact_special_mode(&source, 0o4755),
+            "setgid" => set_exact_special_mode(&source, 0o2755),
+            "sticky" => set_exact_special_mode(&source, 0o1755),
+            _ => unreachable!(),
+        }
+        assert!(
+            runner::materializer_v4::materialize_v4(&fixture.request, &fixture.approved).is_err(),
+            "selected {label} source must be refused"
+        );
+    }
+
+    let fixture = fixture(false);
+    let mut unsafe_request = fixture.request.clone();
+    unsafe_request.selected_vendoring[0].vendor_bindings[0].origin_path =
+        ContractPath("../outside".into());
+    assert!(
+        runner::materializer_v4::materialize_v4(&unsafe_request, &fixture.approved).is_err(),
+        "Core must refuse a selected unsafe origin path"
     );
 }
 
@@ -638,13 +739,16 @@ fn actual_v2_crash_filesystem_and_authority_matrix_fails_closed_without_adoption
         );
     }
 
-    for label in ["byte", "mode", "symlink"] {
+    for label in ["byte", "mode", "setuid", "setgid", "sticky", "symlink"] {
         let fixture = fixture(false);
         let complete = materialize(&fixture);
         let path = fixture.worktree.join("vendor/a.bin");
         match label {
             "byte" => fs::write(&path, b"drift\0").unwrap(),
             "mode" => fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap(),
+            "setuid" => set_exact_special_mode(&path, 0o4755),
+            "setgid" => set_exact_special_mode(&path, 0o2755),
+            "sticky" => set_exact_special_mode(&path, 0o1755),
             "symlink" => {
                 fs::remove_file(&path).unwrap();
                 symlink(fixture.root.join("foreign-tracked.txt"), &path).unwrap();
@@ -679,35 +783,42 @@ fn actual_v2_crash_filesystem_and_authority_matrix_fails_closed_without_adoption
         );
     }
 
-    let head_fixture = fixture(false);
+    let unrelated_state = fixture(false);
     fs::write(
-        head_fixture.worktree.join("src/authored.rs"),
-        b"wrong head\n",
+        unrelated_state.worktree.join("src/authored.rs"),
+        b"new unrelated HEAD\n",
     )
     .unwrap();
-    git(&head_fixture.worktree, &["add", "src/authored.rs"]);
+    git(&unrelated_state.worktree, &["add", "src/authored.rs"]);
     git(
-        &head_fixture.worktree,
-        &["commit", "--quiet", "-m", "wrong head"],
+        &unrelated_state.worktree,
+        &["commit", "--quiet", "-m", "move unrelated lane HEAD"],
     );
-    assert!(
-        runner::materializer_v4::materialize_v4(&head_fixture.request, &head_fixture.approved)
-            .is_err(),
-        "wrong HEAD"
+    fs::write(
+        unrelated_state.worktree.join("foreign-tracked.txt"),
+        b"dirty unrelated tracked leaf\n",
+    )
+    .unwrap();
+    fs::create_dir_all(unrelated_state.worktree.join(".pi")).unwrap();
+    fs::write(
+        unrelated_state.worktree.join(".pi/foreign.txt"),
+        b"unrelated untracked residue",
+    )
+    .unwrap();
+    symlink(
+        unrelated_state.root.join("foreign-tracked.txt"),
+        unrelated_state.worktree.join("unrelated-link"),
+    )
+    .unwrap();
+    let binding = materialize(&unrelated_state);
+    assert_eq!(
+        fs::read(unrelated_state.worktree.join("vendor/a.bin")).unwrap(),
+        b"executable\0non-utf8\xfe"
     );
-    let mut main = head_fixture.request.clone();
-    main.worktree = head_fixture.root.clone();
-    assert!(
-        runner::materializer_v4::materialize_v4(&main, &head_fixture.approved).is_err(),
-        "main checkout"
-    );
-
-    let fixture = fixture(false);
-    fs::create_dir_all(fixture.worktree.join(".pi")).unwrap();
-    fs::write(fixture.worktree.join(".pi/foreign.txt"), b"foreign residue").unwrap();
-    assert!(
-        runner::materializer_v4::materialize_v4(&fixture.request, &fixture.approved).is_err(),
-        "foreign nonignored .pi residue"
+    assert_eq!(
+        materialize(&unrelated_state),
+        binding,
+        "replay must not enumerate unrelated repository state"
     );
 }
 
@@ -1055,6 +1166,8 @@ fn small_rooted_v2_proof_request() -> (Fixture, runner::ValidationRunnerRequest)
     .unwrap();
     let expected = expectation(&fixture.worktree, &fixture.base, false);
     let delivery = result(&expected, "src/authored.rs");
+    runner::materializer_v4::replay_v4_materialization(&artifact)
+        .unwrap_or_else(|error| panic!("materialization replay before package: {error}"));
     let package = runner::establish_delivery_package_v4(&delivery, &expected, &artifact).unwrap();
     let accepted =
         runner::accept_delivery_v4_with_package_facts(&delivery, &expected, &artifact, &package)
@@ -1301,9 +1414,6 @@ fn actual_v2_preissuance_mutations_write_no_validator_artifacts() {
         "package-commit-mismatch",
         "package-tree-mismatch",
         "foreign-candidate-residue",
-        "origin-dirty",
-        "origin-head-drift",
-        "origin-mode-drift",
         "approved-binding-digest-drift",
         "materialization-receipt-drift",
     ];
@@ -1346,27 +1456,6 @@ fn actual_v2_preissuance_mutations_write_no_validator_artifacts() {
             "foreign-candidate-residue" => {
                 fs::write(fixture.worktree.join("foreign-candidate.txt"), b"residue\n").unwrap();
             }
-            "origin-dirty" => {
-                fs::write(
-                    fixture.root.join("upstream/source.bin"),
-                    b"origin dirty\0\xff",
-                )
-                .unwrap();
-            }
-            "origin-head-drift" => {
-                fs::write(
-                    fixture.root.join("upstream/source.bin"),
-                    b"origin head\0\xff",
-                )
-                .unwrap();
-                git(&fixture.root, &["add", "upstream/source.bin"]);
-                git(&fixture.root, &["commit", "--quiet", "-m", "origin drift"]);
-            }
-            "origin-mode-drift" => fs::set_permissions(
-                fixture.root.join("upstream/executable.bin"),
-                fs::Permissions::from_mode(0o644),
-            )
-            .unwrap(),
             "approved-binding-digest-drift" => {
                 rooted_artifact_mut(&mut request).approved_plan_binding_digest = "0".repeat(64);
             }
@@ -1542,22 +1631,6 @@ fn actual_v2_inner_receipt_and_replay_mutation_table_fails_closed() {
             InnerV2Mutation::ReceiptDigest("materialization_receipt_digest"),
         ),
         (
-            "repository-manifest-path",
-            InnerV2Mutation::ReceiptText("repository_manifest_path"),
-        ),
-        (
-            "repository-manifest-digest",
-            InnerV2Mutation::ReceiptDigest("repository_manifest_digest"),
-        ),
-        (
-            "repository-head-commit",
-            InnerV2Mutation::ReceiptOid("repository_head_commit"),
-        ),
-        (
-            "repository-head-tree",
-            InnerV2Mutation::ReceiptOid("repository_head_tree"),
-        ),
-        (
             "scope-count",
             InnerV2Mutation::ReceiptCount("package_scope_files_count"),
         ),
@@ -1644,13 +1717,8 @@ fn actual_v2_external_assignment_root_rejects_omitted_v2_record() {
 }
 
 #[test]
-fn actual_v2_live_replay_drift_rejects_original_authority() {
-    for label in [
-        "candidate-bytes",
-        "candidate-mode",
-        "origin-status",
-        "origin-head",
-    ] {
+fn actual_v2_live_replay_rejects_candidate_and_manifest_drift_without_origin_reads() {
+    for label in ["candidate-bytes", "candidate-mode", "manifest-bytes"] {
         let (fixture, request, path, authority) = issue_small_rooted_v2_proof();
         let original_authority_bytes = fs::read(&path).unwrap();
         let expected_digest = authority["authority_digest"].as_str().unwrap();
@@ -1663,25 +1731,11 @@ fn actual_v2_live_replay_drift_rejects_original_authority() {
                 fs::Permissions::from_mode(0o644),
             )
             .unwrap(),
-            "origin-status" => {
-                fs::write(
-                    fixture.root.join("upstream/source.bin"),
-                    b"origin drift\0\xff",
-                )
-                .unwrap();
-            }
-            "origin-head" => {
-                fs::write(
-                    fixture.root.join("upstream/source.bin"),
-                    b"origin head\0\xff",
-                )
-                .unwrap();
-                git(&fixture.root, &["add", "upstream/source.bin"]);
-                git(
-                    &fixture.root,
-                    &["commit", "--quiet", "-m", "origin head drift"],
-                );
-            }
+            "manifest-bytes" => fs::write(
+                fixture.worktree.join("manifests/provenance.tsv"),
+                b"baseline manifest drift\n",
+            )
+            .unwrap(),
             _ => unreachable!(),
         }
         assert_eq!(fs::read(&path).unwrap(), original_authority_bytes);
@@ -1831,6 +1885,7 @@ fn w0_repository() -> PathBuf {
     for index in 0..84_u8 {
         let path = root.join(format!("upstream/origin-{index:03}.bin"));
         fs::write(&path, [index, 0, 0xff, b'v']).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         if index == 0 {
             fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         }
@@ -1853,21 +1908,13 @@ fn w0_repository() -> PathBuf {
     fs::canonicalize(root).unwrap()
 }
 
-fn w0_plan(root: &Path) -> String {
-    let authority = runner::repository_authority_binding(root, "main").unwrap();
-    let anchors = authority
-        .manifest
-        .tracked_sources
-        .iter()
-        .map(|source| (source.path.clone(), source.whole_file_anchor.clone()))
-        .collect::<std::collections::BTreeMap<_, _>>();
+fn w0_plan(_root: &Path) -> String {
     let vendors = (0..84)
         .map(|index| {
             serde_json::json!({
                 "binding_id":format!("binding-{index:03}"),
                 "origin_path":format!("upstream/origin-{index:03}.bin"),
                 "destination":format!("vendor/leaf-{index:03}.bin"),
-                "origin_anchor":anchors[&format!("upstream/origin-{index:03}.bin")],
             })
         })
         .collect::<Vec<_>>();
@@ -1897,7 +1944,6 @@ fn w0_plan(root: &Path) -> String {
 
 fn w0_fixture() -> Fixture {
     let root = w0_repository();
-    let authority = runner::repository_authority_binding(&root, "main").unwrap();
     let (atoms, atom_digest) = atom_registry(&root);
     let carrier = actual_carrier_named(&root, "w0", &w0_plan(&root));
     let admitted = planning::work_map_v2::admit_work_map_v2_actual_carrier_for_test_only(
@@ -1905,7 +1951,6 @@ fn w0_fixture() -> Fixture {
         WorkMapV2AdmissionContext {
             atom_registry_path: &atoms,
             atom_registry_digest: &atom_digest,
-            repository_authority: &authority,
             recovery_subject: None,
         },
     )
@@ -1980,20 +2025,6 @@ fn common_objects(root: &Path) -> PathBuf {
 #[test]
 fn actual_v2_w0_scale_packed_rooted_proofs_are_complete_and_bounded() {
     let fixture = w0_fixture();
-    let source_authority = runner::read_repository_authority_binding(
-        Path::new(&fixture.approved.repository_authority.manifest_path),
-        &fixture.approved.repository_authority.manifest_digest,
-    )
-    .unwrap();
-    assert_eq!(
-        source_authority
-            .manifest
-            .tracked_sources
-            .iter()
-            .filter(|source| source.path.starts_with("upstream/origin-"))
-            .count(),
-        84
-    );
     assert_eq!(fixture.approved.units[0].files.len(), 115);
     assert_eq!(fixture.approved.units[0].commands.len(), 1);
     assert!(fixture.approved.units[0].criterion_text.len() >= 2);
@@ -2254,11 +2285,11 @@ fn actual_v2_w0_scale_packed_rooted_proofs_are_complete_and_bounded() {
     );
     assert_eq!(
         vendor["candidate_vendor_tree_witness_digest"],
-        "ef9578f33f42435b9d34afcd61b0c92a4a471c6f3aeda87b0767e690d2069ccf"
+        "581f97046c2e4d8caed8431c20ac11cd74f0f9ea4f74e3de30020d06cfb778a4"
     );
     assert_eq!(
         vendor["candidate_manifest_tree_witness_digest"],
-        "526e3b86e803149dd5451d1d4c0b57688b8ba7c96eb707693476343331447c07"
+        "453501b727665b7f4ddba84a5589f81cc5c56dd18eb92dacb87e33c1ee9d5e86"
     );
     for receipt in &receipts {
         assert_eq!(

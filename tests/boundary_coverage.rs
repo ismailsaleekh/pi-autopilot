@@ -135,6 +135,38 @@ const V2_CAPTURE_EXPECTATIONS: [WorkMapV2CaptureExpectation; 3] = [
     },
 ];
 
+const V2_REPOSITORY_FREE_CAPTURE_REPORT_SHA256: &str =
+    "774e96ee4aa101b0bcdddc13c893b2e459f9194cdc020b50dd488f58c7d1b151";
+const V2_REPOSITORY_FREE_CAPTURE_EXPECTATIONS: [WorkMapV2CaptureExpectation; 3] = [
+    WorkMapV2CaptureExpectation {
+        role: "plan-compiler",
+        mode: "initial-plan",
+        profile: "planning.work-map.v2:autopilot_submit_plan_cluster",
+        tool: "autopilot_submit_plan_cluster",
+        schema_digest: "4f341cc4aade90ac13c4584898f29b42d054d4ea4b5c126117841550e680ae75",
+        raw_output_digest: "765a630c4e18899bd4aa9db4294dbcb67509f3b52544de24c62ede38b78b0ada",
+        session_id: "autopilot-planning-work-map-v2-capture-plan-compiler-01-29aa1591e756163f",
+    },
+    WorkMapV2CaptureExpectation {
+        role: "plan-synthesizer",
+        mode: "initial-plan",
+        profile: "planning.work-map.v2:autopilot_submit_synthesis",
+        tool: "autopilot_submit_synthesis",
+        schema_digest: "4f341cc4aade90ac13c4584898f29b42d054d4ea4b5c126117841550e680ae75",
+        raw_output_digest: "765a630c4e18899bd4aa9db4294dbcb67509f3b52544de24c62ede38b78b0ada",
+        session_id: "autopilot-planning-work-map-v2-capture-plan-synthesizer-01-aec1916554db9a84",
+    },
+    WorkMapV2CaptureExpectation {
+        role: "recovery-engineer",
+        mode: "planning-repair",
+        profile: "recovery-work-map.v2",
+        tool: "autopilot_emit_status",
+        schema_digest: "4b254caa4e21953efdc3102cb86c35c3238dfadc57b83fb083f5cbb49065857c",
+        raw_output_digest: "403943118a4b80b29f30a5fdc08fc1af6be921df3d8c3a936c56f36db62f69c0",
+        session_id: "autopilot-planning-work-map-v2-capture-recovery-engineer-01-e29fbc5405e4c312",
+    },
+];
+
 #[derive(Deserialize)]
 struct WorkMapV2CaptureReport {
     schema: String,
@@ -251,6 +283,89 @@ fn work_map_v2_genuine_subscription_capture_is_exact_and_replays() {
         }
     }
     assert_eq!(sessions.len(), V2_CAPTURE_EXPECTATIONS.len());
+}
+
+#[test]
+fn repository_authority_free_work_map_v2_capture_is_exact_and_replays() {
+    let evidence_dir = transcript_root()
+        .join("planning.work-map.v2")
+        .join("repository-authority-free");
+    let report_bytes = fs::read(evidence_dir.join("capture-report.json"))
+        .expect("repository-authority-free WorkMap V2 capture report");
+    assert_eq!(
+        sha256_hex(&report_bytes),
+        V2_REPOSITORY_FREE_CAPTURE_REPORT_SHA256
+    );
+    assert_eq!(
+        fs::read(evidence_dir.join("capture-report.sha256"))
+            .expect("repository-authority-free report digest"),
+        format!("{V2_REPOSITORY_FREE_CAPTURE_REPORT_SHA256}\n").into_bytes()
+    );
+    let report_text = std::str::from_utf8(&report_bytes).expect("capture report UTF-8");
+    for retired in [
+        "repository_manifest_",
+        "repository_head_",
+        "tracked_sources",
+        "origin_anchor",
+        "origin_git_blob_oid",
+    ] {
+        assert!(
+            !report_text.contains(retired),
+            "current capture contains retired repository authority {retired}"
+        );
+    }
+
+    let report: WorkMapV2CaptureReport =
+        serde_json::from_slice(&report_bytes).expect("closed repository-authority-free report");
+    assert_eq!(report.schema, "autopilot.work_map_v2_capture_report.v1");
+    assert_eq!(
+        report.raw_output_description,
+        V2_CAPTURE_RAW_OUTPUT_DESCRIPTION
+    );
+    assert_eq!(
+        report.records.len(),
+        V2_REPOSITORY_FREE_CAPTURE_EXPECTATIONS.len()
+    );
+    let mut sessions = BTreeSet::new();
+    for (expected, evidence) in V2_REPOSITORY_FREE_CAPTURE_EXPECTATIONS
+        .iter()
+        .zip(&report.records)
+    {
+        assert_eq!(evidence.role, expected.role);
+        assert_eq!(evidence.mode, expected.mode);
+        assert_eq!(evidence.profile, expected.profile);
+        assert_eq!(evidence.tool, expected.tool);
+        assert_eq!(evidence.schema_digest, expected.schema_digest);
+        assert_eq!(evidence.provider, V2_CAPTURE_PROVIDER);
+        assert_eq!(evidence.model, V2_CAPTURE_MODEL);
+        assert_eq!(evidence.thinking, V2_CAPTURE_THINKING);
+        assert_eq!(evidence.route, V2_CAPTURE_CHANNEL);
+        assert_eq!(evidence.pi_version, V2_CAPTURE_PI_VERSION);
+        assert_eq!(evidence.strict_admission, V2_CAPTURE_ADMISSION);
+        assert_eq!(evidence.raw_output_digest, expected.raw_output_digest);
+        assert_eq!(evidence.session_id, expected.session_id);
+        assert!(sessions.insert(evidence.session_id.as_str()));
+        assert_eq!(
+            sha256_hex(evidence.raw_output.as_bytes()),
+            evidence.raw_output_digest
+        );
+        replay_work_map_v2(&evidence.raw_output)
+            .expect("current exact V2 boundary parser accepts genuine capture");
+        let work_map: WorkMapV2 =
+            serde_json::from_str(&evidence.raw_output).expect("current genuine V2 payload parses");
+        if expected.role == "recovery-engineer" {
+            assert_eq!(
+                work_map
+                    .recovery
+                    .as_ref()
+                    .map(|recovery| &recovery.disposition),
+                Some(&RecoveryDisposition::NoDefect)
+            );
+        } else {
+            assert!(work_map.recovery.is_none());
+        }
+    }
+    assert_eq!(sessions.len(), 3);
 }
 
 #[test]

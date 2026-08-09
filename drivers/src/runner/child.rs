@@ -3300,11 +3300,7 @@ fn validate_terminal_route(strict: &AgentRunSpec) -> Result<(), String> {
     if strict.boundary_id.0 == "planning.work-map.v2"
         && (route.version != "v2"
             || strict.atom_registry_path.is_none()
-            || strict.atom_registry_digest.is_none()
-            || strict.repository_manifest_path.is_none()
-            || strict.repository_manifest_digest.is_none()
-            || strict.repository_head_commit.is_none()
-            || strict.repository_head_tree.is_none())
+            || strict.atom_registry_digest.is_none())
     {
         return Err(
             "agent-run V2 work-map route lacks exact route or authority binding".to_owned(),
@@ -3432,26 +3428,8 @@ fn validate_digests(strict: &AgentRunSpec) -> Result<(), String> {
             .context_documents
             .as_ref()
             .ok_or_else(|| "agent-run missing context_documents".to_owned())?;
-        let manifest_path = strict
-            .repository_manifest_path
-            .as_ref()
-            .ok_or_else(|| "agent-run planning missing repository_manifest_path".to_owned())?;
-        let manifest_digest = strict
-            .repository_manifest_digest
-            .as_ref()
-            .ok_or_else(|| "agent-run planning missing repository_manifest_digest".to_owned())?;
-        let repo_authority = super::read_repository_authority_binding(
-            Path::new(&manifest_path.0),
-            &manifest_digest.0,
-        )
-        .map_err(|error| error.to_string())?;
-        super::planning_context_digest(
-            authority_set_id,
-            authority_documents,
-            context_documents,
-            &repo_authority,
-        )
-        .map_err(|error| error.to_string())?
+        super::planning_context_digest(authority_set_id, authority_documents, context_documents)
+            .map_err(|error| error.to_string())?
     } else {
         sha_json(&serde_json::json!({
             "assignment_path": strict.assignment_path,
@@ -4008,43 +3986,12 @@ fn validate_planning_documents(strict: &AgentRunSpec) -> Result<(), String> {
             || strict.authority_documents.is_some()
             || strict.context_document.is_some()
             || strict.context_documents.is_some()
-            || strict.repository_manifest_path.is_some()
-            || strict.repository_manifest_digest.is_some()
-            || strict.repository_head_commit.is_some()
-            || strict.repository_head_tree.is_some()
         {
             return Err(
-                "agent-run non-planning spec contains planning repository/documents".to_owned(),
+                "agent-run non-planning spec contains planning document bindings".to_owned(),
             );
         }
         return Ok(());
-    }
-    let repository_manifest_path = strict
-        .repository_manifest_path
-        .as_ref()
-        .ok_or_else(|| "agent-run planning missing repository_manifest_path".to_owned())?;
-    let repository_manifest_digest = strict
-        .repository_manifest_digest
-        .as_ref()
-        .ok_or_else(|| "agent-run planning missing repository_manifest_digest".to_owned())?;
-    let repository_head_commit = strict
-        .repository_head_commit
-        .as_ref()
-        .ok_or_else(|| "agent-run planning missing repository_head_commit".to_owned())?;
-    let repository_head_tree = strict
-        .repository_head_tree
-        .as_ref()
-        .ok_or_else(|| "agent-run planning missing repository_head_tree".to_owned())?;
-    let repository = super::read_repository_authority_binding(
-        Path::new(&repository_manifest_path.0),
-        &repository_manifest_digest.0,
-    )
-    .map_err(|error| error.to_string())?;
-    if repository.manifest.head_commit != repository_head_commit.0
-        || repository.manifest.head_tree != repository_head_tree.0
-        || repository.path != repository_manifest_path.0
-    {
-        return Err("agent-run planning repository authority spec drift".to_owned());
     }
     let authority_set_id = strict
         .authority_set_id
@@ -5123,27 +5070,6 @@ fn prepare_carrier(
                 "V2 work-map carrier missing atom registry digest".to_owned(),
             )
         })?;
-        let repository_manifest_path = spec.repository_manifest_path.as_ref().ok_or_else(|| {
-            CarrierRejection::Identity(
-                "V2 work-map carrier missing repository manifest path".to_owned(),
-            )
-        })?;
-        let repository_manifest_digest =
-            spec.repository_manifest_digest.as_ref().ok_or_else(|| {
-                CarrierRejection::Identity(
-                    "V2 work-map carrier missing repository manifest digest".to_owned(),
-                )
-            })?;
-        let repository_head_commit = spec.repository_head_commit.as_ref().ok_or_else(|| {
-            CarrierRejection::Identity(
-                "V2 work-map carrier missing repository head commit".to_owned(),
-            )
-        })?;
-        let repository_head_tree = spec.repository_head_tree.as_ref().ok_or_else(|| {
-            CarrierRejection::Identity(
-                "V2 work-map carrier missing repository head tree".to_owned(),
-            )
-        })?;
         let object = carrier.as_object_mut().expect("planning carrier object");
         object.insert(
             "terminal_route".to_owned(),
@@ -5160,22 +5086,6 @@ fn prepare_carrier(
         object.insert(
             "atom_registry_digest".to_owned(),
             serde_json::json!(atom_registry_digest.0),
-        );
-        object.insert(
-            "repository_manifest_path".to_owned(),
-            serde_json::json!(repository_manifest_path.0),
-        );
-        object.insert(
-            "repository_manifest_digest".to_owned(),
-            serde_json::json!(repository_manifest_digest.0),
-        );
-        object.insert(
-            "repository_head_commit".to_owned(),
-            serde_json::json!(repository_head_commit.0),
-        );
-        object.insert(
-            "repository_head_tree".to_owned(),
-            serde_json::json!(repository_head_tree.0),
         );
     }
     Ok(PreparedCarrier {

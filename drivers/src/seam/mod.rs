@@ -290,8 +290,7 @@ fn route_plan(id: u64, args: &[String], state: &mut CoreState) -> Result<SeamEnv
         .map_err(|error| context_status("planning", error))?;
     let inventory = planning::p1_inventory_from_input_set(&input_set)
         .map_err(|error| context_status("planning", error))?;
-    let cwd = std::env::current_dir()?;
-    let dossier = planning::p2_ground(&RepoGrounding { repo: cwd }, &inventory)
+    let dossier = planning::p2_ground(&RepoGrounding, &inventory)
         .map_err(|error| context_status("planning", error))?;
     let plan = planning::AssignmentPlan::d72_default();
     plan.validate(25)
@@ -375,16 +374,8 @@ fn advance_run(
     }
     let approved_artifact = read_approved_plan_artifact(workstream, state)
         .map_err(|error| format!("CONTEXT_GAP:approved-plan:{error}"))?;
-    let repository_authority = approved_artifact
-        .repository_authority()
-        .ok_or_else(|| "CONTEXT_GAP:approved-plan:missing repository authority".to_owned())?;
     let cwd = fs::canonicalize(std::env::current_dir()?)?;
-    ensure_run_main_at_approved_baseline(
-        &cwd,
-        workstream,
-        repository_authority,
-        delivery_execution_started(state),
-    )?;
+    ensure_run_main_from_current_head(&cwd, workstream, delivery_execution_started(state))?;
     let approved = approved_artifact.units();
     let submission = allocation_submission_from_plan(workstream, approved, state)
         .map_err(|error| format!("CONTEXT_GAP:allocation:{error}"))?;
@@ -4026,10 +4017,6 @@ mod recovery_resume_binding_tests {
             terminal_route: None,
             assignment_path: None,
             assignment_digest: None,
-            repository_manifest_path: None,
-            repository_manifest_digest: None,
-            repository_head_commit: None,
-            repository_head_tree: None,
             mode_parameter: None,
             planning_subject_assignment_id: None,
             planning_subject_path: None,
@@ -5628,77 +5615,29 @@ fn has_ref_prefix(state: &CoreState, prefix: &str) -> bool {
         .any(|reference| reference.0.starts_with(prefix))
 }
 
-fn ensure_run_main_at_approved_baseline(
+fn ensure_run_main_from_current_head(
     repo: &Path,
     workstream: &str,
-    authority: &ApprovedRepositoryAuthority,
     execution_started: bool,
 ) -> Result<(), String> {
     let run_main = run_main_ref(workstream);
-    let manifest_path = PathBuf::from(&authority.manifest_path);
-    let binding =
-        runner::read_repository_authority_binding(&manifest_path, &authority.manifest_digest)
-            .map_err(|error| format!("run-main:repository-authority:{error}"))?;
-    if binding.manifest.head_commit != authority.head_commit.0
-        || binding.manifest.head_tree != authority.head_tree.0
-    {
-        return Err(format!(
-            "run-main approved baseline drift: manifest head={} tree={} approved head={} tree={}",
-            binding.manifest.head_commit,
-            binding.manifest.head_tree,
-            authority.head_commit.0,
-            authority.head_tree.0
-        ));
-    }
     match git_stdout(
         repo,
         &["rev-parse", "--verify", &format!("{run_main}^{{commit}}")],
     ) {
-        Ok(_) => {
-            let stable_tip = verify_run_main_stable(repo, workstream)?;
-            if execution_started {
-                git_status(
-                    repo,
-                    &["merge-base", "--is-ancestor", &authority.head_commit.0, &stable_tip],
-                )
-                .map_err(|error| {
-                    format!(
-                        "run-main approved baseline is not an ancestor of stable tip: baseline={} tip={stable_tip}: {error}",
-                        authority.head_commit.0
-                    )
-                })?;
-                Ok(())
-            } else if stable_tip == authority.head_commit.0 {
-                Ok(())
-            } else {
-                Err(format!(
-                    "run-main preexisting baseline drift: expected approved baseline {}, got {}",
-                    authority.head_commit.0, stable_tip
-                ))
-            }
-        }
-        Err(error) => {
-            if execution_started {
-                return Err(format!(
-                    "run-main missing after execution began: {run_main}: {error}"
-                ));
-            }
-            git_status(
-                repo,
-                &["update-ref", &run_main, &authority.head_commit.0, ""],
-            )
-            .map_err(|error| format!("run-main:create-cas:{error}"))?;
-            let actual = verify_run_main_stable(repo, workstream)?;
-            if actual != authority.head_commit.0 {
-                return Err(format!(
-                    "run-main created at wrong commit: expected {}, got {}",
-                    authority.head_commit.0, actual
-                ));
-            }
+        Ok(_) => Ok(()),
+        Err(error) if execution_started => Err(format!(
+            "run-main missing after execution began: {run_main}: {error}"
+        )),
+        Err(_) => {
+            let head = git_stdout(repo, &["rev-parse", "--verify", "HEAD^{commit}"])?;
+            git_status(repo, &["update-ref", &run_main, head.trim(), ""])
+                .map_err(|error| format!("run-main:create-cas:{error}"))?;
             Ok(())
         }
     }
 }
+
 fn verify_run_main_stable(repo: &Path, workstream: &str) -> Result<String, String> {
     let run_main = run_main_ref(workstream);
     let first = git_stdout(

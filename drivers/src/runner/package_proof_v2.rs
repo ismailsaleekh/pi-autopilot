@@ -2,8 +2,7 @@
 //!
 //! The receipt is deliberately a compact commitment.  It never turns a
 //! receipt summary into evidence: Validator admission reconstructs the same
-//! subject from the approved image, materialization pair, pinned origins, and
-//! exact candidate tree.
+//! subject from the approved image, materialization receipt, and exact candidate tree.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -18,16 +17,14 @@ use sha2::{Digest as ShaDigest, Sha256};
 
 use crate::allocation::{
     ApprovedPackageProofV2, ApprovedUnit, ApprovedUnitPackageAuthorityV2, ApprovedUnitVendoringV2,
-    ApprovedVendorBindingV2, validate_approved_v2_authority,
+    validate_approved_v2_authority,
 };
 use crate::seam;
 
 use super::{
     DELIVERY_ASSIGNMENT_MAX_BYTES, DeliveryAssignmentArtifactReader, DeliveryAssignmentArtifactV4,
     RunnerError, ValidationRunnerRequest, authority_git_output_bounded_with_input,
-    authority_git_output_bounded_with_limits, materializer_v4,
-    read_pinned_repository_source_blobs_from_verified, read_repository_authority_binding,
-    sha256_hex,
+    authority_git_output_bounded_with_limits, materializer_v4, sha256_hex,
 };
 
 pub const CORE_V2_PACKAGE_PROOF_RECEIPT_V1_SCHEMA: &str =
@@ -60,10 +57,6 @@ pub struct CoreV2PackageProofReceiptV1 {
     pub approved_image_digest: String,
     pub materialization_receipt_path: String,
     pub materialization_receipt_digest: String,
-    pub repository_manifest_path: String,
-    pub repository_manifest_digest: String,
-    pub repository_head_commit: String,
-    pub repository_head_tree: String,
     pub package_scope_files_count: u32,
     pub package_scope_files_digest: String,
     pub vendor_binding_ids_count: u32,
@@ -239,13 +232,8 @@ fn replay_and_evaluate(
         Path::new(&artifact.approved_plan_binding_path),
         &artifact.approved_plan_binding_digest,
     )?;
-    if approved.repository_authority.manifest_path.is_empty()
-        || approved.repository_authority.manifest_digest.is_empty()
-        || approved.repository_authority.head_commit.0.is_empty()
-        || approved.repository_authority.head_tree.0.is_empty()
-        || artifact.approved_image_digest.is_empty()
-    {
-        return Err("V2 rooted approved image has incomplete repository authority".to_owned());
+    if artifact.approved_image_digest.is_empty() {
+        return Err("V2 rooted approved image is incomplete".to_owned());
     }
     validate_approved_v2_authority(
         &approved.units,
@@ -260,17 +248,6 @@ fn replay_and_evaluate(
         &approved.package_authority,
         &approved.vendoring,
     )?;
-
-    let repository = read_repository_authority_binding(
-        Path::new(&approved.repository_authority.manifest_path),
-        &approved.repository_authority.manifest_digest,
-    )
-    .map_err(|error| error.to_string())?;
-    if repository.manifest.head_commit != approved.repository_authority.head_commit.0
-        || repository.manifest.head_tree != approved.repository_authority.head_tree.0
-    {
-        return Err("V2 repository authority head/tree drift".to_owned());
-    }
 
     let mut receipts = Vec::new();
     for (unit, row) in artifact.ordered_units.iter().zip(selected_rows) {
@@ -290,7 +267,7 @@ fn replay_and_evaluate(
                     &candidate_root,
                     &context.package_tree,
                     &approved.vendoring,
-                    &repository,
+                    &artifact.materialization.baseline,
                     proof,
                 )?,
             };
@@ -319,10 +296,6 @@ fn replay_and_evaluate(
                 approved_image_digest: artifact.approved_image_digest.clone(),
                 materialization_receipt_path: artifact.materialization.receipt_path.clone(),
                 materialization_receipt_digest: artifact.materialization.receipt_digest.clone(),
-                repository_manifest_path: approved.repository_authority.manifest_path.clone(),
-                repository_manifest_digest: approved.repository_authority.manifest_digest.clone(),
-                repository_head_commit: approved.repository_authority.head_commit.0.clone(),
-                repository_head_tree: approved.repository_authority.head_tree.0.clone(),
                 package_scope_files_count: summaries.scope_count,
                 package_scope_files_digest: summaries.scope_digest,
                 vendor_binding_ids_count: summaries.binding_count,
@@ -525,12 +498,9 @@ fn vendor_summaries(
     root: &Path,
     exact_tree: &str,
     vendoring: &[ApprovedUnitVendoringV2],
-    repository: &super::RepositoryAuthorityBinding,
+    baseline: &[materializer_v4::CoreBaselineLeafV1],
     proof: &ApprovedPackageProofV2,
 ) -> Result<ProofSummaries, String> {
-    // The final closure scope is populated by caller only in the receipt, but
-    // this function's witnesses intentionally enumerate every approved row.
-    // A proof's binding list has already been checked against the complete set.
     let mut bindings = vendoring
         .iter()
         .flat_map(|row| {
@@ -571,56 +541,50 @@ fn vendor_summaries(
     {
         return Err("V2 vendor proof does not enumerate every approved binding".to_owned());
     }
-
-    // The received binding was verified before this call. Refresh it once at
-    // each edge of the batch; every interior read remains a fixed-argv,
-    // authority-owned lookup of the pinned tree/blob.
-    let verified_repository =
-        read_repository_authority_binding(Path::new(&repository.path), &repository.digest)
-            .map_err(|error| error.to_string())?;
-    if verified_repository != *repository {
-        return Err("V2 repository authority changed before vendor proof batch".to_owned());
+    let mut by_binding = BTreeMap::new();
+    for leaf in baseline {
+        if let Some(id) = &leaf.binding_id {
+            by_binding.insert(id, leaf);
+        }
     }
-    let origins = bindings
-        .iter()
-        .map(|(_, binding)| {
-            (
-                binding.origin_path.0.as_str(),
-                binding.origin_anchor.as_str(),
-            )
-        })
-        .collect::<Vec<_>>();
-    let sources = read_pinned_repository_source_blobs_from_verified(&verified_repository, &origins)
-        .map_err(|error| error.to_string())?;
     let candidate_destinations = bindings
         .iter()
         .map(|(_, binding)| binding.destination.0.clone())
         .collect::<Vec<_>>();
     let candidates = candidate_blobs(root, exact_tree, &candidate_destinations)?;
-    if candidates.len() != bindings.len() || sources.len() != bindings.len() {
+    if candidates.len() != bindings.len() {
         return Err("V2 candidate vendor batch cardinality drift".to_owned());
     }
     let mut vendor_rows = Vec::new();
-    let mut manifest_rows = Vec::new();
-    for (((_, binding), source), candidate) in bindings.iter().zip(sources).zip(candidates) {
-        validate_source_binding(&source, binding)?;
-        let candidate_digest = validate_candidate_binding(&source, binding, &candidate)?;
+    for ((_, binding), candidate) in bindings.iter().zip(candidates) {
+        let source = by_binding
+            .get(&binding.binding_id)
+            .ok_or_else(|| "V2 materialization baseline lacks binding".to_owned())?;
+        let candidate_digest = sha256_hex(&candidate.bytes);
+        if source.kind != "vendor"
+            || source.destination != binding.destination
+            || source.origin_path.as_ref() != Some(&binding.origin_path)
+            || candidate.destination != binding.destination.0
+            || candidate.mode != source.mode
+            || candidate_digest != source.bytes_sha256
+            || candidate.bytes != read_materialized_baseline(root, source)?
+        {
+            return Err(format!(
+                "V2 candidate vendor bytes/mode drift: {}",
+                binding.binding_id.0
+            ));
+        }
         vendor_rows.push(canonical_row(&[
             "vendor",
             &binding.binding_id.0,
             &binding.origin_path.0,
             &binding.destination.0,
-            &binding.origin_anchor,
-            &binding.origin_git_blob_oid,
-            &source.blob,
             &source.mode,
-            &binding.origin_bytes_sha256,
-            &candidate.oid,
             &candidate.mode,
             &candidate_digest,
         ]));
     }
-
+    let mut manifest_rows = Vec::new();
     for row in vendoring
         .iter()
         .filter(|row| !row.vendor_bindings.is_empty())
@@ -629,29 +593,16 @@ fn vendor_summaries(
             .provenance_manifest_destination
             .as_ref()
             .ok_or_else(|| "V2 vendor row lacks manifest destination".to_owned())?;
-        let mut entries = row
-            .vendor_bindings
+        let leaf = baseline
             .iter()
-            .map(|binding| {
-                format!(
-                    "{}\t{}\tsha256:{}\n",
-                    binding.origin_path.0, binding.destination.0, binding.origin_bytes_sha256
-                )
-            })
-            .collect::<Vec<_>>();
-        entries.sort_by(|left, right| {
-            // destination is the middle TAB-separated field; use bytes from the
-            // enriched binding instead of locale sorting text.
-            let left_destination = left.split('\t').nth(1).unwrap_or("");
-            let right_destination = right.split('\t').nth(1).unwrap_or("");
-            left_destination
-                .as_bytes()
-                .cmp(right_destination.as_bytes())
-        });
-        let expected = entries.concat().into_bytes();
-        let expected_digest = sha256_hex(&expected);
+            .find(|leaf| leaf.destination == *destination && leaf.kind == "manifest")
+            .ok_or_else(|| "V2 materialization baseline lacks manifest".to_owned())?;
         let candidate = candidate_blob(root, exact_tree, &destination.0)?;
-        if candidate.mode != "100644" || candidate.bytes != expected {
+        if leaf.unit_id != row.unit_id
+            || candidate.mode != leaf.mode
+            || sha256_hex(&candidate.bytes) != leaf.bytes_sha256
+            || candidate.bytes != read_materialized_baseline(root, leaf)?
+        {
             return Err(format!(
                 "V2 candidate provenance manifest drift: {}",
                 destination.0
@@ -660,20 +611,12 @@ fn vendor_summaries(
         manifest_rows.push(canonical_row(&[
             "manifest",
             &destination.0,
-            &candidate.oid,
             &candidate.mode,
-            &expected_digest,
-            &sha256_hex(&candidate.bytes),
+            &leaf.bytes_sha256,
         ]));
     }
     vendor_rows.sort();
     manifest_rows.sort();
-    let final_repository =
-        read_repository_authority_binding(Path::new(&repository.path), &repository.digest)
-            .map_err(|error| error.to_string())?;
-    if final_repository != verified_repository {
-        return Err("V2 repository authority changed during vendor proof batch".to_owned());
-    }
     Ok(ProofSummaries {
         scope_count: 0,
         scope_digest: String::new(),
@@ -695,44 +638,21 @@ fn vendor_summaries(
     })
 }
 
-fn validate_source_binding(
-    source: &super::RepositoryPinnedSourceBlob,
-    binding: &ApprovedVendorBindingV2,
-) -> Result<(), String> {
-    if source.path != binding.origin_path.0
-        || source.whole_file_anchor != binding.origin_anchor
-        || source.blob != binding.origin_git_blob_oid
-        || source.mode != binding.origin_mode
-        || sha256_hex(&source.bytes) != binding.origin_bytes_sha256
-    {
-        return Err(format!(
-            "V2 pinned origin binding drift: {}",
-            binding.binding_id.0
-        ));
-    }
-    Ok(())
-}
-
-fn validate_candidate_binding(
-    source: &super::RepositoryPinnedSourceBlob,
-    binding: &ApprovedVendorBindingV2,
-    candidate: &CandidateBlob,
-) -> Result<String, String> {
-    let candidate_digest = sha256_hex(&candidate.bytes);
-    if candidate.destination != binding.destination.0
-        || candidate.mode != source.mode
-        || candidate.mode != binding.origin_mode
-        || candidate.oid != source.blob
-        || candidate.oid != binding.origin_git_blob_oid
-        || candidate.bytes != source.bytes
-        || candidate_digest != binding.origin_bytes_sha256
-    {
-        return Err(format!(
-            "V2 candidate vendor bytes/mode drift: {}",
-            binding.binding_id.0
-        ));
-    }
-    Ok(candidate_digest)
+fn read_materialized_baseline(
+    root: &Path,
+    leaf: &materializer_v4::CoreBaselineLeafV1,
+) -> Result<Vec<u8>, String> {
+    let mode = match leaf.mode.as_str() {
+        "100644" => 0o644,
+        "100755" => 0o755,
+        _ => return Err("V2 materialization baseline mode malformed".to_owned()),
+    };
+    super::read_binary_leaf_exact_mode(
+        &root.join(&leaf.destination.0),
+        super::MAX_AUTHORITY_SOURCE_BYTES,
+        mode,
+    )
+    .map_err(|error| error.to_string())
 }
 
 const MAX_CAT_FILE_BATCH_FRAMING_BYTES_PER_BLOB: usize = 128;
@@ -747,7 +667,6 @@ struct CandidateTreeBlob {
 struct CandidateBlob {
     destination: String,
     mode: String,
-    oid: String,
     bytes: Vec<u8>,
 }
 
@@ -908,7 +827,6 @@ fn parse_candidate_blob_batch(
         candidates.push(CandidateBlob {
             destination: row.destination.clone(),
             mode: row.mode.clone(),
-            oid: row.oid.clone(),
             bytes: bytes[payload_start..payload_end].to_vec(),
         });
         cursor = payload_end + 1;
@@ -970,7 +888,6 @@ fn candidate_blob(root: &Path, tree: &str, destination: &str) -> Result<Candidat
     Ok(CandidateBlob {
         destination: destination.to_owned(),
         mode: mode.to_owned(),
-        oid: oid.to_owned(),
         bytes: output.stdout,
     })
 }
@@ -1035,7 +952,6 @@ pub(crate) fn validate_receipt_shape_and_subject_digest(
         &receipt.approved_plan_binding_digest,
         &receipt.approved_image_digest,
         &receipt.materialization_receipt_digest,
-        &receipt.repository_manifest_digest,
         &receipt.package_scope_files_digest,
         &receipt.vendor_binding_ids_digest,
         &receipt.candidate_vendor_tree_witness_digest,
@@ -1053,8 +969,6 @@ pub(crate) fn validate_receipt_shape_and_subject_digest(
             &receipt.base_commit,
             &receipt.package_commit,
             &receipt.package_tree,
-            &receipt.repository_head_commit,
-            &receipt.repository_head_tree,
         ]
         .iter()
         .all(|oid| is_git_oid(oid))
@@ -1182,10 +1096,6 @@ mod tests {
             approved_image_digest: digest.clone(),
             materialization_receipt_path: "/tmp/receipt.json".to_owned(),
             materialization_receipt_digest: digest.clone(),
-            repository_manifest_path: "/tmp/manifest.json".to_owned(),
-            repository_manifest_digest: digest.clone(),
-            repository_head_commit: oid.clone(),
-            repository_head_tree: oid,
             package_scope_files_count: 2,
             package_scope_files_digest: digest.clone(),
             vendor_binding_ids_count: 0,
@@ -1250,32 +1160,5 @@ mod tests {
                 .all(|candidate| candidate.bytes == payload)
         );
         assert!(parse_candidate_blob_batch(&batch[..batch.len() - 1], &rows).is_err());
-
-        let source = super::super::RepositoryPinnedSourceBlob {
-            path: "upstream/source.bin".to_owned(),
-            mode: "100644".to_owned(),
-            blob: oid.clone(),
-            whole_file_anchor: "anchor".to_owned(),
-            bytes: payload.to_vec(),
-        };
-        let binding = ApprovedVendorBindingV2 {
-            binding_id: Id("binding-a".to_owned()),
-            origin_path: kernel::generated::Path("upstream/source.bin".to_owned()),
-            destination: kernel::generated::Path("vendor/a.bin".to_owned()),
-            origin_anchor: "anchor".to_owned(),
-            origin_git_blob_oid: oid,
-            origin_mode: "100644".to_owned(),
-            origin_bytes_sha256: sha256_hex(&payload),
-        };
-        let corrupt = CandidateBlob {
-            destination: binding.destination.0.clone(),
-            mode: "100644".to_owned(),
-            oid: source.blob.clone(),
-            bytes: vec![0, 0xff, b'!', b'\n'],
-        };
-        assert!(
-            validate_candidate_binding(&source, &binding, &corrupt).is_err(),
-            "matching OID text cannot substitute for candidate bytes"
-        );
     }
 }

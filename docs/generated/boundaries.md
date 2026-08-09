@@ -10,7 +10,7 @@ Sources: `data/boundary-modes.kdl`.
 | planning.scout-dossier.v1 | enforce | W4 live subscription transcript recorded 2026-07-27; flip is one-way |
 | planning.questions.v1 | enforce | W4 live subscription transcript recorded 2026-07-27; flip is one-way |
 | planning.work-map.v1 | enforce | W4 live subscription transcript recorded 2026-07-27; flip is one-way |
-| planning.work-map.v2 | enforce | genuine Pi 0.84.1 subscription compiler/synthesizer/recovery acceptance; report SHA-256 174d50e13ba5c519c0d36708fd013e167e88dbd8caf76d77ec49b95ed9f62bd7; flip is one-way |
+| planning.work-map.v2 | enforce | genuine repository-authority-free Pi 0.84.1 subscription compiler/synthesizer/recovery acceptance; report SHA-256 774e96ee4aa101b0bcdddc13c893b2e459f9194cdc020b50dd488f58c7d1b151; flip is one-way |
 | planning.plan-review.v1 | enforce | W4 live subscription transcript recorded 2026-07-27; flip is one-way |
 | allocation.lane-proposal.v1 | enforce | W5 live subscription transcript recorded 2026-07-27; flip is one-way |
 | validation.verdict.v1 | enforce | W6 live subscription transcript recorded 2026-07-27; flip is one-way |

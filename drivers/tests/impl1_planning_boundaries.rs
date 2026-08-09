@@ -1511,10 +1511,6 @@ fn carrier_value_from_spec(spec_path: &Path, raw: &str) -> serde_json::Value {
     carrier["terminal_route"] = serde_json::to_value(route).unwrap();
     carrier["atom_registry_path"] = spec["atom_registry_path"].clone();
     carrier["atom_registry_digest"] = spec["atom_registry_digest"].clone();
-    carrier["repository_manifest_path"] = spec["repository_manifest_path"].clone();
-    carrier["repository_manifest_digest"] = spec["repository_manifest_digest"].clone();
-    carrier["repository_head_commit"] = spec["repository_head_commit"].clone();
-    carrier["repository_head_tree"] = spec["repository_head_tree"].clone();
     carrier
 }
 
@@ -1694,7 +1690,7 @@ fn task_file_digest(class: &str, authority_set_id: &str, body: &str) -> String {
 
 fn work_map_v2_terminal_route(role_id: &str, mode: &str) -> TerminalRoute {
     const BOUNDARY: &str = "planning.work-map.v2";
-    const SCHEMA_DIGEST: &str = "07750be5a58112e8b3f956f261d33ef75e3a71b9b13b75be2192cfc43adbbc9a";
+    const SCHEMA_DIGEST: &str = "4f341cc4aade90ac13c4584898f29b42d054d4ea4b5c126117841550e680ae75";
     let (profile_id, tool_name) = match (role_id, mode) {
         ("plan-compiler", "initial-plan") => (
             "planning.work-map.v2:autopilot_submit_plan_cluster",

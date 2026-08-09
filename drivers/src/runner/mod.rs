@@ -34,7 +34,6 @@ pub(crate) use package_proof_v2::{
     evaluate_rooted_v4_package_proofs, validate_receipt_shape_and_subject_digest,
     verify_receipt_against_validation_authority,
 };
-pub mod repository_authority;
 pub mod rpc;
 #[cfg(unix)]
 pub use materializer_v4::{
@@ -42,15 +41,6 @@ pub use materializer_v4::{
     CoreBaselineLeafV1, CoreMaterializationBindingV1, CoreMaterializationIntentionV1,
     CoreMaterializationReceiptV1, CoreMaterializationRequestV4, DELIVERY_ASSIGNMENT_V4_SCHEMA,
     DeliveryAssignmentArtifactV4,
-};
-pub(crate) use repository_authority::path_uri_component;
-pub use repository_authority::{
-    RepositoryAuthority, RepositoryAuthorityBinding, RepositoryPinnedSourceBlob,
-    RepositoryTrackedSource, read_pinned_repository_source_blob, read_repository_authority_binding,
-    repository_authority, repository_authority_binding,
-};
-pub(crate) use repository_authority::{
-    read_pinned_repository_source_blobs_from_verified, repository_authority_run_root,
 };
 
 pub mod validation_authority;
@@ -73,21 +63,12 @@ pub const MAX_DELIVERY_HARD_BOUNDARY_VIOLATION_CHARS: usize = 512;
 pub const DELIVERY_ASSIGNMENT_MAX_BYTES: usize = 256 * 1024;
 /// Maximum bytes accepted for the codegen-anchored child terminal-tool add-on.
 pub const CHILD_ADDON_MAX_BYTES: usize = 1024 * 1024;
-/// Maximum bytes for the package-owned planning repository authority manifest.
-pub const REPOSITORY_AUTHORITY_MANIFEST_MAX_BYTES: usize = 2 * 1024 * 1024;
 /// One immutable source object may contain at most 2 MiB before Core hashes
 /// or validates it. Repository enrichment and Validator V3 share this exact
 /// authority ceiling.
 pub const MAX_AUTHORITY_SOURCE_BYTES: usize = 2 * 1024 * 1024;
 /// Core never retains more than this many raw source bytes across V2 bindings.
 pub const MAX_VENDORED_SOURCE_BYTES: usize = 64 * 1024 * 1024;
-const REPOSITORY_AUTHORITY_IDENTITY_MAX_STDOUT_BYTES: usize = 16 * 1024;
-const REPOSITORY_AUTHORITY_STATUS_MAX_STDOUT_BYTES: usize = REPOSITORY_AUTHORITY_MANIFEST_MAX_BYTES;
-const REPOSITORY_AUTHORITY_LS_TREE_MAX_STDOUT_BYTES: usize =
-    REPOSITORY_AUTHORITY_MANIFEST_MAX_BYTES;
-const REPOSITORY_AUTHORITY_LS_TREE_MAX_RECORD_BYTES: usize = 8 * 1024;
-const REPOSITORY_AUTHORITY_LS_TREE_MAX_PATH_BYTES: usize = 4 * 1024;
-const REPOSITORY_AUTHORITY_MAX_TRACKED_SOURCES: usize = 20_000;
 const PACKAGE_GIT_STDOUT_MAX_BYTES: usize = 64 * 1024 * 1024;
 const PACKAGE_GIT_STDERR_MAX_BYTES: usize = 1024 * 1024;
 /// This is the complete Git environment Core deliberately grants repository
@@ -497,14 +478,6 @@ pub struct IssuedRunnerBinding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignment_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub repository_manifest_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub repository_manifest_digest: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub repository_head_commit: Option<Sha>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub repository_head_tree: Option<Sha>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode_parameter: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planning_subject_assignment_id: Option<Id>,
@@ -528,13 +501,11 @@ pub struct IssuedRunnerAction {
     pub action: BackgroundAction,
     pub binding: IssuedRunnerBinding,
 }
-
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ResolvedRoleTools {
     pub active: Vec<String>,
     pub unavailable: Vec<String>,
 }
-
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct RoleRuntime {
     pub role_id: String,
@@ -545,14 +516,12 @@ pub struct RoleRuntime {
     pub route: String,
     pub declared_tools: Vec<String>,
 }
-
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct RunnerPaths {
     pub prompt_path: PathBuf,
     pub spec_path: PathBuf,
     pub carrier_path: PathBuf,
 }
-
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct BindingDigests {
     pub boundary_digest: String,
@@ -574,24 +543,15 @@ impl RunnerTransportFacts {
     }
 
     pub fn new(node_executable: PathBuf, runner_wrapper: PathBuf) -> Result<Self, RunnerError> {
-        if !node_executable.is_absolute() {
-            return Err(RunnerError::InvalidTransport(format!(
-                "node executable is not absolute: {:?}",
-                node_executable
-            )));
-        }
-        if !runner_wrapper.is_absolute() {
-            return Err(RunnerError::InvalidTransport(format!(
-                "runner wrapper is not absolute: {:?}",
-                runner_wrapper
-            )));
+        if !node_executable.is_absolute() || !runner_wrapper.is_absolute() {
+            return Err(RunnerError::InvalidTransport(
+                "runner transport is not absolute".to_owned(),
+            ));
         }
         reject_link_components_for_path(&node_executable)?;
         reject_link_components_for_path(&runner_wrapper)?;
         require_regular_file(&node_executable)?;
         require_regular_file(&runner_wrapper)?;
-        let _ = path_to_string(&node_executable)?;
-        let _ = path_to_string(&runner_wrapper)?;
         Ok(Self {
             node_executable,
             runner_wrapper,
@@ -674,7 +634,6 @@ pub fn planning_issue(request: &PlanningRunnerRequest) -> Result<IssuedRunnerAct
     let cwd = canonical_current_dir()?;
     let paths = planning_paths(&cwd, &request.workstream, &request.assignment_id);
     reject_link_components_for_path(&paths.carrier_path)?;
-    let repo_authority = repository_authority_binding(&cwd, &request.workstream)?;
     let run_identity = run_identity_for(&request.workstream)?;
     let session_dir = session_dir_for(&run_identity.run_root);
     let session_id = session_id_for(
@@ -685,11 +644,11 @@ pub fn planning_issue(request: &PlanningRunnerRequest) -> Result<IssuedRunnerAct
         &request.mode,
         &request.boundary_id,
     );
-    let rendered = render_planning_prompt(request, &route, &cwd, &repo_authority)?;
+    let rendered = render_planning_prompt(request, &route, &cwd)?;
     let planning_subject = planning_subject_for_request(request)?;
     write_parent_file(&paths.prompt_path, rendered.text.as_bytes())?;
     let prompt_digest = sha256_hex(rendered.text.as_bytes());
-    let binding_digests = planning_binding_digests(request, &route, &repo_authority)?;
+    let binding_digests = planning_binding_digests(request, &route)?;
     let spec = AgentRunSpec {
         schema: kernel::generated::SchemaId("autopilot.agent_run_spec.v4".to_owned()),
         assignment_kind: ValidationAssignmentKind::PlanningReview,
@@ -775,10 +734,6 @@ pub fn planning_issue(request: &PlanningRunnerRequest) -> Result<IssuedRunnerAct
             .map(|digest| Digest(digest.clone())),
         planning_inputs_path: None,
         planning_inputs_digest: None,
-        repository_manifest_path: Some(ContractPath(repo_authority.path.clone())),
-        repository_manifest_digest: Some(Digest(repo_authority.digest.clone())),
-        repository_head_commit: Some(Sha(repo_authority.manifest.head_commit.clone())),
-        repository_head_tree: Some(Sha(repo_authority.manifest.head_tree.clone())),
     };
     let spec_digest = write_spec_document(&paths.spec_path, &spec)?;
     let binding = IssuedRunnerBinding {
@@ -805,10 +760,6 @@ pub fn planning_issue(request: &PlanningRunnerRequest) -> Result<IssuedRunnerAct
         terminal_route: Some(terminal_route),
         assignment_path: None,
         assignment_digest: None,
-        repository_manifest_path: Some(repo_authority.path.clone()),
-        repository_manifest_digest: Some(repo_authority.digest.clone()),
-        repository_head_commit: Some(Sha(repo_authority.manifest.head_commit.clone())),
-        repository_head_tree: Some(Sha(repo_authority.manifest.head_tree.clone())),
         mode_parameter: request.mode_parameter.clone(),
         planning_subject_assignment_id: planning_subject
             .map(|artifact| artifact.assignment_id.clone()),
@@ -987,10 +938,6 @@ pub fn delivery_issue_with_facts(
         atom_registry_digest: None,
         planning_inputs_path: None,
         planning_inputs_digest: None,
-        repository_manifest_path: None,
-        repository_manifest_digest: None,
-        repository_head_commit: None,
-        repository_head_tree: None,
     };
     let spec_digest = write_spec_document(&paths.spec_path, &spec)?;
     let binding = IssuedRunnerBinding {
@@ -1017,10 +964,6 @@ pub fn delivery_issue_with_facts(
         terminal_route: None,
         assignment_path: Some(path_to_string(&assignment_path)?),
         assignment_digest: Some(assignment_digest),
-        repository_manifest_path: None,
-        repository_manifest_digest: None,
-        repository_head_commit: None,
-        repository_head_tree: None,
         mode_parameter: None,
         planning_subject_assignment_id: None,
         planning_subject_path: None,
@@ -1209,10 +1152,6 @@ pub fn delivery_issue_v4_with_facts(
         atom_registry_digest: None,
         planning_inputs_path: None,
         planning_inputs_digest: None,
-        repository_manifest_path: None,
-        repository_manifest_digest: None,
-        repository_head_commit: None,
-        repository_head_tree: None,
     };
     let spec_digest = write_spec_document(&paths.spec_path, &spec)?;
     let binding = IssuedRunnerBinding {
@@ -1239,10 +1178,6 @@ pub fn delivery_issue_v4_with_facts(
         terminal_route: None,
         assignment_path: Some(path_to_string(&assignment_path)?),
         assignment_digest: Some(assignment_digest),
-        repository_manifest_path: None,
-        repository_manifest_digest: None,
-        repository_head_commit: None,
-        repository_head_tree: None,
         mode_parameter: None,
         planning_subject_assignment_id: None,
         planning_subject_path: None,
@@ -1712,10 +1647,6 @@ pub fn validation_issue(
         atom_registry_digest: None,
         planning_inputs_path: None,
         planning_inputs_digest: None,
-        repository_manifest_path: None,
-        repository_manifest_digest: None,
-        repository_head_commit: None,
-        repository_head_tree: None,
     };
     let spec_digest = write_spec_document(&paths.spec_path, &spec)?;
     let binding = IssuedRunnerBinding {
@@ -1742,10 +1673,6 @@ pub fn validation_issue(
         terminal_route: None,
         assignment_path: Some(path_to_string(&assignment_path)?),
         assignment_digest: Some(assignment_digest.clone()),
-        repository_manifest_path: None,
-        repository_manifest_digest: None,
-        repository_head_commit: None,
-        repository_head_tree: None,
         mode_parameter: None,
         planning_subject_assignment_id: None,
         planning_subject_path: None,
@@ -2429,10 +2356,6 @@ pub fn validation_issue_v3(
         atom_registry_digest: None,
         planning_inputs_path: None,
         planning_inputs_digest: None,
-        repository_manifest_path: None,
-        repository_manifest_digest: None,
-        repository_head_commit: None,
-        repository_head_tree: None,
     };
     let spec_digest = write_spec_document(&paths.spec_path, &spec)?;
     let binding = IssuedRunnerBinding {
@@ -2459,10 +2382,6 @@ pub fn validation_issue_v3(
         terminal_route: None,
         assignment_path: Some(path_to_string(&assignment_path)?),
         assignment_digest: Some(assignment_digest),
-        repository_manifest_path: None,
-        repository_manifest_digest: None,
-        repository_head_commit: None,
-        repository_head_tree: None,
         mode_parameter: None,
         planning_subject_assignment_id: None,
         planning_subject_path: None,
@@ -3350,13 +3269,11 @@ fn validate_runner_task_document(
 fn planning_binding_digests(
     request: &PlanningRunnerRequest,
     route: &roster::Route,
-    repo_authority: &RepositoryAuthorityBinding,
 ) -> Result<BindingDigests, RunnerError> {
     let context_digest = planning_context_digest(
         &request.authority_set_id,
         &request.authority_documents,
         &request.context_documents,
-        repo_authority,
     )?;
     Ok(BindingDigests {
         boundary_digest: contract_digest(&request.boundary_id.0)?,
@@ -3372,17 +3289,10 @@ pub fn planning_context_digest(
     authority_set_id: &str,
     authority_documents: &impl Serialize,
     context_documents: &impl Serialize,
-    repo_authority: &RepositoryAuthorityBinding,
 ) -> Result<String, RunnerError> {
-    sha_json(&serde_json::json!({
-        "authority_set_id": authority_set_id,
-        "authority_documents": authority_documents,
-        "context_documents": context_documents,
-        "repository_manifest_path": repo_authority.path,
-        "repository_manifest_digest": repo_authority.digest,
-        "repository_head_commit": repo_authority.manifest.head_commit,
-        "repository_head_tree": repo_authority.manifest.head_tree,
-    }))
+    sha_json(
+        &serde_json::json!({"authority_set_id": authority_set_id, "authority_documents": authority_documents, "context_documents": context_documents}),
+    )
 }
 
 pub fn delivery_policy_digest(
@@ -3530,7 +3440,6 @@ fn render_planning_prompt(
     request: &PlanningRunnerRequest,
     route: &roster::Route,
     cwd: &Path,
-    repo_authority: &RepositoryAuthorityBinding,
 ) -> Result<crate::prompt::RenderedPrompt, RunnerError> {
     let roles = crate::roles::RoleRegistry::package()
         .map_err(|error| RunnerError::InvalidSpec(format!("role registry: {error:?}")))?;
@@ -3543,10 +3452,10 @@ fn render_planning_prompt(
             request.role_id.0, request.mode.0
         )));
     }
-    let mut context_manifest = planning_context_manifest(request, role, cwd, repo_authority)?;
-    let assignment = planning_assignment_text(request, role, route, repo_authority)?;
+    let mut context_manifest = planning_context_manifest(request, role, cwd)?;
+    let assignment = planning_assignment_text(request, role, route)?;
     let contract = planning_contract_authority_text(request)?;
-    let plan_revision = planning_assignment_digest(request, repo_authority)?;
+    let plan_revision = planning_assignment_digest(request)?;
     for _ in 0..8 {
         let context_manifest_text = serde_json::to_string_pretty(&context_manifest.manifest)
             .map_err(|error| RunnerError::InvalidSpec(format!("context manifest json: {error}")))?;
@@ -3595,10 +3504,7 @@ struct PlanningContextManifest {
     manifest: ContextManifest,
 }
 
-fn planning_assignment_digest(
-    request: &PlanningRunnerRequest,
-    repo_authority: &RepositoryAuthorityBinding,
-) -> Result<String, RunnerError> {
+fn planning_assignment_digest(request: &PlanningRunnerRequest) -> Result<String, RunnerError> {
     sha_json(&serde_json::json!({
         "workstream": request.workstream,
         "assignment_id": request.assignment_id,
@@ -3614,10 +3520,6 @@ fn planning_assignment_digest(
         "atom_registry_path": request.atom_registry_path,
         "atom_registry_digest": request.atom_registry_digest,
         "accepted_planning_artifacts": request.accepted_planning_artifacts,
-        "repository_manifest_path": repo_authority.path,
-        "repository_manifest_digest": repo_authority.digest,
-        "repository_head_commit": repo_authority.manifest.head_commit,
-        "repository_head_tree": repo_authority.manifest.head_tree,
     }))
 }
 
@@ -3625,7 +3527,6 @@ fn planning_assignment_text(
     request: &PlanningRunnerRequest,
     role: &crate::roles::Role,
     route: &roster::Route,
-    repo_authority: &RepositoryAuthorityBinding,
 ) -> Result<String, RunnerError> {
     let assignment_json = serde_json::to_string_pretty(&serde_json::json!({
         "assignment_id": request.assignment_id.0,
@@ -3644,7 +3545,6 @@ fn planning_assignment_text(
         "atom_id_prefix": request.atom_id_prefix,
         "atom_registry": request.atom_registry_path.as_ref().zip(request.atom_registry_digest.as_ref()).map(|(path, digest)| serde_json::json!({"path": path, "digest": digest})),
         "accepted_planning_artifacts": request.accepted_planning_artifacts.iter().map(artifact_binding_summary).collect::<Vec<_>>(),
-        "repository_authority": repository_binding_summary(repo_authority),
         "bound_authority_documents": request.authority_documents.iter().map(document_binding_summary).collect::<Vec<_>>(),
         "bound_context_documents": request.context_documents.iter().map(document_binding_summary).collect::<Vec<_>>(),
     }))
@@ -3702,17 +3602,6 @@ fn artifact_binding_summary(artifact: &AcceptedPlanningArtifactBinding) -> serde
         "boundary_id": artifact.boundary_id.0,
         "path": artifact.path,
         "digest": artifact.digest,
-    })
-}
-
-pub fn repository_binding_summary(binding: &RepositoryAuthorityBinding) -> serde_json::Value {
-    serde_json::json!({
-        "manifest_path": binding.path,
-        "manifest_digest": binding.digest,
-        "head_commit": binding.manifest.head_commit,
-        "head_tree": binding.manifest.head_tree,
-        "repo_root": binding.manifest.repo_root,
-        "tracked_sources": binding.manifest.tracked_sources.len(),
     })
 }
 
@@ -3794,8 +3683,7 @@ fn rendered_prompt_budget(text: &str) -> Result<crate::context::BudgetDecision, 
 fn planning_context_manifest(
     request: &PlanningRunnerRequest,
     role: &crate::roles::Role,
-    cwd: &Path,
-    repo_authority: &RepositoryAuthorityBinding,
+    _cwd: &Path,
 ) -> Result<PlanningContextManifest, RunnerError> {
     let policies = crate::context::policy::ContextPolicyRegistry::package()
         .map_err(|error| RunnerError::InvalidSpec(format!("context policy registry: {error:?}")))?;
@@ -3820,19 +3708,11 @@ fn planning_context_manifest(
         crate::context::route_budget(0, PLANNING_CONTEXT_WINDOW_TOKENS, 0),
     );
     manifest.role.mode = request.mode.clone();
-    let canonical_cwd = fs::canonicalize(cwd).map_err(io_error)?;
-    if canonical_cwd.as_path() != Path::new(&repo_authority.manifest.repo_root) {
-        return Err(RunnerError::InvalidSpec(format!(
-            "planning repository root drift: cwd={} manifest={}",
-            canonical_cwd.display(),
-            repo_authority.manifest.repo_root
-        )));
-    }
-    manifest.freshness.task_revision = Digest(planning_assignment_digest(request, repo_authority)?);
+    manifest.freshness.task_revision = Digest(planning_assignment_digest(request)?);
     manifest.freshness.plan_revision = Digest(request.run_revision.to_string());
     manifest.freshness.dossier_revision = Digest("planning-dossier:not-bound".to_owned());
     manifest.freshness.runtime_revision = request.run_revision;
-    manifest.freshness.git_commit = Sha(repo_authority.manifest.head_commit.clone());
+    manifest.freshness.git_commit = Sha("planning-unbound".to_owned());
 
     fill_context_tier(
         &policies,
@@ -3841,7 +3721,6 @@ fn planning_context_manifest(
         "mandatory_inline",
         &mut manifest.mandatory_inline,
         &mut manifest.gaps,
-        repo_authority,
     )?;
     fill_context_tier(
         &policies,
@@ -3850,7 +3729,6 @@ fn planning_context_manifest(
         "required_reads",
         &mut manifest.required_reads,
         &mut manifest.gaps,
-        repo_authority,
     )?;
     fill_context_tier(
         &policies,
@@ -3859,7 +3737,6 @@ fn planning_context_manifest(
         "on_demand",
         &mut manifest.on_demand,
         &mut manifest.gaps,
-        repo_authority,
     )?;
     fill_context_tier(
         &policies,
@@ -3868,7 +3745,6 @@ fn planning_context_manifest(
         "excluded",
         &mut manifest.excluded,
         &mut manifest.gaps,
-        repo_authority,
     )?;
 
     Ok(PlanningContextManifest {
@@ -3884,7 +3760,6 @@ fn fill_context_tier(
     tier: &str,
     target: &mut Vec<ContextItem>,
     gaps: &mut Vec<ContextGap>,
-    repo_authority: &RepositoryAuthorityBinding,
 ) -> Result<(), RunnerError> {
     for category_id in categories {
         let category = policies
@@ -3941,13 +3816,12 @@ fn fill_context_tier(
                 &format!("package-generated:{}:{}", category.source, category.class),
             )),
             "repository" if category.id == "source-anchor" => {
-                target.push(context_item_for_source_anchor(
+                target.push(context_item_for_synthetic(
                     request,
                     tier,
                     &category.id,
-                    &category.class,
-                    repo_authority,
-                )?);
+                    "planning-unbound-source-anchor",
+                ))
             }
             "repository" => {}
             _ => {}
@@ -4047,54 +3921,6 @@ fn context_item_for_artifact(
         token_estimate: 0,
         redaction_state: RedactionState("none".to_owned()),
     }
-}
-
-fn context_item_for_source_anchor(
-    request: &PlanningRunnerRequest,
-    tier: &str,
-    category_id: &str,
-    class: &str,
-    authority: &RepositoryAuthorityBinding,
-) -> Result<ContextItem, RunnerError> {
-    let bytes = read_bounded_file(
-        Path::new(&authority.path),
-        REPOSITORY_AUTHORITY_MANIFEST_MAX_BYTES,
-    )?;
-    let digest = sha256_hex(&bytes);
-    if digest != authority.digest {
-        return Err(RunnerError::InvalidSpec(format!(
-            "repository authority manifest digest drift: expected {}, got {digest}",
-            authority.digest
-        )));
-    }
-    let uri = format!(
-        "json://{}/{}#/",
-        authority.digest,
-        path_uri_component(&authority.path)
-    );
-    Ok(ContextItem {
-        id: Id(format!(
-            "{}:{}:{}",
-            request.assignment_id.0, tier, category_id
-        )),
-        authority_class: AuthorityClass(class.to_owned()),
-        source_uri: Uri(uri.clone()),
-        anchor: ContextAnchor {
-            anchor_form: ContextAnchorForm::Json,
-            uri: Uri(uri),
-        },
-        source_digest: Digest(authority.digest.clone()),
-        content_digest: Digest(authority.digest.clone()),
-        purpose: format!(
-            "{tier}:{category_id}:HEAD={} tree={} manifest={}",
-            authority.manifest.head_commit, authority.manifest.head_tree, authority.path
-        ),
-        linked_criterion: None,
-        linked_decision: None,
-        linked_unit: None,
-        token_estimate: crate::context::estimate_tokens(&bytes, 0),
-        redaction_state: RedactionState("none".to_owned()),
-    })
 }
 
 fn context_item_for_synthetic(
@@ -4679,9 +4505,9 @@ pub(crate) fn write_binary_leaf_create_once_exact_mode(
 }
 
 /// Read a V2 authority artifact through the same capability-rooted primitive
-/// as create-once writes.  This is deliberately separate from the historical
-/// general-purpose bounded reader: V2 provenance and repository manifests
-/// must not inherit a check-then-open path walk.
+/// as create-once writes. This is deliberately separate from the historical
+/// general-purpose bounded reader so V2 provenance cannot inherit a
+/// check-then-open path walk.
 pub(crate) fn read_bounded_authority_file(
     path: &Path,
     max_bytes: usize,
@@ -4706,6 +4532,73 @@ pub(crate) fn read_binary_leaf_exact_mode(
     validate_authority_path(path, "binary authority leaf read")?;
     let (parent, name) = authority_open_parent(path, false)?;
     authority_read_from_parent_with_mode(&parent, &name, max_bytes, Some(mode))
+}
+
+/// Open one exact lane-worktree leaf once, reject symlinks and non-regular
+/// files on that held descriptor, and return the bytes plus its allowed mode.
+#[cfg(unix)]
+pub(crate) fn read_binary_leaf_with_allowed_mode(
+    path: &Path,
+    max_bytes: usize,
+) -> Result<(Vec<u8>, String), RunnerError> {
+    use rustix::fs::{Mode, OFlags, openat};
+    use std::os::unix::fs::PermissionsExt;
+    validate_authority_path(path, "binary authority leaf read")?;
+    let (parent, name) = authority_open_parent(path, false)?;
+    let fd = openat(
+        &parent,
+        &name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| {
+        if error == rustix::io::Errno::LOOP {
+            RunnerError::InvalidTransport(
+                "authority read refused symlink/no-follow final component".to_owned(),
+            )
+        } else {
+            RunnerError::Io(error.to_string())
+        }
+    })?;
+    let file = fs::File::from(fd);
+    let metadata = file.metadata().map_err(io_error)?;
+    let mode = metadata.permissions().mode() & 0o7777;
+    let mode = match mode {
+        0o644 => "100644",
+        0o755 => "100755",
+        _ => {
+            return Err(RunnerError::InvalidSpec(
+                "authority read exact mode drift".to_owned(),
+            ));
+        }
+    };
+    if !metadata.file_type().is_file() {
+        return Err(RunnerError::InvalidSpec(
+            "authority read refused non-regular descriptor".to_owned(),
+        ));
+    }
+    let len = usize::try_from(metadata.len())
+        .map_err(|_| RunnerError::InvalidSpec("authority read length overflow".to_owned()))?;
+    if len > max_bytes {
+        return Err(RunnerError::InvalidSpec(format!(
+            "authority read oversized: {len} bytes exceeds {max_bytes}"
+        )));
+    }
+    let mut bytes = Vec::with_capacity(len);
+    file.take(
+        u64::try_from(max_bytes)
+            .map_err(|_| RunnerError::InvalidSpec("authority read limit overflow".to_owned()))?
+            .checked_add(1)
+            .ok_or_else(|| RunnerError::InvalidSpec("authority read limit overflow".to_owned()))?,
+    )
+    .read_to_end(&mut bytes)
+    .map_err(io_error)?;
+    if bytes.len() > max_bytes {
+        return Err(RunnerError::InvalidSpec(format!(
+            "authority read oversized after read: more than {max_bytes} bytes"
+        )));
+    }
+    Ok((bytes, mode.to_owned()))
 }
 
 #[cfg(unix)]
@@ -4844,7 +4737,7 @@ fn authority_read_from_parent_with_mode(
     }
     if let Some(expected_mode) = expected_mode {
         use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o777 != expected_mode {
+        if metadata.permissions().mode() & 0o7777 != expected_mode {
             return Err(RunnerError::InvalidSpec(
                 "authority read exact mode drift".to_owned(),
             ));
@@ -4973,7 +4866,7 @@ fn authority_create_once_inner(
                 use std::os::unix::fs::PermissionsExt;
                 file.set_permissions(fs::Permissions::from_mode(mode))
                     .map_err(io_error)?;
-                if file.metadata().map_err(io_error)?.permissions().mode() & 0o777 != mode {
+                if file.metadata().map_err(io_error)?.permissions().mode() & 0o7777 != mode {
                     return Err(RunnerError::InvalidSpec(
                         "create-once staged authority exact mode drift".to_owned(),
                     ));
@@ -4983,7 +4876,7 @@ fn authority_create_once_inner(
             file.sync_all().map_err(io_error)?;
             if exact_mode {
                 use std::os::unix::fs::PermissionsExt;
-                if file.metadata().map_err(io_error)?.permissions().mode() & 0o777 != mode {
+                if file.metadata().map_err(io_error)?.permissions().mode() & 0o7777 != mode {
                     return Err(RunnerError::InvalidSpec(
                         "create-once staged authority exact mode drift".to_owned(),
                     ));

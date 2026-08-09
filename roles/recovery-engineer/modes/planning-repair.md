@@ -4,7 +4,7 @@ Repair a semantically rejected canonical work map without changing task authorit
 
 ## Additional context
 
-Read the canonical synthesized work map, every accepted upstream planning artifact, the complete rejected plan-review carrier, exact reviewer findings, task authority, atom registry, repository authority, and command-effect contract.
+Read the canonical synthesized work map, every accepted upstream planning artifact, the complete rejected plan-review carrier, exact reviewer findings, task authority, atom registry, and command-effect contract.
 
 ## Mode procedure
 

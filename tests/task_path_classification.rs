@@ -550,11 +550,8 @@ fn task_path_classification_delivery_runtime_packages_uncommitted_lane_changes_f
     fs::write(root.join("README.md"), "delivery terminal fixture\n").expect("fixture file");
     fs::write(root.join("obsolete.txt"), "approved deletion fixture\n").expect("deleted fixture");
     git_init(&root);
-    let repo_authority =
-        runner::repository_authority_binding(&root, "main").expect("repo authority");
     fs::create_dir_all(root.join(".pi/autopilot/main")).expect("plan dir");
     fs::write(root.join(".pi/autopilot/main/approved-plan.json"), serde_json::to_vec_pretty(&serde_json::json!({
-        "repository_authority": {"manifest_path": repo_authority.path, "manifest_digest": repo_authority.digest, "head_commit": repo_authority.manifest.head_commit, "head_tree": repo_authority.manifest.head_tree},
         "units":[
             {"id":"U1","kind":"implementation","objective":"deliver U1","operator_order":1,"decisions":[],"criteria":["AC1"],"criterion_text":[{"id":"AC1","text":"criterion text AC1"}],"dependencies":[],"predecessor_forward_criteria":[],"downstream_release_edges":["EDGE1"],"files":["README.md",".gitignore","obsolete.txt"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"package_checks":[]}
         ]
@@ -1131,11 +1128,8 @@ fn task_path_classification_delivery_runtime_adopts_existing_agent_commit_withou
     let root = temp_repo("delivery-runtime-adopt");
     fs::write(root.join("README.md"), "delivery terminal fixture\n").expect("fixture file");
     git_init(&root);
-    let repo_authority =
-        runner::repository_authority_binding(&root, "main").expect("repo authority");
     fs::create_dir_all(root.join(".pi/autopilot/main")).expect("plan dir");
     fs::write(root.join(".pi/autopilot/main/approved-plan.json"), serde_json::to_vec_pretty(&serde_json::json!({
-        "repository_authority": {"manifest_path": repo_authority.path, "manifest_digest": repo_authority.digest, "head_commit": repo_authority.manifest.head_commit, "head_tree": repo_authority.manifest.head_tree},
         "units":[
             {"id":"U1","kind":"implementation","objective":"deliver U1","operator_order":1,"decisions":[],"criteria":["AC1"],"criterion_text":[{"id":"AC1","text":"criterion text AC1"}],"dependencies":[],"predecessor_forward_criteria":[],"downstream_release_edges":["EDGE1"],"files":["README.md"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"package_checks":[]}
         ]
@@ -1217,11 +1211,8 @@ fn task_path_classification_delivery_terminal_carrier_is_core_accepted_and_incom
     let root = temp_repo("delivery-terminal");
     fs::write(root.join("README.md"), "delivery terminal fixture\n").expect("fixture file");
     git_init(&root);
-    let repo_authority =
-        runner::repository_authority_binding(&root, "main").expect("repo authority");
     fs::create_dir_all(root.join(".pi/autopilot/main")).expect("plan dir");
     fs::write(root.join(".pi/autopilot/main/approved-plan.json"), serde_json::to_vec_pretty(&serde_json::json!({
-        "repository_authority": {"manifest_path": repo_authority.path, "manifest_digest": repo_authority.digest, "head_commit": repo_authority.manifest.head_commit, "head_tree": repo_authority.manifest.head_tree},
         "units":[
             {"id":"U1","kind":"implementation","objective":"deliver U1","operator_order":1,"decisions":[],"criteria":["AC1"],"criterion_text":[{"id":"AC1","text":"criterion text AC1"}],"dependencies":[],"predecessor_forward_criteria":[],"downstream_release_edges":["EDGE1"],"files":["README.md"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"package_checks":[]},
             {"id":"U2","kind":"implementation","objective":"deliver U2","operator_order":2,"decisions":[],"criteria":["AC2"],"criterion_text":[{"id":"AC2","text":"criterion text AC2"}],"dependencies":["U1"],"predecessor_forward_criteria":[],"downstream_release_edges":["EDGE2"],"files":["README.md"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"package_checks":[]},

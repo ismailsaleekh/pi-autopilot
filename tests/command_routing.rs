@@ -162,209 +162,84 @@ fn command_routing_all_public_commands_reach_driver_surfaces() {
 }
 
 #[test]
-fn planning_manifest_binds_real_head_source_anchor_and_rejects_dirty_repo() {
-    let root = temp_dir("source-anchor");
+fn fresh_planning_issues_without_repository_authority_or_full_tree_inventory() {
+    let root = temp_dir("planning-unbound-large-index");
     let repo = root.join("repo");
     let vcs = GitVcs::new(&root);
     vcs.init_fixture(&repo).expect("fixture repo");
-    let task_paths = write_task_pack(&repo, "set-source-anchor");
-    fs::write(
-        repo.join(".gitignore"),
-        ".pi/autopilot/\n.pi/tasks/\ntarget/\n",
-    )
-    .expect("package runtime ignores");
+    let task_paths = write_task_pack(&repo, "set-planning-unbound");
     vcs.stage_all(&repo).expect("stage task");
     vcs.snapshot(&repo, "task commit").expect("task commit");
-    let head = git_stdout(&repo, &["rev-parse", "--verify", "HEAD^{commit}"]);
-    fs::create_dir_all(repo.join(".pi/autopilot/package-owned")).expect("autopilot state");
-    fs::create_dir_all(repo.join(".pi/tasks/package-owned")).expect("task state");
-    fs::write(repo.join(".pi/autopilot/package-owned/state.json"), "{}\n")
-        .expect("autopilot state file");
-    fs::write(repo.join(".pi/tasks/package-owned/task.json"), "{}\n").expect("task state file");
-    let plan = send_with_log(
-        &format!("autopilot-plan main {}", task_paths.join(" ")),
+
+    // Build a >20k tracked-entry tree directly in the index. Only the task
+    // files exist in the checkout: planning must neither inventory nor require
+    // materialization of this unrelated tree.
+    let blob = git_stdout(&repo, &["hash-object", "-w", "--stdin"]);
+    // `hash-object --stdin` receives no bytes through this helper; use the
+    // empty blob repeatedly, which is sufficient to stress tree enumeration.
+    let blob = blob.trim();
+    let head = git_stdout(&repo, &["rev-parse", "HEAD"]);
+    let mut index = String::new();
+    for number in 0..20_001 {
+        index.push_str(&format!("100644 {blob}\tbulk/{number:05}.txt\n"));
+    }
+    index.push_str(&format!("120000 {blob}\tunrelated-symlink\n"));
+    index.push_str(&format!("160000 {}\tunrelated-gitlink\n", head.trim()));
+    let mut child = Command::new("git")
+        .current_dir(&repo)
+        .args(["update-index", "--add", "--index-info"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("start index update");
+    child
+        .stdin
+        .as_mut()
+        .expect("index stdin")
+        .write_all(index.as_bytes())
+        .expect("write index entries");
+    assert!(child.wait().expect("wait index update").success());
+    let tree = git_stdout(&repo, &["write-tree"]);
+    let commit = git_stdout(
+        &repo,
+        &[
+            "commit-tree",
+            tree.trim(),
+            "-p",
+            head.trim(),
+            "-m",
+            "large index",
+        ],
+    );
+    git_stdout(&repo, &["update-ref", "HEAD", commit.trim()]);
+    // The task classifier must still be able to read the tracked leaves it is
+    // explicitly handed, without constructing a pathological full checkout.
+    for number in 0..20_001 {
+        let path = repo.join(format!("bulk/{number:05}.txt"));
+        fs::create_dir_all(path.parent().unwrap()).expect("bulk parent");
+        fs::write(path, b"").expect("bulk leaf");
+    }
+
+    // A dirty checkout and untracked foreign state no longer gate planning.
+    fs::write(repo.join("README.md"), "dirty tracked mutation\n").expect("dirty");
+    fs::write(repo.join("UNTRACKED.txt"), "untracked\n").expect("untracked");
+    // Do not merely use a large tree: remove Git from the Core subprocess's
+    // PATH. Planning may consume only the explicit task paths and must not
+    // enumerate, clean-check, commit-check, or otherwise inspect the checkout.
+    let no_git = root.join("no-git-on-path");
+    fs::create_dir(&no_git).expect("empty PATH directory");
+    let no_git_path = no_git.to_str().expect("UTF-8 empty PATH");
+    let plan = send_frame_env(
+        frame_json(1, &format!("autopilot-plan main {}", task_paths.join(" "))),
         &root.join("events.jsonl"),
         Some(&repo),
+        &[("PATH", no_git_path)],
     );
-    let wave = planning_wave_payload(plan);
-    let first = &wave.actions[0];
-    let spec_path = repo
-        .join(".pi/autopilot/main/planning/specs")
-        .join(format!("{}.json", first.assignment_id.0));
-    let spec: serde_json::Value =
-        serde_json::from_slice(&fs::read(&spec_path).expect("spec bytes")).expect("spec json");
-    assert_eq!(spec["repository_head_commit"], head.trim());
-    let repository_manifest_path = spec["repository_manifest_path"]
-        .as_str()
-        .expect("repo manifest path");
-    let repository_manifest_digest = spec["repository_manifest_digest"]
-        .as_str()
-        .expect("repo manifest digest");
-    let manifest_bytes = fs::read(repository_manifest_path).expect("repo manifest bytes");
-    assert_eq!(sha256_hex(&manifest_bytes), repository_manifest_digest);
-    let repository_manifest: serde_json::Value =
-        serde_json::from_slice(&manifest_bytes).expect("repo manifest json");
-    assert_eq!(repository_manifest["head_commit"], head.trim());
-    assert_eq!(
-        repository_manifest["repo_root"],
-        fs::canonicalize(&repo).unwrap().display().to_string()
-    );
-    assert!(
-        repository_manifest["tracked_sources"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|source| source["whole_file_anchor"]
-                .as_str()
-                .is_some_and(|anchor| anchor.contains("#whole-file")))
-    );
-    let prompt_path = repo
-        .join(".pi/autopilot/main/planning/prompts")
-        .join(format!("{}.md", first.assignment_id.0));
-    let prompt = fs::read_to_string(prompt_path).expect("planning prompt");
-    assert!(
-        prompt.contains(&format!("\"git_commit\": \"{}\"", head.trim())),
-        "{prompt}"
-    );
-    assert!(prompt.contains(repository_manifest_digest), "{prompt}");
-    assert!(prompt.contains("source-anchor"), "{prompt}");
-
-    let non_git = temp_dir("source-anchor-non-git");
-    assert!(runner::repository_authority(&non_git).is_err());
-
-    let foreign_root = temp_dir("source-anchor-foreign-pi");
-    let foreign_repo = foreign_root.join("repo");
-    let vcs = GitVcs::new(&foreign_root);
-    vcs.init_fixture(&foreign_repo).expect("fixture repo");
-    fs::create_dir_all(foreign_repo.join(".pi/foreign")).expect("foreign pi dir");
-    fs::write(foreign_repo.join(".pi/foreign/evidence.txt"), "foreign\n").expect("foreign pi file");
-    let foreign_error = runner::repository_authority(&foreign_repo)
-        .expect_err("foreign untracked .pi paths must not inherit package runtime authority");
-    assert!(
-        format!("{foreign_error:?}").contains(".pi/foreign/evidence.txt"),
-        "{foreign_error:?}"
-    );
-
-    let ignored_foreign_root = temp_dir("source-anchor-ignored-foreign-pi");
-    let ignored_foreign_repo = ignored_foreign_root.join("repo");
-    let vcs = GitVcs::new(&ignored_foreign_root);
-    vcs.init_fixture(&ignored_foreign_repo)
-        .expect("fixture repo");
-    fs::write(
-        ignored_foreign_repo.join(".gitignore"),
-        ".pi/foreign/\ntarget/\n",
-    )
-    .expect("gitignore");
-    git_stdout(&ignored_foreign_repo, &["add", ".gitignore"]);
-    git_stdout(
-        &ignored_foreign_repo,
-        &["commit", "-m", "ignore foreign pi fixture"],
-    );
-    fs::create_dir_all(ignored_foreign_repo.join(".pi/foreign")).expect("ignored foreign pi dir");
-    fs::write(
-        ignored_foreign_repo.join(".pi/foreign/evidence.txt"),
-        "ignored foreign\n",
-    )
-    .expect("ignored foreign pi file");
-    fs::create_dir_all(ignored_foreign_repo.join("target")).expect("ordinary ignored build dir");
-    fs::write(
-        ignored_foreign_repo.join("target/residue"),
-        "ignored build\n",
-    )
-    .expect("ordinary ignored build file");
-    let ignored_foreign_error = runner::repository_authority(&ignored_foreign_repo)
-        .expect_err("ignored foreign .pi paths must not inherit package runtime authority");
-    assert!(
-        format!("{ignored_foreign_error:?}").contains(".pi/foreign"),
-        "{ignored_foreign_error:?}"
-    );
-
-    let dirty_root = temp_dir("source-anchor-dirty");
-    let dirty_repo = dirty_root.join("repo");
-    let vcs = GitVcs::new(&dirty_root);
-    vcs.init_fixture(&dirty_repo).expect("fixture repo");
-    let task_paths = write_task_pack(&dirty_repo, "set-source-anchor-dirty");
-    fs::write(dirty_repo.join("README.md"), "clean\n").expect("readme");
-    vcs.stage_all(&dirty_repo).expect("stage task");
-    vcs.snapshot(&dirty_repo, "task commit")
-        .expect("task commit");
-    fs::write(dirty_repo.join("README.md"), "dirty tracked mutation\n").expect("dirty");
-    fs::write(dirty_repo.join("UNTRACKED.txt"), "nonignored untracked\n").expect("untracked");
-    fs::create_dir_all(dirty_repo.join(".pi/foreign")).expect("foreign pi dir");
-    fs::write(dirty_repo.join(".pi/foreign/evidence.txt"), "foreign\n").expect("foreign pi file");
-    let dirty = send_with_log(
-        &format!("autopilot-plan main {}", task_paths.join(" ")),
-        &dirty_root.join("events.jsonl"),
-        Some(&dirty_repo),
-    );
-    let dirty_status = done_status(&dirty);
-    assert!(
-        dirty_status.contains("repository authority requires clean status"),
-        "{dirty_status}"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn repository_authority_rejects_tracked_symlink_sources() {
-    let root = temp_dir("source-anchor-symlink");
-    let repo = root.join("repo");
-    let vcs = GitVcs::new(&root);
-    vcs.init_fixture(&repo).expect("fixture repo");
-    std::os::unix::fs::symlink("README.md", repo.join("tracked-link")).expect("symlink");
-    git_stdout(&repo, &["add", "tracked-link"]);
-    git_stdout(&repo, &["commit", "-m", "tracked symlink"]);
-
-    let error = runner::repository_authority(&repo).expect_err("tracked symlink must be refused");
-    let detail = format!("{error:?}");
-    assert!(detail.contains("120000"), "{detail}");
-    assert!(detail.contains("symlink"), "{detail}");
-}
-
-#[test]
-fn plan_review_refuses_tampered_repository_authority_manifest() {
-    let root = temp_dir("repo-authority-tamper");
-    let repo = root.join("repo");
-    let vcs = GitVcs::new(&root);
-    vcs.init_fixture(&repo).expect("fixture repo");
-    let task_paths = write_task_pack(&repo, "set-repo-authority-tamper");
-    vcs.stage_all(&repo).expect("stage task");
-    vcs.snapshot(&repo, "task commit").expect("task commit");
-    let event_log = root.join("events.jsonl");
-
-    let plan = send_with_log(
-        &format!("autopilot-plan main {}", task_paths.join(" ")),
-        &event_log,
-        Some(&repo),
-    );
-    let reviewer = complete_planning_until_assignment(
-        planning_wave_payload(plan),
-        &event_log,
-        &repo,
-        "planning-main-plan-reviewer-01",
-    );
-    let spec_path = repo
-        .join(".pi/autopilot/main/planning/specs")
-        .join(format!("{}.json", reviewer.assignment_id.0));
-    let spec: serde_json::Value =
-        serde_json::from_slice(&fs::read(&spec_path).expect("spec")).expect("spec json");
-    let manifest_path = spec["repository_manifest_path"]
-        .as_str()
-        .expect("manifest path");
-    let mut manifest = fs::read_to_string(manifest_path).expect("manifest");
-    manifest.push('\n');
-    fs::write(manifest_path, manifest).expect("tamper manifest");
-
-    let refused = send_planning_completion(&reviewer, &event_log, &repo, 930);
-    let status = done_status(&refused);
-    assert!(
-        status.contains("repository authority digest drift"),
-        "{status}"
-    );
+    let _wave = planning_wave_payload(plan);
     assert!(
         !repo
-            .join(".pi/autopilot/main/approved-plan.v2.json")
-            .exists()
+            .join(".pi/autopilot/main/planning/repository-authority.v1.json")
+            .exists(),
+        "fresh planning created removed repository authority"
     );
 }
 
@@ -1665,10 +1540,6 @@ fn send_planning_completion_inner(
             "terminal_route":route,
             "atom_registry_path":spec["atom_registry_path"],
             "atom_registry_digest":spec["atom_registry_digest"],
-            "repository_manifest_path":spec["repository_manifest_path"],
-            "repository_manifest_digest":spec["repository_manifest_digest"],
-            "repository_head_commit":spec["repository_head_commit"],
-            "repository_head_tree":spec["repository_head_tree"],
             "raw_output":raw_output
         })
     } else {
@@ -1939,8 +1810,6 @@ fn complete_run_repo(root: &Path, workstream: &str, units: usize, _closed: &[&st
     .expect("lib");
     git_stdout(&repo, &["add", ".gitignore", "src/lib.rs"]);
     git_stdout(&repo, &["commit", "-m", "fixture implementation"]);
-    let repo_authority =
-        runner::repository_authority_binding(&repo, workstream).expect("repo authority");
     fs::create_dir_all(repo.join(".pi/autopilot").join(workstream)).expect("autopilot dir");
     let approved_units = (1..=units)
         .map(|index| {
@@ -1966,12 +1835,6 @@ fn complete_run_repo(root: &Path, workstream: &str, units: usize, _closed: &[&st
             .join(workstream)
             .join("approved-plan.json"),
         serde_json::to_vec_pretty(&serde_json::json!({
-            "repository_authority": {
-                "manifest_path": repo_authority.path,
-                "manifest_digest": repo_authority.digest,
-                "head_commit": repo_authority.manifest.head_commit,
-                "head_tree": repo_authority.manifest.head_tree,
-            },
             "units": approved_units
         }))
         .expect("approved json"),
@@ -2023,10 +1886,6 @@ fn append_active_binding(event_log: &Path, repo: &Path, workstream: &str) {
         terminal_route: None,
         assignment_path: None,
         assignment_digest: None,
-        repository_manifest_path: None,
-        repository_manifest_digest: None,
-        repository_head_commit: None,
-        repository_head_tree: None,
         mode_parameter: None,
         planning_subject_assignment_id: None,
         planning_subject_path: None,

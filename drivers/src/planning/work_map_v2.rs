@@ -84,10 +84,6 @@ pub(crate) struct WorkMapV2ActualCarrierAuthority {
     pub(crate) terminal_route: TerminalRoute,
     pub(crate) atom_registry_path: String,
     pub(crate) atom_registry_digest: String,
-    pub(crate) repository_manifest_path: String,
-    pub(crate) repository_manifest_digest: String,
-    pub(crate) repository_head_commit: String,
-    pub(crate) repository_head_tree: String,
 }
 
 /// Result of one complete carrier/spec authority replay.  The source bytes are
@@ -130,10 +126,6 @@ struct WorkMapV2ActualCarrierWire {
     terminal_route: TerminalRoute,
     atom_registry_path: String,
     atom_registry_digest: String,
-    repository_manifest_path: String,
-    repository_manifest_digest: String,
-    repository_head_commit: String,
-    repository_head_tree: String,
     raw_output: String,
 }
 
@@ -198,10 +190,6 @@ pub(crate) fn read_work_map_v2_actual_carrier_authority(
         terminal_route: wire.terminal_route,
         atom_registry_path: wire.atom_registry_path,
         atom_registry_digest: wire.atom_registry_digest,
-        repository_manifest_path: wire.repository_manifest_path,
-        repository_manifest_digest: wire.repository_manifest_digest,
-        repository_head_commit: wire.repository_head_commit,
-        repository_head_tree: wire.repository_head_tree,
     };
     Ok((
         WorkMapV2SourceCarrier {
@@ -300,26 +288,6 @@ pub(crate) fn verify_work_map_v2_actual_carrier_authority(
             .as_ref()
             .map(|value| value.0.as_str())
             != Some(authority.atom_registry_digest.as_str())
-        || spec
-            .repository_manifest_path
-            .as_ref()
-            .map(|value| value.0.as_str())
-            != Some(authority.repository_manifest_path.as_str())
-        || spec
-            .repository_manifest_digest
-            .as_ref()
-            .map(|value| value.0.as_str())
-            != Some(authority.repository_manifest_digest.as_str())
-        || spec
-            .repository_head_commit
-            .as_ref()
-            .map(|value| value.0.as_str())
-            != Some(authority.repository_head_commit.as_str())
-        || spec
-            .repository_head_tree
-            .as_ref()
-            .map(|value| value.0.as_str())
-            != Some(authority.repository_head_tree.as_str())
         || spec.session_continuity != kernel::generated::SessionContinuity::Fresh
         || authority.carrier_binding != runner::child::carrier_binding(&spec)
     {
@@ -408,7 +376,6 @@ pub fn read_work_map_v2_source_carrier(path: &Path) -> Result<WorkMapV2SourceCar
 pub struct WorkMapV2AdmissionContext<'a> {
     pub atom_registry_path: &'a Path,
     pub atom_registry_digest: &'a str,
-    pub repository_authority: &'a runner::RepositoryAuthorityBinding,
     /// Recovery is relative to a prior authenticated Core admission, never a
     /// caller-parsed model map.
     pub recovery_subject: Option<&'a ApprovedWorkMapV2>,
@@ -430,7 +397,6 @@ pub struct ApprovedWorkMapV2 {
     source_actual_authority: Option<WorkMapV2ActualCarrierAuthority>,
     atom_registry_path: PathBuf,
     atom_registry_digest: String,
-    repository_authority: runner::RepositoryAuthorityBinding,
     units: Vec<allocation::ApprovedUnit>,
     vendoring: Vec<allocation::ApprovedUnitVendoringV2>,
     package_authority: Vec<allocation::ApprovedUnitPackageAuthorityV2>,
@@ -454,9 +420,6 @@ impl ApprovedWorkMapV2 {
     }
     pub(crate) fn atom_registry_digest(&self) -> &str {
         &self.atom_registry_digest
-    }
-    pub(crate) fn repository_authority(&self) -> &runner::RepositoryAuthorityBinding {
-        &self.repository_authority
     }
     pub(crate) fn units(&self) -> &[allocation::ApprovedUnit] {
         &self.units
@@ -487,7 +450,6 @@ pub(crate) struct ApprovedWorkMapV2RecoverySubject {
     pub(crate) source_raw_work_map_sha256: String,
     pub(crate) atom_registry_path: PathBuf,
     pub(crate) atom_registry_digest: String,
-    pub(crate) repository_authority: runner::RepositoryAuthorityBinding,
     pub(crate) source_actual_authority: Option<WorkMapV2ActualCarrierAuthority>,
 }
 
@@ -560,7 +522,6 @@ pub fn admit_work_map_v2(
             source_raw_work_map_sha256: subject.source_raw_work_map_sha256.clone(),
             atom_registry_path: subject.atom_registry_path.clone(),
             atom_registry_digest: subject.atom_registry_digest.clone(),
-            repository_authority: subject.repository_authority.clone(),
             source_actual_authority: subject.source_actual_authority.clone(),
         })
     } else {
@@ -573,7 +534,7 @@ pub fn admit_work_map_v2(
         None
     };
     let units = approved_units_from_work_map_v2(&work_map)?;
-    let vendoring = enrich_work_map_v2_vendoring(&work_map, context.repository_authority)?;
+    let vendoring = vendoring_from_work_map_v2(&work_map)?;
     let package_authority = package_authority_from_work_map_v2(&work_map)?;
     allocation::validate_approved_v2_authority(&units, &vendoring, &package_authority)
         .map_err(|error| format!("work-map-v2:package authority: {error}"))?;
@@ -586,7 +547,6 @@ pub fn admit_work_map_v2(
         source_actual_authority: None,
         atom_registry_path: context.atom_registry_path.to_path_buf(),
         atom_registry_digest: context.atom_registry_digest.to_owned(),
-        repository_authority: context.repository_authority.clone(),
         units,
         vendoring,
         package_authority,
@@ -597,16 +557,18 @@ fn validate_v2_artifact_confinement(
     source_carrier: &WorkMapV2SourceCarrier,
     context: &WorkMapV2AdmissionContext<'_>,
 ) -> Result<(), String> {
-    let run_root = runner::repository_authority_run_root(context.repository_authority)
-        .map_err(|error| format!("work-map-v2 repository/run authority: {error}"))?;
+    let run_root = source_carrier
+        .path
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .ok_or_else(|| "work-map-v2 source carrier lacks run root".to_owned())?;
     for (path, label) in [
         (source_carrier.path.as_path(), "source carrier"),
         (context.atom_registry_path, "atom registry"),
     ] {
-        if path == run_root.as_path() || !path.starts_with(&run_root) {
-            return Err(format!(
-                "work-map-v2 {label} is outside the exact repository/run authority root"
-            ));
+        if path == run_root || !path.starts_with(run_root) {
+            return Err(format!("work-map-v2 {label} is outside the exact run root"));
         }
     }
     Ok(())
@@ -627,11 +589,6 @@ fn validate_authenticated_recovery_subject(
         return Err(
             "work-map-v2:recovery subject atom-registry authority differs from candidate"
                 .to_owned(),
-        );
-    }
-    if &subject.repository_authority != context.repository_authority {
-        return Err(
-            "work-map-v2:recovery subject repository authority differs from candidate".to_owned(),
         );
     }
     Ok(())
@@ -807,11 +764,6 @@ fn validate_work_map_v2_shape(work_map: &WorkMapV2, atom_ids: &BTreeSet<Id>) -> 
             }
             validate_work_map_v2_tsv_path(&binding.origin_path, "vendor origin path")?;
             validate_work_map_v2_tsv_path(&binding.destination, "vendor destination")?;
-            validate_work_map_v2_string(
-                &binding.origin_anchor,
-                WORK_MAP_V2_MAX_ITEM_BYTES,
-                "vendor origin anchor",
-            )?;
             if !unit.files.contains(&binding.destination) {
                 return Err(format!(
                     "unit {} vendor destination {} is not an exact unit file",
@@ -1229,40 +1181,20 @@ fn approved_units_from_work_map_v2(
         .collect()
 }
 
-fn enrich_work_map_v2_vendoring(
+fn vendoring_from_work_map_v2(
     work_map: &WorkMapV2,
-    authority: &runner::RepositoryAuthorityBinding,
 ) -> Result<Vec<allocation::ApprovedUnitVendoringV2>, String> {
-    let mut aggregate_bytes = 0_usize;
     let mut rows = Vec::with_capacity(work_map.units.len());
     for unit in &work_map.units {
-        let mut bindings = Vec::with_capacity(unit.vendor_bindings.len());
-        for binding in &unit.vendor_bindings {
-            let pinned = runner::read_pinned_repository_source_blob(
-                authority,
-                &binding.origin_path.0,
-                &binding.origin_anchor,
-            )
-            .map_err(|error| format!("vendor binding {}: {error}", binding.binding_id.0))?;
-            aggregate_bytes = aggregate_bytes
-                .checked_add(pinned.bytes.len())
-                .ok_or_else(|| "vendored source byte total overflow".to_owned())?;
-            if aggregate_bytes > runner::MAX_VENDORED_SOURCE_BYTES {
-                return Err(format!(
-                    "vendored source bytes exceed {}",
-                    runner::MAX_VENDORED_SOURCE_BYTES
-                ));
-            }
-            bindings.push(allocation::ApprovedVendorBindingV2 {
+        let mut bindings = unit
+            .vendor_bindings
+            .iter()
+            .map(|binding| allocation::ApprovedVendorBindingV2 {
                 binding_id: binding.binding_id.clone(),
                 origin_path: binding.origin_path.clone(),
                 destination: binding.destination.clone(),
-                origin_anchor: binding.origin_anchor.clone(),
-                origin_git_blob_oid: pinned.blob,
-                origin_mode: pinned.mode,
-                origin_bytes_sha256: sha256_hex(&pinned.bytes),
-            });
-        }
+            })
+            .collect::<Vec<_>>();
         bindings.sort_by(|left, right| {
             left.destination
                 .0

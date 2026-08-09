@@ -1,23 +1,20 @@
-//! Core-owned V4 vendoring materialization.  This module never reads source
-//! bytes from a mutable worktree: every vendor leaf is re-derived from the
-//! repository authority-pinned Git object before it is published.
+//! Core-owned V4 vendoring materialization. Sources are read once from the
+//! selected lane worktree after it exists; planning never authorizes a repository snapshot.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use kernel::generated::{Id, Path as ContractPath, Sha};
 use serde::{Deserialize, Serialize};
 
-use crate::allocation::{ApprovedUnit, ApprovedUnitVendoringV2, ApprovedVendorBindingV2};
+use crate::allocation::{ApprovedUnit, ApprovedUnitVendoringV2};
 use crate::seam::{self, ApprovedPlanArtifactV2, ApprovedPlanV2BindingV1};
 
 use super::{
-    MAX_AUTHORITY_SOURCE_BYTES, RepositoryAuthorityBinding, RunnerError,
-    read_binary_leaf_exact_mode, read_bounded_authority_file, read_pinned_repository_source_blob,
-    read_repository_authority_binding, sha256_hex, write_binary_leaf_create_once_exact_mode,
-    write_bounded_file_create_once,
+    MAX_AUTHORITY_SOURCE_BYTES, MAX_VENDORED_SOURCE_BYTES, RunnerError,
+    read_binary_leaf_exact_mode, read_binary_leaf_with_allowed_mode, read_bounded_authority_file,
+    sha256_hex, write_binary_leaf_create_once_exact_mode, write_bounded_file_create_once,
 };
 
 pub const DELIVERY_ASSIGNMENT_V4_SCHEMA: &str = "autopilot.delivery_assignment.v4";
@@ -37,8 +34,6 @@ pub struct CoreBaselineLeafV1 {
     pub mode: String,
     pub bytes_sha256: String,
     pub origin_path: Option<ContractPath>,
-    pub origin_anchor: Option<String>,
-    pub origin_git_blob_oid: Option<String>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -111,54 +106,19 @@ pub fn materialize_v4(
     request: &CoreMaterializationRequestV4,
     approved: &ApprovedPlanArtifactV2,
 ) -> Result<CoreMaterializationBindingV1, RunnerError> {
-    materialize_v4_inner(request, approved, true, true)
+    materialize_v4_inner(request, approved, true)
 }
 
-/// `materialize_v4` is the only path that may start a new pair.  Replayers use
-/// the same root/source reconstruction but never turn a missing pair into new
-/// authority and do not impose the initial baseline-only Git residue law.
+/// `materialize_v4` is the only path that may start a new pair. Replayers use
+/// the external approved root and durable receipt without reopening origins.
 fn materialize_v4_inner(
     request: &CoreMaterializationRequestV4,
     approved: &ApprovedPlanArtifactV2,
-    require_initial_status: bool,
     allow_create: bool,
 ) -> Result<CoreMaterializationBindingV1, RunnerError> {
     validate_request(request, approved)?;
     let worktree = canonical_worktree(&request.worktree)?;
     let (intention_path, receipt_path) = materialization_paths(&worktree, &request.assignment_id);
-    let plan = planned_leaves(request, approved)?;
-    let intention = CoreMaterializationIntentionV1 {
-        schema: CORE_MATERIALIZATION_INTENTION_V1_SCHEMA.to_owned(),
-        workstream: request.workstream.clone(),
-        assignment_id: request.assignment_id.clone(),
-        lane_id: request.lane_id.clone(),
-        attempt: request.attempt,
-        base_commit: request.base_commit.clone(),
-        worktree: path_text(&worktree)?,
-        approved_plan_binding_path: request.approved_plan_binding_path.clone(),
-        approved_plan_binding_digest: request.approved_plan_binding_digest.clone(),
-        approved_image_digest: request.approved_image_digest.clone(),
-        selected_vendoring: request.selected_vendoring.clone(),
-        intended_baseline: plan.iter().map(|item| item.leaf.clone()).collect(),
-    };
-    validate_intention(&intention)?;
-    let intention_bytes = canonical_bytes(&intention)?;
-    let intention_digest = sha256_hex(&intention_bytes);
-    let receipt = CoreMaterializationReceiptV1 {
-        schema: CORE_MATERIALIZATION_RECEIPT_V1_SCHEMA.to_owned(),
-        intention_path: path_text(&intention_path)?,
-        intention_digest: intention_digest.clone(),
-        workstream: request.workstream.clone(),
-        assignment_id: request.assignment_id.clone(),
-        lane_id: request.lane_id.clone(),
-        attempt: request.attempt,
-        base_commit: request.base_commit.clone(),
-        worktree: path_text(&worktree)?,
-        completed_baseline: intention.intended_baseline.clone(),
-    };
-    validate_receipt(&receipt, &intention)?;
-    let receipt_bytes = canonical_bytes(&receipt)?;
-    let receipt_digest = sha256_hex(&receipt_bytes);
 
     match (intention_path.exists(), receipt_path.exists()) {
         (false, false) => {
@@ -167,7 +127,43 @@ fn materialize_v4_inner(
                     "V4 Core materialization pair is absent during replay".to_owned(),
                 ));
             }
-            require_initial_materialization_worktree(&worktree, &request.base_commit)?;
+            // Open only the exact selected origins. Unrelated repository state
+            // is neither enumerated nor promoted into materialization authority.
+            let plan = planned_leaves(request, &worktree)?;
+            let intention = CoreMaterializationIntentionV1 {
+                schema: CORE_MATERIALIZATION_INTENTION_V1_SCHEMA.to_owned(),
+                workstream: request.workstream.clone(),
+                assignment_id: request.assignment_id.clone(),
+                lane_id: request.lane_id.clone(),
+                attempt: request.attempt,
+                base_commit: request.base_commit.clone(),
+                worktree: path_text(&worktree)?,
+                approved_plan_binding_path: request.approved_plan_binding_path.clone(),
+                approved_plan_binding_digest: request.approved_plan_binding_digest.clone(),
+                approved_image_digest: request.approved_image_digest.clone(),
+                selected_vendoring: request.selected_vendoring.clone(),
+                intended_baseline: plan.iter().map(|item| item.leaf.clone()).collect(),
+            };
+            validate_intention(&intention)?;
+            validate_baseline_rows(&intention.selected_vendoring, &intention.intended_baseline)
+                .map_err(RunnerError::InvalidSpec)?;
+            let intention_bytes = canonical_bytes(&intention)?;
+            let intention_digest = sha256_hex(&intention_bytes);
+            let receipt = CoreMaterializationReceiptV1 {
+                schema: CORE_MATERIALIZATION_RECEIPT_V1_SCHEMA.to_owned(),
+                intention_path: path_text(&intention_path)?,
+                intention_digest: intention_digest.clone(),
+                workstream: request.workstream.clone(),
+                assignment_id: request.assignment_id.clone(),
+                lane_id: request.lane_id.clone(),
+                attempt: request.attempt,
+                base_commit: request.base_commit.clone(),
+                worktree: path_text(&worktree)?,
+                completed_baseline: intention.intended_baseline.clone(),
+            };
+            validate_receipt(&receipt, &intention)?;
+            let receipt_bytes = canonical_bytes(&receipt)?;
+            let receipt_digest = sha256_hex(&receipt_bytes);
             write_bounded_file_create_once(
                 &intention_path,
                 &intention_bytes,
@@ -181,39 +177,29 @@ fn materialize_v4_inner(
                 &receipt_bytes,
                 CORE_MATERIALIZATION_MAX_BYTES,
             )?;
+            Ok(CoreMaterializationBindingV1 {
+                intention_path: path_text(&intention_path)?,
+                intention_digest,
+                receipt_path: path_text(&receipt_path)?,
+                receipt_digest,
+                baseline: receipt.completed_baseline,
+            })
         }
-        (true, false) => {
-            return Err(RunnerError::InvalidSpec(
-                "core materialization intention exists without receipt; crash is permanently blocked"
-                    .to_owned(),
-            ));
-        }
-        (false, true) => {
-            return Err(RunnerError::InvalidSpec(
-                "core materialization receipt exists without intention".to_owned(),
-            ));
-        }
+        (true, false) => Err(RunnerError::InvalidSpec(
+            "core materialization intention exists without receipt; crash is permanently blocked"
+                .to_owned(),
+        )),
+        (false, true) => Err(RunnerError::InvalidSpec(
+            "core materialization receipt exists without intention".to_owned(),
+        )),
         (true, true) => replay_complete_materialization(
             request,
             approved,
             &worktree,
             &intention_path,
             &receipt_path,
-            &intention,
-            &receipt,
-            &plan,
-            &intention_bytes,
-            &receipt_bytes,
-            require_initial_status,
-        )?,
+        ),
     }
-    Ok(CoreMaterializationBindingV1 {
-        intention_path: path_text(&intention_path)?,
-        intention_digest,
-        receipt_path: path_text(&receipt_path)?,
-        receipt_digest,
-        baseline: receipt.completed_baseline,
-    })
 }
 
 /// Replays the external approved root and the materialization pair.  Package,
@@ -338,8 +324,8 @@ pub fn replay_v4_materialization(artifact: &DeliveryAssignmentArtifactV4) -> Res
         selected_units: artifact.ordered_units.clone(),
         selected_vendoring: intention.selected_vendoring.clone(),
     };
-    let binding = materialize_v4_inner(&request, &approved, false, false)
-        .map_err(|error| error.to_string())?;
+    let binding =
+        materialize_v4_inner(&request, &approved, false).map_err(|error| error.to_string())?;
     if binding != artifact.materialization {
         return Err("V4 materialization binding/baseline drift".to_owned());
     }
@@ -478,15 +464,7 @@ pub fn validate_delivery_assignment_v4_json(value: &serde_json::Value) -> Result
         for row in rows {
             array_objects(
                 row.as_object().and_then(|row| row.get("vendor_bindings")),
-                &[
-                    "binding_id",
-                    "origin_path",
-                    "destination",
-                    "origin_anchor",
-                    "origin_git_blob_oid",
-                    "origin_mode",
-                    "origin_bytes_sha256",
-                ],
+                &["binding_id", "origin_path", "destination"],
                 "vendor binding",
             )?;
         }
@@ -514,8 +492,6 @@ pub fn validate_delivery_assignment_v4_json(value: &serde_json::Value) -> Result
             "mode",
             "bytes_sha256",
             "origin_path",
-            "origin_anchor",
-            "origin_git_blob_oid",
         ],
         "baseline leaf",
     )?;
@@ -642,34 +618,44 @@ fn validate_request(
 
 fn planned_leaves(
     request: &CoreMaterializationRequestV4,
-    approved: &ApprovedPlanArtifactV2,
+    worktree: &Path,
 ) -> Result<Vec<PlannedLeaf>, RunnerError> {
-    let repository = read_repository_authority_binding(
-        Path::new(&approved.repository_authority.manifest_path),
-        &approved.repository_authority.manifest_digest,
-    )?;
-    if repository.manifest.head_commit != approved.repository_authority.head_commit.0
-        || repository.manifest.head_tree != approved.repository_authority.head_tree.0
-    {
-        return Err(RunnerError::InvalidSpec(
-            "V4 repository authority head/tree drift".to_owned(),
-        ));
-    }
     let mut leaves = Vec::new();
+    // Several destinations may deliberately copy one exact origin. Retain the
+    // descriptor-read fact by origin path so a lane source is opened once,
+    // then copy those same bytes to each approved destination.
+    let mut sources = BTreeMap::<String, (Vec<u8>, String)>::new();
+    let mut materialized_source_bytes = 0_usize;
     for row in &request.selected_vendoring {
         let mut manifest_rows = Vec::new();
         for binding in &row.vendor_bindings {
-            let source = pinned_source(&repository, binding)?;
-            let bytes_sha256 = sha256_hex(&source.bytes);
-            if source.blob != binding.origin_git_blob_oid
-                || source.mode != binding.origin_mode
-                || bytes_sha256 != binding.origin_bytes_sha256
+            let (source_bytes, source_mode) = if let Some(source) =
+                sources.get(&binding.origin_path.0)
             {
+                source.clone()
+            } else {
+                let source_path = worktree.join(&binding.origin_path.0);
+                if !source_path.starts_with(worktree) {
+                    return Err(RunnerError::InvalidSpec(
+                        "V4 vendor origin escaped lane worktree".to_owned(),
+                    ));
+                }
+                let source =
+                    read_binary_leaf_with_allowed_mode(&source_path, MAX_AUTHORITY_SOURCE_BYTES)?;
+                sources.insert(binding.origin_path.0.clone(), source.clone());
+                source
+            };
+            materialized_source_bytes = materialized_source_bytes
+                .checked_add(source_bytes.len())
+                .ok_or_else(|| {
+                RunnerError::InvalidSpec("V4 vendored source byte total overflow".to_owned())
+            })?;
+            if materialized_source_bytes > MAX_VENDORED_SOURCE_BYTES {
                 return Err(RunnerError::InvalidSpec(format!(
-                    "V4 approved vendoring enrichment drift: {}",
-                    binding.binding_id.0
+                    "V4 vendored source bytes exceed {MAX_VENDORED_SOURCE_BYTES}"
                 )));
             }
+            let bytes_sha256 = sha256_hex(&source_bytes);
             manifest_rows.push((
                 binding.destination.0.clone(),
                 format!(
@@ -684,13 +670,11 @@ fn planned_leaves(
                     unit_id: row.unit_id.clone(),
                     kind: "vendor".to_owned(),
                     binding_id: Some(binding.binding_id.clone()),
-                    mode: binding.origin_mode.clone(),
+                    mode: source_mode,
                     bytes_sha256,
                     origin_path: Some(binding.origin_path.clone()),
-                    origin_anchor: Some(binding.origin_anchor.clone()),
-                    origin_git_blob_oid: Some(binding.origin_git_blob_oid.clone()),
                 },
-                bytes: source.bytes,
+                bytes: source_bytes,
             });
         }
         if let Some(destination) = &row.provenance_manifest_destination {
@@ -708,8 +692,6 @@ fn planned_leaves(
                     mode: "100644".to_owned(),
                     bytes_sha256: sha256_hex(&bytes),
                     origin_path: None,
-                    origin_anchor: None,
-                    origin_git_blob_oid: None,
                 },
                 bytes,
             });
@@ -731,18 +713,6 @@ fn planned_leaves(
         ));
     }
     Ok(leaves)
-}
-
-fn pinned_source(
-    repository: &RepositoryAuthorityBinding,
-    binding: &ApprovedVendorBindingV2,
-) -> Result<super::RepositoryPinnedSourceBlob, RunnerError> {
-    let source = read_pinned_repository_source_blob(
-        repository,
-        &binding.origin_path.0,
-        &binding.origin_anchor,
-    )?;
-    Ok(source)
 }
 
 fn write_leaf(worktree: &Path, item: &PlannedLeaf) -> Result<(), RunnerError> {
@@ -768,57 +738,66 @@ fn write_leaf(worktree: &Path, item: &PlannedLeaf) -> Result<(), RunnerError> {
     write_binary_leaf_create_once_exact_mode(&path, &item.bytes, mode, MAX_AUTHORITY_SOURCE_BYTES)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn replay_complete_materialization(
     request: &CoreMaterializationRequestV4,
     approved: &ApprovedPlanArtifactV2,
     worktree: &Path,
     intention_path: &Path,
     receipt_path: &Path,
-    intention: &CoreMaterializationIntentionV1,
-    receipt: &CoreMaterializationReceiptV1,
-    plan: &[PlannedLeaf],
-    intention_bytes: &[u8],
-    receipt_bytes: &[u8],
-    require_initial_status: bool,
-) -> Result<(), RunnerError> {
-    let stored_intention = canonical_read::<CoreMaterializationIntentionV1>(
+) -> Result<CoreMaterializationBindingV1, RunnerError> {
+    let intention = canonical_read::<CoreMaterializationIntentionV1>(
         intention_path,
         CORE_MATERIALIZATION_MAX_BYTES,
     )?;
-    let stored_receipt = canonical_read::<CoreMaterializationReceiptV1>(
+    let receipt = canonical_read::<CoreMaterializationReceiptV1>(
         receipt_path,
         CORE_MATERIALIZATION_MAX_BYTES,
     )?;
-    if canonical_bytes(&stored_intention)? != intention_bytes
-        || canonical_bytes(&stored_receipt)? != receipt_bytes
-        || stored_intention != *intention
-        || stored_receipt != *receipt
+    validate_intention(&intention)?;
+    validate_receipt(&receipt, &intention)?;
+    let intention_bytes = canonical_bytes(&intention)?;
+    let receipt_bytes = canonical_bytes(&receipt)?;
+    let intention_digest = sha256_hex(&intention_bytes);
+    let receipt_digest = sha256_hex(&receipt_bytes);
+    if receipt.intention_path != path_text(intention_path)?
+        || receipt.intention_digest != intention_digest
+        || intention.workstream != request.workstream
+        || intention.assignment_id != request.assignment_id
+        || intention.lane_id != request.lane_id
+        || intention.attempt != request.attempt
+        || intention.base_commit != request.base_commit
+        || intention.worktree != path_text(worktree)?
+        || intention.approved_plan_binding_path != request.approved_plan_binding_path
+        || intention.approved_plan_binding_digest != request.approved_plan_binding_digest
+        || intention.approved_image_digest != request.approved_image_digest
+        || intention.selected_vendoring != request.selected_vendoring
     {
         return Err(RunnerError::InvalidSpec(
             "V4 Core materialization intention/receipt authority drift".to_owned(),
         ));
     }
-    // Re-run root and source replay even though the caller already did so:
-    // durable materialization is not a substitute oracle for its approved root.
+    // Re-read the approved root, but never origins: the durable receipt's
+    // baseline is the sole materialization source after creation.
     validate_request(request, approved)?;
-    if require_initial_status {
-        require_initial_replay_status(
-            worktree,
-            &request.base_commit,
-            &receipt.completed_baseline,
-            intention_path,
-            receipt_path,
-        )?;
+    validate_baseline_rows(&intention.selected_vendoring, &receipt.completed_baseline)
+        .map_err(RunnerError::InvalidSpec)?;
+    for leaf in &receipt.completed_baseline {
+        validate_materialized_leaf(worktree, leaf)?;
     }
-    for item in plan {
-        validate_leaf(worktree, item)?;
-    }
-    Ok(())
+    Ok(CoreMaterializationBindingV1 {
+        intention_path: path_text(intention_path)?,
+        intention_digest,
+        receipt_path: path_text(receipt_path)?,
+        receipt_digest,
+        baseline: receipt.completed_baseline,
+    })
 }
 
-fn validate_leaf(worktree: &Path, item: &PlannedLeaf) -> Result<(), RunnerError> {
-    let expected_mode = match item.leaf.mode.as_str() {
+fn validate_materialized_leaf(
+    worktree: &Path,
+    leaf: &CoreBaselineLeafV1,
+) -> Result<(), RunnerError> {
+    let expected_mode = match leaf.mode.as_str() {
         "100644" => 0o644,
         "100755" => 0o755,
         _ => {
@@ -827,12 +806,12 @@ fn validate_leaf(worktree: &Path, item: &PlannedLeaf) -> Result<(), RunnerError>
             ));
         }
     };
-    let path = worktree.join(&item.leaf.destination.0);
+    let path = worktree.join(&leaf.destination.0);
     // No metadata/read split: the final leaf is opened O_NOFOLLOW relative to
     // the capability-rooted parent, type/mode checked, and bounded-read on the
     // one held descriptor.
     let bytes = read_binary_leaf_exact_mode(&path, MAX_AUTHORITY_SOURCE_BYTES, expected_mode)?;
-    if bytes != item.bytes || sha256_hex(&bytes) != item.leaf.bytes_sha256 {
+    if sha256_hex(&bytes) != leaf.bytes_sha256 {
         return Err(RunnerError::InvalidSpec(
             "V4 Core baseline leaf byte drift".to_owned(),
         ));
@@ -890,6 +869,9 @@ fn validate_baseline_rows(
     rows: &[ApprovedUnitVendoringV2],
     baseline: &[CoreBaselineLeafV1],
 ) -> Result<(), String> {
+    // Partition coverage is deliberately only destination/unit/kind. Mode,
+    // digest, binding, and origin-path facts are validated below by the
+    // baseline/materialization checks; they are not placeholder tuple values.
     let mut expected = Vec::new();
     for row in rows {
         expected.extend(row.vendor_bindings.iter().map(|binding| {
@@ -897,16 +879,10 @@ fn validate_baseline_rows(
                 binding.destination.0.as_str(),
                 row.unit_id.0.as_str(),
                 "vendor",
-                binding.origin_mode.as_str(),
             )
         }));
         if let Some(path) = &row.provenance_manifest_destination {
-            expected.push((
-                path.0.as_str(),
-                row.unit_id.0.as_str(),
-                "manifest",
-                "100644",
-            ));
+            expected.push((path.0.as_str(), row.unit_id.0.as_str(), "manifest"));
         }
     }
     expected.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
@@ -917,7 +893,6 @@ fn validate_baseline_rows(
                 leaf.destination.0.as_str(),
                 leaf.unit_id.0.as_str(),
                 leaf.kind.as_str(),
-                leaf.mode.as_str(),
             )
         })
         .collect::<Vec<_>>();
@@ -932,7 +907,64 @@ fn validate_baseline_rows(
                 .to_owned(),
         );
     }
+    for leaf in baseline {
+        validate_baseline_leaf(leaf)?;
+        match leaf.kind.as_str() {
+            "vendor" => {
+                let (_, binding) = rows
+                    .iter()
+                    .flat_map(|row| {
+                        row.vendor_bindings
+                            .iter()
+                            .map(move |binding| (row, binding))
+                    })
+                    .find(|(_, binding)| binding.destination == leaf.destination)
+                    .ok_or_else(|| {
+                        "V4 materialization vendor baseline destination is unbound".to_owned()
+                    })?;
+                if leaf.binding_id.as_ref() != Some(&binding.binding_id)
+                    || leaf.origin_path.as_ref() != Some(&binding.origin_path)
+                {
+                    return Err(
+                        "V4 materialization vendor baseline binding/origin drift".to_owned()
+                    );
+                }
+            }
+            "manifest" => {}
+            _ => unreachable!("baseline leaf kind was checked"),
+        }
+    }
     Ok(())
+}
+
+fn validate_baseline_leaf(leaf: &CoreBaselineLeafV1) -> Result<(), String> {
+    if !crate::allocation::approved_path_is_safe(&leaf.destination)
+        || leaf.unit_id.0.trim().is_empty()
+        || !is_sha256(&leaf.bytes_sha256)
+    {
+        return Err("V4 materialization baseline leaf path/id/SHA is malformed".to_owned());
+    }
+    match leaf.kind.as_str() {
+        "vendor"
+            if leaf
+                .binding_id
+                .as_ref()
+                .is_some_and(|id| !id.0.trim().is_empty())
+                && leaf
+                    .origin_path
+                    .as_ref()
+                    .is_some_and(crate::allocation::approved_path_is_safe)
+                && matches!(leaf.mode.as_str(), "100644" | "100755") =>
+        {
+            Ok(())
+        }
+        "manifest"
+            if leaf.binding_id.is_none() && leaf.origin_path.is_none() && leaf.mode == "100644" =>
+        {
+            Ok(())
+        }
+        _ => Err("V4 materialization baseline leaf kind/fact drift".to_owned()),
+    }
 }
 
 fn validate_intention(value: &CoreMaterializationIntentionV1) -> Result<(), RunnerError> {
@@ -943,6 +975,10 @@ fn validate_intention(value: &CoreMaterializationIntentionV1) -> Result<(), Runn
             .intended_baseline
             .windows(2)
             .any(|pair| pair[0].destination.0.as_bytes() >= pair[1].destination.0.as_bytes())
+        || value
+            .intended_baseline
+            .iter()
+            .any(|leaf| validate_baseline_leaf(leaf).is_err())
     {
         return Err(RunnerError::InvalidSpec(
             "V4 Core materialization intention malformed".to_owned(),
@@ -963,6 +999,10 @@ fn validate_receipt(
         || receipt.base_commit != intention.base_commit
         || receipt.worktree != intention.worktree
         || receipt.completed_baseline != intention.intended_baseline
+        || receipt
+            .completed_baseline
+            .iter()
+            .any(|leaf| validate_baseline_leaf(leaf).is_err())
         || !is_sha256(&receipt.intention_digest)
     {
         return Err(RunnerError::InvalidSpec(
@@ -981,6 +1021,10 @@ fn validate_materialization_binding(binding: &CoreMaterializationBindingV1) -> R
             .baseline
             .windows(2)
             .any(|pair| pair[0].destination.0.as_bytes() >= pair[1].destination.0.as_bytes())
+        || binding
+            .baseline
+            .iter()
+            .any(|leaf| validate_baseline_leaf(leaf).is_err())
     {
         return Err("V4 materialization binding malformed".to_owned());
     }
@@ -1023,104 +1067,6 @@ fn canonical_worktree(path: &Path) -> Result<PathBuf, RunnerError> {
         ));
     }
     Ok(worktree)
-}
-
-fn require_initial_materialization_worktree(
-    worktree: &Path,
-    base_commit: &Sha,
-) -> Result<(), RunnerError> {
-    super::verify_distinct_git_worktree(worktree, base_commit)?;
-    let output = Command::new("git")
-        .current_dir(worktree)
-        .args(["rev-parse", "--verify", "HEAD^{commit}"])
-        .output()
-        .map_err(|error| RunnerError::Io(error.to_string()))?;
-    if !output.status.success() || String::from_utf8_lossy(&output.stdout).trim() != base_commit.0 {
-        return Err(RunnerError::InvalidSpec(
-            "V4 Core materialization worktree HEAD differs from assignment base".to_owned(),
-        ));
-    }
-    if !materialization_dirty_paths(worktree)?.is_empty() {
-        return Err(RunnerError::InvalidSpec(
-            "V4 Core materialization requires a clean worktree before intention".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
-fn require_initial_replay_status(
-    worktree: &Path,
-    base_commit: &Sha,
-    baseline: &[CoreBaselineLeafV1],
-    intention_path: &Path,
-    receipt_path: &Path,
-) -> Result<(), RunnerError> {
-    let mut expected = BTreeSet::new();
-    for leaf in baseline {
-        let output = Command::new("git")
-            .current_dir(worktree)
-            .args(["ls-tree", "-z", &base_commit.0, "--", &leaf.destination.0])
-            .output()
-            .map_err(|error| RunnerError::Io(error.to_string()))?;
-        if !output.status.success() {
-            return Err(RunnerError::InvalidSpec(
-                "V4 Core materialization cannot inspect baseline base".to_owned(),
-            ));
-        }
-        if output.stdout.is_empty() {
-            expected.insert(leaf.destination.0.as_bytes().to_vec());
-        }
-    }
-    for path in [intention_path, receipt_path] {
-        expected.insert(
-            path.strip_prefix(worktree)
-                .map_err(|_| {
-                    RunnerError::InvalidSpec("V4 materialization pair escaped worktree".to_owned())
-                })?
-                .to_str()
-                .ok_or_else(|| {
-                    RunnerError::InvalidSpec("V4 materialization path is not UTF-8".to_owned())
-                })?
-                .as_bytes()
-                .to_vec(),
-        );
-    }
-    if materialization_dirty_paths(worktree)? != expected {
-        return Err(RunnerError::InvalidSpec(
-            "V4 Core materialization replay residue differs from protected baseline".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
-fn materialization_dirty_paths(worktree: &Path) -> Result<BTreeSet<Vec<u8>>, RunnerError> {
-    let run = |args: &[&str]| -> Result<Vec<u8>, RunnerError> {
-        let output = Command::new("git")
-            .current_dir(worktree)
-            .args(args)
-            .output()
-            .map_err(|error| RunnerError::Io(error.to_string()))?;
-        if output.status.success() {
-            Ok(output.stdout)
-        } else {
-            Err(RunnerError::InvalidSpec(
-                "V4 Core materialization cannot read worktree status".to_owned(),
-            ))
-        }
-    };
-    let mut paths = BTreeSet::new();
-    for output in [
-        run(&["diff", "--name-only", "-z", "HEAD", "--"])?,
-        run(&["ls-files", "--others", "--exclude-standard", "-z", "--"])?,
-    ] {
-        paths.extend(
-            output
-                .split(|byte| *byte == 0)
-                .filter(|path| !path.is_empty())
-                .map(Vec::from),
-        );
-    }
-    Ok(paths)
 }
 
 fn is_sha256(value: &str) -> bool {

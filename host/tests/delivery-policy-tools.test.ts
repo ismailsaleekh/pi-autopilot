@@ -188,9 +188,10 @@ test("V5 binds canonical V4 receipt, protected union snapshots, and empty vendor
     ["selected extra destination", (assignment) => { const row = (assignment["selected_vendoring"] as Array<Record<string, unknown>>)[0]!; const binding = { ...(row["vendor_bindings"] as Array<Record<string, unknown>>)[0]!, binding_id: "B-extra", destination: "vendor/extra.bin" }; (row["vendor_bindings"] as unknown[]).push(binding); }],
     ["selected missing destination", (assignment) => { ((assignment["selected_vendoring"] as Array<Record<string, unknown>>)[0]!["vendor_bindings"] as Array<Record<string, unknown>>)[0]!["destination"] = "vendor/missing.bin"; }],
     ["0600 instead of exact 0644", (_assignment, _receipt, fixture) => { chmodSync(join(fixture.worktree, "vendor/a.bin"), 0o600); }],
+    ["setuid 04644 instead of exact 0644", (_assignment, _receipt, fixture) => { chmodSync(join(fixture.worktree, "vendor/a.bin"), 0o4644); }],
+    ["setgid 02644 instead of exact 0644", (_assignment, _receipt, fixture) => { chmodSync(join(fixture.worktree, "vendor/a.bin"), 0o2644); }],
+    ["sticky 01644 instead of exact 0644", (_assignment, _receipt, fixture) => { chmodSync(join(fixture.worktree, "vendor/a.bin"), 0o1644); }],
     ["0777 instead of exact 0755", (assignment, receipt, fixture) => {
-      const row = (assignment["selected_vendoring"] as Array<Record<string, unknown>>)[0]!;
-      (row["vendor_bindings"] as Array<Record<string, unknown>>)[0]!["origin_mode"] = "100755";
       const baseline = (assignment["materialization"] as Record<string, unknown>)["baseline"] as Array<Record<string, unknown>>;
       baseline[0]!["mode"] = "100755";
       ((receipt["completed_baseline"] as Array<Record<string, unknown>>)[0])!["mode"] = "100755";
@@ -688,8 +689,8 @@ function makeV4Fixture(emptyVendoring = false): Fixture {
   const worktree = join(root, "worktree"), foreign = join(root, "foreign"); mkdirSync(join(worktree, "src"), { recursive: true }); mkdirSync(join(worktree, "vendor"), { recursive: true }); mkdirSync(foreign);
   const command = "printf v5"; const files = emptyVendoring ? ["src/authored.rs"] : ["vendor/a.bin", "vendor/manifest.tsv", "src/authored.rs"];
   const vendor = Buffer.from([65, 0, 255]), digest = createHash("sha256").update(vendor).digest("hex");
-  const rows = emptyVendoring ? [{ unit_id: "U1", provenance_manifest_destination: null, vendor_bindings: [] }] : [{ unit_id: "U1", provenance_manifest_destination: "vendor/manifest.tsv", vendor_bindings: [{ binding_id: "B1", origin_path: "origin/a.bin", destination: "vendor/a.bin", origin_anchor: "git://head/origin/a.bin#whole-file", origin_git_blob_oid: "a".repeat(40), origin_mode: "100644", origin_bytes_sha256: digest }] }];
-  const baseline = emptyVendoring ? [] : [{ destination: "vendor/a.bin", unit_id: "U1", kind: "vendor", binding_id: "B1", mode: "100644", bytes_sha256: digest, origin_path: "origin/a.bin", origin_anchor: "git://head/origin/a.bin#whole-file", origin_git_blob_oid: "a".repeat(40) }, { destination: "vendor/manifest.tsv", unit_id: "U1", kind: "manifest", binding_id: null, mode: "100644", bytes_sha256: createHash("sha256").update("origin/a.bin\tvendor/a.bin\tsha256:" + digest + "\n").digest("hex"), origin_path: null, origin_anchor: null, origin_git_blob_oid: null }];
+  const rows = emptyVendoring ? [{ unit_id: "U1", provenance_manifest_destination: null, vendor_bindings: [] }] : [{ unit_id: "U1", provenance_manifest_destination: "vendor/manifest.tsv", vendor_bindings: [{ binding_id: "B1", origin_path: "origin/a.bin", destination: "vendor/a.bin" }] }];
+  const baseline = emptyVendoring ? [] : [{ destination: "vendor/a.bin", unit_id: "U1", kind: "vendor", binding_id: "B1", mode: "100644", bytes_sha256: digest, origin_path: "origin/a.bin" }, { destination: "vendor/manifest.tsv", unit_id: "U1", kind: "manifest", binding_id: null, mode: "100644", bytes_sha256: createHash("sha256").update("origin/a.bin\tvendor/a.bin\tsha256:" + digest + "\n").digest("hex"), origin_path: null }];
   if (!emptyVendoring) { writeFileSync(join(worktree, "vendor/a.bin"), vendor); writeFileSync(join(worktree, "vendor/manifest.tsv"), `origin/a.bin\tvendor/a.bin\tsha256:${digest}\n`); chmodSync(join(worktree, "vendor/a.bin"), 0o644); chmodSync(join(worktree, "vendor/manifest.tsv"), 0o644); }
   const receiptPath = join(root, "receipt.json"), intentionPath = join(root, "intention.json"), intentionDigest = "b".repeat(64);
   const receipt = { schema: "autopilot.core_materialization_receipt.v1", intention_path: intentionPath, intention_digest: intentionDigest, workstream: "main", assignment_id: "assignment-main-L1", lane_id: "L1", attempt: 1, base_commit: "0123456789abcdef0123456789abcdef01234567", worktree, completed_baseline: baseline };

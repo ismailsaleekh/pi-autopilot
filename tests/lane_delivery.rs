@@ -1834,18 +1834,10 @@ fn launched_core_delivery(
     let root = fixture.root;
     fs::write(root.join("README.md"), "delivery terminal fixture\n").expect("fixture file");
     git_init_for_core(&root);
-    let repo_authority =
-        runner::repository_authority_binding(&root, "main").expect("repo authority");
     fs::create_dir_all(root.join(".pi/autopilot/main")).expect("plan dir");
     fs::write(
         root.join(".pi/autopilot/main/approved-plan.json"),
         serde_json::to_vec_pretty(&serde_json::json!({
-            "repository_authority": {
-                "manifest_path": repo_authority.path,
-                "manifest_digest": repo_authority.digest,
-                "head_commit": repo_authority.manifest.head_commit,
-                "head_tree": repo_authority.manifest.head_tree,
-            },
             "units":[
                 {"id":"U1","kind":"implementation","objective":"deliver U1","operator_order":1,"decisions":[],"criteria":["AC1"],"criterion_text":[{"id":"AC1","text":"criterion text AC1"}],"dependencies":[],"predecessor_forward_criteria":[],"downstream_release_edges":["EDGE1"],"files":["README.md"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"package_checks":[{"check_id":"PKG-U1-TIP","kind":"clean-exact-package-tip","criterion_ordinals":[1],"expected":"Core proves a clean exact package tip after delivery."}]}
             ]

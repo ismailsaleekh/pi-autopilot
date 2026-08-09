@@ -1,8 +1,8 @@
 {
   "schema_version": "autopilot.docs_semantic_attestation.v2",
   "doc_id": "subsystems/runner-and-forced-output",
-  "reviewed_body_hash": "sha256:1e9a10dd85e638b7a7f7e6c33cc090c7684056146703ddc6dae198b2ffc37ef9",
-  "reviewed_doc_sha256": "sha256:0d6a0ff1eca48a37c88138d2400a5c97aebf39a916788139a0dca97364ad152c",
+  "reviewed_body_hash": "sha256:d236b76a0c1aa1ea31d34f22373b79b6b3a041b4ebff8d608a1b944493757f2f",
+  "reviewed_doc_sha256": "sha256:e9c83c32043df507e348472f2f06edd20a7991ef11de1f099a6eafaeb6312e84",
   "covers_sources": [
     "data/control.kdl",
     "data/seam_real_producers.rs",
@@ -14,7 +14,7 @@
     "src/resolve-core.ts"
   ],
   "verdict": "PASS",
-  "reviewer": "pi-autopilot sole writable source worker",
-  "reviewed_at": "2026-08-09T12:42:35.000Z",
-  "notes": "PASS: offline semantic review confirmed that the exact 2.1.4 EventBus run payload preserves api_version-1 channels, run fields, durable notification, and machine-only completion behavior; only the certified paired-package identity changed."
+  "reviewer": "openai-codex/gpt-5.6-terra independent audit beb4e14f7",
+  "reviewed_at": "2026-08-09T17:11:36.430Z",
+  "notes": "PASS: independent r3 review found H-01 and M-01 remediated and confirmed the repository-free vendoring paragraph matches current planning, lane materialization, source-free replay, protected-baseline, and package-proof behavior."
 }

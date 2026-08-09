@@ -24,6 +24,25 @@ fn multi_unit_plan_dispatches_next_lane_after_integration() {
     let first = send_command(&mut state, "autopilot main");
     let first_spawn = spawn_payload(first);
     assert_eq!(first_spawn.action.assignment_id.0, "assignment-main-L1");
+    assert_eq!(
+        git_out(
+            &fixture.root,
+            &[
+                "rev-parse",
+                "--verify",
+                "refs/heads/autopilot/run/main/main^{commit}",
+            ],
+        ),
+        original_head,
+        "first run-main creation uses the current HEAD"
+    );
+    assert!(
+        !fixture
+            .root
+            .join(".pi/autopilot/main/planning/repository-authority.v1.json")
+            .exists(),
+        "run-main creation does not require a planning repository manifest"
+    );
 
     let after_l1 = fixture.complete_lane(&mut state, &first_spawn, "l1");
     assert_eq!(after_l1.kind, "spawn", "response: {after_l1:?}");
@@ -69,36 +88,29 @@ fn deleting_run_main_after_execution_begins_is_loud() {
 }
 
 #[test]
-fn wrong_preexisting_run_main_before_execution_is_loud_and_not_adopted() {
+fn preexisting_run_main_before_execution_is_run_state_and_is_used() {
     let _guard = CWD_LOCK.lock().expect("cwd lock");
-    let fixture = AdvanceFixture::new("run-main-wrong-preexisting", 1, false);
-    let baseline = git_out(&fixture.root, &["rev-parse", "--verify", "HEAD^{commit}"]);
-    let baseline_tree = git_out(&fixture.root, &["rev-parse", "--verify", "HEAD^{tree}"]);
-    let foreign = git_out(
+    let fixture = AdvanceFixture::new("run-main-preexisting", 1, false);
+    let checkout_head = git_out(&fixture.root, &["rev-parse", "--verify", "HEAD^{commit}"]);
+    let checkout_tree = git_out(&fixture.root, &["rev-parse", "--verify", "HEAD^{tree}"]);
+    let existing_run_main = git_out(
         &fixture.root,
-        &["commit-tree", &baseline_tree, "-m", "foreign run-main"],
+        &["commit-tree", &checkout_tree, "-m", "existing run-main"],
     );
-    assert_ne!(foreign, baseline);
+    assert_ne!(existing_run_main, checkout_head);
     run(
         &fixture.root,
         &[
             "update-ref",
             "refs/heads/autopilot/run/main/main",
-            &foreign,
+            &existing_run_main,
             "",
         ],
     );
 
     let mut state = fixture.state();
-    let refused = send_command(&mut state, "autopilot main");
-    assert_eq!(refused.kind, "done", "response: {refused:?}");
-    let status = done_status(&refused);
-    assert!(
-        status.contains("run-main preexisting baseline drift"),
-        "{status}"
-    );
-    assert!(status.contains(&baseline), "{status}");
-    assert!(status.contains(&foreign), "{status}");
+    let spawn = spawn_payload(send_command(&mut state, "autopilot main"));
+    assert_eq!(spawn.action.assignment_id.0, "assignment-main-L1");
     assert_eq!(
         git_out(
             &fixture.root,
@@ -108,10 +120,18 @@ fn wrong_preexisting_run_main_before_execution_is_loud_and_not_adopted() {
                 "refs/heads/autopilot/run/main/main^{commit}",
             ],
         ),
-        foreign,
-        "foreign preexisting run-main must not be adopted or overwritten"
+        existing_run_main,
+        "Core must preserve an existing run-main instead of comparing it with checkout HEAD"
     );
-    assert_eq!(fixture.count_agent_spawns("assignment-main-L1"), 0);
+    let spec = fixture.delivery_spec(&spawn);
+    assert_eq!(spec["base_commit"], existing_run_main);
+    let worktree = PathBuf::from(spec["worktree"].as_str().expect("worktree"));
+    assert_eq!(
+        git_out(&worktree, &["rev-parse", "--verify", "HEAD^{commit}"]),
+        existing_run_main,
+        "the first lane must start from durable run state"
+    );
+    assert_eq!(fixture.count_agent_spawns("assignment-main-L1"), 1);
 }
 
 #[test]
@@ -973,19 +993,11 @@ fn write_approved_plan(root: &Path, units: usize, block_after_first: bool) {
             })
         })
         .collect::<Vec<_>>();
-    let repo_authority =
-        runner::repository_authority_binding(root, "main").expect("repo authority");
     let dir = root.join(".pi/autopilot/main");
     fs::create_dir_all(&dir).expect("plan dir");
     fs::write(
         dir.join("approved-plan.json"),
         serde_json::to_vec_pretty(&serde_json::json!({
-            "repository_authority": {
-                "manifest_path": repo_authority.path,
-                "manifest_digest": repo_authority.digest,
-                "head_commit": repo_authority.manifest.head_commit,
-                "head_tree": repo_authority.manifest.head_tree,
-            },
             "units": rows
         }))
         .expect("plan json"),

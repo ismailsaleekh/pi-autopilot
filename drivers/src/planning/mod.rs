@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 
 use crate::allocation::validate_plan_unit_command_effect_authority;
 use crate::roles::kdl::{attr as kdl_attr, boundary_runtime as runtime_by_id, table_values};
@@ -1386,7 +1385,7 @@ pub fn accept_work_map(raw: &str, runtime: &BoundaryRuntime) -> Result<String, R
 }
 /// Enforced V2 model boundary parser. Strict Core carrier admission still
 /// performs the complete authority and semantic checks after carrier sealing.
-#[acceptance_boundary(id = "planning.work-map.v2", producer = Producer::Model, visible = true, admits = "Fresh compiler, synthesizer, and recovery work maps use the exact parent-selected V2 terminal profile. Genuine Pi 0.84.1 subscription compiler, synthesizer, and recovery captures were strictly accepted in report SHA-256 174d50e13ba5c519c0d36708fd013e167e88dbd8caf76d77ec49b95ed9f62bd7; only strict Core carrier admission grants planning authority.", mode = BoundaryMode::Enforce)]
+#[acceptance_boundary(id = "planning.work-map.v2", producer = Producer::Model, visible = true, admits = "Fresh compiler, synthesizer, and recovery work maps use the exact parent-selected V2 terminal profile. Genuine repository-authority-free Pi 0.84.1 subscription compiler, synthesizer, and recovery captures were strictly accepted in report SHA-256 774e96ee4aa101b0bcdddc13c893b2e459f9194cdc020b50dd488f58c7d1b151; only strict Core carrier admission grants planning authority.", mode = BoundaryMode::Enforce)]
 pub fn accept_work_map_v2(raw: &str, runtime: &BoundaryRuntime) -> Result<String, Rejection> {
     let _: WorkMapV2 = parse_model_payload(raw, runtime, "planning.work-map.v2")?;
     Ok(raw.to_owned())
@@ -1799,25 +1798,6 @@ fn explicit_html_section_anchor(line: &str) -> Option<ExplicitSectionAnchor> {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RepoRelPath(PathBuf);
-
-impl RepoRelPath {
-    pub fn parse(raw: &str) -> Result<Self, PlanningError> {
-        validate_repo_relative_path(Path::new(raw)).map(Self)
-    }
-
-    pub fn as_path(&self) -> &Path {
-        &self.0
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PinnedRepo {
-    pub repo_root: PathBuf,
-    pub base_commit: String,
-}
-
 pub fn accept_task_atoms_for_assignment(
     raw: &str,
     runtime: &BoundaryRuntime,
@@ -1901,40 +1881,6 @@ fn validate_task_atom_assignment(
         );
     }
     Ok(())
-}
-
-pub fn accept_scout_dossier_at_base(
-    dossier: ScoutDossier,
-    repo: &PinnedRepo,
-) -> Result<ScoutDossier, Rejection> {
-    let runtime = boundary_runtime("planning.scout-dossier.v1");
-    validate_scout_dossier_shape(&dossier, &runtime)?;
-    for finding in &dossier.findings {
-        let rel = match RepoRelPath::parse(&finding.path.0) {
-            Ok(rel) => rel,
-            Err(error) => {
-                return reject_value(
-                    &runtime,
-                    "planning.scout-dossier.v1",
-                    "findings.path",
-                    "repository-relative UTF-8 path with no absolute root, parent component, or backslash",
-                    &format!("{:?}", error),
-                    "Cite a path relative to the pinned repository root.",
-                );
-            }
-        };
-        if !repo_path_exists_at_commit(repo, rel.as_path()) {
-            return reject_value(
-                &runtime,
-                "planning.scout-dossier.v1",
-                "findings.path",
-                "path exists in the repository at the pinned base commit",
-                &finding.path.0,
-                "Re-read the pinned checkout and cite an existing file or directory.",
-            );
-        }
-    }
-    Ok(dossier)
 }
 
 pub fn accept_work_map_for_atoms(
@@ -2469,15 +2415,6 @@ fn validate_plan_review_shape(
         )?;
     }
     Ok(())
-}
-
-fn repo_path_exists_at_commit(repo: &PinnedRepo, rel: &Path) -> bool {
-    let object = format!("{}:{}", repo.base_commit, rel.display());
-    Command::new("git")
-        .current_dir(&repo.repo_root)
-        .args(["cat-file", "-e", &object])
-        .status()
-        .is_ok_and(|status| status.success())
 }
 
 fn reject_value<T>(

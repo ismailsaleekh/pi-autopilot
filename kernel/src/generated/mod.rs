@@ -1028,22 +1028,6 @@ pub struct AgentRunSpec {
     #[serde(rename = "planning_inputs_digest")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub planning_inputs_digest: Option<Digest>,
-    /// Required for fresh planning assignments: absolute path to the package-owned repository authority manifest bound at issue time. Historical specs may omit it only for inspection.
-    #[serde(rename = "repository_manifest_path")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub repository_manifest_path: Option<Path>,
-    /// Required for fresh planning assignments: SHA-256 of repository_manifest_path bytes.
-    #[serde(rename = "repository_manifest_digest")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub repository_manifest_digest: Option<Digest>,
-    /// Required for fresh planning assignments: exact HEAD commit recorded in the repository authority manifest.
-    #[serde(rename = "repository_head_commit")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub repository_head_commit: Option<Sha>,
-    /// Required for fresh planning assignments: exact HEAD tree recorded in the repository authority manifest.
-    #[serde(rename = "repository_head_tree")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub repository_head_tree: Option<Sha>,
 }
 
 /// Allocator model proposal; package validates totality, dependencies, cap, and no invented ownership (D76 §7).
@@ -2565,7 +2549,7 @@ pub struct RunIdentity {
     pub workstream: Id,
 }
 
-/// Model-facing repository scout dossier. Shape is small; path values are checked against the pinned repository commit by the planning driver.
+/// Model-facing repository scout dossier. Shape is small and cites current bounded evidence without creating repository execution authority.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScoutDossier {
     /// Repository findings grounded in current evidence.
@@ -3773,9 +3757,6 @@ pub struct PlanUnitVendorBindingV2 {
     /// Exact normalized repository-relative destination path.
     #[serde(rename = "destination")]
     pub destination: Path,
-    /// Immutable whole-file origin anchor; Core V2 admission requires a nonempty value.
-    #[serde(rename = "origin_anchor")]
-    pub origin_anchor: String,
 }
 
 /// Generated record item.
@@ -3974,7 +3955,7 @@ pub struct HostToCoreTaskCompletedPayload {
 pub const CONTRACT_SCHEMA: &str = "autopilot.contracts.v1";
 pub const CONTRACT_VERSION: u64 = 1;
 pub const CHILD_ADDON_DIGEST: &str =
-    "e2c39a3543e738dece9c7ac6d8e95d56e23902e709233294d5dc8d52afd87d0f";
+    "e25ac24aed40a1fbf5f426ffb4d4d4332bf74eea020d60512bd401f9536e15cb";
 
 pub const CHILD_RUNTIME_ENTRY: &str = "child-runtime/child-extension-runtime.ts";
 
@@ -3992,7 +3973,7 @@ pub const VALIDATION_SUBMISSION_V2_ADMITS: &str = "Call autopilot_emit_status ex
 pub const VALIDATION_SUBMISSION_V3_ADMITS: &str = "Call autopilot_emit_status exactly once with this closed v3 object. Submit only criterion semantic verdicts, allowed source/diff citation_refs, and findings. Do not include validation or assignment identity, commit/tree, outcome, covered paths/surfaces/edges, command/package receipts, or mixed evidence refs. Core derives canonical criterion/finding order and auto-binds exact receipt sets from the generated validation authority; receipt-looking citation refs are rejected. Citation and finding arrays may arrive in any order but must be duplicate-free. Inspect each supplied source/diff record only through the policy-confined read tool at its supplied path, cite only records authorized for the relevant criterion, and give every source-defect finding at least one cited in-range source_location.";
 pub const VALIDATION_VERDICT_ADMITS: &str = "Verdict every required criterion independently as PASS, FAIL, or BLOCKED, and attach evidence refs, finding refs, covered paths, semantic surfaces, and forward-edge ids. Do not issue an overall PASS while any required criterion is unverdicted, stale, failed, or blocked. Use FORWARD_READY, FORWARD_BLOCKED, or BLOCKED only for forward validation, and PASS, NEEDS_FIX, or BLOCKED only for closure/final validation.";
 pub const WORK_MAP_ADMITS: &str = "Plan compiler, synthesizer, and Recovery Engineer output must contain one or more executable implementation units only. Each unit kind must be exactly implementation. Never emit context-gate or verification units: unresolved context must be recorded as review-blocking evidence, and independent verification must be folded into exact criteria plus nonempty focused commands on the owning implementation unit. Each units[].links element must equal exactly one bound atom registry atoms[].id byte-for-byte: no `atoms:` prefix, ranges, comma groups, task/source/scout/context/artifact refs, placeholders, or inferred expansion. Each units[].files element must name one exact normalized repository-relative regular-file destination. Directory, ancestor/prefix, and wildcard-pattern authority is forbidden: enumerate every leaf file, including each vendored, fixture, generated-evidence, manifest, README, and suffix-free destination; directories exist only as parent chains derived from those leaves. If the complete future leaf set cannot be established from authority and repository evidence, surface a context gap instead of widening scope. Commands are strictly pre-package child evidence and must be executable without creating or requiring a commit. They are verification-only: never use an approved command to bootstrap, author, copy, vendor, regenerate, repair, or otherwise implement delivery files. On success and failure the persistent Git-visible candidate state must equal the state before invocation; effect handling may isolate or exactly clean temporary outputs but may not leave implementation changes. A criterion about the Core-owned committed tip, exact package tree, base ancestry, clean package worktree, or exact base-to-package changed paths must use units[].package_checks with kind clean-exact-package-tip and must never be represented as a child command. Package checks are closed Core-owned obligations, are verified after an admitted child submission, and are forwarded as package evidence to the unchanged independent Validator. Each command must declare closed Git-visible effect authority: no-effect with empty generated_paths and none handling; declared-predictable with nonempty exact normalized repo-relative Git-visible persistent generated_paths and isolation, exact cleanup before the scope gate, or block-if-created handling; or unknown-generated with empty generated_paths and run-isolated handling. External temporary paths are not generated_paths; commands leaving no persistent Git-visible repo state use no-effect + [] + none even if they temporarily write outside the repo and clean up. Approved commands execute later inside a package-assigned delivery worktree/candidate root; the planning checkout absolute identity/path is not future execution authority. Command, expected, and scope_preservation text must use repository-relative facts plus typed base commit/tree/worktree authority and must not bake the planning checkout root as expected delivery identity. Exact command strings are transported unchanged; allocation and delivery must not rewrite them. If an approved command conflicts with the later assigned worktree, the implementer must submit the typed blocked outcome and stop rather than seeking another checkout. Every command must include a nonempty final-scope preservation statement proving verification leaves Git-visible state inside approved unit files. Each unit must have a nonempty objective, criteria, depends_on array, files array, commands array, an explicit package_checks array (which may be empty), and traceable links by real atom id. Every package check must name the exact unique 1-based criterion_ordinals it proves. A unit with any package check is a closure unit and its files must include the complete union of files declared by every work-map unit, so final integrated repair remains inside original mechanically declared authority. A Recovery Engineer must preserve all unaffected units and authority links and include recovery evidence that verifies the runtime diagnosis rather than blindly accepting it. Call the parent-selected terminal tool exactly once: autopilot_submit_plan_cluster for a compiler, autopilot_submit_synthesis for a synthesizer, or autopilot_emit_status for a Recovery Engineer.";
-pub const WORK_MAP_V2_ADMITS: &str = "Every fresh unit must explicitly emit package_scope_files, package_proofs, vendor_bindings, and provenance_manifest_destination; omission never selects a default. files are exclusive implementation-authority leaves: every exact leaf has one owner across units, and equal, ancestor, prefix, directory, glob, and inferred authority is forbidden. package_scope_files is read/package closure authority only; it never grants implementation ownership or child write authority. Both proof kinds prove package closure. With no proofs or vendor bindings every package_scope_files array must be []; otherwise exactly one closure unit owns all proofs, has package_scope_files exactly equal to the global files owner-leaf set, every other scope is [], and the closure transitively depends on every other unit. Empty vendor_bindings require a null provenance_manifest_destination and prohibit a vendored-bytes-match-origin proof. Nonempty vendor_bindings require a non-null provenance_manifest_destination and exactly one global vendored-bytes-match-origin proof whose vendor_binding_ids exactly cover all bindings, even when bindings are owned by multiple units. A clean-exact-package-tip proof has empty vendor_binding_ids. Core later mechanically canonicalizes or rejects proof ids, binding ids, destinations, and criterion mappings. A binding declares only origin_path, destination, and an immutable whole-file origin_anchor; Core derives any Git blob, mode, and raw-byte SHA. The vendored destination and provenance manifest destination must be listed in the declaring unit files; a different final closure names them only in package_scope_files. Core alone writes those bytes. Approved commands are verification-only and never a copy or materialization channel. Criteria remain semantic text while proof ordinals provide typed ownership. Call the parent-selected one of autopilot_submit_plan_cluster, autopilot_submit_synthesis, or autopilot_emit_status exactly once.";
+pub const WORK_MAP_V2_ADMITS: &str = "Every fresh unit must explicitly emit package_scope_files, package_proofs, vendor_bindings, and provenance_manifest_destination; omission never selects a default. files are exclusive implementation-authority leaves: every exact leaf has one owner across units, and equal, ancestor, prefix, directory, glob, and inferred authority is forbidden. package_scope_files is read/package closure authority only; it never grants implementation ownership or child write authority. Both proof kinds prove package closure. With no proofs or vendor bindings every package_scope_files array must be []; otherwise exactly one closure unit owns all proofs, has package_scope_files exactly equal to the global files owner-leaf set, every other scope is [], and the closure transitively depends on every other unit. Empty vendor_bindings require a null provenance_manifest_destination and prohibit a vendored-bytes-match-origin proof. Nonempty vendor_bindings require a non-null provenance_manifest_destination and exactly one global vendored-bytes-match-origin proof whose vendor_binding_ids exactly cover all bindings. A clean-exact-package-tip proof has empty vendor_binding_ids. Core mechanically canonicalizes raw binding_id, exact origin_path, and exact destination mappings. After a lane worktree exists, Core reads each origin once from that worktree, derives the bytes, SHA-256, and mode, writes the destination and provenance manifest, and protects them. The vendored destination and provenance manifest destination must be listed in the declaring unit files; a different final closure names them only in package_scope_files. Approved commands are verification-only and never a copy or materialization channel. Criteria remain semantic text while proof ordinals provide typed ownership. Call the parent-selected one of autopilot_submit_plan_cluster, autopilot_submit_synthesis, or autopilot_emit_status exactly once.";
 pub const WORK_MAP_V2_MAX_BYTES: usize = 1048576;
 pub const VALIDATION_EVIDENCE_AUTHORITY_MAX_BYTES: usize = 1048576;
 pub const VALIDATION_ASSIGNMENT_V3_MAX_BYTES: usize = 131072;
@@ -4075,7 +4056,7 @@ pub const ADMISSION_CONTRACTS: [(&str, &str, &str); 15] = [
     (
         "work_map_v2",
         "planning.work-map.v2",
-        "Every fresh unit must explicitly emit package_scope_files, package_proofs, vendor_bindings, and provenance_manifest_destination; omission never selects a default. files are exclusive implementation-authority leaves: every exact leaf has one owner across units, and equal, ancestor, prefix, directory, glob, and inferred authority is forbidden. package_scope_files is read/package closure authority only; it never grants implementation ownership or child write authority. Both proof kinds prove package closure. With no proofs or vendor bindings every package_scope_files array must be []; otherwise exactly one closure unit owns all proofs, has package_scope_files exactly equal to the global files owner-leaf set, every other scope is [], and the closure transitively depends on every other unit. Empty vendor_bindings require a null provenance_manifest_destination and prohibit a vendored-bytes-match-origin proof. Nonempty vendor_bindings require a non-null provenance_manifest_destination and exactly one global vendored-bytes-match-origin proof whose vendor_binding_ids exactly cover all bindings, even when bindings are owned by multiple units. A clean-exact-package-tip proof has empty vendor_binding_ids. Core later mechanically canonicalizes or rejects proof ids, binding ids, destinations, and criterion mappings. A binding declares only origin_path, destination, and an immutable whole-file origin_anchor; Core derives any Git blob, mode, and raw-byte SHA. The vendored destination and provenance manifest destination must be listed in the declaring unit files; a different final closure names them only in package_scope_files. Core alone writes those bytes. Approved commands are verification-only and never a copy or materialization channel. Criteria remain semantic text while proof ordinals provide typed ownership. Call the parent-selected one of autopilot_submit_plan_cluster, autopilot_submit_synthesis, or autopilot_emit_status exactly once.",
+        "Every fresh unit must explicitly emit package_scope_files, package_proofs, vendor_bindings, and provenance_manifest_destination; omission never selects a default. files are exclusive implementation-authority leaves: every exact leaf has one owner across units, and equal, ancestor, prefix, directory, glob, and inferred authority is forbidden. package_scope_files is read/package closure authority only; it never grants implementation ownership or child write authority. Both proof kinds prove package closure. With no proofs or vendor bindings every package_scope_files array must be []; otherwise exactly one closure unit owns all proofs, has package_scope_files exactly equal to the global files owner-leaf set, every other scope is [], and the closure transitively depends on every other unit. Empty vendor_bindings require a null provenance_manifest_destination and prohibit a vendored-bytes-match-origin proof. Nonempty vendor_bindings require a non-null provenance_manifest_destination and exactly one global vendored-bytes-match-origin proof whose vendor_binding_ids exactly cover all bindings. A clean-exact-package-tip proof has empty vendor_binding_ids. Core mechanically canonicalizes raw binding_id, exact origin_path, and exact destination mappings. After a lane worktree exists, Core reads each origin once from that worktree, derives the bytes, SHA-256, and mode, writes the destination and provenance manifest, and protects them. The vendored destination and provenance manifest destination must be listed in the declaring unit files; a different final closure names them only in package_scope_files. Approved commands are verification-only and never a copy or materialization channel. Criteria remain semantic text while proof ordinals provide typed ownership. Call the parent-selected one of autopilot_submit_plan_cluster, autopilot_submit_synthesis, or autopilot_emit_status exactly once.",
     ),
 ];
 
@@ -4088,7 +4069,7 @@ pub const SUBMIT_TOOLS: [(&str, &str, &str); 11] = [
     (
         "autopilot_emit_status",
         "planning.work-map.v2",
-        "07750be5a58112e8b3f956f261d33ef75e3a71b9b13b75be2192cfc43adbbc9a",
+        "4f341cc4aade90ac13c4584898f29b42d054d4ea4b5c126117841550e680ae75",
     ),
     (
         "autopilot_submit_atoms",
@@ -4108,7 +4089,7 @@ pub const SUBMIT_TOOLS: [(&str, &str, &str); 11] = [
     (
         "autopilot_submit_plan_cluster",
         "planning.work-map.v2",
-        "07750be5a58112e8b3f956f261d33ef75e3a71b9b13b75be2192cfc43adbbc9a",
+        "4f341cc4aade90ac13c4584898f29b42d054d4ea4b5c126117841550e680ae75",
     ),
     (
         "autopilot_submit_resolution",
@@ -4133,7 +4114,7 @@ pub const SUBMIT_TOOLS: [(&str, &str, &str); 11] = [
     (
         "autopilot_submit_synthesis",
         "planning.work-map.v2",
-        "07750be5a58112e8b3f956f261d33ef75e3a71b9b13b75be2192cfc43adbbc9a",
+        "4f341cc4aade90ac13c4584898f29b42d054d4ea4b5c126117841550e680ae75",
     ),
 ];
 
@@ -4199,14 +4180,14 @@ pub const TERMINAL_PROFILES: [(&str, &str, &str, &str, &str); 14] = [
         "autopilot_submit_plan_cluster",
         "planning.work-map.v2",
         "planning.work-map.v2",
-        "07750be5a58112e8b3f956f261d33ef75e3a71b9b13b75be2192cfc43adbbc9a",
+        "4f341cc4aade90ac13c4584898f29b42d054d4ea4b5c126117841550e680ae75",
     ),
     (
         "planning.work-map.v2:autopilot_submit_synthesis",
         "autopilot_submit_synthesis",
         "planning.work-map.v2",
         "planning.work-map.v2",
-        "07750be5a58112e8b3f956f261d33ef75e3a71b9b13b75be2192cfc43adbbc9a",
+        "4f341cc4aade90ac13c4584898f29b42d054d4ea4b5c126117841550e680ae75",
     ),
     (
         "recovery-work-map.v1",
@@ -4220,7 +4201,7 @@ pub const TERMINAL_PROFILES: [(&str, &str, &str, &str, &str); 14] = [
         "autopilot_emit_status",
         "planning.work-map.v2",
         "planning.work-map.v2",
-        "3efc6b230002a7216a3e471441a755672f2a750658483e7882b1fa3edb549495",
+        "4b254caa4e21953efdc3102cb86c35c3238dfadc57b83fb083f5cbb49065857c",
     ),
     (
         "validation-status.v2",

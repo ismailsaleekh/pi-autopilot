@@ -468,10 +468,6 @@ function planningV2CarrierForSpec(spec, specBytes, specPath, rawOutput) {
     terminal_route: route,
     atom_registry_path: requireString(spec.atom_registry_path, "V2 planning spec atom_registry_path"),
     atom_registry_digest: requireString(spec.atom_registry_digest, "V2 planning spec atom_registry_digest"),
-    repository_manifest_path: requireString(spec.repository_manifest_path, "V2 planning spec repository_manifest_path"),
-    repository_manifest_digest: requireString(spec.repository_manifest_digest, "V2 planning spec repository_manifest_digest"),
-    repository_head_commit: requireString(spec.repository_head_commit, "V2 planning spec repository_head_commit"),
-    repository_head_tree: requireString(spec.repository_head_tree, "V2 planning spec repository_head_tree"),
     raw_output: rawOutput,
   };
 }

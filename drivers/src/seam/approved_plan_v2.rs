@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
-use kernel::generated::{Id, Nullable, PlanUnitKind, Sha, TerminalRoute};
+use kernel::generated::{Id, Nullable, PlanUnitKind, TerminalRoute};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -12,8 +12,6 @@ use crate::allocation::{
 };
 use crate::planning::{self, ApprovedWorkMapV2, WorkMapV2AdmissionContext};
 use crate::runner;
-
-use super::ApprovedRepositoryAuthority;
 
 pub const APPROVED_PLAN_V2_SCHEMA: &str = "autopilot.approved_plan.v2";
 pub const APPROVED_PLAN_V2_BINDING_SCHEMA: &str = "autopilot.approved_plan_v2_binding.v1";
@@ -27,7 +25,6 @@ pub const APPROVED_PLAN_V2_BINDING_MAX_BYTES: usize = 64 * 1024;
 #[serde(deny_unknown_fields)]
 pub struct ApprovedPlanArtifactV2 {
     pub schema: String,
-    pub repository_authority: ApprovedRepositoryAuthority,
     pub source_boundary: String,
     pub result_contract: String,
     pub source_raw_work_map_sha256: String,
@@ -57,10 +54,6 @@ pub struct ApprovedPlanV2BindingV1 {
     pub source_pi_version: String,
     pub source_boundary: String,
     pub result_contract: String,
-    pub repository_manifest_path: String,
-    pub repository_manifest_digest: String,
-    pub repository_head_commit: Sha,
-    pub repository_head_tree: Sha,
     pub atom_registry_path: String,
     pub atom_registry_digest: String,
     /// Required explicit null for an ordinary plan, or a tagged, complete
@@ -86,10 +79,6 @@ pub struct ApprovedPlanV2RecoverySubjectBindingV1 {
     pub source_pi_version: String,
     pub atom_registry_path: String,
     pub atom_registry_digest: String,
-    pub repository_manifest_path: String,
-    pub repository_manifest_digest: String,
-    pub repository_head_commit: Sha,
-    pub repository_head_tree: Sha,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -113,8 +102,7 @@ pub(crate) fn write_approved_plan_v2(
     validate_workstream(workstream)?;
     reject_artifact_path(approved_plan_path, "approved plan")?;
     reject_artifact_path(binding_path, "approved-plan binding")?;
-    let run_root = runner::repository_authority_run_root(admitted.repository_authority())
-        .map_err(|error| format!("approved-plan-v2 promotion run authority: {error}"))?;
+    let run_root = lexical_run_root_from_binding_path(binding_path, workstream)?;
     validate_run_artifact_path(approved_plan_path, &run_root, "approved plan")?;
     validate_run_artifact_path(binding_path, &run_root, "approved-plan binding")?;
     if matches!(
@@ -149,14 +137,6 @@ pub(crate) fn write_approved_plan_v2(
     {
         return Err("approved-plan-v2 promotion source carrier/payload authority drift".to_owned());
     }
-    let repository = runner::read_repository_authority_binding(
-        Path::new(&admitted.repository_authority().path),
-        &admitted.repository_authority().digest,
-    )
-    .map_err(|error| format!("approved-plan-v2 promotion repository authority: {error}"))?;
-    if repository.manifest != admitted.repository_authority().manifest {
-        return Err("approved-plan-v2 promotion repository authority drift".to_owned());
-    }
     let atoms = runner::read_bounded_authority_file(
         admitted.atom_registry_path(),
         planning::ATOM_REGISTRY_MAX_BYTES,
@@ -173,7 +153,6 @@ pub(crate) fn write_approved_plan_v2(
     }
     runner::write_bounded_file_create_once(approved_plan_path, &image, APPROVED_PLAN_V2_MAX_BYTES)
         .map_err(|error| format!("approved-plan-v2 image write: {error}"))?;
-    let authority = admitted.repository_authority();
     let binding = ApprovedPlanV2BindingV1 {
         schema: APPROVED_PLAN_V2_BINDING_SCHEMA.to_owned(),
         workstream: workstream.to_owned(),
@@ -191,10 +170,6 @@ pub(crate) fn write_approved_plan_v2(
         source_pi_version: admitted_actual.pi_version.clone(),
         source_boundary: APPROVED_PLAN_V2_BOUNDARY.to_owned(),
         result_contract: APPROVED_PLAN_V2_BOUNDARY.to_owned(),
-        repository_manifest_path: authority.path.clone(),
-        repository_manifest_digest: authority.digest.clone(),
-        repository_head_commit: Sha(authority.manifest.head_commit.clone()),
-        repository_head_tree: Sha(authority.manifest.head_tree.clone()),
         atom_registry_path: path_string(admitted.atom_registry_path())?,
         atom_registry_digest: admitted.atom_registry_digest().to_owned(),
         recovery_subject: Nullable(
@@ -265,20 +240,7 @@ pub fn read_approved_plan_v2(
     }
     validate_binding_shape(&binding)?;
 
-    // The binding digest is the only externally selected root. Derive its run
-    // root without consulting any attacker-selected pointed-to path, require
-    // the one exact repository manifest leaf, and confine every later read
-    // before the manifest itself is opened.
     let expected_run_root = lexical_run_root_from_binding_path(binding_path, &binding.workstream)?;
-    let expected_manifest_path = expected_run_root
-        .join("planning")
-        .join("repository-authority.v1.json");
-    if binding.repository_manifest_path != path_string(&expected_manifest_path)? {
-        return Err(
-            "approved-plan-v2 repository manifest is not the exact binding run-root manifest"
-                .to_owned(),
-        );
-    }
     let image_path = Path::new(&binding.approved_plan_path);
     for (path, label) in [
         (binding_path, "approved-plan binding"),
@@ -286,7 +248,6 @@ pub fn read_approved_plan_v2(
         (Path::new(&binding.source_carrier_path), "source carrier"),
         (Path::new(&binding.source_spec_path), "source spec"),
         (Path::new(&binding.atom_registry_path), "atom registry"),
-        (expected_manifest_path.as_path(), "repository manifest"),
     ] {
         validate_run_artifact_path(path, &expected_run_root, label)?;
     }
@@ -304,33 +265,12 @@ pub fn read_approved_plan_v2(
                 Path::new(&subject.atom_registry_path),
                 "recovery subject atom registry",
             ),
-            (
-                Path::new(&subject.repository_manifest_path),
-                "recovery subject repository manifest",
-            ),
         ] {
             validate_run_artifact_path(path, &expected_run_root, label)?;
         }
     }
 
-    let repository = runner::read_repository_authority_binding(
-        &expected_manifest_path,
-        &binding.repository_manifest_digest,
-    )
-    .map_err(|error| format!("approved-plan-v2 repository authority: {error}"))?;
-    if repository.manifest.head_commit != binding.repository_head_commit.0
-        || repository.manifest.head_tree != binding.repository_head_tree.0
-    {
-        return Err("approved-plan-v2 repository head/tree mismatch".to_owned());
-    }
-    let run_root = runner::repository_authority_run_root(&repository)
-        .map_err(|error| format!("approved-plan-v2 replay run authority: {error}"))?;
-    if run_root != expected_run_root {
-        return Err(
-            "approved-plan-v2 binding workstream does not match repository run authority"
-                .to_owned(),
-        );
-    }
+    let run_root = expected_run_root;
 
     let image = runner::read_bounded_authority_file(image_path, APPROVED_PLAN_V2_MAX_BYTES)
         .map_err(|error| format!("approved-plan-v2 image read: {error}"))?;
@@ -395,26 +335,12 @@ pub fn read_approved_plan_v2(
         {
             return Err("approved-plan-v2 recovery subject carrier authority mismatch".to_owned());
         }
-        let subject_repository = runner::read_repository_authority_binding(
-            Path::new(&subject_binding.repository_manifest_path),
-            &subject_binding.repository_manifest_digest,
-        )
-        .map_err(|error| {
-            format!("approved-plan-v2 recovery subject repository authority: {error}")
-        })?;
-        if subject_repository.manifest.head_commit != subject_binding.repository_head_commit.0
-            || subject_repository.manifest.head_tree != subject_binding.repository_head_tree.0
-            || subject_repository != repository
-        {
-            return Err("approved-plan-v2 recovery subject repository authority drift".to_owned());
-        }
         let subject = planning::admit_work_map_v2(
             subject_source.raw_work_map_payload(),
             &subject_source,
             WorkMapV2AdmissionContext {
                 atom_registry_path: Path::new(&subject_binding.atom_registry_path),
                 atom_registry_digest: &subject_binding.atom_registry_digest,
-                repository_authority: &subject_repository,
                 recovery_subject: None,
             },
         )
@@ -429,7 +355,6 @@ pub fn read_approved_plan_v2(
         WorkMapV2AdmissionContext {
             atom_registry_path: Path::new(&binding.atom_registry_path),
             atom_registry_digest: &binding.atom_registry_digest,
-            repository_authority: &repository,
             recovery_subject: recovery_subject.as_ref(),
         },
     )
@@ -445,15 +370,8 @@ pub fn read_approved_plan_v2(
 }
 
 fn artifact_from_admitted(admitted: &ApprovedWorkMapV2) -> ApprovedPlanArtifactV2 {
-    let authority = admitted.repository_authority();
     ApprovedPlanArtifactV2 {
         schema: APPROVED_PLAN_V2_SCHEMA.to_owned(),
-        repository_authority: ApprovedRepositoryAuthority {
-            manifest_path: authority.path.clone(),
-            manifest_digest: authority.digest.clone(),
-            head_commit: Sha(authority.manifest.head_commit.clone()),
-            head_tree: Sha(authority.manifest.head_tree.clone()),
-        },
         source_boundary: APPROVED_PLAN_V2_BOUNDARY.to_owned(),
         result_contract: APPROVED_PLAN_V2_BOUNDARY.to_owned(),
         source_raw_work_map_sha256: admitted.source_raw_work_map_sha256().to_owned(),
@@ -466,7 +384,6 @@ fn artifact_from_admitted(admitted: &ApprovedWorkMapV2) -> ApprovedPlanArtifactV
 fn recovery_subject_binding_from_admitted(
     subject: &planning::work_map_v2::ApprovedWorkMapV2RecoverySubject,
 ) -> Result<ApprovedPlanV2RecoverySubjectBindingV1, String> {
-    let authority = &subject.repository_authority;
     Ok(ApprovedPlanV2RecoverySubjectBindingV1 {
         schema: "autopilot.approved_plan_v2_recovery_subject.v1".to_owned(),
         source_carrier_path: path_string(&subject.source_carrier_path)?,
@@ -522,10 +439,6 @@ fn recovery_subject_binding_from_admitted(
             .clone(),
         atom_registry_path: path_string(&subject.atom_registry_path)?,
         atom_registry_digest: subject.atom_registry_digest.clone(),
-        repository_manifest_path: authority.path.clone(),
-        repository_manifest_digest: authority.digest.clone(),
-        repository_head_commit: Sha(authority.manifest.head_commit.clone()),
-        repository_head_tree: Sha(authority.manifest.head_tree.clone()),
     })
 }
 
@@ -544,10 +457,7 @@ fn validate_binding_shape(binding: &ApprovedPlanV2BindingV1) -> Result<(), Strin
             &binding.source_carrier_binding,
             &binding.source_pi_version,
         )
-        || !is_lower_sha256(&binding.repository_manifest_digest)
         || !is_lower_sha256(&binding.atom_registry_digest)
-        || !is_git_oid(&binding.repository_head_commit.0)
-        || !is_git_oid(&binding.repository_head_tree.0)
     {
         return Err("approved-plan-v2 binding is malformed".to_owned());
     }
@@ -556,7 +466,6 @@ fn validate_binding_shape(binding: &ApprovedPlanV2BindingV1) -> Result<(), Strin
         (&binding.approved_plan_path, "approved plan"),
         (&binding.source_carrier_path, "source carrier"),
         (&binding.source_spec_path, "source spec"),
-        (&binding.repository_manifest_path, "repository manifest"),
         (&binding.atom_registry_path, "atom registry"),
     ] {
         reject_artifact_path(Path::new(path), label)?;
@@ -618,9 +527,6 @@ fn validate_recovery_subject_binding(
             &subject.source_pi_version,
         )
         || !is_lower_sha256(&subject.atom_registry_digest)
-        || !is_lower_sha256(&subject.repository_manifest_digest)
-        || !is_git_oid(&subject.repository_head_commit.0)
-        || !is_git_oid(&subject.repository_head_tree.0)
     {
         return Err("approved-plan-v2 recovery subject binding is malformed".to_owned());
     }
@@ -631,10 +537,6 @@ fn validate_recovery_subject_binding(
         ),
         (&subject.source_spec_path, "recovery subject source spec"),
         (
-            &subject.repository_manifest_path,
-            "recovery subject repository manifest",
-        ),
-        (
             &subject.atom_registry_path,
             "recovery subject atom registry",
         ),
@@ -643,10 +545,6 @@ fn validate_recovery_subject_binding(
     }
     if subject.atom_registry_path != binding.atom_registry_path
         || subject.atom_registry_digest != binding.atom_registry_digest
-        || subject.repository_manifest_path != binding.repository_manifest_path
-        || subject.repository_manifest_digest != binding.repository_manifest_digest
-        || subject.repository_head_commit != binding.repository_head_commit
-        || subject.repository_head_tree != binding.repository_head_tree
     {
         return Err(
             "approved-plan-v2 recovery subject authority differs from candidate".to_owned(),
@@ -662,12 +560,6 @@ fn validate_approved_plan_v2_image(artifact: &ApprovedPlanArtifactV2) -> Result<
         || !is_lower_sha256(&artifact.source_raw_work_map_sha256)
     {
         return Err("approved-plan-v2 image schema/route/source digest is malformed".to_owned());
-    }
-    if !is_lower_sha256(&artifact.repository_authority.manifest_digest)
-        || !is_git_oid(&artifact.repository_authority.head_commit.0)
-        || !is_git_oid(&artifact.repository_authority.head_tree.0)
-    {
-        return Err("approved-plan-v2 image repository authority is malformed".to_owned());
     }
     let mut ids = BTreeSet::new();
     for (index, unit) in artifact.units.iter().enumerate() {
@@ -881,8 +773,16 @@ fn validate_run_artifact_path(path: &Path, run_root: &Path, label: &str) -> Resu
 }
 
 fn validate_workstream(value: &str) -> Result<(), String> {
-    runner::repository_authority::validate_workstream_component(value)
-        .map_err(|_| "approved-plan-v2 workstream is not one safe component".to_owned())
+    if !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        Ok(())
+    } else {
+        Err("approved-plan-v2 workstream is not one safe component".to_owned())
+    }
 }
 
 fn reject_artifact_path(path: &Path, label: &str) -> Result<(), String> {
@@ -913,13 +813,6 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 fn is_lower_sha256(value: &str) -> bool {
     value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-}
-
-fn is_git_oid(value: &str) -> bool {
-    matches!(value.len(), 40 | 64)
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
@@ -961,13 +854,6 @@ mod tests {
     fn artifact(units: Vec<ApprovedUnit>) -> ApprovedPlanArtifactV2 {
         ApprovedPlanArtifactV2 {
             schema: APPROVED_PLAN_V2_SCHEMA.to_owned(),
-            repository_authority: ApprovedRepositoryAuthority {
-                manifest_path: "/repo/.pi/autopilot/w/planning/repository-authority.v1.json"
-                    .to_owned(),
-                manifest_digest: "a".repeat(64),
-                head_commit: Sha("b".repeat(40)),
-                head_tree: Sha("c".repeat(40)),
-            },
             source_boundary: APPROVED_PLAN_V2_BOUNDARY.to_owned(),
             result_contract: APPROVED_PLAN_V2_BOUNDARY.to_owned(),
             source_raw_work_map_sha256: "d".repeat(64),
@@ -997,19 +883,11 @@ mod tests {
                     binding_id: Id("binding-a".to_owned()),
                     origin_path: ContractPath("upstream/a.bin".to_owned()),
                     destination: ContractPath("vendor/a.bin".to_owned()),
-                    origin_anchor: "anchor-a".to_owned(),
-                    origin_git_blob_oid: "a".repeat(40),
-                    origin_mode: "100644".to_owned(),
-                    origin_bytes_sha256: "b".repeat(64),
                 },
                 ApprovedVendorBindingV2 {
                     binding_id: Id("binding-b".to_owned()),
                     origin_path: ContractPath("upstream/b.bin".to_owned()),
                     destination: ContractPath("vendor/b.bin".to_owned()),
-                    origin_anchor: "anchor-b".to_owned(),
-                    origin_git_blob_oid: "c".repeat(40),
-                    origin_mode: "100755".to_owned(),
-                    origin_bytes_sha256: "d".repeat(64),
                 },
             ],
         }];
@@ -1035,30 +913,6 @@ mod tests {
     fn approved_image_complete_validator_reaches_enrichment_order_and_closure_branches() {
         let image = complete_vendor_artifact();
         assert!(validate_approved_plan_v2_image(&image).is_ok());
-
-        for (field, value) in [
-            ("origin_mode", "100600"),
-            ("origin_bytes_sha256", "A"),
-            ("origin_git_blob_oid", "A"),
-        ] {
-            let mut changed = image.clone();
-            match field {
-                "origin_mode" => {
-                    changed.vendoring[0].vendor_bindings[0].origin_mode = value.to_owned()
-                }
-                "origin_bytes_sha256" => {
-                    changed.vendoring[0].vendor_bindings[0].origin_bytes_sha256 = value.repeat(64)
-                }
-                "origin_git_blob_oid" => {
-                    changed.vendoring[0].vendor_bindings[0].origin_git_blob_oid = value.repeat(40)
-                }
-                _ => unreachable!(),
-            }
-            assert_eq!(
-                validate_approved_plan_v2_image(&changed).unwrap_err(),
-                "approved-plan-v2 package authority: vendor binding binding-a has malformed Core enrichment"
-            );
-        }
 
         let mut binding_order = image.clone();
         binding_order.vendoring[0].vendor_bindings.swap(0, 1);
@@ -1284,10 +1138,6 @@ mod tests {
                             binding_id: Id(format!("binding-{index:03}")),
                             origin_path: ContractPath(format!("upstream/{index:03}.bin")),
                             destination: ContractPath(format!("vendor/{index:03}.bin")),
-                            origin_anchor: "anchor".to_owned(),
-                            origin_git_blob_oid: "a".repeat(40),
-                            origin_mode: "100644".to_owned(),
-                            origin_bytes_sha256: "b".repeat(64),
                         })
                         .collect(),
                 }

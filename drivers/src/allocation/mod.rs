@@ -38,10 +38,9 @@ pub struct ApprovedCriterion {
 
 pub mod vendoring_v2;
 pub use vendoring_v2::{
-    APPROVED_PACKAGE_PROOFS_V2_MAX, APPROVED_VENDOR_BINDINGS_V2_MAX,
-    APPROVED_VENDOR_SOURCE_SHA256_BYTES, ApprovedPackageProofV2, ApprovedUnitPackageAuthorityV2,
-    ApprovedUnitVendoringV2, ApprovedVendorBindingV2, approved_path_is_safe,
-    path_authority_collides, validate_approved_v2_authority,
+    APPROVED_PACKAGE_PROOFS_V2_MAX, APPROVED_VENDOR_BINDINGS_V2_MAX, ApprovedPackageProofV2,
+    ApprovedUnitPackageAuthorityV2, ApprovedUnitVendoringV2, ApprovedVendorBindingV2,
+    approved_path_is_safe, path_authority_collides, validate_approved_v2_authority,
 };
 
 pub fn validate_exact_unit_file_authority(paths: &[ContractPath]) -> Result<(), String> {

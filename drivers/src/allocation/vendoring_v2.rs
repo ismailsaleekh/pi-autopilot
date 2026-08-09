@@ -10,19 +10,15 @@ use super::ApprovedUnit;
 
 pub const APPROVED_VENDOR_BINDINGS_V2_MAX: usize = 128;
 pub const APPROVED_PACKAGE_PROOFS_V2_MAX: usize = 256;
-pub const APPROVED_VENDOR_SOURCE_SHA256_BYTES: usize = 64;
 
-/// Core-enriched immutable source fact. No Git fact in this row is model supplied.
+/// Model-approved exact mapping. Core derives all source facts only after the
+/// lane worktree exists; no planning-time repository fact is persisted here.
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApprovedVendorBindingV2 {
     pub binding_id: Id,
     pub origin_path: ContractPath,
     pub destination: ContractPath,
-    pub origin_anchor: String,
-    pub origin_git_blob_oid: String,
-    pub origin_mode: String,
-    pub origin_bytes_sha256: String,
 }
 
 /// A full V2 package proof, deliberately kept outside legacy `ApprovedUnit`.
@@ -190,7 +186,6 @@ pub fn validate_approved_v2_authority(
             validate_v2_id(&binding.binding_id, "vendor binding id")?;
             validate_v2_path(&binding.origin_path, "vendor origin path")?;
             validate_v2_path(&binding.destination, "vendor destination")?;
-            validate_v2_text(&binding.origin_anchor, 4096, "vendor origin anchor")?;
             if !binding_ids.insert(binding.binding_id.clone()) {
                 return Err(format!(
                     "duplicate vendor binding id {}",
@@ -201,15 +196,6 @@ pub fn validate_approved_v2_authority(
                 return Err(format!(
                     "unit {} vendor destination is not an exact implementation file",
                     unit.id.0
-                ));
-            }
-            if !is_git_oid(&binding.origin_git_blob_oid)
-                || !matches!(binding.origin_mode.as_str(), "100644" | "100755")
-                || !is_lower_sha256(&binding.origin_bytes_sha256)
-            {
-                return Err(format!(
-                    "vendor binding {} has malformed Core enrichment",
-                    binding.binding_id.0
                 ));
             }
             let current = (
@@ -846,18 +832,4 @@ fn validate_free_text(value: &str, maximum: usize, label: &str) -> Result<(), St
         ));
     }
     Ok(())
-}
-
-fn is_lower_sha256(value: &str) -> bool {
-    value.len() == APPROVED_VENDOR_SOURCE_SHA256_BYTES
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-}
-
-fn is_git_oid(value: &str) -> bool {
-    matches!(value.len(), 40 | 64)
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }

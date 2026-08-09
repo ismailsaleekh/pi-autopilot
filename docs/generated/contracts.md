@@ -37,7 +37,7 @@ Sources: `data/contracts.kdl`.
 | agent_handoff | autopilot.agent-handoff.v1 | Model | true | Model-facing checkpoint handoff. The package preserves unknown top-level properties and validates role-required critical_state slots from data/checkpoint-policy.kdl before compaction/resume. |
 | task_atoms | planning.task-atoms.v1 | Model | true | Model-facing task atom submission. Shape is deliberately small: structure is enforced by the submit tool; source values are checked against runtime-supplied task source anchors by the planning driver. |
 | planning_atom_registry | autopilot.planning_atom_registry.v1 | Package | false | Create-once accepted task atom registry materialized by the seam after task extractors are accepted. |
-| scout_dossier | planning.scout-dossier.v1 | Model | true | Model-facing repository scout dossier. Shape is small; path values are checked against the pinned repository commit by the planning driver. |
+| scout_dossier | planning.scout-dossier.v1 | Model | true | Model-facing repository scout dossier. Shape is small and cites current bounded evidence without creating repository execution authority. |
 | questions | planning.questions.v1 | Model | true | Model-facing contradiction/question nominations. Empty questions are valid when no material unresolved issue remains. |
 | work_map | planning.work-map.v1 | Model | true | Model-facing work map. Link values are checked against the accepted atom registry by the planning driver. |
 | work_map_v2 | planning.work-map.v2 | Model | true | Fresh version-isolated work map for vendoring contracts. Generated Rust types own only V2 shape; Core V2 admission owns declarative and semantic enforcement. |
@@ -435,10 +435,6 @@ Sources: `data/contracts.kdl`.
 | agent_run_spec | field | atom_registry_digest | digest | false | true |  |
 | agent_run_spec | field | planning_inputs_path | path | false | true |  |
 | agent_run_spec | field | planning_inputs_digest | digest | false | true |  |
-| agent_run_spec | field | repository_manifest_path | path | false | true | Required for fresh planning assignments: absolute path to the package-owned repository authority manifest bound at issue time. Historical specs may omit it only for inspection. |
-| agent_run_spec | field | repository_manifest_digest | digest | false | true | Required for fresh planning assignments: SHA-256 of repository_manifest_path bytes. |
-| agent_run_spec | field | repository_head_commit | sha | false | true | Required for fresh planning assignments: exact HEAD commit recorded in the repository authority manifest. |
-| agent_run_spec | field | repository_head_tree | sha | false | true | Required for fresh planning assignments: exact HEAD tree recorded in the repository authority manifest. |
 | run_identity | field | repo_key | base32 | true |  | lowercase-base32(sha256("autopilot-repo-v1\0" + realpath(git-common-dir))) |
 | run_identity | field | run_id | uuidv7 | true |  | UUIDv7 run-id. |
 | run_identity | field | workstream | id | true |  |  |
@@ -528,7 +524,6 @@ Sources: `data/contracts.kdl`.
 | work_map_v2 | field | plan_unit_vendor_binding_v2.binding_id | id | true |  |  |
 | work_map_v2 | field | plan_unit_vendor_binding_v2.origin_path | path | true |  | Exact normalized repository-relative origin path. |
 | work_map_v2 | field | plan_unit_vendor_binding_v2.destination | path | true |  | Exact normalized repository-relative destination path. |
-| work_map_v2 | field | plan_unit_vendor_binding_v2.origin_anchor | string | true |  | Immutable whole-file origin anchor; Core V2 admission requires a nonempty value. |
 | work_map_v2 | field | work_map_recovery_v2.disposition | recovery-disposition | true |  | Typed conclusion after independent diagnosis: repaired/no-defect may return to the same gate; authority, infrastructure, and unsafe outcomes fail closed. |
 | work_map_v2 | list | work_map_recovery_v2.diagnosis_refs | ref | true |  | Exact rejected-review or runtime-diagnosis evidence inspected independently. |
 | work_map_v2 | field | work_map_recovery_v2.root_cause | string | true |  | Evidence-backed root cause; may correct rather than repeat the runtime diagnosis. |

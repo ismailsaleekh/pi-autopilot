@@ -15,8 +15,8 @@ use drivers::runner::{
     AcceptedPlanningArtifactBinding, PlanningRunnerRequest, RecoveryDirective, RunnerAssignment,
     RunnerTaskDocument, RunnerTransportFacts, ValidationRunnerRequest, VerifiedCommandExecution,
     approved_command_bindings, child, delivery_issue_with_facts, planning_context_digest,
-    planning_paths, repository_authority_binding, role_runtime, role_tool_names, session_id_for,
-    settings_digest, validation_issue_v3,
+    planning_paths, role_runtime, role_tool_names, session_id_for, settings_digest,
+    validation_issue_v3,
 };
 use drivers::seam::{self, CoreState};
 use drivers::vcs::GitVcs;
@@ -1554,32 +1554,6 @@ fn terminal_tool_result_must_have_correlated_details_by_opaque_call_id() {
         assert!(error.contains(expected), "{label}: {error}");
         assert!(!carrier_path(&root).exists(), "{label}");
     }
-}
-
-#[test]
-fn planning_child_rejects_missing_repository_manifest_binding() {
-    let root = temp_root("runner-missing-repo-manifest");
-    write_fake_pi(
-        &root,
-        &success_fake_pi(&task_atoms_output("TASK-A.md", "AUTHORITY-A-SENTINEL")),
-    );
-    let spec = write_planning_spec(
-        &root,
-        |mut value| {
-            value
-                .as_object_mut()
-                .unwrap()
-                .remove("repository_manifest_path");
-            value
-        },
-        "planning.task-atoms.v1",
-        "gpt-5.5",
-    );
-    let error = with_fake_path(&root, || {
-        child::main(&["--spec".to_owned(), spec.display().to_string()])
-    })
-    .expect_err("missing repository manifest binding must fail");
-    assert!(error.contains("repository_manifest_path"), "{error}");
 }
 
 #[test]
@@ -3349,8 +3323,6 @@ fn write_planning_spec_inner(
         "CONTEXT-SENTINEL-UNIQUE",
     );
     let context_documents = vec![context_document.clone()];
-    let repo_binding =
-        repository_authority_binding(root, "main").expect("repository authority binding");
     let context_digest =
         planning_context_digest_for_spec(root, "set-a", &authority_documents, &context_documents);
     let session_id = session_id_for(
@@ -3397,10 +3369,6 @@ fn write_planning_spec_inner(
         "authority_documents":authority_documents,
         "context_document":context_document,
         "context_documents":context_documents,
-        "repository_manifest_path":repo_binding.path,
-        "repository_manifest_digest":repo_binding.digest,
-        "repository_head_commit":repo_binding.manifest.head_commit,
-        "repository_head_tree":repo_binding.manifest.head_tree,
         "runtime_extension_path":child_addon_path(),
         "runtime_extension_digest":child_addon_digest(),
         "terminal_profile_id":"planning.task-atoms.v1:autopilot_submit_atoms",
@@ -3446,8 +3414,6 @@ fn write_work_map_spec_with_prompt(
         "CONTEXT-SENTINEL-UNIQUE",
     );
     let context_documents = vec![context_document.clone()];
-    let repo_binding =
-        repository_authority_binding(root, "main").expect("repository authority binding");
     let context_digest =
         planning_context_digest_for_spec(root, "set-a", &authority_documents, &context_documents);
     let session_id = session_id_for(
@@ -3496,10 +3462,6 @@ fn write_work_map_spec_with_prompt(
         "authority_documents":authority_documents,
         "context_document":context_document,
         "context_documents":context_documents,
-        "repository_manifest_path":repo_binding.path,
-        "repository_manifest_digest":repo_binding.digest,
-        "repository_head_commit":repo_binding.manifest.head_commit,
-        "repository_head_tree":repo_binding.manifest.head_tree,
         "runtime_extension_path":child_addon_path(),
         "runtime_extension_digest":child_addon_digest(),
         "terminal_profile_id":"planning.work-map.v1:autopilot_submit_plan_cluster",
@@ -4659,7 +4621,7 @@ fn task_document_digest(class: &str, authority_set_id: &str, body: &str) -> Stri
 }
 
 fn planning_context_digest_for_spec(
-    root: &Path,
+    _root: &Path,
     authority_set_id: &str,
     authority_documents: &[Value],
     context_documents: &[Value],
@@ -4670,14 +4632,8 @@ fn planning_context_digest_for_spec(
     let context_documents =
         serde_json::from_value::<Vec<TaskDocument>>(Value::Array(context_documents.to_vec()))
             .expect("context documents match agent-run spec schema");
-    let repo_authority = repository_authority_binding(root, "main").expect("repository authority");
-    planning_context_digest(
-        authority_set_id,
-        &authority_documents,
-        &context_documents,
-        &repo_authority,
-    )
-    .expect("planning context digest")
+    planning_context_digest(authority_set_id, &authority_documents, &context_documents)
+        .expect("planning context digest")
 }
 
 fn extract_task_source_manifest_json(text: &str) -> String {

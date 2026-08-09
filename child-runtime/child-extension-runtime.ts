@@ -53,8 +53,8 @@ type ValidationEvidenceReceipt = {
   active_override: "read";
 };
 
-type CoreBaselineLeaf = { destination: string; unit_id: string; kind: string; binding_id: string | null; mode: string; bytes_sha256: string; origin_path: string | null; origin_anchor: string | null; origin_git_blob_oid: string | null };
-type VendorBinding = { binding_id: string; origin_path: string; destination: string; origin_anchor: string; origin_git_blob_oid: string; origin_mode: string; origin_bytes_sha256: string };
+type CoreBaselineLeaf = { destination: string; unit_id: string; kind: string; binding_id: string | null; mode: string; bytes_sha256: string; origin_path: string | null };
+type VendorBinding = { binding_id: string; origin_path: string; destination: string };
 type VendoringRow = { unit_id: string; provenance_manifest_destination: string | null; vendor_bindings: VendorBinding[] };
 type Materialization = { intention_path: string; intention_digest: string; receipt_path: string; receipt_digest: string; baseline: CoreBaselineLeaf[] };
 type DeliveryRecovery = { trigger_assignment_id: string };
@@ -850,7 +850,6 @@ function assertMutationTopology(policy: Pick<DeliveryPolicy, "worktree" | "allow
     throw error;
   }
 }
-
 function parseDeliveryAssignment(bytes: Buffer): DeliveryAssignmentArtifact {
   let value: unknown; try { value = JSON.parse(bytes.toString("utf8")); } catch (error) {
     throw new Error(`autopilot delivery assignment malformed JSON: ${error instanceof Error ? error.message : error}`); }
@@ -886,15 +885,15 @@ function parseVendoringRow(value: unknown, index: number): VendoringRow {
   return { unit_id: requiredString(row, "unit_id"), provenance_manifest_destination: manifest, vendor_bindings: row["vendor_bindings"].map((binding, bindingIndex) => parseVendorBinding(binding, bindingIndex)) };
 }
 function parseVendorBinding(value: unknown, index: number): VendorBinding {
-  if (value === null || typeof value !== "object") throw new Error(`autopilot V4 vendor binding ${index} malformed`); const binding = value as Record<string, unknown>; const keys = ["binding_id","origin_path","destination","origin_anchor","origin_git_blob_oid","origin_mode","origin_bytes_sha256"];
+  if (value === null || typeof value !== "object") throw new Error(`autopilot V4 vendor binding ${index} malformed`); const binding = value as Record<string, unknown>; const keys = ["binding_id","origin_path","destination"];
   if (Object.keys(binding).length !== keys.length || Object.keys(binding).some((key) => !keys.includes(key))) throw new Error("autopilot V4 vendor binding fields drift");
-  const out: VendorBinding = { binding_id: requiredString(binding, "binding_id"), origin_path: requiredString(binding, "origin_path"), destination: requiredString(binding, "destination"), origin_anchor: requiredString(binding, "origin_anchor"), origin_git_blob_oid: requiredString(binding, "origin_git_blob_oid"), origin_mode: requiredString(binding, "origin_mode"), origin_bytes_sha256: requiredDigest(binding, "origin_bytes_sha256") };
-  if (!isSafeRelativeUnitPath(out.origin_path) || !isSafeRelativeUnitPath(out.destination) || !/^(100644|100755)$/.test(out.origin_mode)) throw new Error("autopilot V4 vendor binding authority drift"); return out;
+  const out: VendorBinding = { binding_id: requiredString(binding, "binding_id"), origin_path: requiredString(binding, "origin_path"), destination: requiredString(binding, "destination") };
+  if (!isSafeRelativeUnitPath(out.origin_path) || !isSafeRelativeUnitPath(out.destination)) throw new Error("autopilot V4 vendor binding authority drift"); return out;
 }
 function parseCoreBaselineLeaf(value: unknown, index: number): CoreBaselineLeaf {
-  if (value === null || typeof value !== "object") throw new Error(`autopilot V4 baseline leaf ${index} malformed`); const leaf = value as Record<string, unknown>; const keys = ["destination","unit_id","kind","binding_id","mode","bytes_sha256","origin_path","origin_anchor","origin_git_blob_oid"];
+  if (value === null || typeof value !== "object") throw new Error(`autopilot V4 baseline leaf ${index} malformed`); const leaf = value as Record<string, unknown>; const keys = ["destination","unit_id","kind","binding_id","mode","bytes_sha256","origin_path"];
   if (Object.keys(leaf).length !== keys.length || Object.keys(leaf).some((key) => !keys.includes(key))) throw new Error("autopilot V4 baseline leaf fields drift");
-  const out: CoreBaselineLeaf = { destination: requiredString(leaf, "destination"), unit_id: requiredString(leaf, "unit_id"), kind: requiredString(leaf, "kind"), binding_id: nullableString(leaf, "binding_id"), mode: requiredString(leaf, "mode"), bytes_sha256: requiredDigest(leaf, "bytes_sha256"), origin_path: nullableString(leaf, "origin_path"), origin_anchor: nullableString(leaf, "origin_anchor"), origin_git_blob_oid: nullableString(leaf, "origin_git_blob_oid") };
+  const out: CoreBaselineLeaf = { destination: requiredString(leaf, "destination"), unit_id: requiredString(leaf, "unit_id"), kind: requiredString(leaf, "kind"), binding_id: nullableString(leaf, "binding_id"), mode: requiredString(leaf, "mode"), bytes_sha256: requiredDigest(leaf, "bytes_sha256"), origin_path: nullableString(leaf, "origin_path") };
   if (!isSafeRelativeUnitPath(out.destination) || !/^(100644|100755)$/.test(out.mode)) throw new Error("autopilot V4 baseline leaf authority drift"); return out;
 }
 
@@ -902,9 +901,9 @@ function validateV5Baseline(artifact: DeliveryAssignmentArtifact, worktree: stri
   const m = artifact.materialization, rows = artifact.selected_vendoring, leaves = artifact.protected_baseline;
   if (m === undefined || rows === undefined || leaves === undefined || artifact.baseline_digest !== m.receipt_digest || artifact.receipt_path !== m.receipt_path) throw new Error("autopilot V5 baseline missing");
   if (rows.length !== artifact.ordered_units.length || rows.some((row, index) => row.unit_id !== artifact.ordered_units[index]?.id)) throw new Error("autopilot V5 selected vendoring row drift");
-  const expected: CoreBaselineLeaf[] = []; for (const row of rows) { for (const binding of row.vendor_bindings) expected.push({ destination: binding.destination, unit_id: row.unit_id, kind: "vendor", binding_id: binding.binding_id, mode: binding.origin_mode, bytes_sha256: binding.origin_bytes_sha256, origin_path: binding.origin_path, origin_anchor: binding.origin_anchor, origin_git_blob_oid: binding.origin_git_blob_oid }); if (row.provenance_manifest_destination !== null) { const bytes = Buffer.concat([...row.vendor_bindings].sort((a, b) => Buffer.compare(Buffer.from(a.destination), Buffer.from(b.destination))).map((binding) => Buffer.from(`${binding.origin_path}\t${binding.destination}\tsha256:${binding.origin_bytes_sha256}\n`, "utf8"))); expected.push({ destination: row.provenance_manifest_destination, unit_id: row.unit_id, kind: "manifest", binding_id: null, mode: "100644", bytes_sha256: sha256Hex(bytes), origin_path: null, origin_anchor: null, origin_git_blob_oid: null }); } }
-  expected.sort((a, b) => Buffer.compare(Buffer.from(a.destination), Buffer.from(b.destination)));
-  if (canonicalJson(leaves) !== canonicalJson(expected)) throw new Error("autopilot V5 baseline/selected authority drift");
+  const expected = rows.flatMap((row) => [...row.vendor_bindings.map((binding) => [binding.destination, row.unit_id, "vendor", binding.binding_id, binding.origin_path]), ...(row.provenance_manifest_destination === null ? [] : [[row.provenance_manifest_destination, row.unit_id, "manifest", null, null]])]).sort((a, b) => Buffer.compare(Buffer.from(String(a[0])), Buffer.from(String(b[0]))));
+  if (canonicalJson(leaves.map((leaf) => [leaf.destination, leaf.unit_id, leaf.kind, leaf.binding_id, leaf.origin_path])) !== canonicalJson(expected)) throw new Error("autopilot V5 baseline/selected authority drift");
+  for (const row of rows) if (row.provenance_manifest_destination !== null) { const bytes = Buffer.concat([...row.vendor_bindings].sort((a, b) => Buffer.compare(Buffer.from(a.destination), Buffer.from(b.destination))).map((binding) => Buffer.from(`${binding.origin_path}\t${binding.destination}\tsha256:${leaves.find((leaf) => leaf.destination === binding.destination)?.bytes_sha256}\n`, "utf8"))); const manifest = leaves.find((leaf) => leaf.destination === row.provenance_manifest_destination); if (manifest?.mode !== "100644" || manifest?.bytes_sha256 !== sha256Hex(bytes)) throw new Error("autopilot V5 provenance manifest baseline drift"); }
   const receiptPath = canonicalRegularFile("receipt_path", m.receipt_path); const receiptBytes = readBoundedRegularFileSync("V5 materialization receipt", receiptPath, MAX_CORE_MATERIALIZATION_RECEIPT_BYTES);
   if (sha256Hex(receiptBytes) !== m.receipt_digest) throw new Error("autopilot V5 receipt digest drift");
   let receiptValue: unknown; try { receiptValue = JSON.parse(receiptBytes.toString("utf8")); } catch { throw new Error("autopilot V5 receipt malformed"); }
@@ -912,7 +911,7 @@ function validateV5Baseline(artifact: DeliveryAssignmentArtifact, worktree: stri
   const receipt = receiptValue as Record<string, unknown>; const keys = ["schema","intention_path","intention_digest","workstream","assignment_id","lane_id","attempt","base_commit","worktree","completed_baseline"];
   const receiptAssignment = requiredString(receipt, "assignment_id"), receiptBase = requiredString(receipt, "base_commit"), recovery = artifact.recovery !== undefined;
   if (Object.keys(receipt).length !== keys.length || Object.keys(receipt).some((key) => !keys.includes(key)) || receipt["schema"] !== "autopilot.core_materialization_receipt.v1" || requiredString(receipt, "intention_path") !== m.intention_path || requiredDigest(receipt, "intention_digest") !== m.intention_digest || requiredString(receipt, "workstream") !== artifact.workstream || (recovery ? receiptAssignment === artifact.assignment_id || receiptBase === artifact.base_commit : receiptAssignment !== artifact.assignment_id || receiptBase !== artifact.base_commit) || requiredString(receipt, "lane_id") !== artifact.lane_id || requiredNumber(receipt, "attempt") !== artifact.attempt || requiredString(receipt, "worktree") !== artifact.worktree || !Array.isArray(receipt["completed_baseline"]) || canonicalJson(receipt["completed_baseline"].map(parseCoreBaselineLeaf)) !== canonicalJson(leaves)) throw new Error("autopilot V5 receipt authority drift");
-  const protectedPaths = new Set<string>(); for (const leaf of leaves) { if (!unitFiles.has(leaf.destination) || protectedPaths.has(leaf.destination)) throw new Error("autopilot V5 baseline overlap/drift"); protectedPaths.add(leaf.destination); const absolute = path.resolve(worktree, leaf.destination); assertMutationTopology({ worktree, allowedAbsolutePaths: new Set([absolute]), allowedParentDirectories: new Set(ancestorDirectoryChain(worktree, absolute)) }, absolute, true); const bytes = readBoundedRegularFileSync("V5 Core baseline", absolute, MAX_SCOPE_SNAPSHOT_FILE_BYTES); if (sha256Hex(bytes) !== leaf.bytes_sha256 || (lstatSync(absolute).mode & 0o777) !== (leaf.mode === "100644" ? 0o644 : 0o755)) throw new Error("autopilot V5 protected baseline byte/mode drift"); }
+  const protectedPaths = new Set<string>(); for (const leaf of leaves) { if (!unitFiles.has(leaf.destination) || protectedPaths.has(leaf.destination)) throw new Error("autopilot V5 baseline overlap/drift"); protectedPaths.add(leaf.destination); const absolute = path.resolve(worktree, leaf.destination); assertMutationTopology({ worktree, allowedAbsolutePaths: new Set([absolute]), allowedParentDirectories: new Set(ancestorDirectoryChain(worktree, absolute)) }, absolute, true); const bytes = readBoundedRegularFileSync("V5 Core baseline", absolute, MAX_SCOPE_SNAPSHOT_FILE_BYTES); if (sha256Hex(bytes) !== leaf.bytes_sha256 || (lstatSync(absolute).mode & 0o7777) !== (leaf.mode === "100644" ? 0o644 : 0o755)) throw new Error("autopilot V5 protected baseline byte/mode drift"); }
   return protectedPaths;
 }
 
