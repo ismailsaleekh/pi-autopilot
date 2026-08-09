@@ -18,6 +18,10 @@ const FRAME_VALIDATION_DESCRIPTORS = {
       "request-operator",
       "return-idle"
     ],
+    "admission-mode": [
+      "receipt_v1",
+      "replay_v0"
+    ],
     "archive_entry_class": [
       "receipt",
       "protected-evidence",
@@ -36,6 +40,18 @@ const FRAME_VALIDATION_DESCRIPTORS = {
       "launch-attested-pi",
       "reconcile-attested-pi"
     ],
+    "blocked-evidence-kind": [
+      "observation",
+      "path",
+      "command",
+      "reference"
+    ],
+    "blocked-reason-code": [
+      "missing-authority",
+      "external-dependency",
+      "infrastructure",
+      "unsafe-to-continue"
+    ],
     "candidate_state": [
       "queued",
       "preparing",
@@ -47,6 +63,14 @@ const FRAME_VALIDATION_DESCRIPTORS = {
       "needs-fix",
       "failed",
       "superseded"
+    ],
+    "child-control-outcome": [
+      "ACCEPT",
+      "RETRY"
+    ],
+    "child-control-request-kind": [
+      "submit",
+      "blocked"
     ],
     "closure_verdict": [
       "PASS",
@@ -82,6 +106,14 @@ const FRAME_VALIDATION_DESCRIPTORS = {
       "PASS",
       "FAIL",
       "BLOCKED"
+    ],
+    "deferred-host-effect-kind": [
+      "ui",
+      "spawn",
+      "spawn-wave",
+      "session",
+      "log",
+      "done"
     ],
     "delivery-blocker-class": [
       "semantic-repairable",
@@ -226,6 +258,9 @@ const FRAME_VALIDATION_DESCRIPTORS = {
       "fail",
       "blocked",
       "needs-fix"
+    ],
+    "prepared-transition-kind": [
+      "receipt-consumption"
     ],
     "producer": [
       "Model",

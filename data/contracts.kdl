@@ -21,6 +21,7 @@ type "task-document-class" doc="Closed task-pack document class string carried i
 type "unix-ms" doc="JSON integer Unix epoch milliseconds in 0..=9007199254740991."
 type "git-oid" doc="Git object id string for the repository object format."
 type "json" doc="Closed JSON value serialized with AP-CJ1 canonical JSON."
+type "json-value" doc="Arbitrary JSON tree transported without TypeScript normalization or semantic validation."
 
 artifact "role_frontmatter" schema="autopilot.role.v1" producer="Package" model_produced=#false {
     doc "Strict package-authored YAML frontmatter for role definitions (D76 §2.2)."
@@ -487,6 +488,72 @@ artifact "agent_run_spec" schema="autopilot.agent_run_spec.v4" producer="Package
     field "terminal_profile_id" type="string" required=#false nullable=#true doc="Required for every model assignment; parent-selected generated terminal profile, never inferred from model payload."
     field "terminal_route" type="terminal_route" required=#false nullable=#true doc="Fresh planning terminal route selected as one exact generated descriptor row. Historical V1 specs omit this only under their explicit legacy reader."
     list "unavailable_tools" item="tool-name" required=#false nullable=#true doc="Role-declared capabilities omitted only by an explicit retained-unavailable data disposition."
+    list "producer_assignment_ids" item="id" required=#false nullable=#true
+    field "validation_id" type="id" required=#false nullable=#true
+    field "validation_attempt" type="u32" required=#false nullable=#true
+    field "semantic_round" type="u32" required=#false nullable=#true
+    field "model_submission_path" type="path" required=#false nullable=#true
+    field "atom_id_prefix" type="string" required=#false nullable=#true
+    field "atom_registry_path" type="path" required=#false nullable=#true
+    field "atom_registry_digest" type="digest" required=#false nullable=#true
+    field "planning_inputs_path" type="path" required=#false nullable=#true
+    field "planning_inputs_digest" type="digest" required=#false nullable=#true
+}
+
+artifact "agent_run_spec_v5" schema="autopilot.agent_run_spec.v5" producer="Package" model_produced=#false {
+    doc "Fresh receipt-backed child runner specification. Fresh writers emit receipt_v1 only; pre-v5 bytes remain under their explicit replay_v0 legacy reader."
+    field "schema" type="schema-id" required=#true constant="autopilot.agent_run_spec.v5"
+    field "admission_mode" type="admission-mode" required=#true constant="receipt_v1" doc="Fresh issuance is receipt_v1; replay_v0 is explicit legacy classification only."
+    field "child_control_socket_path" type="path" required=#true
+    field "child_control_token" type="string" required=#true
+    field "child_control_token_digest" type="digest" required=#true
+    field "assignment_kind" type="validation_assignment_kind" required=#true doc="Explicit assignment class; no runner infers planning/delivery/validation from result_contract."
+    field "action_id" type="id" required=#true
+    field "assignment_id" type="id" required=#true
+    field "run_id" type="id" required=#true
+    field "run_revision" type="u64" required=#true
+    field "workstream" type="id" required=#true
+    field "role_id" type="id" required=#true
+    field "mode" type="mode-id" required=#true
+    field "provider" type="string" required=#true
+    field "model" type="string" required=#true
+    field "thinking" type="thinking-level" required=#true
+    field "route" type="string" required=#true
+    field "cwd" type="path" required=#true
+    list "allowed_tools" item="tool-name" required=#true
+    field "spec_path" type="path" required=#true
+    field "prompt_path" type="path" required=#true
+    field "prompt_digest" type="digest" required=#true
+    field "boundary_id" type="contract-id" required=#true
+    field "boundary_digest" type="digest" required=#true
+    field "result_contract" type="contract-id" required=#true
+    field "result_contract_digest" type="digest" required=#true
+    field "carrier_path" type="path" required=#true
+    field "session_id" type="id" required=#true
+    field "session_dir" type="path" required=#true
+    field "session_continuity" type="session_continuity" required=#true
+    field "settings_digest" type="digest" required=#true
+    field "context_digest" type="digest" required=#true
+    field "skills_digest" type="digest" required=#true
+    field "subscription_digest" type="digest" required=#true
+    field "lane_id" type="id" required=#false nullable=#true
+    field "attempt" type="u32" required=#false nullable=#true
+    field "base_commit" type="sha" required=#false nullable=#true
+    field "worktree" type="path" required=#false nullable=#true
+    field "required_focused_evidence" type="u32" required=#false nullable=#true
+    field "authority_set_id" type="string" required=#false nullable=#true
+    list "authority_documents" item="task_document" required=#false nullable=#true
+    field "context_document" type="task_document" required=#false nullable=#true
+    list "context_documents" item="task_document" required=#false nullable=#true
+    field "assignment_path" type="path" required=#false nullable=#true
+    field "assignment_digest" type="digest" required=#false nullable=#true
+    field "context_manifest_path" type="path" required=#false nullable=#true
+    field "context_manifest_digest" type="digest" required=#false nullable=#true
+    field "runtime_extension_path" type="path" required=#false nullable=#true
+    field "runtime_extension_digest" type="digest" required=#false nullable=#true
+    field "terminal_profile_id" type="string" required=#false nullable=#true
+    field "terminal_route" type="terminal_route" required=#false nullable=#true
+    list "unavailable_tools" item="tool-name" required=#false nullable=#true
     list "producer_assignment_ids" item="id" required=#false nullable=#true
     field "validation_id" type="id" required=#false nullable=#true
     field "validation_attempt" type="u32" required=#false nullable=#true
@@ -1108,6 +1175,31 @@ artifact "validation_assignment_v3" schema="autopilot.validation_assignment.v3" 
     field "max_value_attempts" type="u32" required=#true
 }
 
+artifact "validation_assignment_v4" schema="autopilot.validation_assignment.v4" producer="Package" model_produced=#false max_bytes=131072 {
+    doc "Fresh receipt-backed Validator assignment. It removes max_value_attempts; fresh issuance is receipt_v1 and old v3 assignment bytes remain explicit replay_v0 legacy input."
+    field "schema" type="schema-id" required=#true constant="autopilot.validation_assignment.v4" max_bytes=64
+    field "admission_mode" type="admission-mode" required=#true constant="receipt_v1"
+    field "validation_id" type="id" required=#true max_bytes=256
+    field "validation_key" type="digest" required=#true max_bytes=64
+    field "workstream" type="id" required=#true max_bytes=256
+    field "run_revision" type="u64" required=#true
+    field "role_id" type="id" required=#true max_bytes=256
+    field "mode" type="mode-id" required=#true max_bytes=256
+    field "assignment_id" type="id" required=#true max_bytes=256
+    field "action_id" type="id" required=#true max_bytes=256
+    field "validation_attempt" type="u32" required=#true
+    field "semantic_round" type="u32" required=#true
+    list "producer_assignment_ids" item="id" required=#true min_items=1 max_items=256 unique=#true
+    field "base_commit" type="git-oid" required=#true max_bytes=64
+    field "exact_commit" type="git-oid" required=#true max_bytes=64
+    field "exact_tree" type="git-oid" required=#true max_bytes=64
+    field "candidate_root" type="path" required=#true max_bytes=4096
+    field "context_path" type="path" required=#true max_bytes=4096
+    field "context_digest" type="digest" required=#true max_bytes=64
+    field "authority_path" type="path" required=#true max_bytes=4096
+    field "authority_digest" type="digest" required=#true max_bytes=64
+}
+
 artifact "validation_context_v3" schema="autopilot.validation_context.v3" producer="Package" model_produced=#false max_bytes=1048576 {
     doc "Fact-only v3 Validator context. It projects readable exact source/diff citations but never asks the model to echo Core-owned receipts or coverage."
     field "schema" type="schema-id" required=#true constant="autopilot.validation_context.v3" max_bytes=64
@@ -1263,6 +1355,176 @@ artifact "validation_result_v3" schema="autopilot.validation_result.v3" producer
     field "submission" type="validation_submission_v3" required=#true
     field "verdict_digest" type="digest" required=#true
     field "verdict" type="validation_verdict_v3" required=#true
+}
+
+artifact "child_control_request" schema="autopilot.child_control_request.v1" producer="Host" model_produced=#false {
+    doc "Closed child-to-Core control request. Raw payload is transported as the pre-schema JSON tree without TypeScript coercion, defaults, or semantic admission."
+    field "schema" type="schema-id" required=#true constant="autopilot.child_control_request.v1"
+    field "request_id" type="id" required=#true
+    field "token" type="string" required=#true
+    field "run_id" type="id" required=#true
+    field "assignment_id" type="id" required=#true
+    field "attempt" type="u32" required=#true
+    field "tool_call_id" type="string" required=#true
+    field "kind" type="child-control-request-kind" required=#true
+    field "tool_name" type="tool-name" required=#true
+    field "profile_id" type="string" required=#true
+    field "raw_payload" type="json-value" required=#true
+}
+
+artifact "child_control_accept_receipt" schema="autopilot.child_control_accept_receipt.v1" producer="Package" model_produced=#false union_tag="kind" {
+    doc "Typed receipt envelope returned only for an accepted child-control request."
+    record "submit" variant="submit" {
+        field "schema" type="schema-id" required=#true constant="autopilot.child_control_accept_receipt.v1"
+        field "receipt" type="submit_receipt" required=#true
+    }
+    record "blocked" variant="blocked" {
+        field "schema" type="schema-id" required=#true constant="autopilot.child_control_accept_receipt.v1"
+        field "receipt" type="blocked_receipt" required=#true
+    }
+}
+
+artifact "child_control_response" schema="autopilot.child_control_response.v1" producer="Package" model_produced=#false union_tag="outcome" {
+    doc "Closed child-control response. ACCEPT carries exactly one typed receipt; RETRY carries exactly one complete diagnostic."
+    record "accept" variant="ACCEPT" {
+        field "schema" type="schema-id" required=#true constant="autopilot.child_control_response.v1"
+        field "request_id" type="id" required=#true
+        field "receipt" type="child_control_accept_receipt" required=#true
+    }
+    record "retry" variant="RETRY" {
+        field "schema" type="schema-id" required=#true constant="autopilot.child_control_response.v1"
+        field "request_id" type="id" required=#true
+        field "diagnostic" type="submit_diagnostic" required=#true
+    }
+}
+
+artifact "submit_diagnostic" schema="autopilot.submit_diagnostic.v1" producer="Package" model_produced=#false {
+    doc "Complete canonical submit RETRY diagnostic. Rows are sorted by pointer UTF-8 bytes, code, expected, and actual.sha256; error_count is the complete pre-summary count."
+    field "schema" type="schema-id" required=#true constant="autopilot.submit_diagnostic.v1"
+    field "code" type="string" required=#true constant="AUTOPILOT_SUBMIT_RETRY"
+    field "error_count" type="u32" required=#true doc="Complete independently knowable error count, including rows summarized elsewhere when bounded output is required."
+    list "errors" item="submit_diagnostic_error" required=#true min_items=1
+    record "submit_diagnostic_error" {
+        field "index" type="u32" required=#true doc="Canonical zero-based row index after deterministic sort."
+        field "code" type="string" required=#true max_bytes=256 doc="Stable machine-readable error code."
+        field "pointer" type="string" required=#true max_bytes=4096 doc="RFC6901 pointer to the rejected value."
+        field "expected" type="string" required=#true max_bytes=4096 doc="Canonical deterministic expectation."
+        field "actual" type="submit_diagnostic_actual" required=#true
+        field "fix" type="string" required=#true max_bytes=4096 doc="Imperative correction."
+    }
+    record "submit_diagnostic_actual" {
+        field "preview" type="string" required=#true max_bytes=256 doc="Bounded and redacted preview of the actual value."
+        field "redacted" type="bool" required=#true
+        field "truncated" type="bool" required=#true
+        field "sha256" type="digest" required=#true doc="SHA-256 of the complete canonical actual value."
+        field "byte_count" type="u64" required=#true doc="Complete canonical actual-value byte count."
+        field "item_count" type="u64" required=#true doc="Complete actual-value item count."
+    }
+}
+
+artifact "submit_receipt" schema="autopilot.submit_receipt.v1" producer="Package" model_produced=#false {
+    doc "Create-once accepted submit receipt. It binds authenticated child identity, canonical raw payload, validators, carrier artifacts, and a typed deferred continuation without granting repository authority."
+    field "schema" type="schema-id" required=#true constant="autopilot.submit_receipt.v1"
+    field "receipt_id" type="uuidv7" required=#true
+    field "run_id" type="id" required=#true
+    field "run_revision" type="u64" required=#true
+    field "workstream" type="id" required=#true
+    field "action_id" type="id" required=#true
+    field "assignment_id" type="id" required=#true
+    field "attempt" type="u32" required=#true
+    field "profile_id" type="string" required=#true
+    field "tool_name" type="tool-name" required=#true
+    field "boundary_id" type="contract-id" required=#true
+    field "result_contract" type="contract-id" required=#true
+    field "schema_digest" type="digest" required=#true
+    field "spec_digest" type="digest" required=#true
+    field "carrier_binding_digest" type="digest" required=#true
+    field "authority_digest" type="digest" required=#true
+    list "frozen_validator_versions" item="submit_receipt_validator_version" required=#true min_items=1
+    field "raw_payload_digest" type="digest" required=#true
+    field "raw_payload_byte_count" type="u64" required=#true
+    field "request_id" type="id" required=#true
+    field "tool_call_id" type="string" required=#true
+    field "carrier_digest" type="digest" required=#true
+    list "artifact_digests" item="submit_receipt_artifact" required=#true
+    field "prepared_transition" type="submit_prepared_transition" required=#true
+    field "receipt_sha256" type="digest" required=#true
+    record "submit_receipt_validator_version" {
+        field "validator_id" type="id" required=#true
+        field "version" type="string" required=#true
+        field "digest" type="digest" required=#true
+    }
+    record "submit_receipt_artifact" {
+        field "artifact_id" type="id" required=#true
+        field "sha256" type="digest" required=#true
+        field "byte_count" type="u64" required=#true
+    }
+    record "submit_prepared_transition" {
+        field "transition_id" type="id" required=#true
+        field "kind" type="prepared-transition-kind" required=#true
+        field "transition_digest" type="digest" required=#true
+        field "deferred_host_effect" type="submit_deferred_host_effect" required=#true
+    }
+    record "submit_deferred_host_effect" {
+        field "kind" type="deferred-host-effect-kind" required=#true
+        field "effect_digest" type="digest" required=#true
+    }
+}
+
+artifact "blocked_report" schema="autopilot.blocked_report.v1" producer="Model" model_produced=#true {
+    doc "Closed universal blocked report. Core derives workstream, action, cancellation scope, and all durable effects from the authenticated lease."
+    admits "Use autopilot_report_blocked only when genuinely stuck and no further work is possible. It is never an ordinary submit retry."
+    submit_tool "autopilot_report_blocked" label="Report blocked" description="NEVER use this tool unless you are genuinely stuck and no further work is possible. Accepted use immediately terminates the ENTIRE workstream and process, including every parallel line of work. Never use it for an ordinary retry — if your submit was rejected, fix the reported problem and submit again." profile="autopilot.blocked_report.v1:autopilot_report_blocked" result_contract="autopilot.blocked_report.v1" closed=#true universal=#true
+    field "schema" type="schema-id" required=#true constant="autopilot.blocked_report.v1"
+    field "reason_code" type="blocked-reason-code" required=#true
+    field "summary" type="string" required=#true min_bytes=1 max_bytes=2000
+    list "evidence" item="blocked_evidence" required=#true min_items=1
+    field "last_attempted_action" type="string" required=#true min_bytes=1 max_bytes=2000
+    record "blocked_evidence" {
+        field "kind" type="blocked-evidence-kind" required=#true
+        field "value" type="string" required=#true min_bytes=1 max_bytes=4096
+    }
+}
+
+artifact "blocked_receipt" schema="autopilot.blocked_receipt.v1" producer="Package" model_produced=#false {
+    doc "Create-once accepted blocked-report receipt. All workstream scope and cancellation identities are Core-derived from the authenticated lease."
+    field "schema" type="schema-id" required=#true constant="autopilot.blocked_receipt.v1"
+    field "receipt_id" type="uuidv7" required=#true
+    field "run_id" type="id" required=#true
+    field "run_revision" type="u64" required=#true
+    field "workstream" type="id" required=#true
+    field "action_id" type="id" required=#true
+    field "assignment_id" type="id" required=#true
+    field "attempt" type="u32" required=#true
+    field "profile_id" type="string" required=#true
+    field "tool_name" type="tool-name" required=#true
+    field "request_id" type="id" required=#true
+    field "tool_call_id" type="string" required=#true
+    field "report_digest" type="digest" required=#true
+    field "reason_code" type="blocked-reason-code" required=#true
+    field "cancellation_set_digest" type="digest" required=#true
+    field "receipt_sha256" type="digest" required=#true
+}
+
+artifact "blocked_latch" schema="autopilot.blocked_latch.v1" producer="Package" model_produced=#false {
+    doc "Durable workstream blocked latch and Core-derived cancellation records. The reporter is ordered last; only Autopilot-owned tasks are present."
+    field "schema" type="schema-id" required=#true constant="autopilot.blocked_latch.v1"
+    field "latch_id" type="uuidv7" required=#true
+    field "blocked_receipt_id" type="uuidv7" required=#true
+    field "run_id" type="id" required=#true
+    field "run_revision" type="u64" required=#true
+    field "workstream" type="id" required=#true
+    field "reporter_assignment_id" type="id" required=#true
+    field "cancellation_set_digest" type="digest" required=#true
+    list "cancellations" item="blocked_cancellation_record" required=#true min_items=1
+    field "latch_sha256" type="digest" required=#true
+    record "blocked_cancellation_record" {
+        field "task_id" type="id" required=#true
+        field "action_id" type="id" required=#true
+        field "assignment_id" type="id" required=#true
+        field "cancellation_index" type="u32" required=#true
+        field "reporter" type="bool" required=#true
+    }
 }
 
 artifact "seam_envelope" schema="autopilot.seam_envelope.v1" producer="Host" model_produced=#false {
@@ -1887,6 +2149,49 @@ enum "context_anchor_form" {
     value "json"
 }
 
+enum "admission-mode" {
+    doc "Receipt-backed fresh admission versus explicitly versioned legacy replay classification."
+    value "receipt_v1"
+    value "replay_v0"
+}
+
+enum "child-control-request-kind" {
+    value "submit"
+    value "blocked"
+}
+
+enum "child-control-outcome" {
+    doc "The complete child-control outcome vocabulary; no third outcome exists."
+    value "ACCEPT"
+    value "RETRY"
+}
+
+enum "blocked-reason-code" {
+    value "missing-authority"
+    value "external-dependency"
+    value "infrastructure"
+    value "unsafe-to-continue"
+}
+
+enum "blocked-evidence-kind" {
+    value "observation"
+    value "path"
+    value "command"
+    value "reference"
+}
+
+enum "prepared-transition-kind" {
+    value "receipt-consumption"
+}
+
+enum "deferred-host-effect-kind" {
+    value "ui"
+    value "spawn"
+    value "spawn-wave"
+    value "session"
+    value "log"
+    value "done"
+}
 
 frame direction="core-to-host" kind="spawn-attested" {
     doc "Launch an exact Core-issued attested action through pi-background-tasks EventBus v2 run-attested-pi."

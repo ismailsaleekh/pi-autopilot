@@ -24,6 +24,7 @@ pub struct Artifact {
     pub schema: String,
     pub model_produced: bool,
     pub max_bytes: Option<u64>,
+    pub union_tag: Option<String>,
     pub doc: String,
     pub admits: Option<String>,
     pub submit_tools: Vec<TerminalTool>,
@@ -33,9 +34,11 @@ pub struct Artifact {
 pub struct TerminalTool {
     pub name: String,
     pub label: String,
+    pub description: Option<String>,
     pub profile: String,
     pub result_contract: String,
     pub closed: bool,
+    pub universal: bool,
 }
 #[derive(Debug, Clone)]
 pub struct Frame {
@@ -66,11 +69,13 @@ pub struct Item {
     pub nullable: bool,
     pub require_explicit_null: bool,
     pub constant: Option<String>,
+    pub min_bytes: Option<u64>,
     pub min_items: Option<u64>,
     pub max_items: Option<u64>,
     pub max_bytes: Option<u64>,
     pub item_max_bytes: Option<u64>,
     pub unique: bool,
+    pub variant: Option<String>,
     pub doc: Option<String>,
     pub items: Vec<Item>,
 }
@@ -141,7 +146,9 @@ impl Contracts {
                 .flat_map(|a| a.submit_tools.iter().map(|t| t.profile.as_str())),
             "terminal profile",
         )?;
+        validate_child_control_tools(self)?;
         for artifact in &self.artifacts {
+            validate_tagged_union(artifact)?;
             check_types(
                 &artifact.items,
                 &known,
@@ -155,6 +162,70 @@ impl Contracts {
     }
 }
 
+fn validate_child_control_tools(contracts: &Contracts) -> Result<()> {
+    let normal = contracts
+        .artifacts
+        .iter()
+        .flat_map(|artifact| artifact.submit_tools.iter())
+        .filter(|tool| !tool.universal)
+        .count();
+    require(normal == 14, "terminal profile count drift; expected 14")?;
+    let universal = contracts
+        .artifacts
+        .iter()
+        .flat_map(|artifact| artifact.submit_tools.iter().map(move |tool| (artifact, tool)))
+        .filter(|(_, tool)| tool.universal)
+        .collect::<Vec<_>>();
+    require(
+        universal.len() == 1,
+        "universal child tool count drift; expected one blocked tool",
+    )?;
+    let (artifact, tool) = universal[0];
+    require(
+        artifact.schema == "autopilot.blocked_report.v1"
+            && tool.name == "autopilot_report_blocked"
+            && tool.closed
+            && tool.description.as_deref().is_some_and(|text| !text.is_empty()),
+        "universal blocked tool contract drift",
+    )
+}
+
+fn validate_tagged_union(artifact: &Artifact) -> Result<()> {
+    let Some(tag) = &artifact.union_tag else {
+        require(
+            artifact.items.iter().all(|item| item.variant.is_none()),
+            format!("artifact `{}` has variant records without union_tag", artifact.name),
+        )?;
+        return Ok(());
+    };
+    require(
+        !tag.is_empty(),
+        format!("artifact `{}` union_tag is empty", artifact.name),
+    )?;
+    require(
+        !artifact.items.is_empty()
+            && artifact
+                .items
+                .iter()
+                .all(|item| {
+                    item.kind == ItemKind::Record
+                        && item.variant.is_some()
+                        && item
+                            .items
+                            .iter()
+                            .all(|member| matches!(member.kind, ItemKind::Field | ItemKind::List))
+                }),
+        format!("artifact `{}` tagged union must contain only variant records", artifact.name),
+    )?;
+    unique(
+        artifact
+            .items
+            .iter()
+            .filter_map(|item| item.variant.as_deref()),
+        "tagged union variant",
+    )
+}
+
 fn parse_type(doc: &SourceDoc, node: &KdlNode) -> Result<String> {
     doc.entries(node, 1, &["doc"])?;
     doc.opt_string(node, "doc")?;
@@ -166,7 +237,7 @@ fn parse_artifact(doc: &SourceDoc, node: &KdlNode) -> Result<Artifact> {
     doc.entries(
         node,
         1,
-        &["schema", "producer", "model_produced", "max_bytes"],
+        &["schema", "producer", "model_produced", "max_bytes", "union_tag"],
     )?;
     let artifact_name = doc.arg_string(node, 0)?.to_owned();
     let schema = doc.prop_string(node, "schema")?.to_owned();
@@ -179,6 +250,7 @@ fn parse_artifact(doc: &SourceDoc, node: &KdlNode) -> Result<Artifact> {
             .entry("max_bytes")
             .map(|_| doc.prop_u64(node, "max_bytes"))
             .transpose()?,
+        union_tag: doc.opt_string(node, "union_tag")?.map(str::to_owned),
         doc: String::new(),
         admits: None,
         submit_tools: Vec::new(),
@@ -231,7 +303,11 @@ fn parse_tool(
     artifact: &str,
     schema: &str,
 ) -> Result<TerminalTool> {
-    doc.entries(node, 1, &["label", "profile", "result_contract", "closed"])?;
+    doc.entries(
+        node,
+        1,
+        &["label", "description", "profile", "result_contract", "closed", "universal"],
+    )?;
     let name = doc.arg_string(node, 0)?.to_owned();
     require(
         name.bytes()
@@ -239,6 +315,8 @@ fn parse_tool(
         format!("submit_tool `{name}` in artifact `{artifact}` must match [a-z0-9_]+"),
     )?;
     let tool = TerminalTool {
+        description: doc.opt_string(node, "description")?.map(str::to_owned),
+        universal: doc.opt_bool(node, "universal")?.unwrap_or(false),
         profile: doc
             .opt_string(node, "profile")?
             .map(str::to_owned)
@@ -312,6 +390,7 @@ fn parse_item(doc: &SourceDoc, node: &KdlNode, owner: &str) -> Result<Item> {
             "doc",
             "constant",
             "max_bytes",
+            "min_bytes",
         ][..],
         ItemKind::List => &[
             "item",
@@ -324,7 +403,7 @@ fn parse_item(doc: &SourceDoc, node: &KdlNode, owner: &str) -> Result<Item> {
             "unique",
         ],
         ItemKind::Group => &["required"],
-        ItemKind::Record => &[],
+        ItemKind::Record => &["variant"],
     };
     doc.entries(node, 1, props)?;
     let name = doc.arg_string(node, 0)?.to_owned();
@@ -351,11 +430,19 @@ fn parse_item(doc: &SourceDoc, node: &KdlNode, owner: &str) -> Result<Item> {
         validate_constant(doc, node, &name, &type_id, value)?;
     }
     let optional_u64 = |key: &str| node.entry(key).map(|_| doc.prop_u64(node, key)).transpose();
+    let min_bytes = optional_u64("min_bytes")?;
     let min_items = optional_u64("min_items")?;
     let max_items = optional_u64("max_items")?;
     let max_bytes = optional_u64("max_bytes")?;
     let item_max_bytes = optional_u64("item_max_bytes")?;
     let unique = doc.opt_bool(node, "unique")?.unwrap_or(false);
+    if min_bytes.is_some_and(|min| max_bytes.is_some_and(|max| min > max)) {
+        return line_err(
+            doc,
+            node,
+            format!("field `{name}` has min_bytes greater than max_bytes in {owner}"),
+        );
+    }
     if min_items.is_some_and(|min| max_items.is_some_and(|max| min > max)) {
         return line_err(
             doc,
@@ -377,11 +464,13 @@ fn parse_item(doc: &SourceDoc, node: &KdlNode, owner: &str) -> Result<Item> {
         nullable,
         require_explicit_null,
         constant,
+        min_bytes,
         min_items,
         max_items,
         max_bytes,
         item_max_bytes,
         unique,
+        variant: doc.opt_string(node, "variant")?.map(str::to_owned),
         doc: doc.opt_string(node, "doc")?.map(str::to_owned),
         items,
     })
@@ -523,6 +612,9 @@ pub fn json_schema_for_items(
         if let Some(constant) = &item.constant {
             add_schema_constant(&mut value, &item.type_id, constant)?;
         }
+        if let Some(min_bytes) = item.min_bytes {
+            add_schema_u64(&mut value, "minLength", min_bytes)?;
+        }
         if let Some(max_bytes) = item.max_bytes {
             add_schema_u64(&mut value, "maxLength", max_bytes)?;
         }
@@ -632,6 +724,7 @@ fn json_schema_for_type(
             "object" | "json" | "control_observation" => {
                 json!({ "type": "object", "additionalProperties": true })
             }
+            "json-value" => json!({}),
             _ => json!({ "type": "string" }),
         }
     };
@@ -694,7 +787,7 @@ pub fn rust_scalar_type(type_id: &str) -> Option<&'static str> {
         "u8" => Some("u8"),
         "u32" => Some("u32"),
         "u64" => Some("u64"),
-        "control_observation" | "object" => Some("serde_json::Value"),
+        "control_observation" | "object" | "json-value" => Some("serde_json::Value"),
         _ => None,
     }
 }
@@ -704,6 +797,7 @@ pub fn ts_scalar_type(type_id: &str) -> Option<&'static str> {
         "bool" => Some("boolean"),
         "u8" | "u32" | "u64" => Some("number"),
         "control_observation" | "object" => Some("JsonObject"),
+        "json-value" => Some("unknown"),
         _ => None,
     }
 }

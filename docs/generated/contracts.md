@@ -31,6 +31,7 @@ Sources: `data/contracts.kdl`.
 | task_document | autopilot.task_document.v1 | Package | false | Core-classified task-pack document copied into child runner specs. The digest is over the exact admitted file bytes; body_digest is over the model-visible body only. |
 | terminal_route | autopilot.terminal_route.v1 | Package | false | Strict versioned terminal route. A fresh planning issuer selects one generated descriptor row exactly; no consumer infers a route from a tool name or payload. |
 | agent_run_spec | autopilot.agent_run_spec.v4 | Package | false | Strict parent-Core written child runner specification for the package-contained autopilot-agent-run wrapper and Rust agent-run mode. |
+| agent_run_spec_v5 | autopilot.agent_run_spec.v5 | Package | false | Fresh receipt-backed child runner specification. Fresh writers emit receipt_v1 only; pre-v5 bytes remain under their explicit replay_v0 legacy reader. |
 | run_identity | autopilot.run_identity.v1 | Package | false | Clean v2 runtime identity namespace (D76 §5.1). |
 | event_row | autopilot.event_row.v1 | Package | false | Append-only event row; events.jsonl is the sole state authority (D76 §5.4 + D77 Closure B). |
 | state_cache | autopilot.state_cache.v1 | Package | false | Disposable cache only, never an authority. State is fold(events); this cache may be deleted at any instant with zero semantic loss and any mismatch forces full replay (D77 Closure B). |
@@ -55,11 +56,20 @@ Sources: `data/contracts.kdl`.
 | validation_result_v2 | autopilot.validation_result.v2 | Package | false | Retained legacy package-bound Validator carrier written create-once after exact-echo v2 admission and immutable runner binding. |
 | validation_evidence_authority | autopilot.validation_evidence_authority.v1 | Package | false | Single digest-bound authority for v3 validation identity, exact candidate evidence, receipt bindings, coverage, and allowed model citations. |
 | validation_assignment_v3 | autopilot.validation_assignment.v3 | Package | false | Package-issued v3 Validator assignment bound to one validation evidence authority. |
+| validation_assignment_v4 | autopilot.validation_assignment.v4 | Package | false | Fresh receipt-backed Validator assignment. It removes max_value_attempts; fresh issuance is receipt_v1 and old v3 assignment bytes remain explicit replay_v0 legacy input. |
 | validation_context_v3 | autopilot.validation_context.v3 | Package | false | Fact-only v3 Validator context. It projects readable exact source/diff citations but never asks the model to echo Core-owned receipts or coverage. |
 | validation_submission_v3 | autopilot.validation_submission.v3 | Model | true | Closed v3 Validator model payload. Core owns identity, candidate state, assigned coverage, receipts, and outcome; the model owns only semantic verdicts, citation selection, and findings. |
 | validation_verdict_v3 | autopilot.validation_verdict.v3 | Package | false | Core-normalized v3 validation verdict. It keeps model citations separate from automatically bound command/package receipts and derives coverage and outcome. |
 | validation_admission_diagnostic | autopilot.validation_admission_diagnostic.v1 | Package | false | Complete deterministic v3 validation admission diagnostic. Authority corruption is fatal; model shape and semantic-value mismatches are repaired together. Large value lists and excess rows are represented by deterministic count/digest summaries inside the generated repair-prompt byte ceiling without reclassifying model input as fatal; mismatch_count retains the complete pre-summary count. |
 | validation_result_v3 | autopilot.validation_result.v3 | Package | false | Package-bound v3 Validator result preserving canonical admitted model semantics, exact authority binding, and Core-normalized verdict bytes. Raw tool arguments remain in the Pi session and attempt evidence rather than influencing carrier bytes. |
+| child_control_request | autopilot.child_control_request.v1 | Host | false | Closed child-to-Core control request. Raw payload is transported as the pre-schema JSON tree without TypeScript coercion, defaults, or semantic admission. |
+| child_control_accept_receipt | autopilot.child_control_accept_receipt.v1 | Package | false | Typed receipt envelope returned only for an accepted child-control request. |
+| child_control_response | autopilot.child_control_response.v1 | Package | false | Closed child-control response. ACCEPT carries exactly one typed receipt; RETRY carries exactly one complete diagnostic. |
+| submit_diagnostic | autopilot.submit_diagnostic.v1 | Package | false | Complete canonical submit RETRY diagnostic. Rows are sorted by pointer UTF-8 bytes, code, expected, and actual.sha256; error_count is the complete pre-summary count. |
+| submit_receipt | autopilot.submit_receipt.v1 | Package | false | Create-once accepted submit receipt. It binds authenticated child identity, canonical raw payload, validators, carrier artifacts, and a typed deferred continuation without granting repository authority. |
+| blocked_report | autopilot.blocked_report.v1 | Model | true | Closed universal blocked report. Core derives workstream, action, cancellation scope, and all durable effects from the authenticated lease. |
+| blocked_receipt | autopilot.blocked_receipt.v1 | Package | false | Create-once accepted blocked-report receipt. All workstream scope and cancellation identities are Core-derived from the authenticated lease. |
+| blocked_latch | autopilot.blocked_latch.v1 | Package | false | Durable workstream blocked latch and Core-derived cancellation records. The reporter is ordered last; only Autopilot-owned tasks are present. |
 | seam_envelope | autopilot.seam_envelope.v1 | Host | false | D78 §3.1 newline-delimited JSON frame envelope over stdio. |
 | artifact_link | autopilot.artifact_link.v1 | Package | false | Digest-bound run-root artifact link used by finalization assemblies and archive manifests. |
 | accepted_evidence_envelope | autopilot.accepted_evidence_envelope.v1 | Package | false | Authoritative accepted evidence envelope. External-attested advisory origin is archived but cannot satisfy final conditions. |
@@ -435,6 +445,68 @@ Sources: `data/contracts.kdl`.
 | agent_run_spec | field | atom_registry_digest | digest | false | true |  |
 | agent_run_spec | field | planning_inputs_path | path | false | true |  |
 | agent_run_spec | field | planning_inputs_digest | digest | false | true |  |
+| agent_run_spec_v5 | field | schema | schema-id | true |  |  |
+| agent_run_spec_v5 | field | admission_mode | admission-mode | true |  | Fresh issuance is receipt_v1; replay_v0 is explicit legacy classification only. |
+| agent_run_spec_v5 | field | child_control_socket_path | path | true |  |  |
+| agent_run_spec_v5 | field | child_control_token | string | true |  |  |
+| agent_run_spec_v5 | field | child_control_token_digest | digest | true |  |  |
+| agent_run_spec_v5 | field | assignment_kind | validation_assignment_kind | true |  | Explicit assignment class; no runner infers planning/delivery/validation from result_contract. |
+| agent_run_spec_v5 | field | action_id | id | true |  |  |
+| agent_run_spec_v5 | field | assignment_id | id | true |  |  |
+| agent_run_spec_v5 | field | run_id | id | true |  |  |
+| agent_run_spec_v5 | field | run_revision | u64 | true |  |  |
+| agent_run_spec_v5 | field | workstream | id | true |  |  |
+| agent_run_spec_v5 | field | role_id | id | true |  |  |
+| agent_run_spec_v5 | field | mode | mode-id | true |  |  |
+| agent_run_spec_v5 | field | provider | string | true |  |  |
+| agent_run_spec_v5 | field | model | string | true |  |  |
+| agent_run_spec_v5 | field | thinking | thinking-level | true |  |  |
+| agent_run_spec_v5 | field | route | string | true |  |  |
+| agent_run_spec_v5 | field | cwd | path | true |  |  |
+| agent_run_spec_v5 | list | allowed_tools | tool-name | true |  |  |
+| agent_run_spec_v5 | field | spec_path | path | true |  |  |
+| agent_run_spec_v5 | field | prompt_path | path | true |  |  |
+| agent_run_spec_v5 | field | prompt_digest | digest | true |  |  |
+| agent_run_spec_v5 | field | boundary_id | contract-id | true |  |  |
+| agent_run_spec_v5 | field | boundary_digest | digest | true |  |  |
+| agent_run_spec_v5 | field | result_contract | contract-id | true |  |  |
+| agent_run_spec_v5 | field | result_contract_digest | digest | true |  |  |
+| agent_run_spec_v5 | field | carrier_path | path | true |  |  |
+| agent_run_spec_v5 | field | session_id | id | true |  |  |
+| agent_run_spec_v5 | field | session_dir | path | true |  |  |
+| agent_run_spec_v5 | field | session_continuity | session_continuity | true |  |  |
+| agent_run_spec_v5 | field | settings_digest | digest | true |  |  |
+| agent_run_spec_v5 | field | context_digest | digest | true |  |  |
+| agent_run_spec_v5 | field | skills_digest | digest | true |  |  |
+| agent_run_spec_v5 | field | subscription_digest | digest | true |  |  |
+| agent_run_spec_v5 | field | lane_id | id | false | true |  |
+| agent_run_spec_v5 | field | attempt | u32 | false | true |  |
+| agent_run_spec_v5 | field | base_commit | sha | false | true |  |
+| agent_run_spec_v5 | field | worktree | path | false | true |  |
+| agent_run_spec_v5 | field | required_focused_evidence | u32 | false | true |  |
+| agent_run_spec_v5 | field | authority_set_id | string | false | true |  |
+| agent_run_spec_v5 | list | authority_documents | task_document | false | true |  |
+| agent_run_spec_v5 | field | context_document | task_document | false | true |  |
+| agent_run_spec_v5 | list | context_documents | task_document | false | true |  |
+| agent_run_spec_v5 | field | assignment_path | path | false | true |  |
+| agent_run_spec_v5 | field | assignment_digest | digest | false | true |  |
+| agent_run_spec_v5 | field | context_manifest_path | path | false | true |  |
+| agent_run_spec_v5 | field | context_manifest_digest | digest | false | true |  |
+| agent_run_spec_v5 | field | runtime_extension_path | path | false | true |  |
+| agent_run_spec_v5 | field | runtime_extension_digest | digest | false | true |  |
+| agent_run_spec_v5 | field | terminal_profile_id | string | false | true |  |
+| agent_run_spec_v5 | field | terminal_route | terminal_route | false | true |  |
+| agent_run_spec_v5 | list | unavailable_tools | tool-name | false | true |  |
+| agent_run_spec_v5 | list | producer_assignment_ids | id | false | true |  |
+| agent_run_spec_v5 | field | validation_id | id | false | true |  |
+| agent_run_spec_v5 | field | validation_attempt | u32 | false | true |  |
+| agent_run_spec_v5 | field | semantic_round | u32 | false | true |  |
+| agent_run_spec_v5 | field | model_submission_path | path | false | true |  |
+| agent_run_spec_v5 | field | atom_id_prefix | string | false | true |  |
+| agent_run_spec_v5 | field | atom_registry_path | path | false | true |  |
+| agent_run_spec_v5 | field | atom_registry_digest | digest | false | true |  |
+| agent_run_spec_v5 | field | planning_inputs_path | path | false | true |  |
+| agent_run_spec_v5 | field | planning_inputs_digest | digest | false | true |  |
 | run_identity | field | repo_key | base32 | true |  | lowercase-base32(sha256("autopilot-repo-v1\0" + realpath(git-common-dir))) |
 | run_identity | field | run_id | uuidv7 | true |  | UUIDv7 run-id. |
 | run_identity | field | workstream | id | true |  |  |
@@ -867,6 +939,27 @@ Sources: `data/contracts.kdl`.
 | validation_assignment_v3 | field | authority_path | path | true |  |  |
 | validation_assignment_v3 | field | authority_digest | digest | true |  |  |
 | validation_assignment_v3 | field | max_value_attempts | u32 | true |  |  |
+| validation_assignment_v4 | field | schema | schema-id | true |  |  |
+| validation_assignment_v4 | field | admission_mode | admission-mode | true |  |  |
+| validation_assignment_v4 | field | validation_id | id | true |  |  |
+| validation_assignment_v4 | field | validation_key | digest | true |  |  |
+| validation_assignment_v4 | field | workstream | id | true |  |  |
+| validation_assignment_v4 | field | run_revision | u64 | true |  |  |
+| validation_assignment_v4 | field | role_id | id | true |  |  |
+| validation_assignment_v4 | field | mode | mode-id | true |  |  |
+| validation_assignment_v4 | field | assignment_id | id | true |  |  |
+| validation_assignment_v4 | field | action_id | id | true |  |  |
+| validation_assignment_v4 | field | validation_attempt | u32 | true |  |  |
+| validation_assignment_v4 | field | semantic_round | u32 | true |  |  |
+| validation_assignment_v4 | list | producer_assignment_ids | id | true |  |  |
+| validation_assignment_v4 | field | base_commit | git-oid | true |  |  |
+| validation_assignment_v4 | field | exact_commit | git-oid | true |  |  |
+| validation_assignment_v4 | field | exact_tree | git-oid | true |  |  |
+| validation_assignment_v4 | field | candidate_root | path | true |  |  |
+| validation_assignment_v4 | field | context_path | path | true |  |  |
+| validation_assignment_v4 | field | context_digest | digest | true |  |  |
+| validation_assignment_v4 | field | authority_path | path | true |  |  |
+| validation_assignment_v4 | field | authority_digest | digest | true |  |  |
 | validation_context_v3 | field | schema | schema-id | true |  |  |
 | validation_context_v3 | field | validation_id | id | true |  |  |
 | validation_context_v3 | field | assignment_id | id | true |  |  |
@@ -986,6 +1079,118 @@ Sources: `data/contracts.kdl`.
 | validation_result_v3 | field | submission | validation_submission_v3 | true |  |  |
 | validation_result_v3 | field | verdict_digest | digest | true |  |  |
 | validation_result_v3 | field | verdict | validation_verdict_v3 | true |  |  |
+| child_control_request | field | schema | schema-id | true |  |  |
+| child_control_request | field | request_id | id | true |  |  |
+| child_control_request | field | token | string | true |  |  |
+| child_control_request | field | run_id | id | true |  |  |
+| child_control_request | field | assignment_id | id | true |  |  |
+| child_control_request | field | attempt | u32 | true |  |  |
+| child_control_request | field | tool_call_id | string | true |  |  |
+| child_control_request | field | kind | child-control-request-kind | true |  |  |
+| child_control_request | field | tool_name | tool-name | true |  |  |
+| child_control_request | field | profile_id | string | true |  |  |
+| child_control_request | field | raw_payload | json-value | true |  |  |
+| child_control_accept_receipt | field | submit.schema | schema-id | true |  |  |
+| child_control_accept_receipt | field | submit.receipt | submit_receipt | true |  |  |
+| child_control_accept_receipt | field | blocked.schema | schema-id | true |  |  |
+| child_control_accept_receipt | field | blocked.receipt | blocked_receipt | true |  |  |
+| child_control_response | field | accept.schema | schema-id | true |  |  |
+| child_control_response | field | accept.request_id | id | true |  |  |
+| child_control_response | field | accept.receipt | child_control_accept_receipt | true |  |  |
+| child_control_response | field | retry.schema | schema-id | true |  |  |
+| child_control_response | field | retry.request_id | id | true |  |  |
+| child_control_response | field | retry.diagnostic | submit_diagnostic | true |  |  |
+| submit_diagnostic | field | schema | schema-id | true |  |  |
+| submit_diagnostic | field | code | string | true |  |  |
+| submit_diagnostic | field | error_count | u32 | true |  | Complete independently knowable error count, including rows summarized elsewhere when bounded output is required. |
+| submit_diagnostic | list | errors | submit_diagnostic_error | true |  |  |
+| submit_diagnostic | field | submit_diagnostic_error.index | u32 | true |  | Canonical zero-based row index after deterministic sort. |
+| submit_diagnostic | field | submit_diagnostic_error.code | string | true |  | Stable machine-readable error code. |
+| submit_diagnostic | field | submit_diagnostic_error.pointer | string | true |  | RFC6901 pointer to the rejected value. |
+| submit_diagnostic | field | submit_diagnostic_error.expected | string | true |  | Canonical deterministic expectation. |
+| submit_diagnostic | field | submit_diagnostic_error.actual | submit_diagnostic_actual | true |  |  |
+| submit_diagnostic | field | submit_diagnostic_error.fix | string | true |  | Imperative correction. |
+| submit_diagnostic | field | submit_diagnostic_actual.preview | string | true |  | Bounded and redacted preview of the actual value. |
+| submit_diagnostic | field | submit_diagnostic_actual.redacted | bool | true |  |  |
+| submit_diagnostic | field | submit_diagnostic_actual.truncated | bool | true |  |  |
+| submit_diagnostic | field | submit_diagnostic_actual.sha256 | digest | true |  | SHA-256 of the complete canonical actual value. |
+| submit_diagnostic | field | submit_diagnostic_actual.byte_count | u64 | true |  | Complete canonical actual-value byte count. |
+| submit_diagnostic | field | submit_diagnostic_actual.item_count | u64 | true |  | Complete actual-value item count. |
+| submit_receipt | field | schema | schema-id | true |  |  |
+| submit_receipt | field | receipt_id | uuidv7 | true |  |  |
+| submit_receipt | field | run_id | id | true |  |  |
+| submit_receipt | field | run_revision | u64 | true |  |  |
+| submit_receipt | field | workstream | id | true |  |  |
+| submit_receipt | field | action_id | id | true |  |  |
+| submit_receipt | field | assignment_id | id | true |  |  |
+| submit_receipt | field | attempt | u32 | true |  |  |
+| submit_receipt | field | profile_id | string | true |  |  |
+| submit_receipt | field | tool_name | tool-name | true |  |  |
+| submit_receipt | field | boundary_id | contract-id | true |  |  |
+| submit_receipt | field | result_contract | contract-id | true |  |  |
+| submit_receipt | field | schema_digest | digest | true |  |  |
+| submit_receipt | field | spec_digest | digest | true |  |  |
+| submit_receipt | field | carrier_binding_digest | digest | true |  |  |
+| submit_receipt | field | authority_digest | digest | true |  |  |
+| submit_receipt | list | frozen_validator_versions | submit_receipt_validator_version | true |  |  |
+| submit_receipt | field | raw_payload_digest | digest | true |  |  |
+| submit_receipt | field | raw_payload_byte_count | u64 | true |  |  |
+| submit_receipt | field | request_id | id | true |  |  |
+| submit_receipt | field | tool_call_id | string | true |  |  |
+| submit_receipt | field | carrier_digest | digest | true |  |  |
+| submit_receipt | list | artifact_digests | submit_receipt_artifact | true |  |  |
+| submit_receipt | field | prepared_transition | submit_prepared_transition | true |  |  |
+| submit_receipt | field | receipt_sha256 | digest | true |  |  |
+| submit_receipt | field | submit_receipt_validator_version.validator_id | id | true |  |  |
+| submit_receipt | field | submit_receipt_validator_version.version | string | true |  |  |
+| submit_receipt | field | submit_receipt_validator_version.digest | digest | true |  |  |
+| submit_receipt | field | submit_receipt_artifact.artifact_id | id | true |  |  |
+| submit_receipt | field | submit_receipt_artifact.sha256 | digest | true |  |  |
+| submit_receipt | field | submit_receipt_artifact.byte_count | u64 | true |  |  |
+| submit_receipt | field | submit_prepared_transition.transition_id | id | true |  |  |
+| submit_receipt | field | submit_prepared_transition.kind | prepared-transition-kind | true |  |  |
+| submit_receipt | field | submit_prepared_transition.transition_digest | digest | true |  |  |
+| submit_receipt | field | submit_prepared_transition.deferred_host_effect | submit_deferred_host_effect | true |  |  |
+| submit_receipt | field | submit_deferred_host_effect.kind | deferred-host-effect-kind | true |  |  |
+| submit_receipt | field | submit_deferred_host_effect.effect_digest | digest | true |  |  |
+| blocked_report | field | schema | schema-id | true |  |  |
+| blocked_report | field | reason_code | blocked-reason-code | true |  |  |
+| blocked_report | field | summary | string | true |  |  |
+| blocked_report | list | evidence | blocked_evidence | true |  |  |
+| blocked_report | field | last_attempted_action | string | true |  |  |
+| blocked_report | field | blocked_evidence.kind | blocked-evidence-kind | true |  |  |
+| blocked_report | field | blocked_evidence.value | string | true |  |  |
+| blocked_receipt | field | schema | schema-id | true |  |  |
+| blocked_receipt | field | receipt_id | uuidv7 | true |  |  |
+| blocked_receipt | field | run_id | id | true |  |  |
+| blocked_receipt | field | run_revision | u64 | true |  |  |
+| blocked_receipt | field | workstream | id | true |  |  |
+| blocked_receipt | field | action_id | id | true |  |  |
+| blocked_receipt | field | assignment_id | id | true |  |  |
+| blocked_receipt | field | attempt | u32 | true |  |  |
+| blocked_receipt | field | profile_id | string | true |  |  |
+| blocked_receipt | field | tool_name | tool-name | true |  |  |
+| blocked_receipt | field | request_id | id | true |  |  |
+| blocked_receipt | field | tool_call_id | string | true |  |  |
+| blocked_receipt | field | report_digest | digest | true |  |  |
+| blocked_receipt | field | reason_code | blocked-reason-code | true |  |  |
+| blocked_receipt | field | cancellation_set_digest | digest | true |  |  |
+| blocked_receipt | field | receipt_sha256 | digest | true |  |  |
+| blocked_latch | field | schema | schema-id | true |  |  |
+| blocked_latch | field | latch_id | uuidv7 | true |  |  |
+| blocked_latch | field | blocked_receipt_id | uuidv7 | true |  |  |
+| blocked_latch | field | run_id | id | true |  |  |
+| blocked_latch | field | run_revision | u64 | true |  |  |
+| blocked_latch | field | workstream | id | true |  |  |
+| blocked_latch | field | reporter_assignment_id | id | true |  |  |
+| blocked_latch | field | cancellation_set_digest | digest | true |  |  |
+| blocked_latch | list | cancellations | blocked_cancellation_record | true |  |  |
+| blocked_latch | field | latch_sha256 | digest | true |  |  |
+| blocked_latch | field | blocked_cancellation_record.task_id | id | true |  |  |
+| blocked_latch | field | blocked_cancellation_record.action_id | id | true |  |  |
+| blocked_latch | field | blocked_cancellation_record.assignment_id | id | true |  |  |
+| blocked_latch | field | blocked_cancellation_record.cancellation_index | u32 | true |  |  |
+| blocked_latch | field | blocked_cancellation_record.reporter | bool | true |  |  |
 | seam_envelope | field | v | u32 | true |  |  |
 | seam_envelope | field | id | u64 | true |  |  |
 | seam_envelope | field | kind | string | true |  |  |
@@ -1168,6 +1373,7 @@ Sources: `data/contracts.kdl`.
 | delivery_submission_v2 | autopilot.delivery_submission.v2 | autopilot_emit_status | Submit delivery status |
 | validation_submission_v2 | autopilot.validation_submission.v2 | autopilot_emit_status | Submit validation status |
 | validation_submission_v3 | autopilot.validation_submission.v3 | autopilot_emit_status | Submit validation status |
+| blocked_report | autopilot.blocked_report.v1 | autopilot_report_blocked | Report blocked |
 
 ## Enums
 
@@ -1215,6 +1421,13 @@ Sources: `data/contracts.kdl`.
 | producer | Model, Git, Operator, Filesystem, Provider, BackgroundTask, Package, Host |
 | roster_slot | control, reasoning, extraction, coding, review |
 | context_anchor_form | task, plan, dossier, run, version-control-lines, version-control-whole-file, json |
+| admission-mode | receipt_v1, replay_v0 |
+| child-control-request-kind | submit, blocked |
+| child-control-outcome | ACCEPT, RETRY |
+| blocked-reason-code | missing-authority, external-dependency, infrastructure, unsafe-to-continue |
+| blocked-evidence-kind | observation, path, command, reference |
+| prepared-transition-kind | receipt-consumption |
+| deferred-host-effect-kind | ui, spawn, spawn-wave, session, log, done |
 
 ## Seam frames
 

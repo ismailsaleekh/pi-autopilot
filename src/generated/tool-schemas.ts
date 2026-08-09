@@ -1766,3 +1766,78 @@ export const SUBMIT_TOOLS: readonly SubmitToolDescriptor[] = [
   { profile_id: "validation-status.v2", name: "autopilot_emit_status", label: "Submit validation status", boundary_id: "autopilot.validation_submission.v2", result_contract: "autopilot.validation_result.v2", schema_digest: VALIDATION_SUBMISSION_V2_TOOL_SCHEMA_DIGEST, parameters: VALIDATION_SUBMISSION_V2_TOOL_PARAMETERS },
   { profile_id: "validation-status.v3", name: "autopilot_emit_status", label: "Submit validation status", boundary_id: "autopilot.validation_submission.v3", result_contract: "autopilot.validation_result.v3", schema_digest: VALIDATION_SUBMISSION_V3_TOOL_SCHEMA_DIGEST, parameters: VALIDATION_SUBMISSION_V3_TOOL_PARAMETERS },
 ] as const;
+
+export const BLOCKED_REPORT_TOOL_PARAMETERS = {
+  "additionalProperties": false,
+  "properties": {
+    "evidence": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "enum": [
+              "observation",
+              "path",
+              "command",
+              "reference"
+            ],
+            "type": "string"
+          },
+          "value": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "value"
+        ],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "last_attempted_action": {
+      "maxLength": 2000,
+      "minLength": 1,
+      "type": "string"
+    },
+    "reason_code": {
+      "enum": [
+        "missing-authority",
+        "external-dependency",
+        "infrastructure",
+        "unsafe-to-continue"
+      ],
+      "type": "string"
+    },
+    "schema": {
+      "const": "autopilot.blocked_report.v1",
+      "type": "string"
+    },
+    "summary": {
+      "maxLength": 2000,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema",
+    "reason_code",
+    "summary",
+    "evidence",
+    "last_attempted_action"
+  ],
+  "type": "object"
+} as TSchema;
+export const BLOCKED_REPORT_TOOL_SCHEMA_DIGEST = "330f037c777255e46ff0bfd9309a6a9c46568c4946aed89ba61041d2e4ac794a";
+
+export interface UniversalChildToolDescriptor extends SubmitToolDescriptor {
+  description: string;
+}
+
+export const UNIVERSAL_CHILD_TOOLS: readonly UniversalChildToolDescriptor[] = [
+  { profile_id: "autopilot.blocked_report.v1:autopilot_report_blocked", name: "autopilot_report_blocked", label: "Report blocked", description: "NEVER use this tool unless you are genuinely stuck and no further work is possible. Accepted use immediately terminates the ENTIRE workstream and process, including every parallel line of work. Never use it for an ordinary retry — if your submit was rejected, fix the reported problem and submit again.", boundary_id: "autopilot.blocked_report.v1", result_contract: "autopilot.blocked_report.v1", schema_digest: BLOCKED_REPORT_TOOL_SCHEMA_DIGEST, parameters: BLOCKED_REPORT_TOOL_PARAMETERS },
+] as const;
+export const BLOCKED_REPORT_TOOL = UNIVERSAL_CHILD_TOOLS[0]!;

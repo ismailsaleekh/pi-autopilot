@@ -159,6 +159,15 @@ pub enum ActionKind {
     StopBackground,
 }
 
+/// Receipt-backed fresh admission versus explicitly versioned legacy replay classification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AdmissionMode {
+    #[serde(rename = "receipt_v1")]
+    ReceiptV1,
+    #[serde(rename = "replay_v0")]
+    ReplayV0,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ArchiveEntryClass {
     #[serde(rename = "background-reference")]
@@ -196,6 +205,30 @@ pub enum AttestedActionKind {
     ReconcileAttestedPi,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BlockedEvidenceKind {
+    #[serde(rename = "command")]
+    Command,
+    #[serde(rename = "observation")]
+    Observation,
+    #[serde(rename = "path")]
+    Path,
+    #[serde(rename = "reference")]
+    Reference,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BlockedReasonCode {
+    #[serde(rename = "external-dependency")]
+    ExternalDependency,
+    #[serde(rename = "infrastructure")]
+    Infrastructure,
+    #[serde(rename = "missing-authority")]
+    MissingAuthority,
+    #[serde(rename = "unsafe-to-continue")]
+    UnsafeToContinue,
+}
+
 /// D76 §5.3 candidate states.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CandidateState {
@@ -219,6 +252,23 @@ pub enum CandidateState {
     Resolving,
     #[serde(rename = "superseded")]
     Superseded,
+}
+
+/// The complete child-control outcome vocabulary; no third outcome exists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChildControlOutcome {
+    #[serde(rename = "ACCEPT")]
+    ACCEPT,
+    #[serde(rename = "RETRY")]
+    RETRY,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChildControlRequestKind {
+    #[serde(rename = "blocked")]
+    Blocked,
+    #[serde(rename = "submit")]
+    Submit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -291,6 +341,22 @@ pub enum CriterionVerdict {
     FAIL,
     #[serde(rename = "PASS")]
     PASS,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeferredHostEffectKind {
+    #[serde(rename = "done")]
+    Done,
+    #[serde(rename = "log")]
+    Log,
+    #[serde(rename = "session")]
+    Session,
+    #[serde(rename = "spawn")]
+    Spawn,
+    #[serde(rename = "spawn-wave")]
+    SpawnWave,
+    #[serde(rename = "ui")]
+    Ui,
 }
 
 /// Closed delivery blocker taxonomy separating semantic repair from authority, infrastructure, and unsafe failures.
@@ -588,6 +654,12 @@ pub enum PlanningReviewVerdict {
     NeedsFix,
     #[serde(rename = "pass")]
     Pass,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PreparedTransitionKind {
+    #[serde(rename = "receipt-consumption")]
+    ReceiptConsumption,
 }
 
 /// D77 §3.1 closed Producer enum plus Host from D78 §7.
@@ -995,6 +1067,166 @@ pub struct AgentRunSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_route: Option<TerminalRoute>,
     /// Role-declared capabilities omitted only by an explicit retained-unavailable data disposition.
+    #[serde(rename = "unavailable_tools")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable_tools: Option<Vec<ToolName>>,
+    #[serde(rename = "producer_assignment_ids")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub producer_assignment_ids: Option<Vec<Id>>,
+    #[serde(rename = "validation_id")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validation_id: Option<Id>,
+    #[serde(rename = "validation_attempt")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validation_attempt: Option<u32>,
+    #[serde(rename = "semantic_round")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub semantic_round: Option<u32>,
+    #[serde(rename = "model_submission_path")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_submission_path: Option<Path>,
+    #[serde(rename = "atom_id_prefix")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub atom_id_prefix: Option<String>,
+    #[serde(rename = "atom_registry_path")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub atom_registry_path: Option<Path>,
+    #[serde(rename = "atom_registry_digest")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub atom_registry_digest: Option<Digest>,
+    #[serde(rename = "planning_inputs_path")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub planning_inputs_path: Option<Path>,
+    #[serde(rename = "planning_inputs_digest")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub planning_inputs_digest: Option<Digest>,
+}
+
+/// Fresh receipt-backed child runner specification. Fresh writers emit receipt_v1 only; pre-v5 bytes remain under their explicit replay_v0 legacy reader.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentRunSpecV5 {
+    #[serde(rename = "schema")]
+    pub schema: SchemaId,
+    /// Fresh issuance is receipt_v1; replay_v0 is explicit legacy classification only.
+    #[serde(rename = "admission_mode")]
+    pub admission_mode: AdmissionMode,
+    #[serde(rename = "child_control_socket_path")]
+    pub child_control_socket_path: Path,
+    #[serde(rename = "child_control_token")]
+    pub child_control_token: String,
+    #[serde(rename = "child_control_token_digest")]
+    pub child_control_token_digest: Digest,
+    /// Explicit assignment class; no runner infers planning/delivery/validation from result_contract.
+    #[serde(rename = "assignment_kind")]
+    pub assignment_kind: ValidationAssignmentKind,
+    #[serde(rename = "action_id")]
+    pub action_id: Id,
+    #[serde(rename = "assignment_id")]
+    pub assignment_id: Id,
+    #[serde(rename = "run_id")]
+    pub run_id: Id,
+    #[serde(rename = "run_revision")]
+    pub run_revision: u64,
+    #[serde(rename = "workstream")]
+    pub workstream: Id,
+    #[serde(rename = "role_id")]
+    pub role_id: Id,
+    #[serde(rename = "mode")]
+    pub mode: ModeId,
+    #[serde(rename = "provider")]
+    pub provider: String,
+    #[serde(rename = "model")]
+    pub model: String,
+    #[serde(rename = "thinking")]
+    pub thinking: ThinkingLevel,
+    #[serde(rename = "route")]
+    pub route: String,
+    #[serde(rename = "cwd")]
+    pub cwd: Path,
+    #[serde(rename = "allowed_tools")]
+    pub allowed_tools: Vec<ToolName>,
+    #[serde(rename = "spec_path")]
+    pub spec_path: Path,
+    #[serde(rename = "prompt_path")]
+    pub prompt_path: Path,
+    #[serde(rename = "prompt_digest")]
+    pub prompt_digest: Digest,
+    #[serde(rename = "boundary_id")]
+    pub boundary_id: ContractId,
+    #[serde(rename = "boundary_digest")]
+    pub boundary_digest: Digest,
+    #[serde(rename = "result_contract")]
+    pub result_contract: ContractId,
+    #[serde(rename = "result_contract_digest")]
+    pub result_contract_digest: Digest,
+    #[serde(rename = "carrier_path")]
+    pub carrier_path: Path,
+    #[serde(rename = "session_id")]
+    pub session_id: Id,
+    #[serde(rename = "session_dir")]
+    pub session_dir: Path,
+    #[serde(rename = "session_continuity")]
+    pub session_continuity: SessionContinuity,
+    #[serde(rename = "settings_digest")]
+    pub settings_digest: Digest,
+    #[serde(rename = "context_digest")]
+    pub context_digest: Digest,
+    #[serde(rename = "skills_digest")]
+    pub skills_digest: Digest,
+    #[serde(rename = "subscription_digest")]
+    pub subscription_digest: Digest,
+    #[serde(rename = "lane_id")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lane_id: Option<Id>,
+    #[serde(rename = "attempt")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u32>,
+    #[serde(rename = "base_commit")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_commit: Option<Sha>,
+    #[serde(rename = "worktree")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<Path>,
+    #[serde(rename = "required_focused_evidence")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required_focused_evidence: Option<u32>,
+    #[serde(rename = "authority_set_id")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authority_set_id: Option<String>,
+    #[serde(rename = "authority_documents")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authority_documents: Option<Vec<TaskDocument>>,
+    #[serde(rename = "context_document")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_document: Option<TaskDocument>,
+    #[serde(rename = "context_documents")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_documents: Option<Vec<TaskDocument>>,
+    #[serde(rename = "assignment_path")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignment_path: Option<Path>,
+    #[serde(rename = "assignment_digest")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignment_digest: Option<Digest>,
+    #[serde(rename = "context_manifest_path")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_manifest_path: Option<Path>,
+    #[serde(rename = "context_manifest_digest")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_manifest_digest: Option<Digest>,
+    #[serde(rename = "runtime_extension_path")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_extension_path: Option<Path>,
+    #[serde(rename = "runtime_extension_digest")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_extension_digest: Option<Digest>,
+    #[serde(rename = "terminal_profile_id")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_profile_id: Option<String>,
+    #[serde(rename = "terminal_route")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_route: Option<TerminalRoute>,
     #[serde(rename = "unavailable_tools")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unavailable_tools: Option<Vec<ToolName>>,
@@ -1590,6 +1822,184 @@ pub struct BackgroundCapabilities {
     #[serde(rename = "attestation_schema")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attestation_schema: Option<String>,
+}
+
+/// Durable workstream blocked latch and Core-derived cancellation records. The reporter is ordered last; only Autopilot-owned tasks are present.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlockedLatch {
+    #[serde(rename = "schema")]
+    pub schema: SchemaId,
+    #[serde(rename = "latch_id")]
+    pub latch_id: Uuidv7,
+    #[serde(rename = "blocked_receipt_id")]
+    pub blocked_receipt_id: Uuidv7,
+    #[serde(rename = "run_id")]
+    pub run_id: Id,
+    #[serde(rename = "run_revision")]
+    pub run_revision: u64,
+    #[serde(rename = "workstream")]
+    pub workstream: Id,
+    #[serde(rename = "reporter_assignment_id")]
+    pub reporter_assignment_id: Id,
+    #[serde(rename = "cancellation_set_digest")]
+    pub cancellation_set_digest: Digest,
+    #[serde(rename = "cancellations")]
+    pub cancellations: Vec<BlockedCancellationRecord>,
+    #[serde(rename = "latch_sha256")]
+    pub latch_sha256: Digest,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlockedCancellationRecord {
+    #[serde(rename = "task_id")]
+    pub task_id: Id,
+    #[serde(rename = "action_id")]
+    pub action_id: Id,
+    #[serde(rename = "assignment_id")]
+    pub assignment_id: Id,
+    #[serde(rename = "cancellation_index")]
+    pub cancellation_index: u32,
+    #[serde(rename = "reporter")]
+    pub reporter: bool,
+}
+
+/// Create-once accepted blocked-report receipt. All workstream scope and cancellation identities are Core-derived from the authenticated lease.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlockedReceipt {
+    #[serde(rename = "schema")]
+    pub schema: SchemaId,
+    #[serde(rename = "receipt_id")]
+    pub receipt_id: Uuidv7,
+    #[serde(rename = "run_id")]
+    pub run_id: Id,
+    #[serde(rename = "run_revision")]
+    pub run_revision: u64,
+    #[serde(rename = "workstream")]
+    pub workstream: Id,
+    #[serde(rename = "action_id")]
+    pub action_id: Id,
+    #[serde(rename = "assignment_id")]
+    pub assignment_id: Id,
+    #[serde(rename = "attempt")]
+    pub attempt: u32,
+    #[serde(rename = "profile_id")]
+    pub profile_id: String,
+    #[serde(rename = "tool_name")]
+    pub tool_name: ToolName,
+    #[serde(rename = "request_id")]
+    pub request_id: Id,
+    #[serde(rename = "tool_call_id")]
+    pub tool_call_id: String,
+    #[serde(rename = "report_digest")]
+    pub report_digest: Digest,
+    #[serde(rename = "reason_code")]
+    pub reason_code: BlockedReasonCode,
+    #[serde(rename = "cancellation_set_digest")]
+    pub cancellation_set_digest: Digest,
+    #[serde(rename = "receipt_sha256")]
+    pub receipt_sha256: Digest,
+}
+
+/// Closed universal blocked report. Core derives workstream, action, cancellation scope, and all durable effects from the authenticated lease.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlockedReport {
+    #[serde(rename = "schema")]
+    pub schema: SchemaId,
+    #[serde(rename = "reason_code")]
+    pub reason_code: BlockedReasonCode,
+    #[serde(rename = "summary")]
+    pub summary: String,
+    #[serde(rename = "evidence")]
+    pub evidence: Vec<BlockedEvidence>,
+    #[serde(rename = "last_attempted_action")]
+    pub last_attempted_action: String,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlockedEvidence {
+    #[serde(rename = "kind")]
+    pub kind: BlockedEvidenceKind,
+    #[serde(rename = "value")]
+    pub value: String,
+}
+
+/// Typed receipt envelope returned only for an accepted child-control request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum ChildControlAcceptReceipt {
+    #[serde(rename = "submit")]
+    Submit {
+        #[serde(rename = "schema")]
+        pub schema: SchemaId,
+        #[serde(rename = "receipt")]
+        pub receipt: SubmitReceipt,
+    },
+    #[serde(rename = "blocked")]
+    Blocked {
+        #[serde(rename = "schema")]
+        pub schema: SchemaId,
+        #[serde(rename = "receipt")]
+        pub receipt: BlockedReceipt,
+    },
+}
+
+/// Closed child-to-Core control request. Raw payload is transported as the pre-schema JSON tree without TypeScript coercion, defaults, or semantic admission.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChildControlRequest {
+    #[serde(rename = "schema")]
+    pub schema: SchemaId,
+    #[serde(rename = "request_id")]
+    pub request_id: Id,
+    #[serde(rename = "token")]
+    pub token: String,
+    #[serde(rename = "run_id")]
+    pub run_id: Id,
+    #[serde(rename = "assignment_id")]
+    pub assignment_id: Id,
+    #[serde(rename = "attempt")]
+    pub attempt: u32,
+    #[serde(rename = "tool_call_id")]
+    pub tool_call_id: String,
+    #[serde(rename = "kind")]
+    pub kind: ChildControlRequestKind,
+    #[serde(rename = "tool_name")]
+    pub tool_name: ToolName,
+    #[serde(rename = "profile_id")]
+    pub profile_id: String,
+    #[serde(rename = "raw_payload")]
+    pub raw_payload: serde_json::Value,
+}
+
+/// Closed child-control response. ACCEPT carries exactly one typed receipt; RETRY carries exactly one complete diagnostic.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "outcome", deny_unknown_fields)]
+pub enum ChildControlResponse {
+    #[serde(rename = "ACCEPT")]
+    Accept {
+        #[serde(rename = "schema")]
+        pub schema: SchemaId,
+        #[serde(rename = "request_id")]
+        pub request_id: Id,
+        #[serde(rename = "receipt")]
+        pub receipt: ChildControlAcceptReceipt,
+    },
+    #[serde(rename = "RETRY")]
+    Retry {
+        #[serde(rename = "schema")]
+        pub schema: SchemaId,
+        #[serde(rename = "request_id")]
+        pub request_id: Id,
+        #[serde(rename = "diagnostic")]
+        pub diagnostic: SubmitDiagnostic,
+    },
 }
 
 /// Create-once close archive manifest excluding close receipt/publication to avoid digest cycles.
@@ -2592,6 +3002,170 @@ pub struct StateCache {
     pub state_hash: Digest,
 }
 
+/// Complete canonical submit RETRY diagnostic. Rows are sorted by pointer UTF-8 bytes, code, expected, and actual.sha256; error_count is the complete pre-summary count.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubmitDiagnostic {
+    #[serde(rename = "schema")]
+    pub schema: SchemaId,
+    #[serde(rename = "code")]
+    pub code: String,
+    /// Complete independently knowable error count, including rows summarized elsewhere when bounded output is required.
+    #[serde(rename = "error_count")]
+    pub error_count: u32,
+    #[serde(rename = "errors")]
+    pub errors: Vec<SubmitDiagnosticError>,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubmitDiagnosticError {
+    /// Canonical zero-based row index after deterministic sort.
+    #[serde(rename = "index")]
+    pub index: u32,
+    /// Stable machine-readable error code.
+    #[serde(rename = "code")]
+    pub code: String,
+    /// RFC6901 pointer to the rejected value.
+    #[serde(rename = "pointer")]
+    pub pointer: String,
+    /// Canonical deterministic expectation.
+    #[serde(rename = "expected")]
+    pub expected: String,
+    #[serde(rename = "actual")]
+    pub actual: SubmitDiagnosticActual,
+    /// Imperative correction.
+    #[serde(rename = "fix")]
+    pub fix: String,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubmitDiagnosticActual {
+    /// Bounded and redacted preview of the actual value.
+    #[serde(rename = "preview")]
+    pub preview: String,
+    #[serde(rename = "redacted")]
+    pub redacted: bool,
+    #[serde(rename = "truncated")]
+    pub truncated: bool,
+    /// SHA-256 of the complete canonical actual value.
+    #[serde(rename = "sha256")]
+    pub sha256: Digest,
+    /// Complete canonical actual-value byte count.
+    #[serde(rename = "byte_count")]
+    pub byte_count: u64,
+    /// Complete actual-value item count.
+    #[serde(rename = "item_count")]
+    pub item_count: u64,
+}
+
+/// Create-once accepted submit receipt. It binds authenticated child identity, canonical raw payload, validators, carrier artifacts, and a typed deferred continuation without granting repository authority.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubmitReceipt {
+    #[serde(rename = "schema")]
+    pub schema: SchemaId,
+    #[serde(rename = "receipt_id")]
+    pub receipt_id: Uuidv7,
+    #[serde(rename = "run_id")]
+    pub run_id: Id,
+    #[serde(rename = "run_revision")]
+    pub run_revision: u64,
+    #[serde(rename = "workstream")]
+    pub workstream: Id,
+    #[serde(rename = "action_id")]
+    pub action_id: Id,
+    #[serde(rename = "assignment_id")]
+    pub assignment_id: Id,
+    #[serde(rename = "attempt")]
+    pub attempt: u32,
+    #[serde(rename = "profile_id")]
+    pub profile_id: String,
+    #[serde(rename = "tool_name")]
+    pub tool_name: ToolName,
+    #[serde(rename = "boundary_id")]
+    pub boundary_id: ContractId,
+    #[serde(rename = "result_contract")]
+    pub result_contract: ContractId,
+    #[serde(rename = "schema_digest")]
+    pub schema_digest: Digest,
+    #[serde(rename = "spec_digest")]
+    pub spec_digest: Digest,
+    #[serde(rename = "carrier_binding_digest")]
+    pub carrier_binding_digest: Digest,
+    #[serde(rename = "authority_digest")]
+    pub authority_digest: Digest,
+    #[serde(rename = "frozen_validator_versions")]
+    pub frozen_validator_versions: Vec<SubmitReceiptValidatorVersion>,
+    #[serde(rename = "raw_payload_digest")]
+    pub raw_payload_digest: Digest,
+    #[serde(rename = "raw_payload_byte_count")]
+    pub raw_payload_byte_count: u64,
+    #[serde(rename = "request_id")]
+    pub request_id: Id,
+    #[serde(rename = "tool_call_id")]
+    pub tool_call_id: String,
+    #[serde(rename = "carrier_digest")]
+    pub carrier_digest: Digest,
+    #[serde(rename = "artifact_digests")]
+    pub artifact_digests: Vec<SubmitReceiptArtifact>,
+    #[serde(rename = "prepared_transition")]
+    pub prepared_transition: SubmitPreparedTransition,
+    #[serde(rename = "receipt_sha256")]
+    pub receipt_sha256: Digest,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubmitReceiptValidatorVersion {
+    #[serde(rename = "validator_id")]
+    pub validator_id: Id,
+    #[serde(rename = "version")]
+    pub version: String,
+    #[serde(rename = "digest")]
+    pub digest: Digest,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubmitReceiptArtifact {
+    #[serde(rename = "artifact_id")]
+    pub artifact_id: Id,
+    #[serde(rename = "sha256")]
+    pub sha256: Digest,
+    #[serde(rename = "byte_count")]
+    pub byte_count: u64,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubmitPreparedTransition {
+    #[serde(rename = "transition_id")]
+    pub transition_id: Id,
+    #[serde(rename = "kind")]
+    pub kind: PreparedTransitionKind,
+    #[serde(rename = "transition_digest")]
+    pub transition_digest: Digest,
+    #[serde(rename = "deferred_host_effect")]
+    pub deferred_host_effect: SubmitDeferredHostEffect,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubmitDeferredHostEffect {
+    #[serde(rename = "kind")]
+    pub kind: DeferredHostEffectKind,
+    #[serde(rename = "effect_digest")]
+    pub effect_digest: Digest,
+}
+
 /// Model-facing task atom submission. Shape is deliberately small: structure is enforced by the submit tool; source values are checked against runtime-supplied task source anchors by the planning driver.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TaskAtoms {
@@ -2835,6 +3409,54 @@ pub struct ValidationAssignmentV3 {
     pub authority_digest: Digest,
     #[serde(rename = "max_value_attempts")]
     pub max_value_attempts: u32,
+}
+
+/// Fresh receipt-backed Validator assignment. It removes max_value_attempts; fresh issuance is receipt_v1 and old v3 assignment bytes remain explicit replay_v0 legacy input.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidationAssignmentV4 {
+    #[serde(rename = "schema")]
+    pub schema: SchemaId,
+    #[serde(rename = "admission_mode")]
+    pub admission_mode: AdmissionMode,
+    #[serde(rename = "validation_id")]
+    pub validation_id: Id,
+    #[serde(rename = "validation_key")]
+    pub validation_key: Digest,
+    #[serde(rename = "workstream")]
+    pub workstream: Id,
+    #[serde(rename = "run_revision")]
+    pub run_revision: u64,
+    #[serde(rename = "role_id")]
+    pub role_id: Id,
+    #[serde(rename = "mode")]
+    pub mode: ModeId,
+    #[serde(rename = "assignment_id")]
+    pub assignment_id: Id,
+    #[serde(rename = "action_id")]
+    pub action_id: Id,
+    #[serde(rename = "validation_attempt")]
+    pub validation_attempt: u32,
+    #[serde(rename = "semantic_round")]
+    pub semantic_round: u32,
+    #[serde(rename = "producer_assignment_ids")]
+    pub producer_assignment_ids: Vec<Id>,
+    #[serde(rename = "base_commit")]
+    pub base_commit: GitOid,
+    #[serde(rename = "exact_commit")]
+    pub exact_commit: GitOid,
+    #[serde(rename = "exact_tree")]
+    pub exact_tree: GitOid,
+    #[serde(rename = "candidate_root")]
+    pub candidate_root: Path,
+    #[serde(rename = "context_path")]
+    pub context_path: Path,
+    #[serde(rename = "context_digest")]
+    pub context_digest: Digest,
+    #[serde(rename = "authority_path")]
+    pub authority_path: Path,
+    #[serde(rename = "authority_digest")]
+    pub authority_digest: Digest,
 }
 
 /// Retained legacy fact-only Validator context for already-issued v2 bindings. Forbidden producer reasoning/session classes remain explicit.
@@ -3961,6 +4583,7 @@ pub const CHILD_RUNTIME_ENTRY: &str = "child-runtime/child-extension-runtime.ts"
 
 pub const AGENT_HANDOFF_ADMITS: &str = "When checkpointed, return one autopilot.agent-handoff.v1 object with exactly these required fields: schema, completed, remaining, critical_state, and next_action. Put finished obligations in completed, unfinished obligations in remaining, role-required scalar or array-of-scalar slots in critical_state, and the immediate resume instruction in next_action; do not invent completion.";
 pub const ALLOCATION_LANE_PROPOSAL_ADMITS: &str = "Return a lane proposal that groups only approved plan units. Preserve every unit id, dependency, predecessor forward criterion, downstream release edge, and verification obligation exactly as supplied. Do not invent file ownership or modify plan authority. Include ordered unit ids, one delivery boundary, context family id and estimate, focused tests, and launch wave.";
+pub const BLOCKED_REPORT_ADMITS: &str = "Use autopilot_report_blocked only when genuinely stuck and no further work is possible. It is never an ordinary submit retry.";
 pub const DELIVERY_RESULT_ADMITS: &str = "Submit exactly one terminal delivery carrier for your assigned role, mode, assignment, attempt, and run revision. Report the exact base, worktree, actual changed paths, execution audit reference, and required focused evidence. Do not claim validation, merge, package commit/tree, package state mutation, or success hidden behind missing evidence. The runtime establishes package commit/tree after accepting this carrier. If any hard boundary was violated or required evidence is missing, say so instead of reporting DONE.";
 pub const DELIVERY_SUBMISSION_V2_ADMITS: &str = "Call autopilot_emit_status exactly once with the actual changed paths, execution audit reference, focused evidence references, terminal status, and every hard-boundary violation. terminal_status must be exactly succeeded or blocked. Ordinary delivery omits recovery_disposition and remains closed and cross-field: succeeded requires nonempty safe actual_changed_paths, a nonempty execution_audit_ref, at least the required focused_evidence_refs, empty hard_boundary_violations, and no blocker_class; blocked requires empty actual_changed_paths, a nonempty execution_audit_ref, at least the required focused_evidence_refs, nonempty bounded hard_boundary_violations, and one blocker_class. Semantic-repairable can dispatch Recovery Engineer. requires-new-authority remains fail closed unless Core independently verifies a bounded pre-effect unapproved-command denial, exact unchanged base HEAD, and nonempty dirty paths wholly inside original unit scope; only that mechanically reconciled case receives the same single Recovery Engineer attempt. infrastructure and unsafe remain recovery-ineligible. A package-issued Recovery Engineer assignment requires exactly one typed recovery_disposition: repaired requires succeeded with nonempty changes; no-defect requires succeeded with exact in-scope changes or a mechanically clean unchanged commit; requires-new-authority, infrastructure-blocked, and unsafe-blocked require blocked with no changed-path claim and bounded violations. Mixed or unknown shapes are rejected. If execution is blocked or authority conflicts, report blocked and stop; value repair may correct terminal carrier fields only and must not mutate files, seek another checkout, or manufacture success. Do not include assignment or package identity.";
 pub const FINDING_ADMITS: &str = "For each material issue, record one effect: forward-blocking, closure-blocking-forward-safe, or advisory. Tie the finding to exact criteria or forward edges and evidence. Do not use severity alone to decide scheduling, do not hide a mandatory blocker as advisory, and do not report a source repair requirement without the evidence that makes it mandatory.";
@@ -3977,12 +4600,13 @@ pub const WORK_MAP_V2_ADMITS: &str = "Every fresh unit must explicitly emit pack
 pub const WORK_MAP_V2_MAX_BYTES: usize = 1048576;
 pub const VALIDATION_EVIDENCE_AUTHORITY_MAX_BYTES: usize = 1048576;
 pub const VALIDATION_ASSIGNMENT_V3_MAX_BYTES: usize = 131072;
+pub const VALIDATION_ASSIGNMENT_V4_MAX_BYTES: usize = 131072;
 pub const VALIDATION_CONTEXT_V3_MAX_BYTES: usize = 1048576;
 pub const VALIDATION_SUBMISSION_V3_MAX_BYTES: usize = 1048576;
 pub const VALIDATION_VERDICT_V3_MAX_BYTES: usize = 2097152;
 pub const VALIDATION_ADMISSION_DIAGNOSTIC_MAX_BYTES: usize = 2097152;
 
-pub const ADMISSION_CONTRACTS: [(&str, &str, &str); 15] = [
+pub const ADMISSION_CONTRACTS: [(&str, &str, &str); 16] = [
     (
         "agent_handoff",
         "autopilot.agent-handoff.v1",
@@ -3992,6 +4616,11 @@ pub const ADMISSION_CONTRACTS: [(&str, &str, &str); 15] = [
         "allocation_lane_proposal",
         "autopilot.allocation_lane_proposal.v1",
         "Return a lane proposal that groups only approved plan units. Preserve every unit id, dependency, predecessor forward criterion, downstream release edge, and verification obligation exactly as supplied. Do not invent file ownership or modify plan authority. Include ordered unit ids, one delivery boundary, context family id and estimate, focused tests, and launch wave.",
+    ),
+    (
+        "blocked_report",
+        "autopilot.blocked_report.v1",
+        "Use autopilot_report_blocked only when genuinely stuck and no further work is possible. It is never an ordinary submit retry.",
     ),
     (
         "delivery_result",
@@ -4216,5 +4845,16 @@ pub const TERMINAL_PROFILES: [(&str, &str, &str, &str, &str); 14] = [
         "autopilot.validation_submission.v3",
         "autopilot.validation_result.v3",
         "86052745eff30b746b44366bd1a9dc54aeee74aba63c1d6be80a187efc691545",
+    ),
+];
+
+pub const UNIVERSAL_CHILD_TOOLS: [(&str, &str, &str, &str, &str, &str); 1] = [
+    (
+        "autopilot.blocked_report.v1:autopilot_report_blocked",
+        "autopilot_report_blocked",
+        "autopilot.blocked_report.v1",
+        "autopilot.blocked_report.v1",
+        "330f037c777255e46ff0bfd9309a6a9c46568c4946aed89ba61041d2e4ac794a",
+        "NEVER use this tool unless you are genuinely stuck and no further work is possible. Accepted use immediately terminates the ENTIRE workstream and process, including every parallel line of work. Never use it for an ordinary retry \u{2014} if your submit was rejected, fix the reported problem and submit again.",
     ),
 ];

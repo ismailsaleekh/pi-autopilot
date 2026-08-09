@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use serde_json::{Value as JsonValue, json};
+use serde_json::{Map as JsonMap, Value as JsonValue, json};
 use sha2::{Digest as ShaDigest, Sha256};
 
 use crate::contracts::*;
@@ -49,6 +49,10 @@ pub fn emit_all(
             emit_tool_schemas(contracts)?,
         ),
         file("src/generated/child-extension.ts", emit_child_extension()),
+        file(
+            "src/generated/child-control-bridge.ts",
+            emit_child_control_bridge(contracts)?,
+        ),
         file(
             "drivers/src/generated/mod.rs",
             format!(
@@ -369,14 +373,25 @@ fn emit_rust_typescript(contracts: &Contracts) -> Result<(String, String)> {
     let mut artifacts = contracts.artifacts.clone();
     artifacts.sort_by_key(|artifact| artifact.name.clone());
     for artifact in &artifacts {
-        emit_shape_tree(
-            &mut rust,
-            &mut ts,
-            &type_name(&artifact.name),
-            &artifact.doc,
-            &artifact.items,
-            artifact.model_produced && !artifact.submit_tools.iter().any(|tool| tool.closed),
-        );
+        if let Some(tag) = &artifact.union_tag {
+            emit_tagged_union(
+                &mut rust,
+                &mut ts,
+                &type_name(&artifact.name),
+                &artifact.doc,
+                tag,
+                &artifact.items,
+            );
+        } else {
+            emit_shape_tree(
+                &mut rust,
+                &mut ts,
+                &type_name(&artifact.name),
+                &artifact.doc,
+                &artifact.items,
+                artifact.model_produced && !artifact.submit_tools.iter().any(|tool| tool.closed),
+            );
+        }
     }
     let mut frame_names = Vec::new();
     let mut frames = contracts.frames.clone();
@@ -457,6 +472,7 @@ fn emit_submit_rows(rust: &mut String, contracts: &Contracts) -> Result<()> {
     let shapes = schema_items_by_name(contracts);
     let mut submit_rows = Vec::new();
     let mut profile_rows = Vec::new();
+    let mut universal_rows = Vec::new();
     for artifact in &contracts.artifacts {
         if artifact.submit_tools.is_empty() {
             continue;
@@ -464,7 +480,7 @@ fn emit_submit_rows(rust: &mut String, contracts: &Contracts) -> Result<()> {
         let schema = json_schema_for_items(&artifact.items, &shapes, &enums, false)?;
         let digest = sha256_hex(json_string(&schema, "tool schema digest")?.as_bytes());
         for tool in &artifact.submit_tools {
-            if artifact.schema.starts_with("planning.") {
+            if !tool.universal && artifact.schema.starts_with("planning.") {
                 submit_rows.push(format!(
                     "    (\n        \"{}\",\n        \"{}\",\n        \"{}\",\n    ),",
                     escape_rust_string(&tool.name),
@@ -475,11 +491,16 @@ fn emit_submit_rows(rust: &mut String, contracts: &Contracts) -> Result<()> {
             let parameters = json_schema_for_items(&artifact.items, &shapes, &enums, tool.closed)?;
             let pdigest =
                 sha256_hex(json_string(&parameters, "terminal profile digest")?.as_bytes());
-            profile_rows.push(format!("    (\n        \"{}\",\n        \"{}\",\n        \"{}\",\n        \"{}\",\n        \"{}\",\n    ),", escape_rust_string(&tool.profile), escape_rust_string(&tool.name), escape_rust_string(&artifact.schema), escape_rust_string(&tool.result_contract), pdigest));
+            if tool.universal {
+                universal_rows.push(format!("    (\n        \"{}\",\n        \"{}\",\n        \"{}\",\n        \"{}\",\n        \"{}\",\n        \"{}\",\n    ),", escape_rust_string(&tool.profile), escape_rust_string(&tool.name), escape_rust_string(&artifact.schema), escape_rust_string(&tool.result_contract), pdigest, escape_rust_string(tool.description.as_deref().expect("validated universal tool"))));
+            } else {
+                profile_rows.push(format!("    (\n        \"{}\",\n        \"{}\",\n        \"{}\",\n        \"{}\",\n        \"{}\",\n    ),", escape_rust_string(&tool.profile), escape_rust_string(&tool.name), escape_rust_string(&artifact.schema), escape_rust_string(&tool.result_contract), pdigest));
+            }
         }
     }
     submit_rows.sort();
     profile_rows.sort();
+    universal_rows.sort();
     rust.push_str(&format!(
         "\npub const SUBMIT_TOOLS: [(&str, &str, &str); {}] = [\n{}\n];\n",
         submit_rows.len(),
@@ -489,6 +510,11 @@ fn emit_submit_rows(rust: &mut String, contracts: &Contracts) -> Result<()> {
         "\npub const TERMINAL_PROFILES: [(&str, &str, &str, &str, &str); {}] = [\n{}\n];\n",
         profile_rows.len(),
         profile_rows.join("\n")
+    ));
+    rust.push_str(&format!(
+        "\npub const UNIVERSAL_CHILD_TOOLS: [(&str, &str, &str, &str, &str, &str); {}] = [\n{}\n];\n",
+        universal_rows.len(),
+        universal_rows.join("\n")
     ));
     Ok(())
 }
@@ -512,6 +538,45 @@ fn emit_frame_unions(ts: &mut String, frame_names: &[(String, String, String)]) 
             .join(" | ");
         ts.push_str(&format!("export type {alias} = {union};\n"));
     }
+}
+
+fn emit_tagged_union(
+    rust: &mut String,
+    ts: &mut String,
+    ty_name: &str,
+    doc: &str,
+    tag: &str,
+    variants: &[Item],
+) {
+    rust.push_str(&rust_doc(doc));
+    rust.push_str("#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]\n");
+    rust.push_str(&format!(
+        "#[serde(tag = \"{}\", deny_unknown_fields)]\npub enum {ty_name} {{\n",
+        escape_rust_string(tag)
+    ));
+    ts.push_str(&format!("export type {ty_name} =\n"));
+    for variant in variants {
+        let value = variant.variant.as_deref().expect("validated tagged union");
+        rust.push_str(&format!(
+            "    #[serde(rename = \"{}\")]\n    {} {{\n",
+            escape_rust_string(value),
+            variant_name(&variant.name)
+        ));
+        ts.push_str(&format!("  | {{\n    {}: \"{}\";\n", quote_ts_key(tag), escape_ts_string(value)));
+        for item in &variant.items {
+            let (rust_ty, ts_ty) = member_types(item, ty_name)
+                .expect("validated tagged-union member");
+            let mut rust_member = String::new();
+            let mut ts_member = String::new();
+            emit_member(&mut rust_member, &mut ts_member, item, rust_ty, ts_ty);
+            rust.push_str(&indent(&rust_member, "    "));
+            ts.push_str(&indent(&ts_member, "    "));
+        }
+        rust.push_str("    },\n");
+        ts.push_str("  }\n");
+    }
+    rust.push_str("}\n\n");
+    ts.push_str(";\n\n");
 }
 
 fn emit_shape_tree(
@@ -623,16 +688,21 @@ pub fn emit_tool_schemas(contracts: &Contracts) -> Result<String> {
     for artifact in contracts
         .artifacts
         .iter()
-        .filter(|artifact| artifact.model_produced && !artifact.submit_tools.is_empty())
+        .filter(|artifact| {
+            artifact.model_produced
+                && artifact.submit_tools.iter().any(|tool| !tool.universal)
+        })
     {
         let default_closed = artifact
             .submit_tools
-            .first()
+            .iter()
+            .find(|tool| !tool.universal)
             .is_some_and(|tool| tool.closed);
         let mut closed_modes = vec![default_closed];
         if artifact
             .submit_tools
             .iter()
+            .filter(|tool| !tool.universal)
             .any(|tool| tool.closed != default_closed)
         {
             closed_modes.push(!default_closed);
@@ -668,6 +738,7 @@ pub fn emit_tool_schemas(contracts: &Contracts) -> Result<String> {
         let tools = artifact
             .submit_tools
             .iter()
+            .filter(|tool| !tool.universal)
             .map(|tool| {
                 let (parameters, digest) = schema_names
                     .get(&tool.closed)
@@ -688,7 +759,415 @@ pub fn emit_tool_schemas(contracts: &Contracts) -> Result<String> {
     }).collect::<Vec<_>>();
     rows.sort();
     out.push_str(&format!("export interface SubmitToolDescriptor {{\n  profile_id: string;\n  name: string;\n  label: string;\n  boundary_id: string;\n  result_contract: string;\n  schema_digest: string;\n  parameters: TSchema;\n}}\n\nexport const SUBMIT_TOOLS: readonly SubmitToolDescriptor[] = [\n{}\n] as const;\n", rows.join("\n")));
+    emit_universal_child_tools(&mut out, contracts, &shapes, &enum_values)?;
     Ok(out)
+}
+
+const CHILD_CONTROL_PLACEHOLDER_SENTINEL: &str = "__autopilot_child_control_placeholder__:";
+
+#[derive(Debug)]
+struct PlaceholderTemplate {
+    value: JsonValue,
+    slot: Option<String>,
+}
+
+fn emit_child_control_bridge(contracts: &Contracts) -> Result<String> {
+    let enums = enum_map(contracts);
+    let shapes = schema_items_by_name(contracts);
+    let mut rows = Vec::new();
+    let mut terminal_profiles = 0usize;
+    for artifact in &contracts.artifacts {
+        if !artifact.model_produced {
+            continue;
+        }
+        for tool in &artifact.submit_tools {
+            let template = placeholder_for_items(&artifact.items, &shapes, &enums)?;
+            let slot = template.slot.ok_or_else(|| {
+                Error::input(format!(
+                    "child-control placeholder has no nonce slot for profile `{}`",
+                    tool.profile
+                ))
+            })?;
+            let parameters = json_schema_for_items(&artifact.items, &shapes, &enums, tool.closed)?;
+            let schema_digest = sha256_hex(
+                json_string(&parameters, "child-control schema digest")?.as_bytes(),
+            );
+            if !tool.universal {
+                terminal_profiles += 1;
+            }
+            rows.push(json!({
+                "profile_id": tool.profile,
+                "tool_name": tool.name,
+                "kind": if tool.universal { "blocked" } else { "submit" },
+                "boundary_id": artifact.schema,
+                "result_contract": tool.result_contract,
+                "schema_digest": schema_digest,
+                "placeholder_pointer": slot,
+                "placeholder": template.value,
+            }));
+        }
+    }
+    rows.sort_by(|left, right| left["profile_id"].as_str().cmp(&right["profile_id"].as_str()));
+    require(
+        terminal_profiles == 14,
+        "child-control terminal profile metadata count drift; expected 14",
+    )?;
+    let metadata = pretty_json(&JsonValue::Array(rows), "child-control bridge metadata")?;
+    let mut out = r#"// @generated by codegen
+
+import { randomBytes } from "node:crypto";
+
+import type { ChildControlRequest, ChildControlResponse } from "./index.ts";
+
+export const CHILD_CONTROL_PLACEHOLDER_SENTINEL = "__autopilot_child_control_placeholder__:";
+export const CHILD_CONTROL_TERMINAL_PROFILE_COUNT = 14;
+
+export type ChildControlKind = "submit" | "blocked";
+type JsonTree = null | boolean | number | string | readonly JsonTree[] | { readonly [key: string]: JsonTree };
+
+export interface ChildControlToolMetadata {
+  readonly profile_id: string;
+  readonly tool_name: string;
+  readonly kind: ChildControlKind;
+  readonly boundary_id: string;
+  readonly result_contract: string;
+  readonly schema_digest: string;
+  readonly placeholder_pointer: string;
+  readonly placeholder: JsonTree;
+}
+
+export const CHILD_CONTROL_TOOL_METADATA = "#.to_owned();
+    out.push_str(&metadata);
+    out.push_str(r#" as const satisfies readonly ChildControlToolMetadata[];
+
+export interface ChildControlBridgeBinding {
+  readonly token: string;
+  readonly run_id: string;
+  readonly assignment_id: string;
+  readonly attempt: number;
+}
+
+export interface ChildControlBridgeTransport {
+  request(request: ChildControlRequest): Promise<ChildControlResponse>;
+}
+
+export interface ChildControlBridge {
+  prepareArguments(profileId: string, rawPayload: unknown): Record<string, unknown>;
+  execute(toolCallId: string, placeholder: unknown): Promise<ChildControlResponse>;
+}
+
+export class ChildControlBridgeProtocolError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ChildControlBridgeProtocolError";
+  }
+}
+
+const PLACEHOLDER_TOKEN: unique symbol = Symbol("autopilot.child-control.placeholder");
+type PlaceholderObject = Record<PropertyKey, unknown>;
+type PendingCall = {
+  readonly metadata: ChildControlToolMetadata;
+  readonly rawPayload: unknown;
+  readonly placeholder: PlaceholderObject;
+  readonly token: object;
+};
+
+export function createChildControlBridge(
+  binding: ChildControlBridgeBinding,
+  transport: ChildControlBridgeTransport,
+): ChildControlBridge {
+  const pending = new Map<string, PendingCall>();
+  const usedToolCallIds = new Set<string>();
+
+  return {
+    prepareArguments(profileId, rawPayload) {
+      const metadata = CHILD_CONTROL_TOOL_METADATA.find((row) => row.profile_id === profileId);
+      if (metadata === undefined) {
+        throw new ChildControlBridgeProtocolError(`unknown child-control profile ${JSON.stringify(profileId)}`);
+      }
+      const nonce = randomBytes(32).toString("hex");
+      const placeholder = structuredClone(metadata.placeholder) as PlaceholderObject;
+      setPointer(placeholder, metadata.placeholder_pointer, `${CHILD_CONTROL_PLACEHOLDER_SENTINEL}${nonce}`);
+      const token = {};
+      Object.defineProperty(placeholder, PLACEHOLDER_TOKEN, {
+        configurable: false,
+        enumerable: false,
+        value: token,
+        writable: false,
+      });
+      pending.set(nonce, {
+        metadata,
+        rawPayload: structuredClone(rawPayload),
+        placeholder,
+        token,
+      });
+      return placeholder as Record<string, unknown>;
+    },
+
+    async execute(toolCallId, placeholder) {
+      const holder = asPlaceholderObject(placeholder);
+      const token = holder[PLACEHOLDER_TOKEN];
+      if (token === null || typeof token !== "object") {
+        throw new ChildControlBridgeProtocolError("child-control placeholder token is absent");
+      }
+      const nonce = placeholderNonce(holder);
+      if (nonce === undefined) {
+        throw new ChildControlBridgeProtocolError("child-control placeholder is unknown or already consumed");
+      }
+      const call = pending.get(nonce);
+      if (call === undefined || call.placeholder !== holder || call.token !== token) {
+        throw new ChildControlBridgeProtocolError("child-control placeholder is unknown or already consumed");
+      }
+      pending.delete(nonce);
+      const expected = structuredClone(call.metadata.placeholder) as PlaceholderObject;
+      setPointer(expected, call.metadata.placeholder_pointer, `${CHILD_CONTROL_PLACEHOLDER_SENTINEL}${nonce}`);
+      if (!sameJsonShape(holder, expected) || usedToolCallIds.has(toolCallId)) {
+        throw new ChildControlBridgeProtocolError("child-control placeholder shape or tool-call correlation mismatch");
+      }
+      usedToolCallIds.add(toolCallId);
+      return transport.request({
+        schema: "autopilot.child_control_request.v1",
+        request_id: randomBytes(32).toString("hex"),
+        token: binding.token,
+        run_id: binding.run_id,
+        assignment_id: binding.assignment_id,
+        attempt: binding.attempt,
+        tool_call_id: toolCallId,
+        kind: call.metadata.kind,
+        tool_name: call.metadata.tool_name,
+        profile_id: call.metadata.profile_id,
+        raw_payload: call.rawPayload,
+      });
+    },
+  };
+}
+
+function asPlaceholderObject(value: unknown): PlaceholderObject {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new ChildControlBridgeProtocolError("child-control placeholder is not an object");
+  }
+  return value as PlaceholderObject;
+}
+
+function placeholderNonce(value: PlaceholderObject): string | undefined {
+  const marker = findPlaceholderMarker(value);
+  return marker?.startsWith(CHILD_CONTROL_PLACEHOLDER_SENTINEL)
+    ? marker.slice(CHILD_CONTROL_PLACEHOLDER_SENTINEL.length)
+    : undefined;
+}
+
+function findPlaceholderMarker(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const marker = findPlaceholderMarker(item);
+      if (marker?.startsWith(CHILD_CONTROL_PLACEHOLDER_SENTINEL)) return marker;
+    }
+    return undefined;
+  }
+  if (value !== null && typeof value === "object") {
+    for (const item of Object.values(value)) {
+      const marker = findPlaceholderMarker(item);
+      if (marker?.startsWith(CHILD_CONTROL_PLACEHOLDER_SENTINEL)) return marker;
+    }
+  }
+  return undefined;
+}
+
+function setPointer(value: PlaceholderObject, pointer: string, marker: string): void {
+  const parts = pointer.slice(1).split("/").map((part) => part.replaceAll("~1", "/").replaceAll("~0", "~"));
+  let current: unknown = value;
+  for (const [index, part] of parts.entries()) {
+    const last = index === parts.length - 1;
+    if (Array.isArray(current)) {
+      const offset = Number(part);
+      if (!Number.isInteger(offset) || current[offset] === undefined) {
+        throw new ChildControlBridgeProtocolError("generated child-control placeholder pointer drift");
+      }
+      if (last) current[offset] = marker;
+      else current = current[offset];
+    } else if (current !== null && typeof current === "object") {
+      const record = current as Record<string, unknown>;
+      if (!(part in record)) throw new ChildControlBridgeProtocolError("generated child-control placeholder pointer drift");
+      if (last) record[part] = marker;
+      else current = record[part];
+    } else {
+      throw new ChildControlBridgeProtocolError("generated child-control placeholder pointer drift");
+    }
+  }
+}
+
+function sameJsonShape(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left)
+      && Array.isArray(right)
+      && left.length === right.length
+      && left.every((item, index) => sameJsonShape(item, right[index]));
+  }
+  if (left !== null && right !== null && typeof left === "object" && typeof right === "object") {
+    const leftRecord = left as Record<string, unknown>;
+    const rightRecord = right as Record<string, unknown>;
+    const leftKeys = Object.keys(leftRecord).sort();
+    const rightKeys = Object.keys(rightRecord).sort();
+    return leftKeys.length === rightKeys.length
+      && leftKeys.every((key, index) => key === rightKeys[index] && sameJsonShape(leftRecord[key], rightRecord[key]));
+  }
+  return false;
+}
+"#);
+    Ok(out)
+}
+
+fn placeholder_for_items(
+    items: &[Item],
+    shapes: &BTreeMap<String, Vec<Item>>,
+    enums: &BTreeMap<&str, Vec<String>>,
+) -> Result<PlaceholderTemplate> {
+    let mut value = JsonMap::new();
+    let mut slot = None;
+    for item in items {
+        if item.kind == ItemKind::Record || !item.required {
+            continue;
+        }
+        let template = placeholder_for_item(item, shapes, enums)?;
+        if slot.is_none() {
+            slot = template
+                .slot
+                .as_deref()
+                .map(|child| format!("/{}{}", pointer_segment(&item.name), child));
+        }
+        value.insert(item.name.clone(), template.value);
+    }
+    Ok(PlaceholderTemplate {
+        value: JsonValue::Object(value),
+        slot,
+    })
+}
+
+fn placeholder_for_item(
+    item: &Item,
+    shapes: &BTreeMap<String, Vec<Item>>,
+    enums: &BTreeMap<&str, Vec<String>>,
+) -> Result<PlaceholderTemplate> {
+    match item.kind {
+        ItemKind::Field => {
+            if let Some(constant) = &item.constant {
+                return Ok(PlaceholderTemplate {
+                    value: placeholder_constant(&item.type_id, constant)?,
+                    slot: None,
+                });
+            }
+            placeholder_for_type(&item.type_id, item.max_bytes, shapes, enums)
+        }
+        ItemKind::List => {
+            let template = placeholder_for_type(&item.type_id, item.item_max_bytes, shapes, enums)?;
+            Ok(PlaceholderTemplate {
+                value: JsonValue::Array(vec![template.value]),
+                slot: template.slot.map(|child| format!("/0{child}")),
+            })
+        }
+        ItemKind::Group => placeholder_for_items(&item.items, shapes, enums),
+        ItemKind::Record => Err(Error::input("record cannot be a placeholder property")),
+    }
+}
+
+fn placeholder_for_type(
+    type_id: &str,
+    max_bytes: Option<u64>,
+    shapes: &BTreeMap<String, Vec<Item>>,
+    enums: &BTreeMap<&str, Vec<String>>,
+) -> Result<PlaceholderTemplate> {
+    if let Some(values) = enums.get(type_id) {
+        return Ok(PlaceholderTemplate {
+            value: JsonValue::String(
+                values
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| Error::input(format!("empty enum `{type_id}`")))?,
+            ),
+            slot: None,
+        });
+    }
+    if let Some(items) = shapes.get(type_id) {
+        return placeholder_for_items(items, shapes, enums);
+    }
+    let (value, slot) = match type_id {
+        "bool" => (JsonValue::Bool(false), None),
+        "u8" | "u32" | "u64" => (JsonValue::from(0_u64), None),
+        "object" | "json" | "json-value" | "control_observation" => {
+            (JsonValue::Object(JsonMap::new()), None)
+        }
+        _ => {
+            let can_hold_nonce = max_bytes.is_none_or(|max| {
+                max >= (CHILD_CONTROL_PLACEHOLDER_SENTINEL.len() + 64) as u64
+            });
+            (
+                JsonValue::String("x".to_owned()),
+                if can_hold_nonce { Some(String::new()) } else { None },
+            )
+        }
+    };
+    Ok(PlaceholderTemplate { value, slot })
+}
+
+fn placeholder_constant(type_id: &str, value: &str) -> Result<JsonValue> {
+    match type_id {
+        "bool" => value
+            .parse::<bool>()
+            .map(JsonValue::Bool)
+            .map_err(|error| Error::input(format!("invalid placeholder bool constant: {error}"))),
+        "u8" | "u32" | "u64" => value
+            .parse::<u64>()
+            .map(JsonValue::from)
+            .map_err(|error| Error::input(format!("invalid placeholder integer constant: {error}"))),
+        _ => Ok(JsonValue::String(value.to_owned())),
+    }
+}
+
+fn pointer_segment(value: &str) -> String {
+    value.replace('~', "~0").replace('/', "~1")
+}
+
+fn emit_universal_child_tools(
+    out: &mut String,
+    contracts: &Contracts,
+    shapes: &BTreeMap<String, Vec<Item>>,
+    enums: &BTreeMap<&str, Vec<String>>,
+) -> Result<()> {
+    let mut rows = Vec::new();
+    for artifact in &contracts.artifacts {
+        if !artifact.model_produced {
+            continue;
+        }
+        for tool in artifact.submit_tools.iter().filter(|tool| tool.universal) {
+            let schema = json_schema_for_items(&artifact.items, shapes, enums, tool.closed)?;
+            let schema_json = serde_json::to_string_pretty(&schema)
+                .map_err(|error| Error::input(format!("json schema emit failed: {error}")))?;
+            let digest = sha256_hex(json_string(&schema, "universal tool schema digest")?.as_bytes());
+            let const_name = format!("{}_TOOL_PARAMETERS", screaming_name(&artifact.name));
+            let digest_name = format!("{}_TOOL_SCHEMA_DIGEST", screaming_name(&artifact.name));
+            out.push_str(&format!("\nexport const {const_name} = {schema_json} as TSchema;\n"));
+            out.push_str(&format!("export const {digest_name} = \"{digest}\";\n"));
+            rows.push(format!(
+                "  {{ profile_id: \"{}\", name: \"{}\", label: \"{}\", description: \"{}\", boundary_id: \"{}\", result_contract: \"{}\", schema_digest: {digest_name}, parameters: {const_name} }},",
+                escape_ts_string(&tool.profile),
+                escape_ts_string(&tool.name),
+                escape_ts_string(&tool.label),
+                escape_ts_string(tool.description.as_deref().expect("validated universal tool")),
+                escape_ts_string(&artifact.schema),
+                escape_ts_string(&tool.result_contract),
+            ));
+        }
+    }
+    rows.sort();
+    out.push_str("\nexport interface UniversalChildToolDescriptor extends SubmitToolDescriptor {\n  description: string;\n}\n\n");
+    out.push_str(&format!(
+        "export const UNIVERSAL_CHILD_TOOLS: readonly UniversalChildToolDescriptor[] = [\n{}\n] as const;\n",
+        rows.join("\n")
+    ));
+    out.push_str("export const BLOCKED_REPORT_TOOL = UNIVERSAL_CHILD_TOOLS[0]!;\n");
+    Ok(())
 }
 
 pub fn emit_child_extension() -> String {

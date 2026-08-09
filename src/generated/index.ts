@@ -36,16 +36,22 @@ export type Uuidv7 = string;
 export type ValidationScope = string;
 
 export type ActionKind = "launch-background" | "reconcile-background" | "read-failure-log" | "stop-background" | "request-operator" | "return-idle";
+export type AdmissionMode = "receipt_v1" | "replay_v0";
 export type ArchiveEntryClass = "receipt" | "protected-evidence" | "background-reference" | "cleanup-receipt" | "watchdog-receipt" | "plan" | "finalization";
 export type AttemptAttribute = "interrupted" | "checkpointed" | "superseded";
 export type AttestedActionKind = "launch-attested-pi" | "reconcile-attested-pi";
+export type BlockedEvidenceKind = "observation" | "path" | "command" | "reference";
+export type BlockedReasonCode = "missing-authority" | "external-dependency" | "infrastructure" | "unsafe-to-continue";
 export type CandidateState = "queued" | "preparing" | "conflicted" | "resolving" | "focused-checking" | "ready-to-commit" | "committed" | "needs-fix" | "failed" | "superseded";
+export type ChildControlOutcome = "ACCEPT" | "RETRY";
+export type ChildControlRequestKind = "submit" | "blocked";
 export type ClosureVerdict = "PASS" | "NEEDS_FIX" | "BLOCKED";
 export type CommandEffect = "no-effect" | "declared-predictable" | "unknown-generated";
 export type CommandEffectHandling = "none" | "run-isolated" | "exact-cleanup-before-scope-gate" | "block-if-created";
 export type CommandReceiptKind = "final-command" | "full-suite" | "focused";
 export type ContextAnchorForm = "task" | "plan" | "dossier" | "run" | "version-control-lines" | "version-control-whole-file" | "json";
 export type CriterionVerdict = "PASS" | "FAIL" | "BLOCKED";
+export type DeferredHostEffectKind = "ui" | "spawn" | "spawn-wave" | "session" | "log" | "done";
 export type DeliveryBlockerClass = "semantic-repairable" | "requires-new-authority" | "infrastructure" | "unsafe";
 export type DeliveryOutcome = "succeeded" | "blocked";
 export type EvidenceContentKind = "prompt" | "assignment" | "action" | "producer-binding" | "report" | "producer-sidecar" | "acceptance-receipt" | "failure-receipt" | "supersession-receipt" | "transcript" | "envelope-manifest";
@@ -62,6 +68,7 @@ export type PlanUnitKind = "implementation";
 export type PlanningAtomKind = "work" | "decision" | "constraint" | "acceptance" | "premise" | "question" | "reference";
 export type PlanningQuestionClass = "invalidated-decision" | "missing-material-decision" | "material-underdetermination" | "dod-hole" | "unsafe-irreversible";
 export type PlanningReviewVerdict = "pass" | "blocker" | "advisory" | "fail" | "blocked" | "needs-fix";
+export type PreparedTransitionKind = "receipt-consumption";
 export type Producer = "Model" | "Git" | "Operator" | "Filesystem" | "Provider" | "BackgroundTask" | "Package" | "Host";
 export type RecoveryDisposition = "repaired" | "no-defect" | "requires-new-authority" | "infrastructure-blocked" | "unsafe-blocked";
 export type RosterSlot = "control" | "reasoning" | "extraction" | "coding" | "review";
@@ -115,6 +122,71 @@ export interface AgentHandoff {
 
 export interface AgentRunSpec {
   schema: SchemaId;
+  assignment_kind: ValidationAssignmentKind;
+  action_id: Id;
+  assignment_id: Id;
+  run_id: Id;
+  run_revision: number;
+  workstream: Id;
+  role_id: Id;
+  mode: ModeId;
+  provider: string;
+  model: string;
+  thinking: ThinkingLevel;
+  route: string;
+  cwd: Path;
+  allowed_tools: ToolName[];
+  spec_path: Path;
+  prompt_path: Path;
+  prompt_digest: Digest;
+  boundary_id: ContractId;
+  boundary_digest: Digest;
+  result_contract: ContractId;
+  result_contract_digest: Digest;
+  carrier_path: Path;
+  session_id: Id;
+  session_dir: Path;
+  session_continuity: SessionContinuity;
+  settings_digest: Digest;
+  context_digest: Digest;
+  skills_digest: Digest;
+  subscription_digest: Digest;
+  lane_id?: Id | null;
+  attempt?: number | null;
+  base_commit?: Sha | null;
+  worktree?: Path | null;
+  required_focused_evidence?: number | null;
+  authority_set_id?: string | null;
+  authority_documents?: TaskDocument[] | null;
+  context_document?: TaskDocument | null;
+  context_documents?: TaskDocument[] | null;
+  assignment_path?: Path | null;
+  assignment_digest?: Digest | null;
+  context_manifest_path?: Path | null;
+  context_manifest_digest?: Digest | null;
+  runtime_extension_path?: Path | null;
+  runtime_extension_digest?: Digest | null;
+  terminal_profile_id?: string | null;
+  terminal_route?: TerminalRoute | null;
+  unavailable_tools?: ToolName[] | null;
+  producer_assignment_ids?: Id[] | null;
+  validation_id?: Id | null;
+  validation_attempt?: number | null;
+  semantic_round?: number | null;
+  model_submission_path?: Path | null;
+  atom_id_prefix?: string | null;
+  atom_registry_path?: Path | null;
+  atom_registry_digest?: Digest | null;
+  planning_inputs_path?: Path | null;
+  planning_inputs_digest?: Digest | null;
+}
+
+export interface AgentRunSpecV5 {
+  schema: SchemaId;
+  admission_mode: AdmissionMode;
+  child_control_socket_path: Path;
+  child_control_token: string;
+  child_control_token_digest: Digest;
   assignment_kind: ValidationAssignmentKind;
   action_id: Id;
   assignment_id: Id;
@@ -440,6 +512,101 @@ export interface BackgroundCapabilities {
   report_schema?: string;
   attestation_schema?: string;
 }
+
+export interface BlockedLatch {
+  schema: SchemaId;
+  latch_id: Uuidv7;
+  blocked_receipt_id: Uuidv7;
+  run_id: Id;
+  run_revision: number;
+  workstream: Id;
+  reporter_assignment_id: Id;
+  cancellation_set_digest: Digest;
+  cancellations: BlockedCancellationRecord[];
+  latch_sha256: Digest;
+}
+
+export interface BlockedCancellationRecord {
+  task_id: Id;
+  action_id: Id;
+  assignment_id: Id;
+  cancellation_index: number;
+  reporter: boolean;
+}
+
+export interface BlockedReceipt {
+  schema: SchemaId;
+  receipt_id: Uuidv7;
+  run_id: Id;
+  run_revision: number;
+  workstream: Id;
+  action_id: Id;
+  assignment_id: Id;
+  attempt: number;
+  profile_id: string;
+  tool_name: ToolName;
+  request_id: Id;
+  tool_call_id: string;
+  report_digest: Digest;
+  reason_code: BlockedReasonCode;
+  cancellation_set_digest: Digest;
+  receipt_sha256: Digest;
+}
+
+export interface BlockedReport {
+  schema: SchemaId;
+  reason_code: BlockedReasonCode;
+  summary: string;
+  evidence: BlockedEvidence[];
+  last_attempted_action: string;
+}
+
+export interface BlockedEvidence {
+  kind: BlockedEvidenceKind;
+  value: string;
+}
+
+export type ChildControlAcceptReceipt =
+  | {
+    kind: "submit";
+      schema: SchemaId;
+      receipt: SubmitReceipt;
+  }
+  | {
+    kind: "blocked";
+      schema: SchemaId;
+      receipt: BlockedReceipt;
+  }
+;
+
+export interface ChildControlRequest {
+  schema: SchemaId;
+  request_id: Id;
+  token: string;
+  run_id: Id;
+  assignment_id: Id;
+  attempt: number;
+  tool_call_id: string;
+  kind: ChildControlRequestKind;
+  tool_name: ToolName;
+  profile_id: string;
+  raw_payload: unknown;
+}
+
+export type ChildControlResponse =
+  | {
+    outcome: "ACCEPT";
+      schema: SchemaId;
+      request_id: Id;
+      receipt: ChildControlAcceptReceipt;
+  }
+  | {
+    outcome: "RETRY";
+      schema: SchemaId;
+      request_id: Id;
+      diagnostic: SubmitDiagnostic;
+  }
+;
 
 export interface CloseArchiveManifest {
   schema_version: SchemaId;
@@ -921,6 +1088,83 @@ export interface StateCache {
   state_hash: Digest;
 }
 
+export interface SubmitDiagnostic {
+  schema: SchemaId;
+  code: string;
+  error_count: number;
+  errors: SubmitDiagnosticError[];
+}
+
+export interface SubmitDiagnosticError {
+  index: number;
+  code: string;
+  pointer: string;
+  expected: string;
+  actual: SubmitDiagnosticActual;
+  fix: string;
+}
+
+export interface SubmitDiagnosticActual {
+  preview: string;
+  redacted: boolean;
+  truncated: boolean;
+  sha256: Digest;
+  byte_count: number;
+  item_count: number;
+}
+
+export interface SubmitReceipt {
+  schema: SchemaId;
+  receipt_id: Uuidv7;
+  run_id: Id;
+  run_revision: number;
+  workstream: Id;
+  action_id: Id;
+  assignment_id: Id;
+  attempt: number;
+  profile_id: string;
+  tool_name: ToolName;
+  boundary_id: ContractId;
+  result_contract: ContractId;
+  schema_digest: Digest;
+  spec_digest: Digest;
+  carrier_binding_digest: Digest;
+  authority_digest: Digest;
+  frozen_validator_versions: SubmitReceiptValidatorVersion[];
+  raw_payload_digest: Digest;
+  raw_payload_byte_count: number;
+  request_id: Id;
+  tool_call_id: string;
+  carrier_digest: Digest;
+  artifact_digests: SubmitReceiptArtifact[];
+  prepared_transition: SubmitPreparedTransition;
+  receipt_sha256: Digest;
+}
+
+export interface SubmitReceiptValidatorVersion {
+  validator_id: Id;
+  version: string;
+  digest: Digest;
+}
+
+export interface SubmitReceiptArtifact {
+  artifact_id: Id;
+  sha256: Digest;
+  byte_count: number;
+}
+
+export interface SubmitPreparedTransition {
+  transition_id: Id;
+  kind: PreparedTransitionKind;
+  transition_digest: Digest;
+  deferred_host_effect: SubmitDeferredHostEffect;
+}
+
+export interface SubmitDeferredHostEffect {
+  kind: DeferredHostEffectKind;
+  effect_digest: Digest;
+}
+
 export interface TaskAtoms {
   atoms: TaskAtom[];
 }
@@ -1038,6 +1282,30 @@ export interface ValidationAssignmentV3 {
   authority_path: Path;
   authority_digest: Digest;
   max_value_attempts: number;
+}
+
+export interface ValidationAssignmentV4 {
+  schema: SchemaId;
+  admission_mode: AdmissionMode;
+  validation_id: Id;
+  validation_key: Digest;
+  workstream: Id;
+  run_revision: number;
+  role_id: Id;
+  mode: ModeId;
+  assignment_id: Id;
+  action_id: Id;
+  validation_attempt: number;
+  semantic_round: number;
+  producer_assignment_ids: Id[];
+  base_commit: GitOid;
+  exact_commit: GitOid;
+  exact_tree: GitOid;
+  candidate_root: Path;
+  context_path: Path;
+  context_digest: Digest;
+  authority_path: Path;
+  authority_digest: Digest;
 }
 
 export interface ValidationContextV2 {
