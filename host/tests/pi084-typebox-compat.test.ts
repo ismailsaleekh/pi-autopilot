@@ -76,6 +76,30 @@ const validSamples: Record<string, Record<string, unknown>> = {
       links: ["atom-1"],
     }],
   },
+  "planning.work-map.v2": {
+    schema: "planning.work-map.v2",
+    units: [{
+      id: "unit-v2-1",
+      kind: "implementation",
+      objective: "cover the V2 terminal schema",
+      criteria: ["The V2 terminal schema accepts its complete required unit shape."],
+      depends_on: [],
+      files: ["host/tests/pi084-typebox-compat.test.ts"],
+      package_scope_files: [],
+      commands: [{
+        command: "node --experimental-strip-types --test host/tests/pi084-typebox-compat.test.ts",
+        expected: "Pi 0.84 TypeBox compatibility coverage passes.",
+        effect: "no-effect",
+        generated_paths: [],
+        handling: "none",
+        scope_preservation: "The verification command leaves no Git-visible repository state.",
+      }],
+      package_proofs: [],
+      vendor_bindings: [],
+      provenance_manifest_destination: null,
+      links: ["atom-1"],
+    }],
+  },
   "planning.plan-review.v1": {
     verdicts: [{ criterion_id: "c-1", verdict: "pass", finding: "covered" }],
   },
@@ -143,6 +167,7 @@ const emptyArraySamples: Record<string, Record<string, unknown>> = {
   "planning.scout-dossier.v1": { findings: [] },
   "planning.questions.v1": { questions: [] },
   "planning.work-map.v1": { units: [] },
+  "planning.work-map.v2": { schema: "planning.work-map.v2", units: [] },
   "planning.plan-review.v1": { verdicts: [] },
   "autopilot.delivery_submission.v2": {
     actual_changed_paths: [],

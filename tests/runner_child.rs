@@ -12,10 +12,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use drivers::allocation::{ApprovedCriterion, ApprovedUnit};
 use drivers::planning;
 use drivers::runner::{
-    RecoveryDirective, RunnerAssignment, RunnerTransportFacts, ValidationRunnerRequest,
-    VerifiedCommandExecution, approved_command_bindings, child, delivery_issue_with_facts,
-    planning_context_digest, planning_paths, repository_authority_binding, role_runtime,
-    role_tool_names, session_id_for, settings_digest, validation_issue_v3,
+    AcceptedPlanningArtifactBinding, PlanningRunnerRequest, RecoveryDirective, RunnerAssignment,
+    RunnerTaskDocument, RunnerTransportFacts, ValidationRunnerRequest, VerifiedCommandExecution,
+    approved_command_bindings, child, delivery_issue_with_facts, planning_context_digest,
+    planning_paths, repository_authority_binding, role_runtime, role_tool_names, session_id_for,
+    settings_digest, validation_issue_v3,
 };
 use drivers::seam::{self, CoreState};
 use drivers::vcs::GitVcs;
@@ -255,6 +256,7 @@ fn validation_v3_shape_and_value_repairs_are_three_attempt_bounded_and_receipt_r
             result_digest: "2".repeat(64),
             scope_snapshot_digest: "3".repeat(64),
         }],
+        package_authority: drivers::runner::ValidationPackageAuthority::LegacyV3,
     };
     let facts = RunnerTransportFacts::new(
         std::env::current_exe().expect("current exe"),
@@ -629,6 +631,198 @@ fn bug_187_recovery_delivery_child_accepts_package_owned_recovery_identity() {
     assert_eq!(
         attempt_events(&worktree, "recovery-assignment-main-L1-a1"),
         ["started", "accepted"]
+    );
+}
+
+#[test]
+fn bug_187_recovery_child_rejects_ordinary_artifact_identity_before_pi() {
+    let root = temp_root("bug-187-recovery-artifact-ordinary-identity");
+    let worktree = delivery_worktree(&root, "ordinary-artifact");
+    let pi_started = root.join("fake-pi-started");
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            &format!("writeFileSync({pi_started:?}, 'started');"),
+            &format!("emitCarrier({:?});", recovery_blocked_payload()),
+        ),
+    );
+    let recovery_spec = write_recovery_delivery_spec(&root, &worktree);
+    let ordinary_spec =
+        rewrite_recovery_spec_identity(&recovery_spec, "action-main-L1", "assignment-main-L1", 1);
+    let spec: Value = serde_json::from_slice(&fs::read(&ordinary_spec).expect("ordinary spec"))
+        .expect("ordinary spec json");
+    assert_eq!(spec["role_id"], "recovery-engineer");
+    assert_eq!(spec["attempt"], 1);
+    assert_eq!(spec["action_id"], "action-main-L1");
+    assert_eq!(spec["assignment_id"], "assignment-main-L1");
+    let carrier_path = PathBuf::from(spec["carrier_path"].as_str().expect("carrier path"));
+
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), ordinary_spec.display().to_string()])
+    })
+    .expect_err("coherent ordinary identity must fail at the recovery role identity gate");
+    assert_eq!(
+        error,
+        "agent-run delivery action/assignment drift: expected action-recovery-assignment-main-L1-a1/recovery-assignment-main-L1-a1, got action-main-L1/assignment-main-L1"
+    );
+    assert!(!pi_started.exists(), "invalid spec launched fake Pi");
+    assert!(
+        !carrier_path.exists(),
+        "invalid spec wrote a delivery carrier"
+    );
+}
+
+#[test]
+fn bug_187_recovery_child_rejects_attempt_two_before_pi() {
+    let root = temp_root("bug-187-recovery-attempt-two");
+    let worktree = delivery_worktree(&root, "attempt-two");
+    let pi_started = root.join("fake-pi-started");
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            &format!("writeFileSync({pi_started:?}, 'started');"),
+            &format!("emitCarrier({:?});", recovery_blocked_payload()),
+        ),
+    );
+    let spec_path = write_recovery_delivery_spec(&root, &worktree);
+    let attempt_two_spec = rewrite_recovery_spec_identity(
+        &spec_path,
+        "action-recovery-assignment-main-L1-a2",
+        "recovery-assignment-main-L1-a2",
+        2,
+    );
+
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), attempt_two_spec.display().to_string()])
+    })
+    .expect_err("a bounded recovery must reject coherent attempt two before Pi");
+    assert_eq!(
+        error,
+        "recovery delivery attempt 2 exceeds package maximum 1"
+    );
+    assert!(!pi_started.exists(), "attempt two launched fake Pi");
+    assert!(
+        !PathBuf::from(
+            serde_json::from_slice::<Value>(
+                &fs::read(&attempt_two_spec).expect("attempt-two spec")
+            )
+            .expect("attempt-two spec json")["carrier_path"]
+                .as_str()
+                .expect("attempt-two carrier path"),
+        )
+        .exists(),
+        "attempt two wrote a carrier"
+    );
+}
+
+#[test]
+fn bug_187_child_rejects_missing_or_unexpected_recovery_directive_before_pi() {
+    let recovery_root = temp_root("bug-187-recovery-missing-directive");
+    let recovery_worktree = delivery_worktree(&recovery_root, "missing-directive");
+    let recovery_started = recovery_root.join("fake-pi-started");
+    write_fake_pi(
+        &recovery_root,
+        &rpc_fake_pi(
+            &format!("writeFileSync({recovery_started:?}, 'started');"),
+            "process.exit(98);",
+        ),
+    );
+    let recovery_spec = write_recovery_delivery_spec(&recovery_root, &recovery_worktree);
+    rewrite_delivery_artifact(&recovery_spec, |artifact| {
+        artifact["recovery"] = Value::Null;
+    });
+    let missing = with_fake_path(&recovery_root, || {
+        child::main(&["--spec".to_owned(), recovery_spec.display().to_string()])
+    })
+    .expect_err("Recovery Engineer must require its directive");
+    assert_eq!(
+        missing,
+        "recovery delivery assignment is missing its directive"
+    );
+    assert!(
+        !recovery_started.exists(),
+        "missing directive launched fake Pi"
+    );
+
+    let ordinary_root = temp_root("bug-187-ordinary-unexpected-directive");
+    let ordinary_worktree = delivery_worktree(&ordinary_root, "unexpected-directive");
+    let ordinary_started = ordinary_root.join("fake-pi-started");
+    write_fake_pi(
+        &ordinary_root,
+        &rpc_fake_pi(
+            &format!("writeFileSync({ordinary_started:?}, 'started');"),
+            "process.exit(98);",
+        ),
+    );
+    let ordinary_spec = write_delivery_spec(&ordinary_root, &ordinary_worktree, |value| value);
+    rewrite_delivery_artifact(&ordinary_spec, |artifact| {
+        artifact["recovery"] = json!({
+            "schema":"autopilot.recovery_directive.v1",
+            "trigger_phase":"validation",
+            "repair_mode":"forward-critical",
+            "trigger_assignment_id":"validator-assignment-main-L1",
+            "diagnosis_refs":["validation-carrier:main-L1"],
+            "diagnosis_ids":["F-source-defect"],
+            "diagnosis_details":["unexpected recovery authority"],
+            "original_gate":"validator:validator-assignment-main-L1:semantic-round-1",
+            "attempt_budget":1
+        });
+    });
+    let unexpected = with_fake_path(&ordinary_root, || {
+        child::main(&["--spec".to_owned(), ordinary_spec.display().to_string()])
+    })
+    .expect_err("implementer must reject a recovery directive");
+    assert_eq!(
+        unexpected,
+        "non-recovery delivery assignment carries a recovery directive"
+    );
+    assert!(
+        !ordinary_started.exists(),
+        "ordinary assignment with directive launched fake Pi"
+    );
+    rewrite_delivery_spec_role(&ordinary_spec, "fixer-integrator", "forward-critical");
+    let fixer = with_fake_path(&ordinary_root, || {
+        child::main(&["--spec".to_owned(), ordinary_spec.display().to_string()])
+    })
+    .expect_err("fixer-integrator must reject a recovery directive");
+    assert_eq!(
+        fixer,
+        "non-recovery delivery assignment carries a recovery directive"
+    );
+    assert!(
+        !ordinary_started.exists(),
+        "fixer-integrator assignment with directive launched fake Pi"
+    );
+}
+
+#[test]
+fn bug_187_unknown_delivery_role_is_rejected_by_identity_authority() {
+    let assignment = RunnerAssignment {
+        workstream: Id("main".to_owned()),
+        action_id: Id("action-main-L1".to_owned()),
+        assignment_id: Id("assignment-main-L1".to_owned()),
+        role_id: Id("unknown-delivery-role".to_owned()),
+        mode: ModeId("lane-delivery".to_owned()),
+        run_revision: 1,
+        lane_id: Id("L1".to_owned()),
+        attempt: 1,
+        base_commit: Sha("base".to_owned()),
+        worktree: PathBuf::from("/nonexistent/bug-187-identity"),
+        session_file: PathBuf::from("/nonexistent/bug-187-session.json"),
+        roster_assignment: "package-roster/unknown".to_owned(),
+        approved_units: Vec::new(),
+        recovery: None,
+    };
+    let facts = RunnerTransportFacts::new(
+        std::env::current_exe().expect("current executable"),
+        std::env::current_exe().expect("current executable"),
+    )
+    .expect("transport facts");
+    let error = delivery_issue_with_facts(&assignment, &facts)
+        .expect_err("unknown delivery role must not inherit ordinary identity");
+    assert_eq!(
+        error.to_string(),
+        "runner spec refused: delivery identity rejects unsupported role: unknown-delivery-role"
     );
 }
 
@@ -1737,6 +1931,169 @@ fn work_map_value_repair_repeats_authority_and_atom_manifest_for_non_link_error(
 }
 
 #[test]
+fn work_map_v2_issued_compiler_synthesizer_and_recovery_specs_reach_fake_pi() {
+    let _cwd_guard = CWD_LOCK.lock().expect("cwd lock");
+    for role in ["plan-compiler", "plan-synthesizer", "recovery-engineer"] {
+        let root = temp_root(&format!("runner-workmap-v2-{role}"));
+        let pi_started = root.join("fake-pi-started");
+        let accepted = work_map_v2_payload("planning.work-map.v2");
+        write_fake_pi(
+            &root,
+            &rpc_fake_pi(
+                &format!("writeFileSync({pi_started:?}, 'started');"),
+                &format!("emitCarrier({accepted:?});"),
+            ),
+        );
+        let spec = issue_work_map_v2_spec(&root, role);
+        let issued: Value =
+            serde_json::from_slice(&fs::read(&spec).expect("issued V2 spec")).expect("V2 spec");
+        assert_eq!(issued["boundary_id"], "planning.work-map.v2");
+        assert!(issued["terminal_route"].is_object(), "{role} route");
+        assert_eq!(issued["terminal_route"]["version"], "v2");
+        assert!(
+            issued.get("atom_id_prefix").is_none(),
+            "{role} has no prefix"
+        );
+        assert!(
+            issued["atom_registry_path"].is_string(),
+            "{role} registry path"
+        );
+        assert!(
+            issued["atom_registry_digest"].is_string(),
+            "{role} registry digest"
+        );
+
+        with_fake_path(&root, || {
+            child::main(&["--spec".to_owned(), spec.display().to_string()])
+        })
+        .unwrap_or_else(|error| panic!("issued V2 {role} must reach fake Pi: {error}"));
+        assert!(
+            pi_started.exists(),
+            "issued V2 {role} did not launch fake Pi"
+        );
+    }
+}
+
+#[test]
+fn work_map_v2_value_repair_repeats_exact_v2_authority_and_atom_manifest() {
+    let _cwd_guard = CWD_LOCK.lock().expect("cwd lock");
+    let root = temp_root("runner-workmap-v2-repair-authority");
+    let prompt_log = terminalmiss_prompt_log(&root);
+    let bad = json!({"schema":"planning.work-map.v2","units":[],"unexpected":true}).to_string();
+    let accepted = work_map_v2_payload("planning.work-map.v2");
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            &format!("const repairPromptLog = {prompt_log:?};"),
+            &format!(
+                "appendFileSync(repairPromptLog, JSON.stringify({{count:promptCount,message:cmd.message}})+'\\n'); emitCarrier(promptCount === 1 ? {bad:?} : {accepted:?});"
+            ),
+        ),
+    );
+    let spec = issue_work_map_v2_spec(&root, "plan-compiler");
+    let issued: Value =
+        serde_json::from_slice(&fs::read(&spec).expect("issued V2 spec")).expect("V2 spec");
+    let registry_path = PathBuf::from(
+        issued["atom_registry_path"]
+            .as_str()
+            .expect("registry path"),
+    );
+    let registry_digest = issued["atom_registry_digest"]
+        .as_str()
+        .expect("registry digest");
+    let authority = drivers::contract_authority::render_contract_authority("planning.work-map.v2")
+        .expect("V2 work-map authority");
+    let manifest = planning::atom_link_manifest_for_boundary(
+        &registry_path,
+        registry_digest,
+        "planning.work-map.v2",
+    )
+    .expect("V2 atom manifest");
+
+    with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect("V2 value repair must continue in the same fake Pi session");
+
+    let rows = terminalmiss_prompt_rows(&root);
+    assert_eq!(rows.len(), 2, "initial and repaired V2 prompts");
+    let initial = rows[0]["message"].as_str().expect("initial V2 prompt");
+    let repair = rows[1]["message"].as_str().expect("repair V2 prompt");
+    assert!(
+        repair.contains(&authority),
+        "repair lost V2 authority: {repair}"
+    );
+    assert!(
+        repair.contains(&manifest),
+        "repair lost V2 manifest: {repair}"
+    );
+    assert!(
+        !repair.contains("Package-generated admission authority for planning.work-map.v1")
+            && !repair
+                .contains("Package-authoritative atom-link manifest for planning.work-map.v1"),
+        "repair selected V1 authority: {repair}"
+    );
+    assert_eq!(
+        extract_work_map_authority_and_manifest_for_boundary(initial, "planning.work-map.v2"),
+        extract_work_map_authority_and_manifest_for_boundary(repair, "planning.work-map.v2"),
+        "same-session V2 value repair must repeat the exact generated authority"
+    );
+}
+
+#[test]
+fn work_map_v2_missing_or_drifted_registry_fails_before_fake_pi() {
+    let _cwd_guard = CWD_LOCK.lock().expect("cwd lock");
+    for (label, mutate) in [
+        (
+            "missing-path",
+            Box::new(|value: &mut Value| {
+                value
+                    .as_object_mut()
+                    .expect("V2 spec object")
+                    .remove("atom_registry_path");
+            }) as Box<dyn Fn(&mut Value)>,
+        ),
+        (
+            "digest-drift",
+            Box::new(|value: &mut Value| {
+                value["atom_registry_digest"] = json!("0".repeat(64));
+            }) as Box<dyn Fn(&mut Value)>,
+        ),
+    ] {
+        let root = temp_root(&format!("runner-workmap-v2-registry-{label}"));
+        let pi_started = root.join("fake-pi-started");
+        write_fake_pi(
+            &root,
+            &rpc_fake_pi(
+                &format!("writeFileSync({pi_started:?}, 'started');"),
+                "process.exit(66);",
+            ),
+        );
+        let spec = issue_work_map_v2_spec(&root, "plan-compiler");
+        let mut value: Value =
+            serde_json::from_slice(&fs::read(&spec).expect("issued V2 spec")).expect("V2 spec");
+        mutate(&mut value);
+        fs::write(
+            &spec,
+            serde_json::to_vec_pretty(&value).expect("mutated V2 spec"),
+        )
+        .expect("write mutated V2 spec");
+
+        let error = with_fake_path(&root, || {
+            child::main(&["--spec".to_owned(), spec.display().to_string()])
+        })
+        .expect_err("{label} V2 registry must fail before fake Pi");
+        assert!(
+            error.contains("atom registry")
+                || error.contains("atom_registry")
+                || error.contains("authority binding"),
+            "{label}: {error}"
+        );
+        assert!(!pi_started.exists(), "{label} V2 registry launched fake Pi");
+    }
+}
+
+#[test]
 fn work_map_registry_drift_blocks_repair_prompt_reconstruction() {
     let root = temp_root("runner-workmap-repair-registry-drift");
     let prompt_log = terminalmiss_prompt_log(&root);
@@ -2623,6 +2980,183 @@ fn write_delivery_spec(root: &Path, worktree: &Path, mutate: impl Fn(Value) -> V
     spec_path
 }
 
+fn rewrite_delivery_artifact(spec_path: &Path, mutate: impl FnOnce(&mut Value)) {
+    let mut spec: Value = serde_json::from_slice(&fs::read(spec_path).expect("delivery spec"))
+        .expect("delivery spec json");
+    let assignment_path = PathBuf::from(
+        spec["assignment_path"]
+            .as_str()
+            .expect("delivery assignment path"),
+    );
+    let mut artifact: Value =
+        serde_json::from_slice(&fs::read(&assignment_path).expect("delivery assignment artifact"))
+            .expect("delivery assignment artifact json");
+    mutate(&mut artifact);
+    let artifact_bytes =
+        serde_json::to_vec_pretty(&artifact).expect("rewritten assignment artifact");
+    fs::write(&assignment_path, &artifact_bytes).expect("rewrite delivery assignment artifact");
+    spec["assignment_digest"] = json!(sha256_hex(&artifact_bytes));
+    refresh_delivery_spec_context_digest(&mut spec);
+    fs::write(
+        spec_path,
+        serde_json::to_vec_pretty(&spec).expect("rewritten delivery spec"),
+    )
+    .expect("rewrite delivery spec");
+}
+
+fn refresh_delivery_spec_context_digest(spec: &mut Value) {
+    let context = json!({
+        "workstream": spec["workstream"],
+        "lane_id": spec["lane_id"],
+        "attempt": spec["attempt"],
+        "base_commit": spec["base_commit"],
+        "worktree": spec["worktree"],
+        "required_focused_evidence": spec["required_focused_evidence"],
+        "assignment_path": spec["assignment_path"],
+        "assignment_digest": spec["assignment_digest"],
+    });
+    spec["context_digest"] = json!(sha256_hex(
+        &serde_json::to_vec(&context).expect("delivery context bytes"),
+    ));
+}
+
+fn rewrite_delivery_spec_role(spec_path: &Path, role_id: &str, mode: &str) {
+    let mut spec: Value = serde_json::from_slice(&fs::read(spec_path).expect("delivery spec"))
+        .expect("delivery spec json");
+    spec["role_id"] = json!(role_id);
+    spec["mode"] = json!(mode);
+    let session_id = session_id_for(
+        &Id(spec["run_id"].as_str().expect("run id").to_owned()),
+        &Id(spec["workstream"].as_str().expect("workstream").to_owned()),
+        &Id(spec["assignment_id"]
+            .as_str()
+            .expect("assignment id")
+            .to_owned()),
+        &Id(role_id.to_owned()),
+        &ModeId(mode.to_owned()),
+        &ContractId(spec["boundary_id"].as_str().expect("boundary").to_owned()),
+    );
+    spec["session_id"] = json!(session_id.0);
+    fs::write(
+        spec_path,
+        serde_json::to_vec_pretty(&spec).expect("rewritten role spec"),
+    )
+    .expect("rewrite delivery role spec");
+}
+
+fn rewrite_recovery_spec_identity(
+    spec_path: &Path,
+    action_id: &str,
+    assignment_id: &str,
+    attempt: u32,
+) -> PathBuf {
+    let mut spec: Value = serde_json::from_slice(&fs::read(spec_path).expect("recovery spec"))
+        .expect("recovery spec json");
+    let old_action_id = spec["action_id"]
+        .as_str()
+        .expect("recovery action id")
+        .to_owned();
+    let old_assignment_id = spec["assignment_id"]
+        .as_str()
+        .expect("recovery assignment id")
+        .to_owned();
+    let assignment_path = PathBuf::from(
+        spec["assignment_path"]
+            .as_str()
+            .expect("recovery assignment path"),
+    );
+    let prompt_path = PathBuf::from(spec["prompt_path"].as_str().expect("recovery prompt path"));
+    let carrier_path = PathBuf::from(
+        spec["carrier_path"]
+            .as_str()
+            .expect("recovery carrier path"),
+    );
+    let rewritten_assignment_path =
+        rewrite_identity_path(&assignment_path, &old_assignment_id, assignment_id);
+    let rewritten_prompt_path =
+        rewrite_identity_path(&prompt_path, &old_assignment_id, assignment_id);
+    let rewritten_carrier_path =
+        rewrite_identity_path(&carrier_path, &old_assignment_id, assignment_id);
+    let rewritten_spec_path = rewrite_identity_path(spec_path, &old_assignment_id, assignment_id);
+    let mut artifact: Value =
+        serde_json::from_slice(&fs::read(&assignment_path).expect("recovery assignment artifact"))
+            .expect("recovery assignment artifact json");
+    assert_eq!(spec["role_id"], "recovery-engineer");
+    assert!(
+        artifact["recovery"].is_object(),
+        "recovery directive is present"
+    );
+    let old_artifact = serde_json::to_string_pretty(&artifact).expect("old assignment artifact");
+    let old_assignment_digest = spec["assignment_digest"]
+        .as_str()
+        .expect("old assignment digest")
+        .to_owned();
+    artifact["assignment_id"] = json!(assignment_id);
+    artifact["attempt"] = json!(attempt);
+    let artifact_bytes =
+        serde_json::to_vec_pretty(&artifact).expect("rewritten assignment artifact");
+    let assignment_digest = sha256_hex(&artifact_bytes);
+    let new_artifact = serde_json::to_string_pretty(&artifact).expect("new assignment artifact");
+    let prompt = fs::read_to_string(&prompt_path)
+        .expect("read recovery prompt")
+        .replace(&old_artifact, &new_artifact)
+        .replace(&old_action_id, action_id)
+        .replace(&old_assignment_id, assignment_id)
+        .replace(&old_assignment_digest, &assignment_digest);
+    assert!(
+        !prompt.contains(&old_action_id),
+        "stale prompt action identity"
+    );
+    assert!(
+        !prompt.contains(&old_assignment_id),
+        "stale prompt assignment identity"
+    );
+    fs::write(&rewritten_assignment_path, &artifact_bytes).expect("write rewritten assignment");
+    fs::write(&rewritten_prompt_path, &prompt).expect("write rewritten prompt");
+    fs::remove_file(&assignment_path).expect("remove stale assignment");
+    fs::remove_file(&prompt_path).expect("remove stale prompt");
+
+    spec["action_id"] = json!(action_id);
+    spec["assignment_id"] = json!(assignment_id);
+    spec["attempt"] = json!(attempt);
+    spec["assignment_path"] = json!(rewritten_assignment_path);
+    spec["assignment_digest"] = json!(assignment_digest);
+    spec["prompt_path"] = json!(rewritten_prompt_path);
+    spec["prompt_digest"] = json!(sha256_hex(prompt.as_bytes()));
+    spec["carrier_path"] = json!(rewritten_carrier_path);
+    spec["spec_path"] = json!(rewritten_spec_path);
+    let session_id = session_id_for(
+        &Id(spec["run_id"].as_str().expect("run id").to_owned()),
+        &Id(spec["workstream"].as_str().expect("workstream").to_owned()),
+        &Id(assignment_id.to_owned()),
+        &Id(spec["role_id"].as_str().expect("role id").to_owned()),
+        &ModeId(spec["mode"].as_str().expect("mode").to_owned()),
+        &ContractId(spec["boundary_id"].as_str().expect("boundary").to_owned()),
+    );
+    spec["session_id"] = json!(session_id.0);
+    refresh_delivery_spec_context_digest(&mut spec);
+    fs::write(
+        &rewritten_spec_path,
+        serde_json::to_vec_pretty(&spec).expect("rewritten spec bytes"),
+    )
+    .expect("write rewritten spec");
+    fs::remove_file(spec_path).expect("remove stale spec");
+    assert!(!assignment_path.exists(), "stale assignment remains");
+    assert!(!prompt_path.exists(), "stale prompt remains");
+    assert!(!spec_path.exists(), "stale spec remains");
+    assert!(!carrier_path.exists(), "stale carrier remains");
+    rewritten_spec_path
+}
+
+fn rewrite_identity_path(path: &Path, old_assignment_id: &str, assignment_id: &str) -> PathBuf {
+    let path = path.to_string_lossy();
+    assert!(
+        path.contains(old_assignment_id),
+        "identity path contains old assignment"
+    );
+    PathBuf::from(path.replace(old_assignment_id, assignment_id))
+}
+
 fn write_recovery_delivery_spec(root: &Path, worktree: &Path) -> PathBuf {
     let base_commit = Sha(
         git_stdout(worktree, &["rev-parse", "--verify", "HEAD^{commit}"])
@@ -2981,6 +3515,140 @@ fn write_work_map_spec_with_prompt(
     paths.spec_path
 }
 
+fn issue_work_map_v2_spec(root: &Path, role: &str) -> PathBuf {
+    let (registry_path, registry_digest) = write_work_map_atom_registry(root, &["TE01-001"]);
+    let assignments =
+        planning::planning_assignments_for_workstream("main").expect("V2 planning declarations");
+    let assignment = assignments
+        .iter()
+        .find(|assignment| assignment.role == role)
+        .expect("declared V2 role");
+    assert_eq!(
+        assignment.boundary_id.as_deref(),
+        Some("planning.work-map.v2"),
+        "test requires an issued V2 role"
+    );
+    let task_atoms = assignments
+        .iter()
+        .find(|assignment| assignment.role == "task-extractor")
+        .expect("task atom declaration");
+    let scout = assignments
+        .iter()
+        .find(|assignment| assignment.role == "repository-scout")
+        .expect("scout declaration");
+    let compiler = assignments
+        .iter()
+        .find(|assignment| assignment.role == "plan-compiler")
+        .expect("compiler declaration");
+    let synthesizer = assignments
+        .iter()
+        .find(|assignment| assignment.role == "plan-synthesizer")
+        .expect("synthesizer declaration");
+    let reviewer = assignments
+        .iter()
+        .find(|assignment| assignment.role == "plan-reviewer")
+        .expect("review declaration");
+    let task_atoms = issued_planning_artifact(root, "task-atoms", task_atoms);
+    let scout = issued_planning_artifact(root, "scout-findings", scout);
+    let compiler = issued_planning_artifact(root, "compiler-work-maps", compiler);
+    let synthesizer = issued_planning_artifact(root, "synthesized-work-map", synthesizer);
+    let reviewer = issued_planning_artifact(root, "review-verdicts", reviewer);
+    let accepted_planning_artifacts = match role {
+        "plan-compiler" => vec![task_atoms, scout],
+        "plan-synthesizer" => vec![compiler, task_atoms, scout],
+        "recovery-engineer" => vec![synthesizer, reviewer, compiler, task_atoms, scout],
+        _ => panic!("unsupported V2 work-map role {role}"),
+    };
+    let authority_body = "issued V2 work-map authority";
+    let context_body = "issued V2 work-map context";
+    let authority = RunnerTaskDocument::new(
+        "AUTHORITY.md".to_owned(),
+        "authority".to_owned(),
+        task_document_digest("authority", "v2-set", authority_body),
+        authority_body.to_owned(),
+    );
+    let context = RunnerTaskDocument::new(
+        "CONTEXT.md".to_owned(),
+        "context/non-authority".to_owned(),
+        task_document_digest("context/non-authority", "v2-set", context_body),
+        context_body.to_owned(),
+    );
+    let request = PlanningRunnerRequest {
+        workstream: "main".to_owned(),
+        action_id: Id(format!("action-{}", assignment.assignment_id)),
+        assignment_id: Id(assignment.assignment_id.clone()),
+        role_id: Id(assignment.role.clone()),
+        mode: ModeId(assignment.mode.clone()),
+        boundary_id: ContractId(
+            assignment
+                .boundary_id
+                .clone()
+                .expect("V2 role boundary declaration"),
+        ),
+        run_revision: 1,
+        authority_set_id: "v2-set".to_owned(),
+        authority_documents: vec![authority],
+        context_document: context.clone(),
+        context_documents: vec![context],
+        mode_parameter: None,
+        atom_id_prefix: None,
+        atom_registry_path: Some(registry_path.display().to_string()),
+        atom_registry_digest: Some(registry_digest),
+        terminal_route: assignment.terminal_route.clone(),
+        accepted_planning_artifacts,
+    };
+    let current_exe = std::env::current_exe().expect("test executable");
+    let previous = std::env::current_dir().expect("current directory");
+    std::env::set_current_dir(root).expect("V2 issue cwd");
+    let issue = with_env(
+        "AUTOPILOT_NODE_EXECUTABLE",
+        current_exe.to_str().expect("test executable UTF-8"),
+        || {
+            with_env(
+                "AUTOPILOT_AGENT_RUNNER_WRAPPER",
+                current_exe.to_str().expect("test executable UTF-8"),
+                || {
+                    with_env(
+                        "AUTOPILOT_CHILD_ADDON_PATH",
+                        child_addon_path().to_str().expect("child addon UTF-8"),
+                        || drivers::runner::planning_issue(&request),
+                    )
+                },
+            )
+        },
+    )
+    .expect("issue V2 work-map spec");
+    std::env::set_current_dir(previous).expect("restore issue cwd");
+    PathBuf::from(issue.binding.spec_path)
+}
+
+fn issued_planning_artifact(
+    root: &Path,
+    category_id: &str,
+    assignment: &planning::PlanningAgentAssignment,
+) -> AcceptedPlanningArtifactBinding {
+    let path = root
+        .join(".pi/autopilot/main/planning/issued-artifacts")
+        .join(format!("{category_id}-{}.json", assignment.assignment_id));
+    fs::create_dir_all(path.parent().expect("issued artifact parent")).expect("artifact parent");
+    let bytes = format!("issued planning artifact {category_id}\n").into_bytes();
+    fs::write(&path, &bytes).expect("issued artifact");
+    AcceptedPlanningArtifactBinding {
+        category_id: category_id.to_owned(),
+        assignment_id: Id(assignment.assignment_id.clone()),
+        role_id: Id(assignment.role.clone()),
+        boundary_id: ContractId(
+            assignment
+                .boundary_id
+                .clone()
+                .expect("planning artifact boundary"),
+        ),
+        terminal_route: assignment.terminal_route.clone(),
+        path: path.display().to_string(),
+        digest: sha256_hex(&bytes),
+    }
+}
+
 fn write_work_map_atom_registry(root: &Path, ids: &[&str]) -> (PathBuf, String) {
     let path = root.join(".pi/autopilot/main/planning/atom-registry.json");
     fs::create_dir_all(path.parent().expect("registry parent")).expect("registry dir");
@@ -3018,6 +3686,10 @@ fn work_map_carrier_path(root: &Path) -> PathBuf {
     .carrier_path
 }
 
+fn work_map_v2_payload(schema: &str) -> String {
+    json!({"schema":schema,"units":[]}).to_string()
+}
+
 fn work_map_payload(
     effect: &str,
     generated_paths: Vec<&str>,
@@ -3028,8 +3700,14 @@ fn work_map_payload(
 }
 
 fn extract_work_map_authority_and_manifest(prompt: &str) -> String {
+    extract_work_map_authority_and_manifest_for_boundary(prompt, "planning.work-map.v1")
+}
+
+fn extract_work_map_authority_and_manifest_for_boundary(prompt: &str, boundary: &str) -> String {
     let start = prompt
-        .find("Package-generated admission authority for planning.work-map.v1")
+        .find(&format!(
+            "Package-generated admission authority for {boundary}"
+        ))
         .expect("work-map authority start");
     let tail = &prompt[start..];
     let end = tail.find("\n\n## ").unwrap_or(tail.len());
@@ -3133,6 +3811,7 @@ import {{ createHash }} from 'node:crypto';
 import {{ spawn }} from 'node:child_process';
 import {{ appendFileSync, readFileSync, writeFileSync }} from 'node:fs';
 import {{ dirname, resolve }} from 'node:path';
+if (process.argv[2] === '--version') {{ console.log('fake-pi-v2'); process.exit(0); }}
 let promptCount = 0;
 let readToolCount = 0;
 let contextPercent = 10;
@@ -3696,6 +4375,7 @@ fn terminalmiss_planning_manifest() -> drivers::planning::PlanningManifest {
                 role: "task-extractor".to_owned(),
                 mode: "inventory".to_owned(),
                 boundary_id: Some("planning.task-atoms.v1".to_owned()),
+                terminal_route: None,
                 ordinal,
                 atom_id_prefix: None,
             })

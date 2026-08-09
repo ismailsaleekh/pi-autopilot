@@ -94,23 +94,14 @@ readonly -a BANNED_DECISION=(
 #
 # '.startsWith(' — prefix tests are doctrinally interesting because prefix
 # authority ("this path starts with the worktree, therefore it is allowed") is a
-# classic confinement bypass. All four occurrences here are the SAFE direction:
-#   * one selects planning boundary ids for tool registration (not a path);
-#   * three are the canonical `path.relative(...)` escape test, `relative
-#     .startsWith("..")`, which REJECTS on match rather than granting on match.
-# No occurrence tests a path against the worktree prefix to grant access; that
-# authority comes from exact membership in policy.allowedAbsolutePaths.
-#
-# Raised 3 -> 4 when the mkdir/ENOENT confinement fix was integrated: the fourth
-# is ancestorDirectoryChain()'s `parentRelative.startsWith("..")`, the same
-# reject-on-match escape test applied to an approved file's parent chain. Verified
-# by the orchestrator: `grep -cE '\.startsWith\(\s*(policy\.)?worktree|\.startsWith\(\s*root'`
-# returns 0, i.e. no grant-direction prefix test exists in this file.
-# Pinned at exactly 4 so a fifth — or a grant-direction rewrite of these — trips
-# the gate. The pin fails in BOTH directions: a drop to 3 means this written
-# rationale has gone stale and must be re-reviewed.
+# classic confinement bypass. The three occurrences are all the SAFE canonical
+# `path.relative(...)` escape test, `relative.startsWith("..")`, which rejects
+# on match rather than granting access. The obsolete parent bulk terminal
+# registration was deleted, so it no longer contributes a planning-name prefix
+# exception. No occurrence tests a path against the worktree prefix to grant
+# access; authority comes from exact membership in policy.allowedAbsolutePaths.
 readonly -a BANNED_EXCEPTIONS=(
-  $'.startsWith(\t4'
+  $'.startsWith(\t3'
 )
 
 usage() {

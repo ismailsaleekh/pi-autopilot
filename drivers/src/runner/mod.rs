@@ -11,28 +11,58 @@ use kernel::generated::{
     ActionKind, AgentRunSpec, AuthorityClass, BackgroundAction, BackgroundActionBgRun, Bytes,
     ContextAnchor, ContextAnchorForm, ContextGap, ContextItem, ContextManifest, ContractId,
     DeliveryResult, Digest, Id, ModeId, Path as ContractPath, RedactionState, Ref, Sha,
-    SupersessionState, TaskDocument as ContractTaskDocument, TaskDocumentClass, ToolName, Uri,
-    ValidationAssignmentKind,
+    SupersessionState, TaskDocument as ContractTaskDocument, TaskDocumentClass, TerminalRoute,
+    ToolName, Uri, ValidationAssignmentKind,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as ShaDigest, Sha256};
 
-use crate::allocation::ApprovedUnit;
+use crate::allocation::{ApprovedUnit, ApprovedUnitVendoringV2};
 use crate::evidence::EvidenceIdentity;
 use crate::roles::kdl::{blocks, boundary_runtime, one, values};
 use crate::roster::{self, Roster};
 use crate::vcs::GitVcs;
 
 pub mod child;
+#[cfg(unix)]
+pub mod materializer_v4;
+#[cfg(unix)]
+mod package_proof_v2;
+#[cfg(unix)]
+pub(crate) use package_proof_v2::{
+    CORE_V2_PACKAGE_PROOF_RECEIPT_V1_SCHEMA, CoreV2PackageProofReceiptV1,
+    evaluate_rooted_v4_package_proofs, validate_receipt_shape_and_subject_digest,
+    verify_receipt_against_validation_authority,
+};
+pub mod repository_authority;
 pub mod rpc;
-pub(crate) mod validation_authority;
+#[cfg(unix)]
+pub use materializer_v4::{
+    CORE_MATERIALIZATION_INTENTION_V1_SCHEMA, CORE_MATERIALIZATION_RECEIPT_V1_SCHEMA,
+    CoreBaselineLeafV1, CoreMaterializationBindingV1, CoreMaterializationIntentionV1,
+    CoreMaterializationReceiptV1, CoreMaterializationRequestV4, DELIVERY_ASSIGNMENT_V4_SCHEMA,
+    DeliveryAssignmentArtifactV4,
+};
+pub(crate) use repository_authority::path_uri_component;
+pub use repository_authority::{
+    RepositoryAuthority, RepositoryAuthorityBinding, RepositoryPinnedSourceBlob,
+    RepositoryTrackedSource, read_pinned_repository_source_blob, read_repository_authority_binding,
+    repository_authority, repository_authority_binding,
+};
+pub(crate) use repository_authority::{
+    read_pinned_repository_source_blobs_from_verified, repository_authority_run_root,
+};
+
+pub mod validation_authority;
 
 const ROLES_KDL: &str = include_str!("../../../data/roles.kdl");
 const KNOWN_INCOMPLETE_TOOLS_KDL: &str = include_str!("../../../data/known-incomplete-tools.kdl");
 const DEFAULT_BG_TIMEOUT_SECONDS: u32 = 3600;
 const DEFAULT_REQUIRED_FOCUSED_EVIDENCE: u32 = 2;
 const PLANNING_CONTEXT_WINDOW_TOKENS: u32 = 200_000;
+/// Historical V3 assignment policy.  Do not use this as a global default.
 pub const DELIVERY_POLICY_VERSION: &str = "autopilot.delivery_tool_policy.v4";
+pub const DELIVERY_POLICY_V5_VERSION: &str = "autopilot.delivery_tool_policy.v5";
 pub const APPROVED_COMMAND_TOOL: &str = "autopilot_run_approved_command";
 pub const MAX_DELIVERY_HARD_BOUNDARY_VIOLATIONS: usize = 16;
 pub const MAX_SCOPE_SNAPSHOT_FILE_BYTES: u64 = 64 * 1024 * 1024;
@@ -45,6 +75,13 @@ pub const DELIVERY_ASSIGNMENT_MAX_BYTES: usize = 256 * 1024;
 pub const CHILD_ADDON_MAX_BYTES: usize = 1024 * 1024;
 /// Maximum bytes for the package-owned planning repository authority manifest.
 pub const REPOSITORY_AUTHORITY_MANIFEST_MAX_BYTES: usize = 2 * 1024 * 1024;
+/// One immutable source object may contain at most 2 MiB before Core hashes
+/// or validates it. Repository enrichment and Validator V3 share this exact
+/// authority ceiling.
+pub const MAX_AUTHORITY_SOURCE_BYTES: usize = 2 * 1024 * 1024;
+/// Core never retains more than this many raw source bytes across V2 bindings.
+pub const MAX_VENDORED_SOURCE_BYTES: usize = 64 * 1024 * 1024;
+const REPOSITORY_AUTHORITY_IDENTITY_MAX_STDOUT_BYTES: usize = 16 * 1024;
 const REPOSITORY_AUTHORITY_STATUS_MAX_STDOUT_BYTES: usize = REPOSITORY_AUTHORITY_MANIFEST_MAX_BYTES;
 const REPOSITORY_AUTHORITY_LS_TREE_MAX_STDOUT_BYTES: usize =
     REPOSITORY_AUTHORITY_MANIFEST_MAX_BYTES;
@@ -53,8 +90,25 @@ const REPOSITORY_AUTHORITY_LS_TREE_MAX_PATH_BYTES: usize = 4 * 1024;
 const REPOSITORY_AUTHORITY_MAX_TRACKED_SOURCES: usize = 20_000;
 const PACKAGE_GIT_STDOUT_MAX_BYTES: usize = 64 * 1024 * 1024;
 const PACKAGE_GIT_STDERR_MAX_BYTES: usize = 1024 * 1024;
+/// This is the complete Git environment Core deliberately grants repository
+/// and Validator V3 authority reads. Every other inherited `GIT_*` selector
+/// is removed dynamically before these values are installed.
+const AUTHORITY_GIT_ENVIRONMENT: &[(&str, &str)] = &[
+    ("GIT_NO_REPLACE_OBJECTS", "1"),
+    ("GIT_TERMINAL_PROMPT", "0"),
+    ("GIT_OPTIONAL_LOCKS", "0"),
+    ("GIT_CONFIG_NOSYSTEM", "1"),
+    ("GIT_ATTR_NOSYSTEM", "1"),
+    // `/dev/null` is the deterministic empty global configuration on every
+    // supported authority target.
+    #[cfg(unix)]
+    ("GIT_CONFIG_GLOBAL", "/dev/null"),
+    ("GIT_CONFIG_COUNT", "0"),
+    ("GIT_LITERAL_PATHSPECS", "1"),
+];
 const SKILLS_IDENTITY: &str = "agent-run-skills:disabled:v1";
 pub const ISSUED_BINDING_REF_PREFIX: &str = "runner-binding:";
+type AnyError = Box<dyn std::error::Error>;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct RunnerTransportFacts {
@@ -140,7 +194,7 @@ impl RunnerTaskDocument {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PlanningRunnerRequest {
     pub workstream: String,
     pub action_id: Id,
@@ -157,17 +211,34 @@ pub struct PlanningRunnerRequest {
     pub atom_id_prefix: Option<String>,
     pub atom_registry_path: Option<String>,
     pub atom_registry_digest: Option<String>,
+    /// Exact route copied from the planning declaration/manifest. V2 is
+    /// mandatory and compared with one generated terminal descriptor row.
+    pub terminal_route: Option<TerminalRoute>,
     pub accepted_planning_artifacts: Vec<AcceptedPlanningArtifactBinding>,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AcceptedPlanningArtifactBinding {
     pub category_id: String,
     pub assignment_id: Id,
     pub role_id: Id,
     pub boundary_id: ContractId,
+    /// Persist the originating descriptor tuple; V2 consumers must not infer
+    /// it from a public tool name or a payload shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_route: Option<TerminalRoute>,
     pub path: String,
     pub digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ValidationPackageAuthority {
+    /// The byte-compatible V3 package-check receipt path.
+    LegacyV3,
+    /// A digest-bound V4 delivery assignment.  This is explicit authority, not
+    /// a shape-based upgrade or an optional hint.
+    #[cfg(unix)]
+    RootedV4(Box<DeliveryAssignmentArtifactV4>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -193,6 +264,7 @@ pub struct ValidationRunnerRequest {
     pub approved_units: Vec<ApprovedUnit>,
     pub producer_assignment_digest: String,
     pub approved_command_executions: Vec<VerifiedCommandExecution>,
+    pub package_authority: ValidationPackageAuthority,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -211,6 +283,32 @@ pub struct RunnerAssignment {
     pub roster_assignment: String,
     pub approved_units: Vec<ApprovedUnit>,
     pub recovery: Option<RecoveryDirective>,
+}
+
+/// Strict V4 delivery input.  It deliberately repeats the legacy delivery
+/// identity instead of treating a V3 assignment as a V4-shaped oracle.
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunnerAssignmentV4 {
+    pub workstream: Id,
+    pub action_id: Id,
+    pub assignment_id: Id,
+    pub role_id: Id,
+    pub mode: ModeId,
+    pub run_revision: u64,
+    pub lane_id: Id,
+    pub attempt: u32,
+    pub base_commit: Sha,
+    pub worktree: PathBuf,
+    pub session_file: PathBuf,
+    pub roster_assignment: String,
+    pub approved_units: Vec<ApprovedUnit>,
+    pub recovery: Option<RecoveryDirective>,
+    pub approved_plan_binding_path: String,
+    pub approved_plan_binding_digest: String,
+    pub approved_image_digest: String,
+    pub selected_vendoring: Vec<ApprovedUnitVendoringV2>,
+    pub materialization: CoreMaterializationBindingV1,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -259,31 +357,6 @@ pub struct PackageFacts {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct RepositoryAuthority {
-    pub schema: String,
-    pub repo_root: String,
-    pub head_commit: String,
-    pub head_tree: String,
-    pub status_porcelain: String,
-    pub tracked_sources: Vec<RepositoryTrackedSource>,
-}
-
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct RepositoryTrackedSource {
-    pub path: String,
-    pub mode: String,
-    pub blob: String,
-    pub whole_file_anchor: String,
-}
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct RepositoryAuthorityBinding {
-    pub path: String,
-    pub digest: String,
-    pub manifest: RepositoryAuthority,
-}
-
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecoveryDirective {
     pub schema: String,
@@ -310,6 +383,43 @@ pub struct DeliveryAssignmentArtifact {
     pub approved_commands: Vec<ApprovedCommandBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery: Option<RecoveryDirective>,
+}
+
+/// The schema field is the sole version selector.  In particular, a V4
+/// parser is never selected from the presence of vendoring-shaped fields.
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum DeliveryAssignmentArtifactReader {
+    V3(DeliveryAssignmentArtifact),
+    V4(DeliveryAssignmentArtifactV4),
+}
+
+#[cfg(unix)]
+pub fn read_delivery_assignment_artifact(
+    bytes: &[u8],
+) -> Result<DeliveryAssignmentArtifactReader, String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|error| format!("delivery assignment json:{error}"))?;
+    let schema = value
+        .as_object()
+        .and_then(|object| object.get("schema"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "delivery assignment lacks exact schema selector".to_owned())?;
+    match schema {
+        // Keep the legacy deserializer on the original byte stream.  It has
+        // intentionally permissive unknown-field behavior and must not pass
+        // through a Value projection before its historical branch runs.
+        "autopilot.delivery_assignment.v3" => serde_json::from_slice(bytes)
+            .map(DeliveryAssignmentArtifactReader::V3)
+            .map_err(|error| format!("delivery assignment v3 json:{error}")),
+        DELIVERY_ASSIGNMENT_V4_SCHEMA => {
+            materializer_v4::validate_delivery_assignment_v4_json(&value)?;
+            serde_json::from_slice(bytes)
+                .map(DeliveryAssignmentArtifactReader::V4)
+                .map_err(|error| format!("delivery assignment v4 json:{error}"))
+        }
+        _ => Err("delivery assignment schema is unknown".to_owned()),
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -356,7 +466,7 @@ pub struct BlockedDeliverySnapshot {
     pub snapshot_digest: String,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IssuedRunnerBinding {
     pub action_id: Id,
     pub assignment_id: Id,
@@ -378,6 +488,10 @@ pub struct IssuedRunnerBinding {
     pub context_digest: String,
     pub skills_digest: String,
     pub subscription_digest: String,
+    /// Fresh planning authority is one explicit generated descriptor row. A
+    /// missing route is only readable by the explicit historical V1 path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_route: Option<TerminalRoute>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignment_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -528,6 +642,21 @@ pub fn planning_issue(request: &PlanningRunnerRequest) -> Result<IssuedRunnerAct
         &request.boundary_id.0,
         &request.boundary_id.0,
     )?;
+    let terminal_route = terminal_route_for(
+        &request.role_id.0,
+        &request.boundary_id.0,
+        &request.boundary_id.0,
+    )?;
+    if request
+        .terminal_route
+        .as_ref()
+        .is_some_and(|declared| declared != &terminal_route)
+        || (request.boundary_id.0 == "planning.work-map.v2" && request.terminal_route.is_none())
+    {
+        return Err(RunnerError::InvalidSpec(
+            "planning declaration terminal route drift".to_owned(),
+        ));
+    }
     let resolved_tools = resolve_role_tools(&request.role_id.0, profile.0)?;
     let tools = resolved_tools.active.clone();
     let (terminal_tool, _) = terminal_submit_tool(&request.role_id.0)?.ok_or_else(|| {
@@ -622,6 +751,7 @@ pub fn planning_issue(request: &PlanningRunnerRequest) -> Result<IssuedRunnerAct
         runtime_extension_path: Some(to_contract_path(&addon_path)?),
         runtime_extension_digest: Some(Digest(addon_digest)),
         terminal_profile_id: Some(profile.0.to_owned()),
+        terminal_route: Some(terminal_route.clone()),
         unavailable_tools: Some(
             resolved_tools
                 .unavailable
@@ -672,6 +802,7 @@ pub fn planning_issue(request: &PlanningRunnerRequest) -> Result<IssuedRunnerAct
         context_digest: binding_digests.context_digest,
         skills_digest: binding_digests.skills_digest,
         subscription_digest: binding_digests.subscription_digest,
+        terminal_route: Some(terminal_route),
         assignment_path: None,
         assignment_digest: None,
         repository_manifest_path: Some(repo_authority.path.clone()),
@@ -838,6 +969,7 @@ pub fn delivery_issue_with_facts(
         runtime_extension_path: Some(to_contract_path(&addon_path)?),
         runtime_extension_digest: Some(Digest(addon_digest)),
         terminal_profile_id: Some(profile.0.to_owned()),
+        terminal_route: None,
         unavailable_tools: Some(
             resolved_tools
                 .unavailable
@@ -882,6 +1014,229 @@ pub fn delivery_issue_with_facts(
         context_digest: binding_digests.context_digest,
         skills_digest: binding_digests.skills_digest,
         subscription_digest: binding_digests.subscription_digest,
+        terminal_route: None,
+        assignment_path: Some(path_to_string(&assignment_path)?),
+        assignment_digest: Some(assignment_digest),
+        repository_manifest_path: None,
+        repository_manifest_digest: None,
+        repository_head_commit: None,
+        repository_head_tree: None,
+        mode_parameter: None,
+        planning_subject_assignment_id: None,
+        planning_subject_path: None,
+        planning_subject_digest: None,
+        lane_id: Some(assignment.lane_id.clone()),
+        attempt: Some(assignment.attempt),
+        base_commit: Some(assignment.base_commit.clone()),
+        worktree: Some(worktree_text),
+        required_focused_evidence: DEFAULT_REQUIRED_FOCUSED_EVIDENCE,
+    };
+    let action = action_from_doc(
+        facts,
+        &paths.spec_path,
+        &spec,
+        Some(DEFAULT_BG_TIMEOUT_SECONDS),
+    )?;
+    Ok(IssuedRunnerAction { action, binding })
+}
+
+#[cfg(unix)]
+pub fn delivery_issue_v4_with_facts(
+    assignment: &RunnerAssignmentV4,
+    facts: &RunnerTransportFacts,
+) -> Result<IssuedRunnerAction, RunnerError> {
+    let legacy = RunnerAssignment {
+        workstream: assignment.workstream.clone(),
+        action_id: assignment.action_id.clone(),
+        assignment_id: assignment.assignment_id.clone(),
+        role_id: assignment.role_id.clone(),
+        mode: assignment.mode.clone(),
+        run_revision: assignment.run_revision,
+        lane_id: assignment.lane_id.clone(),
+        attempt: assignment.attempt,
+        base_commit: assignment.base_commit.clone(),
+        worktree: assignment.worktree.clone(),
+        session_file: assignment.session_file.clone(),
+        roster_assignment: assignment.roster_assignment.clone(),
+        approved_units: assignment.approved_units.clone(),
+        recovery: assignment.recovery.clone(),
+    };
+    validate_delivery_assignment(&legacy)?;
+    let artifact = DeliveryAssignmentArtifactV4 {
+        schema: DELIVERY_ASSIGNMENT_V4_SCHEMA.to_owned(),
+        workstream: assignment.workstream.clone(),
+        assignment_id: assignment.assignment_id.clone(),
+        lane_id: assignment.lane_id.clone(),
+        attempt: assignment.attempt,
+        base_commit: assignment.base_commit.clone(),
+        worktree: path_to_string(&absolute_path(&assignment.worktree)?)?,
+        ordered_units: assignment.approved_units.clone(),
+        approved_commands: approved_command_bindings(&assignment.approved_units),
+        recovery: assignment.recovery.clone(),
+        approved_plan_binding_path: assignment.approved_plan_binding_path.clone(),
+        approved_plan_binding_digest: assignment.approved_plan_binding_digest.clone(),
+        approved_image_digest: assignment.approved_image_digest.clone(),
+        selected_vendoring: assignment.selected_vendoring.clone(),
+        materialization: assignment.materialization.clone(),
+    };
+    materializer_v4::validate_delivery_assignment_v4(&artifact)
+        .map_err(RunnerError::InvalidSpec)?;
+    materializer_v4::replay_v4_materialization(&artifact).map_err(RunnerError::InvalidSpec)?;
+    let route = route_for_role(&assignment.role_id.0)?;
+    let worktree = absolute_path(&assignment.worktree)?;
+    reject_link_components_for_path(&worktree)?;
+    verify_distinct_git_worktree(&worktree, &assignment.base_commit)?;
+    let head = git_stdout_checked(&worktree, &["rev-parse", "--verify", "HEAD^{commit}"])
+        .map_err(RunnerError::Io)?;
+    if head.trim() != assignment.base_commit.0 {
+        return Err(RunnerError::InvalidSpec(
+            "V4 delivery worktree HEAD differs from assignment base".to_owned(),
+        ));
+    }
+    let boundary = ContractId("autopilot.delivery_submission.v2".to_owned());
+    let contract = delivery_contract_id();
+    let profile = terminal_profile_for(&assignment.role_id.0, &boundary.0, &contract.0)?;
+    let tools = resolve_role_tools(&assignment.role_id.0, profile.0)?;
+    let (addon_path, addon_digest) = child_addon()?;
+    let paths = delivery_paths(&worktree, &assignment.assignment_id);
+    reject_link_components_for_path(&paths.carrier_path)?;
+    let worktree_text = path_to_string(&worktree)?;
+    let identity = run_identity_for(&assignment.workstream.0)?;
+    let session_id = session_id_for(
+        &identity.run_id_as_id(),
+        &assignment.workstream,
+        &assignment.assignment_id,
+        &assignment.role_id,
+        &assignment.mode,
+        &boundary,
+    );
+    let assignment_path = paths
+        .spec_path
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| RunnerError::InvalidSpec("delivery paths have no runner base".to_owned()))?
+        .join("assignments")
+        .join(format!("{}.json", assignment.assignment_id.0));
+    let bytes =
+        serde_json::to_vec_pretty(&artifact).map_err(|error| RunnerError::Io(error.to_string()))?;
+    if bytes.len() > DELIVERY_ASSIGNMENT_MAX_BYTES {
+        return Err(RunnerError::InvalidSpec(
+            "V4 delivery assignment oversized".to_owned(),
+        ));
+    }
+    write_parent_file_create_once_exact(&assignment_path, &bytes)?;
+    let assignment_digest = sha256_hex(&bytes);
+    let prompt = delivery_prompt_v4(
+        &legacy,
+        &route,
+        &worktree_text,
+        &assignment_path,
+        &assignment_digest,
+        &artifact,
+    )?;
+    write_parent_file(&paths.prompt_path, prompt.as_bytes())?;
+    let prompt_digest = sha256_hex(prompt.as_bytes());
+    let digests = delivery_binding_digests_v4(
+        &legacy,
+        &route,
+        &worktree_text,
+        &boundary.0,
+        &contract.0,
+        &assignment_path,
+        &assignment_digest,
+        &artifact,
+    )?;
+    let spec = AgentRunSpec {
+        schema: kernel::generated::SchemaId("autopilot.agent_run_spec.v4".to_owned()),
+        assignment_kind: ValidationAssignmentKind::Delivery,
+        action_id: assignment.action_id.clone(),
+        assignment_id: assignment.assignment_id.clone(),
+        run_id: identity.run_id_as_id(),
+        run_revision: assignment.run_revision,
+        workstream: assignment.workstream.clone(),
+        role_id: assignment.role_id.clone(),
+        mode: assignment.mode.clone(),
+        provider: route.provider.clone(),
+        model: route.model.clone(),
+        thinking: kernel::generated::ThinkingLevel(route.thinking.clone()),
+        route: "subscription".to_owned(),
+        cwd: ContractPath(worktree_text.clone()),
+        allowed_tools: tools.active.iter().cloned().map(ToolName).collect(),
+        spec_path: to_contract_path(&paths.spec_path)?,
+        prompt_path: to_contract_path(&paths.prompt_path)?,
+        prompt_digest: Digest(prompt_digest.clone()),
+        session_dir: to_contract_path(&session_dir_for(&identity.run_root))?,
+        boundary_id: boundary.clone(),
+        boundary_digest: Digest(digests.boundary_digest.clone()),
+        result_contract: contract.clone(),
+        result_contract_digest: Digest(digests.result_contract_digest.clone()),
+        carrier_path: to_contract_path(&paths.carrier_path)?,
+        session_id: session_id.clone(),
+        session_continuity: if assignment.attempt <= 1 {
+            kernel::generated::SessionContinuity::Fresh
+        } else {
+            kernel::generated::SessionContinuity::Resume
+        },
+        settings_digest: Digest(digests.settings_digest.clone()),
+        context_digest: Digest(digests.context_digest.clone()),
+        skills_digest: Digest(digests.skills_digest.clone()),
+        subscription_digest: Digest(digests.subscription_digest.clone()),
+        lane_id: Some(assignment.lane_id.clone()),
+        attempt: Some(assignment.attempt),
+        base_commit: Some(assignment.base_commit.clone()),
+        worktree: Some(ContractPath(worktree_text.clone())),
+        required_focused_evidence: Some(DEFAULT_REQUIRED_FOCUSED_EVIDENCE),
+        authority_set_id: None,
+        authority_documents: None,
+        context_document: None,
+        context_documents: None,
+        assignment_path: Some(to_contract_path(&assignment_path)?),
+        assignment_digest: Some(Digest(assignment_digest.clone())),
+        context_manifest_path: None,
+        context_manifest_digest: None,
+        runtime_extension_path: Some(to_contract_path(&addon_path)?),
+        runtime_extension_digest: Some(Digest(addon_digest)),
+        terminal_profile_id: Some(profile.0.to_owned()),
+        terminal_route: None,
+        unavailable_tools: Some(tools.unavailable.into_iter().map(ToolName).collect()),
+        producer_assignment_ids: None,
+        validation_id: None,
+        validation_attempt: None,
+        semantic_round: None,
+        model_submission_path: None,
+        atom_id_prefix: None,
+        atom_registry_path: None,
+        atom_registry_digest: None,
+        planning_inputs_path: None,
+        planning_inputs_digest: None,
+        repository_manifest_path: None,
+        repository_manifest_digest: None,
+        repository_head_commit: None,
+        repository_head_tree: None,
+    };
+    let spec_digest = write_spec_document(&paths.spec_path, &spec)?;
+    let binding = IssuedRunnerBinding {
+        action_id: assignment.action_id.clone(),
+        assignment_id: assignment.assignment_id.clone(),
+        run_revision: assignment.run_revision,
+        workstream: assignment.workstream.clone(),
+        role_id: assignment.role_id.clone(),
+        mode: assignment.mode.clone(),
+        boundary_id: boundary,
+        result_contract: contract,
+        prompt_path: path_to_string(&paths.prompt_path)?,
+        prompt_digest,
+        spec_path: path_to_string(&paths.spec_path)?,
+        spec_digest,
+        carrier_path: path_to_string(&paths.carrier_path)?,
+        session_id,
+        boundary_digest: digests.boundary_digest,
+        result_contract_digest: digests.result_contract_digest,
+        settings_digest: digests.settings_digest,
+        context_digest: digests.context_digest,
+        skills_digest: digests.skills_digest,
+        subscription_digest: digests.subscription_digest,
+        terminal_route: None,
         assignment_path: Some(path_to_string(&assignment_path)?),
         assignment_digest: Some(assignment_digest),
         repository_manifest_path: None,
@@ -942,7 +1297,15 @@ pub fn validation_issue(
     request: &ValidationRunnerRequest,
     facts: &RunnerTransportFacts,
 ) -> Result<IssuedRunnerAction, RunnerError> {
-    verify_validation_package_checks(request)?;
+    match &request.package_authority {
+        ValidationPackageAuthority::LegacyV3 => verify_validation_package_checks(request)?,
+        #[cfg(unix)]
+        ValidationPackageAuthority::RootedV4(_) => {
+            return Err(RunnerError::InvalidSpec(
+                "rooted V4 package authority requires Validator V3 issuance".to_owned(),
+            ));
+        }
+    }
     let expected_commands = approved_command_bindings(&request.approved_units);
     let valid_digest = |value: &str| {
         value.len() == 64
@@ -1331,6 +1694,7 @@ pub fn validation_issue(
         runtime_extension_path: Some(to_contract_path(&addon_path)?),
         runtime_extension_digest: Some(Digest(addon_digest)),
         terminal_profile_id: Some(profile.0.to_owned()),
+        terminal_route: None,
         unavailable_tools: Some(
             resolved_tools
                 .unavailable
@@ -1375,6 +1739,7 @@ pub fn validation_issue(
         context_digest: binding_digests.context_digest,
         skills_digest: binding_digests.skills_digest,
         subscription_digest: binding_digests.subscription_digest,
+        terminal_route: None,
         assignment_path: Some(path_to_string(&assignment_path)?),
         assignment_digest: Some(assignment_digest.clone()),
         repository_manifest_path: None,
@@ -1406,7 +1771,20 @@ pub fn validation_issue_v3(
     request: &ValidationRunnerRequest,
     facts: &RunnerTransportFacts,
 ) -> Result<IssuedRunnerAction, RunnerError> {
-    verify_validation_package_checks(request)?;
+    // Rooted V4 proof evaluation is intentionally before any candidate diff,
+    // authority, context, assignment, prompt, spec, or carrier file write.
+    // Legacy V3 retains its historical receipt check path unchanged.
+    let rooted_package_records = match &request.package_authority {
+        ValidationPackageAuthority::LegacyV3 => {
+            verify_validation_package_checks(request)?;
+            None
+        }
+        #[cfg(unix)]
+        ValidationPackageAuthority::RootedV4(artifact) => Some(
+            evaluate_rooted_v4_package_proofs(request, artifact)
+                .map_err(|error| RunnerError::InvalidSpec(error.to_string()))?,
+        ),
+    };
     let cwd = absolute_path(&request.candidate_root)?;
     let worktree = absolute_path(&request.worktree)?;
     if cwd != worktree {
@@ -1651,75 +2029,99 @@ pub fn validation_issue_v3(
     let mut package_records = Vec::new();
     let mut package_refs_by_criterion = BTreeMap::<Id, Vec<Ref>>::new();
     let mut package_binding_ids = BTreeSet::new();
-    for unit in &request.approved_units {
-        for check in &unit.package_checks {
-            if !package_binding_ids.insert(check.check_id.clone())
-                || command_refs.keys().any(|id| id == &check.check_id)
+    if let Some(records) = rooted_package_records {
+        for record in records {
+            if !package_binding_ids.insert(record.binding_id.clone())
+                || command_refs.keys().any(|id| id == &record.binding_id)
             {
                 return Err(RunnerError::InvalidSpec(format!(
-                    "v3 receipt binding id is not globally unique: {}",
-                    check.check_id.0
+                    "v3 rooted package proof binding id is not globally unique: {}",
+                    record.binding_id.0
                 )));
             }
-            let mut ordinals = check.criterion_ordinals.clone();
-            ordinals.sort_unstable();
-            let mut mapped_criteria = ordinals
-                .iter()
-                .map(|ordinal| {
-                    let index = usize::try_from(ordinal.saturating_sub(1)).map_err(|_| {
-                        RunnerError::InvalidSpec("package criterion ordinal overflow".to_owned())
-                    })?;
-                    unit.criterion_text
-                        .get(index)
-                        .map(|criterion| criterion.id.clone())
-                        .ok_or_else(|| {
-                            RunnerError::InvalidSpec(format!(
-                                "package criterion ordinal out of range: {}:{}",
-                                check.check_id.0, ordinal
-                            ))
-                        })
-                })
-                .collect::<Result<Vec<_>, RunnerError>>()?;
-            mapped_criteria.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
-            let receipt = serde_json::json!({
-                "schema": "autopilot.package_check_receipt.v1",
-                "check_id": check.check_id,
-                "kind": check.kind,
-                "criterion_ordinals": ordinals,
-                "criterion_ids": mapped_criteria,
-                "unit_id": unit.id,
-                "assignment_id": request.assignment_id,
-                "base_commit": base_commit,
-                "package_commit": exact_commit,
-                "package_tree": exact_tree,
-                "changed_paths": changed_paths,
-            });
-            let receipt_bytes = validation_authority::canonical_json_bytes(&receipt)
-                .map_err(RunnerError::InvalidSpec)?;
-            let receipt_json = String::from_utf8(receipt_bytes.clone())
-                .map_err(|error| RunnerError::Io(error.to_string()))?;
-            let digest = sha256_hex(&receipt_bytes);
-            let evidence_ref = Ref(format!(
-                "package-check-receipt:{}:{digest}",
-                check.check_id.0
-            ));
-            for criterion_id in &mapped_criteria {
+            for criterion_id in &record.criterion_ids {
                 package_refs_by_criterion
                     .entry(criterion_id.clone())
                     .or_default()
-                    .push(evidence_ref.clone());
+                    .push(record.evidence_ref.clone());
             }
-            package_records.push(serde_json::json!({
-                "evidence_ref": evidence_ref,
-                "receipt_digest": digest,
-                "receipt_json": receipt_json,
-                "kind": "delivery-package-check",
-                "exact_commit": exact_commit,
-                "exact_tree": exact_tree,
-                "binding_id": check.check_id,
-                "unit_id": unit.id,
-                "criterion_ids": mapped_criteria,
-            }));
+            package_records.push(
+                serde_json::to_value(record).map_err(|error| RunnerError::Io(error.to_string()))?,
+            );
+        }
+    } else {
+        for unit in &request.approved_units {
+            for check in &unit.package_checks {
+                if !package_binding_ids.insert(check.check_id.clone())
+                    || command_refs.keys().any(|id| id == &check.check_id)
+                {
+                    return Err(RunnerError::InvalidSpec(format!(
+                        "v3 receipt binding id is not globally unique: {}",
+                        check.check_id.0
+                    )));
+                }
+                let mut ordinals = check.criterion_ordinals.clone();
+                ordinals.sort_unstable();
+                let mut mapped_criteria = ordinals
+                    .iter()
+                    .map(|ordinal| {
+                        let index = usize::try_from(ordinal.saturating_sub(1)).map_err(|_| {
+                            RunnerError::InvalidSpec(
+                                "package criterion ordinal overflow".to_owned(),
+                            )
+                        })?;
+                        unit.criterion_text
+                            .get(index)
+                            .map(|criterion| criterion.id.clone())
+                            .ok_or_else(|| {
+                                RunnerError::InvalidSpec(format!(
+                                    "package criterion ordinal out of range: {}:{}",
+                                    check.check_id.0, ordinal
+                                ))
+                            })
+                    })
+                    .collect::<Result<Vec<_>, RunnerError>>()?;
+                mapped_criteria.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+                let receipt = serde_json::json!({
+                    "schema": "autopilot.package_check_receipt.v1",
+                    "check_id": check.check_id,
+                    "kind": check.kind,
+                    "criterion_ordinals": ordinals,
+                    "criterion_ids": mapped_criteria,
+                    "unit_id": unit.id,
+                    "assignment_id": request.assignment_id,
+                    "base_commit": base_commit,
+                    "package_commit": exact_commit,
+                    "package_tree": exact_tree,
+                    "changed_paths": changed_paths,
+                });
+                let receipt_bytes = validation_authority::canonical_json_bytes(&receipt)
+                    .map_err(RunnerError::InvalidSpec)?;
+                let receipt_json = String::from_utf8(receipt_bytes.clone())
+                    .map_err(|error| RunnerError::Io(error.to_string()))?;
+                let digest = sha256_hex(&receipt_bytes);
+                let evidence_ref = Ref(format!(
+                    "package-check-receipt:{}:{digest}",
+                    check.check_id.0
+                ));
+                for criterion_id in &mapped_criteria {
+                    package_refs_by_criterion
+                        .entry(criterion_id.clone())
+                        .or_default()
+                        .push(evidence_ref.clone());
+                }
+                package_records.push(serde_json::json!({
+                    "evidence_ref": evidence_ref,
+                    "receipt_digest": digest,
+                    "receipt_json": receipt_json,
+                    "kind": "delivery-package-check",
+                    "exact_commit": exact_commit,
+                    "exact_tree": exact_tree,
+                    "binding_id": check.check_id,
+                    "unit_id": unit.id,
+                    "criterion_ids": mapped_criteria,
+                }));
+            }
         }
     }
 
@@ -2009,6 +2411,7 @@ pub fn validation_issue_v3(
         runtime_extension_path: Some(to_contract_path(&addon_path)?),
         runtime_extension_digest: Some(Digest(addon_digest)),
         terminal_profile_id: Some(profile.0.to_owned()),
+        terminal_route: None,
         unavailable_tools: Some(
             resolved_tools
                 .unavailable
@@ -2053,6 +2456,7 @@ pub fn validation_issue_v3(
         context_digest: binding_digests.context_digest,
         skills_digest: binding_digests.skills_digest,
         subscription_digest: binding_digests.subscription_digest,
+        terminal_route: None,
         assignment_path: Some(path_to_string(&assignment_path)?),
         assignment_digest: Some(assignment_digest),
         repository_manifest_path: None,
@@ -2233,7 +2637,9 @@ pub fn resolve_role_tools(
             )));
         }
     }
-    if role_id == "recovery-engineer" && profile_id == "recovery-work-map.v1" {
+    if role_id == "recovery-engineer"
+        && matches!(profile_id, "recovery-work-map.v1" | "recovery-work-map.v2")
+    {
         active.retain(|tool| {
             matches!(
                 tool.as_str(),
@@ -2305,6 +2711,8 @@ fn planning_boundary_for_role(role_id: &str) -> Result<Option<String>, RunnerErr
         .map(|row| row.boundary_id))
 }
 
+/// Select one generated terminal descriptor. No public tool-name fallback is
+/// permitted because V1 and V2 intentionally reuse names.
 pub(crate) fn terminal_profile_for(
     role_id: &str,
     boundary_id: &str,
@@ -2338,6 +2746,37 @@ pub(crate) fn terminal_profile_for(
         )));
     }
     Ok(matches[0])
+}
+
+/// Strict, persisted route selected from exactly one generated profile row.
+/// V2 is deliberately limited to the three fresh work-map producers; all
+/// other fresh planning rows retain their exact declared V1 route.
+pub(crate) fn terminal_route_for(
+    role_id: &str,
+    boundary_id: &str,
+    result_contract: &str,
+) -> Result<TerminalRoute, RunnerError> {
+    let profile = terminal_profile_for(role_id, boundary_id, result_contract)?;
+    let version = match (role_id, profile.0) {
+        ("plan-compiler", "planning.work-map.v2:autopilot_submit_plan_cluster")
+        | ("plan-synthesizer", "planning.work-map.v2:autopilot_submit_synthesis")
+        | ("recovery-engineer", "recovery-work-map.v2") => "v2",
+        (_, _) if boundary_id == "planning.work-map.v2" => {
+            return Err(RunnerError::InvalidSpec(format!(
+                "V2 work-map route has no exact role/profile row: {role_id}/{}",
+                profile.0
+            )));
+        }
+        _ => "v1-legacy",
+    };
+    Ok(TerminalRoute {
+        version: version.to_owned(),
+        profile_id: profile.0.to_owned(),
+        tool_name: ToolName(profile.1.to_owned()),
+        boundary_id: ContractId(profile.2.to_owned()),
+        result_contract: ContractId(profile.3.to_owned()),
+        schema_digest: Digest(profile.4.to_owned()),
+    })
 }
 
 fn terminal_submit_tool(
@@ -2575,7 +3014,7 @@ fn validate_planning_request(request: &PlanningRunnerRequest) -> Result<(), Runn
                 ));
             }
         }
-        "planning.work-map.v1" => {
+        "planning.work-map.v1" | "planning.work-map.v2" => {
             if request
                 .atom_registry_path
                 .as_deref()
@@ -2642,6 +3081,23 @@ fn validate_accepted_planning_artifacts(
                 artifact.category_id, category.boundary, artifact.boundary_id.0
             )));
         }
+        if artifact.boundary_id.0 == "planning.work-map.v2" {
+            let route = artifact.terminal_route.as_ref().ok_or_else(|| {
+                RunnerError::InvalidSpec(
+                    "accepted V2 work-map artifact lacks terminal route tuple".to_owned(),
+                )
+            })?;
+            let expected = terminal_route_for(
+                &artifact.role_id.0,
+                &artifact.boundary_id.0,
+                &artifact.boundary_id.0,
+            )?;
+            if route != &expected {
+                return Err(RunnerError::InvalidSpec(
+                    "accepted V2 work-map artifact terminal route drift".to_owned(),
+                ));
+            }
+        }
         if !seen.insert((
             artifact.category_id.as_str(),
             artifact.assignment_id.0.as_str(),
@@ -2656,26 +3112,73 @@ fn validate_accepted_planning_artifacts(
     Ok(())
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct DeliveryIdentity {
+    pub action_id: Id,
+    pub assignment_id: Id,
+}
+
 pub(crate) fn expected_delivery_identity(
     workstream: &Id,
     lane_id: &Id,
     role_id: &Id,
     attempt: u32,
-) -> (Id, Id) {
-    if role_id.0 == "recovery-engineer" {
-        let assignment_id = Id(format!(
-            "recovery-assignment-{}-{}-a{attempt}",
-            workstream.0, lane_id.0
-        ));
-        return (Id(format!("action-{}", assignment_id.0)), assignment_id);
+) -> Result<DeliveryIdentity, AnyError> {
+    if attempt == 0 {
+        return Err(Box::new(std::io::Error::other(format!(
+            "delivery identity requires attempt >= 1: role={}",
+            role_id.0
+        ))));
     }
-    (
-        Id(format!("action-{}-{}", workstream.0, lane_id.0)),
-        Id(format!("assignment-{}-{}", workstream.0, lane_id.0)),
-    )
+    let identity = match role_id.0.as_str() {
+        "implementer" | "fixer-integrator" => DeliveryIdentity {
+            action_id: Id(format!("action-{}-{}", workstream.0, lane_id.0)),
+            assignment_id: Id(format!("assignment-{}-{}", workstream.0, lane_id.0)),
+        },
+        "recovery-engineer" => {
+            let policy = crate::repair::SemanticRecoveryPolicy::package()
+                .map_err(|error| std::io::Error::other(format!("recovery policy: {error}")))?;
+            if policy.max_attempts != 1 {
+                return Err(Box::new(std::io::Error::other(format!(
+                    "recovery policy max_attempts must equal 1, got {}",
+                    policy.max_attempts
+                ))));
+            }
+            if attempt > policy.max_attempts {
+                return Err(Box::new(std::io::Error::other(format!(
+                    "recovery delivery attempt {attempt} exceeds package maximum {}",
+                    policy.max_attempts
+                ))));
+            }
+            DeliveryIdentity {
+                action_id: Id(format!(
+                    "action-recovery-assignment-{}-{}-a{attempt}",
+                    workstream.0, lane_id.0
+                )),
+                assignment_id: Id(format!(
+                    "recovery-assignment-{}-{}-a{attempt}",
+                    workstream.0, lane_id.0
+                )),
+            }
+        }
+        _ => {
+            return Err(Box::new(std::io::Error::other(format!(
+                "delivery identity rejects unsupported role: {}",
+                role_id.0
+            ))));
+        }
+    };
+    Ok(identity)
 }
 
 fn validate_delivery_assignment(assignment: &RunnerAssignment) -> Result<(), RunnerError> {
+    let expected = expected_delivery_identity(
+        &assignment.workstream,
+        &assignment.lane_id,
+        &assignment.role_id,
+        assignment.attempt,
+    )
+    .map_err(|error| RunnerError::InvalidSpec(error.to_string()))?;
     let runtime = role_runtime(&assignment.role_id.0)?;
     if !runtime.modes.iter().any(|mode| mode == &assignment.mode.0) {
         return Err(RunnerError::InvalidSpec(format!(
@@ -2683,21 +3186,24 @@ fn validate_delivery_assignment(assignment: &RunnerAssignment) -> Result<(), Run
             assignment.role_id.0, assignment.mode.0
         )));
     }
-    let (expected_action, expected_assignment) = expected_delivery_identity(
-        &assignment.workstream,
-        &assignment.lane_id,
-        &assignment.role_id,
-        assignment.attempt,
-    );
-    if assignment.action_id != expected_action || assignment.assignment_id != expected_assignment {
+    if assignment.action_id != expected.action_id
+        || assignment.assignment_id != expected.assignment_id
+    {
         return Err(RunnerError::InvalidSpec(format!(
             "delivery action/assignment drift: expected {}/{}, got {}/{}",
-            expected_action.0,
-            expected_assignment.0,
+            expected.action_id.0,
+            expected.assignment_id.0,
             assignment.action_id.0,
             assignment.assignment_id.0
         )));
     }
+    validate_delivery_recovery_binding(
+        &assignment.role_id,
+        &assignment.mode,
+        assignment.attempt,
+        assignment.recovery.as_ref(),
+    )
+    .map_err(RunnerError::InvalidSpec)?;
     terminal_profile_for(
         &assignment.role_id.0,
         "autopilot.delivery_submission.v2",
@@ -2885,12 +3391,73 @@ pub fn delivery_policy_digest(
     worktree: &str,
     cwd: &str,
 ) -> String {
-    sha256_hex(
-        format!(
-            "{DELIVERY_POLICY_VERSION}\0{assignment_path}\0{assignment_digest}\0{worktree}\0{cwd}"
-        )
-        .as_bytes(),
+    delivery_policy_digest_for_version(
+        DELIVERY_POLICY_VERSION,
+        assignment_path,
+        assignment_digest,
+        worktree,
+        cwd,
     )
+}
+
+pub fn delivery_policy_digest_v5(
+    assignment_path: &str,
+    assignment_digest: &str,
+    worktree: &str,
+    cwd: &str,
+) -> String {
+    delivery_policy_digest_for_version(
+        DELIVERY_POLICY_V5_VERSION,
+        assignment_path,
+        assignment_digest,
+        worktree,
+        cwd,
+    )
+}
+
+fn delivery_policy_digest_for_version(
+    version: &str,
+    assignment_path: &str,
+    assignment_digest: &str,
+    worktree: &str,
+    cwd: &str,
+) -> String {
+    sha256_hex(
+        format!("{version}\0{assignment_path}\0{assignment_digest}\0{worktree}\0{cwd}").as_bytes(),
+    )
+}
+
+#[cfg(unix)]
+fn delivery_binding_digests_v4(
+    assignment: &RunnerAssignment,
+    route: &roster::Route,
+    worktree: &str,
+    boundary: &str,
+    result_contract: &str,
+    assignment_path: &Path,
+    assignment_digest: &str,
+    artifact: &DeliveryAssignmentArtifactV4,
+) -> Result<BindingDigests, RunnerError> {
+    let mut digests = delivery_binding_digests(
+        assignment,
+        route,
+        worktree,
+        boundary,
+        result_contract,
+        assignment_path,
+        assignment_digest,
+    )?;
+    digests.context_digest = sha_json(&serde_json::json!({
+        "delivery_v4": true, "workstream": assignment.workstream, "lane_id": assignment.lane_id,
+        "attempt": assignment.attempt, "base_commit": assignment.base_commit, "worktree": worktree,
+        "assignment_path": to_contract_path(assignment_path)?, "assignment_digest": assignment_digest,
+        "approved_plan_binding_path": artifact.approved_plan_binding_path,
+        "approved_plan_binding_digest": artifact.approved_plan_binding_digest,
+        "approved_image_digest": artifact.approved_image_digest,
+        "selected_vendoring": artifact.selected_vendoring,
+        "materialization": artifact.materialization,
+    }))?;
+    Ok(digests)
 }
 
 fn delivery_binding_digests(
@@ -3095,7 +3662,10 @@ fn planning_contract_authority_text(
 ) -> Result<String, RunnerError> {
     let mut out = crate::contract_authority::render_contract_authority(&request.boundary_id.0)
         .map_err(|error| RunnerError::InvalidSpec(error.to_string()))?;
-    if request.boundary_id.0 == "planning.work-map.v1" {
+    if matches!(
+        request.boundary_id.0.as_str(),
+        "planning.work-map.v1" | "planning.work-map.v2"
+    ) {
         let path = request.atom_registry_path.as_ref().ok_or_else(|| {
             RunnerError::InvalidSpec("work-map assignment missing atom registry path".to_owned())
         })?;
@@ -3104,8 +3674,12 @@ fn planning_contract_authority_text(
         })?;
         out.push_str("\n\n");
         out.push_str(
-            &crate::planning::atom_link_manifest_for_registry(Path::new(path), digest)
-                .map_err(|error| RunnerError::InvalidSpec(format!("atom registry: {error:?}")))?,
+            &crate::planning::atom_link_manifest_for_boundary(
+                Path::new(path),
+                digest,
+                &request.boundary_id.0,
+            )
+            .map_err(|error| RunnerError::InvalidSpec(format!("atom registry: {error:?}")))?,
         );
     }
     Ok(out)
@@ -3674,30 +4248,59 @@ pub fn approved_command_bindings(units: &[ApprovedUnit]) -> Vec<ApprovedCommandB
 pub fn validate_approved_command_bindings(
     artifact: &DeliveryAssignmentArtifact,
 ) -> Result<(), String> {
-    let expected = approved_command_bindings(&artifact.ordered_units);
-    if artifact.approved_commands != expected
-        || artifact.approved_commands.is_empty()
-        || artifact
-            .approved_commands
+    validate_approved_command_bindings_v4(&artifact.ordered_units, &artifact.approved_commands)
+}
+
+/// Shared opaque command binding check.  The name retains `v4` because V4
+/// invokes it without converting its strict artifact into a V3 artifact;
+/// V3's caller and serialization remain untouched.
+pub fn validate_approved_command_bindings_v4(
+    units: &[ApprovedUnit],
+    bindings: &[ApprovedCommandBinding],
+) -> Result<(), String> {
+    let expected = approved_command_bindings(units);
+    if bindings != expected
+        || bindings.is_empty()
+        || bindings
             .iter()
             .map(|binding| &binding.command_id)
             .collect::<BTreeSet<_>>()
             .len()
-            != artifact.approved_commands.len()
+            != bindings.len()
     {
         return Err("delivery approved-command binding drift".to_owned());
     }
     Ok(())
 }
 
-fn validate_delivery_recovery_binding(
+pub(crate) fn validate_delivery_recovery_binding(
     role_id: &Id,
     mode: &ModeId,
+    attempt: u32,
     recovery: Option<&RecoveryDirective>,
 ) -> Result<(), String> {
     let recovery_budget = crate::repair::SemanticRecoveryPolicy::package()?.max_attempts;
+    if recovery_budget != 1 {
+        return Err(format!(
+            "recovery policy max_attempts must equal 1, got {recovery_budget}"
+        ));
+    }
     match (&role_id.0[..], recovery) {
         ("recovery-engineer", Some(recovery)) => {
+            if attempt == 0 {
+                return Err("recovery delivery attempt must be nonzero".to_owned());
+            }
+            if attempt > recovery_budget {
+                return Err(format!(
+                    "recovery delivery attempt {attempt} exceeds package maximum {recovery_budget}"
+                ));
+            }
+            if attempt > recovery.attempt_budget {
+                return Err(format!(
+                    "recovery delivery attempt {attempt} exceeds directive budget {}",
+                    recovery.attempt_budget
+                ));
+            }
             if recovery.schema != "autopilot.recovery_directive.v1"
                 || !matches!(
                     recovery.trigger_phase.as_str(),
@@ -3717,6 +4320,14 @@ fn validate_delivery_recovery_binding(
                     .iter()
                     .any(|detail| detail.trim().is_empty())
                 || recovery.original_gate.trim().is_empty()
+                || (recovery.trigger_phase == "validation"
+                    && recovery.original_gate
+                        != format!(
+                            "validator:{}:semantic-round-1",
+                            recovery.trigger_assignment_id.0
+                        ))
+                || (recovery.trigger_phase == "execution"
+                    && recovery.original_gate != "autopilot.delivery_submission.v2")
                 || recovery.attempt_budget != recovery_budget
             {
                 return Err(
@@ -3736,6 +4347,107 @@ fn validate_delivery_recovery_binding(
     Ok(())
 }
 
+#[cfg(test)]
+mod delivery_recovery_binding_tests {
+    use super::*;
+
+    fn valid_directive() -> RecoveryDirective {
+        RecoveryDirective {
+            schema: "autopilot.recovery_directive.v1".to_owned(),
+            trigger_phase: "validation".to_owned(),
+            repair_mode: ModeId("failed-test".to_owned()),
+            trigger_assignment_id: Id("validator-assignment-main-L1".to_owned()),
+            diagnosis_refs: vec![Ref("validation-carrier:main-L1".to_owned())],
+            diagnosis_ids: vec![Id("F-source-defect".to_owned())],
+            diagnosis_details: vec!["validator found a bounded source defect".to_owned()],
+            original_gate: "validator:validator-assignment-main-L1:semantic-round-1".to_owned(),
+            attempt_budget: 1,
+        }
+    }
+
+    fn recovery_binding_accepts(
+        directive: &RecoveryDirective,
+        mode: &str,
+        attempt: u32,
+    ) -> Result<(), String> {
+        validate_delivery_recovery_binding(
+            &Id("recovery-engineer".to_owned()),
+            &ModeId(mode.to_owned()),
+            attempt,
+            Some(directive),
+        )
+    }
+
+    #[test]
+    fn bug_187_recovery_directive_predicate_rejects_each_required_drift() {
+        let directive = valid_directive();
+        assert!(recovery_binding_accepts(&directive, "failed-test", 1).is_ok());
+
+        let mut schema = directive.clone();
+        schema.schema = "autopilot.recovery_directive.v0".to_owned();
+        assert!(recovery_binding_accepts(&schema, "failed-test", 1).is_err());
+
+        let mut phase = directive.clone();
+        phase.trigger_phase = "planning".to_owned();
+        assert!(recovery_binding_accepts(&phase, "failed-test", 1).is_err());
+
+        assert!(recovery_binding_accepts(&directive, "forward-critical", 1).is_err());
+
+        let mut unsupported_mode = directive.clone();
+        unsupported_mode.repair_mode = ModeId("unsupported-mode".to_owned());
+        assert!(
+            recovery_binding_accepts(&unsupported_mode, "unsupported-mode", 1).is_err(),
+            "the allowed-mode predicate must reject a matching unsupported mode"
+        );
+
+        let mut blank_trigger = directive.clone();
+        blank_trigger.trigger_assignment_id = Id(" \t".to_owned());
+        assert!(recovery_binding_accepts(&blank_trigger, "failed-test", 1).is_err());
+
+        let mut refs = directive.clone();
+        refs.diagnosis_refs.clear();
+        assert!(recovery_binding_accepts(&refs, "failed-test", 1).is_err());
+
+        let mut ids = directive.clone();
+        ids.diagnosis_ids.clear();
+        assert!(recovery_binding_accepts(&ids, "failed-test", 1).is_err());
+
+        let mut empty_details = directive.clone();
+        empty_details.diagnosis_details.clear();
+        assert!(recovery_binding_accepts(&empty_details, "failed-test", 1).is_err());
+
+        let mut blank_details = directive.clone();
+        blank_details.diagnosis_details = vec![" \t".to_owned()];
+        assert!(recovery_binding_accepts(&blank_details, "failed-test", 1).is_err());
+
+        let mut gate = directive.clone();
+        gate.original_gate.clear();
+        assert!(recovery_binding_accepts(&gate, "failed-test", 1).is_err());
+
+        let mut validation_gate = directive.clone();
+        validation_gate.original_gate = "validator:other:semantic-round-1".to_owned();
+        assert!(recovery_binding_accepts(&validation_gate, "failed-test", 1).is_err());
+
+        let mut execution_gate = directive.clone();
+        execution_gate.trigger_phase = "execution".to_owned();
+        execution_gate.original_gate = "autopilot.delivery_submission.v2".to_owned();
+        assert!(recovery_binding_accepts(&execution_gate, "failed-test", 1).is_ok());
+        execution_gate.original_gate = "not-delivery-gate".to_owned();
+        assert!(recovery_binding_accepts(&execution_gate, "failed-test", 1).is_err());
+
+        let mut zero_budget = directive.clone();
+        zero_budget.attempt_budget = 0;
+        assert!(recovery_binding_accepts(&zero_budget, "failed-test", 1).is_err());
+
+        let mut excess_budget = directive.clone();
+        excess_budget.attempt_budget = 2;
+        assert!(recovery_binding_accepts(&excess_budget, "failed-test", 1).is_err());
+
+        assert!(recovery_binding_accepts(&directive, "failed-test", 0).is_err());
+        assert!(recovery_binding_accepts(&directive, "failed-test", 2).is_err());
+    }
+}
+
 fn delivery_assignment_artifact(
     assignment: &RunnerAssignment,
     worktree: &str,
@@ -3751,6 +4463,7 @@ fn delivery_assignment_artifact(
     validate_delivery_recovery_binding(
         &assignment.role_id,
         &assignment.mode,
+        assignment.attempt,
         assignment.recovery.as_ref(),
     )
     .map_err(RunnerError::InvalidSpec)?;
@@ -3823,6 +4536,39 @@ fn delivery_prompt(
     ))
 }
 
+#[cfg(unix)]
+fn delivery_prompt_v4(
+    assignment: &RunnerAssignment,
+    _route: &roster::Route,
+    worktree: &str,
+    assignment_path: &Path,
+    assignment_digest: &str,
+    artifact: &DeliveryAssignmentArtifactV4,
+) -> Result<String, RunnerError> {
+    let assignment_path = path_to_string(assignment_path)?;
+    let artifact_text = serde_json::to_string_pretty(artifact)
+        .map_err(|error| RunnerError::Io(error.to_string()))?;
+    let contract =
+        crate::contract_authority::render_contract_authority("autopilot.delivery_submission.v2")
+            .map_err(|error| RunnerError::InvalidSpec(error.to_string()))?;
+    let policy_digest =
+        delivery_policy_digest_v5(&assignment_path, assignment_digest, worktree, worktree);
+    Ok(format!(
+        "Autopilot V4 Core-materialized delivery.\nassignment_id: {}\nworktree: {}\nassignment_path: {}\nassignment_digest: {}\ndelivery_policy_version: {}\ndelivery_policy_digest: {}\n\nCore has materialized protected baseline leaves before this child starts. edit/write authority is only the mutable authored leaves in the V5 policy; protected Core leaves are inspection-only and an attempted write is denied before effect. Approved commands snapshot both mutable and protected bytes and reject any mutation.\n\n{}\n\n{}",
+        assignment.assignment_id.0,
+        worktree,
+        assignment_path,
+        assignment_digest,
+        DELIVERY_POLICY_V5_VERSION,
+        policy_digest,
+        contract,
+        crate::prompt::dynamic_data_fence_block(
+            "json autopilot.delivery_assignment.v4",
+            &artifact_text
+        ),
+    ))
+}
+
 pub fn render_delivery_submission_authority(
     assignment_path: &str,
     assignment_digest: &str,
@@ -3883,6 +4629,810 @@ fn write_parent_file_create_once_exact(path: &Path, data: &[u8]) -> Result<(), R
         }
         Err(error) => Err(io_error(error)),
     }
+}
+
+/// Descriptor-safe create-once write for durable V2 authority artifacts.
+///
+/// The final component is opened no-follow and verified by descriptor; parent
+/// links and `.`/`..` components are rejected before and after parent creation.
+/// Platforms without a no-follow final open fail closed rather than claiming a
+/// check-then-open path is race-free.
+pub(crate) fn write_bounded_file_create_once(
+    path: &Path,
+    data: &[u8],
+    max_bytes: usize,
+) -> Result<(), RunnerError> {
+    validate_authority_path(path, "create-once")?;
+    if data.len() > max_bytes {
+        return Err(RunnerError::InvalidSpec(format!(
+            "create-once authority bytes exceed {max_bytes} at {}",
+            path.display()
+        )));
+    }
+    authority_create_once(path, data, max_bytes)
+}
+
+/// The one additional authority primitive needed by V4 Core materialization:
+/// publish immutable binary leaf bytes with an exact Git regular-file mode.
+/// It retains the descriptor-relative no-follow/create-once protocol used for
+/// V2 artifacts; callers may not use it for an arbitrary mode.
+#[cfg(unix)]
+pub(crate) fn write_binary_leaf_create_once_exact_mode(
+    path: &Path,
+    data: &[u8],
+    mode: u32,
+    max_bytes: usize,
+) -> Result<(), RunnerError> {
+    if !matches!(mode, 0o644 | 0o755) {
+        return Err(RunnerError::InvalidSpec(
+            "binary authority leaf mode must be exact 100644 or 100755".to_owned(),
+        ));
+    }
+    validate_authority_path(path, "binary create-once")?;
+    if data.len() > max_bytes {
+        return Err(RunnerError::InvalidSpec(format!(
+            "binary authority leaf bytes exceed {max_bytes} at {}",
+            path.display()
+        )));
+    }
+    authority_create_once_with_mode(path, data, max_bytes, mode)
+}
+
+/// Read a V2 authority artifact through the same capability-rooted primitive
+/// as create-once writes.  This is deliberately separate from the historical
+/// general-purpose bounded reader: V2 provenance and repository manifests
+/// must not inherit a check-then-open path walk.
+pub(crate) fn read_bounded_authority_file(
+    path: &Path,
+    max_bytes: usize,
+) -> Result<Vec<u8>, RunnerError> {
+    validate_authority_path(path, "authority read")?;
+    authority_read(path, max_bytes)
+}
+
+/// Read one V4 materialized leaf through a no-follow descriptor and prove its
+/// exact Unix Git mode on that same descriptor before accepting its bytes.
+#[cfg(unix)]
+pub(crate) fn read_binary_leaf_exact_mode(
+    path: &Path,
+    max_bytes: usize,
+    mode: u32,
+) -> Result<Vec<u8>, RunnerError> {
+    if !matches!(mode, 0o644 | 0o755) {
+        return Err(RunnerError::InvalidSpec(
+            "binary authority leaf mode is malformed".to_owned(),
+        ));
+    }
+    validate_authority_path(path, "binary authority leaf read")?;
+    let (parent, name) = authority_open_parent(path, false)?;
+    authority_read_from_parent_with_mode(&parent, &name, max_bytes, Some(mode))
+}
+
+#[cfg(unix)]
+fn validate_authority_path(path: &Path, label: &str) -> Result<(), RunnerError> {
+    let mut components = path.components();
+    let rooted = matches!(components.next(), Some(Component::RootDir));
+    if !rooted
+        || components
+            .clone()
+            .any(|component| !matches!(component, Component::Normal(_)))
+        || !matches!(path.components().next_back(), Some(Component::Normal(_)))
+    {
+        return Err(RunnerError::InvalidTransport(format!(
+            "{label} authority path is not an absolute Unix root/normal-component file path: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn validate_authority_path(path: &Path, label: &str) -> Result<(), RunnerError> {
+    use std::path::Prefix;
+
+    let mut components = path.components();
+    let drive_absolute = matches!(
+        (components.next(), components.next()),
+        (Some(Component::Prefix(prefix)), Some(Component::RootDir))
+            if matches!(prefix.kind(), Prefix::Disk(_))
+    );
+    if !drive_absolute
+        || components
+            .clone()
+            .any(|component| !matches!(component, Component::Normal(_)))
+        || !matches!(path.components().next_back(), Some(Component::Normal(_)))
+    {
+        return Err(RunnerError::InvalidTransport(format!(
+            "{label} authority path is not a supported absolute drive/normal-component file path: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn validate_authority_path(path: &Path, label: &str) -> Result<(), RunnerError> {
+    let _ = path;
+    Err(RunnerError::InvalidTransport(format!(
+        "{label} authority path validation is unsupported on this platform"
+    )))
+}
+
+#[cfg(unix)]
+fn authority_open_parent(
+    path: &Path,
+    create: bool,
+) -> Result<(fs::File, std::ffi::OsString), RunnerError> {
+    use rustix::fs::{Mode, OFlags, mkdirat, openat};
+    use rustix::io::Errno;
+
+    let final_name = path
+        .file_name()
+        .ok_or_else(|| {
+            RunnerError::InvalidTransport(format!(
+                "authority path has no final component: {}",
+                path.display()
+            ))
+        })?
+        .to_os_string();
+    let mut current = fs::File::open("/").map_err(io_error)?;
+    let parents = path
+        .parent()
+        .expect("validated authority path has a parent");
+    for component in parents.components() {
+        let Component::Normal(name) = component else {
+            continue;
+        };
+        let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let next = match openat(&current, name, flags, Mode::empty()) {
+            Ok(fd) => fd,
+            Err(Errno::NOENT) if create => {
+                match mkdirat(&current, name, Mode::from_raw_mode(0o700)) {
+                    Ok(()) | Err(Errno::EXIST) => {}
+                    Err(error) => return Err(RunnerError::Io(error.to_string())),
+                }
+                openat(&current, name, flags, Mode::empty())
+                    .map_err(|error| RunnerError::Io(error.to_string()))?
+            }
+            Err(Errno::LOOP | Errno::NOTDIR) => {
+                return Err(RunnerError::InvalidTransport(format!(
+                    "authority path component refused symlink/no-follow traversal: {}",
+                    path.display()
+                )));
+            }
+            Err(error) => return Err(RunnerError::Io(error.to_string())),
+        };
+        current = fs::File::from(next);
+        let metadata = current.metadata().map_err(io_error)?;
+        if !metadata.file_type().is_dir() {
+            return Err(RunnerError::InvalidTransport(format!(
+                "authority path component is not a directory: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok((current, final_name))
+}
+
+#[cfg(unix)]
+fn authority_read_from_parent_with_mode(
+    parent: &fs::File,
+    name: &std::ffi::OsStr,
+    max_bytes: usize,
+    expected_mode: Option<u32>,
+) -> Result<Vec<u8>, RunnerError> {
+    use rustix::fs::{Mode, OFlags, openat};
+
+    let fd = openat(
+        parent,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| match error {
+        rustix::io::Errno::LOOP => RunnerError::InvalidTransport(
+            "authority read refused symlink/no-follow final component".to_owned(),
+        ),
+        other => RunnerError::Io(other.to_string()),
+    })?;
+    let file = fs::File::from(fd);
+    let metadata = file.metadata().map_err(io_error)?;
+    if !metadata.file_type().is_file() {
+        return Err(RunnerError::InvalidSpec(
+            "authority read refused non-regular descriptor".to_owned(),
+        ));
+    }
+    if let Some(expected_mode) = expected_mode {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o777 != expected_mode {
+            return Err(RunnerError::InvalidSpec(
+                "authority read exact mode drift".to_owned(),
+            ));
+        }
+    }
+    let len = usize::try_from(metadata.len())
+        .map_err(|_| RunnerError::InvalidSpec("authority read length overflow".to_owned()))?;
+    if len > max_bytes {
+        return Err(RunnerError::InvalidSpec(format!(
+            "authority read oversized: {len} bytes exceeds {max_bytes}"
+        )));
+    }
+    let read_limit = u64::try_from(max_bytes)
+        .ok()
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| RunnerError::InvalidSpec("authority read limit overflow".to_owned()))?;
+    let mut bytes = Vec::with_capacity(len.min(max_bytes));
+    file.take(read_limit)
+        .read_to_end(&mut bytes)
+        .map_err(io_error)?;
+    if bytes.len() > max_bytes {
+        return Err(RunnerError::InvalidSpec(format!(
+            "authority read oversized after read: more than {max_bytes} bytes"
+        )));
+    }
+    Ok(bytes)
+}
+
+#[cfg(unix)]
+fn authority_read(path: &Path, max_bytes: usize) -> Result<Vec<u8>, RunnerError> {
+    let (parent, name) = authority_open_parent(path, false)?;
+    authority_read_from_parent_with_mode(&parent, &name, max_bytes, None)
+}
+
+const AUTHORITY_CREATE_ONCE_TEMP_ATTEMPTS: usize = 16;
+
+#[cfg(any(unix, windows))]
+static NEXT_AUTHORITY_TEMPORARY: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(test)]
+thread_local! {
+    // The direct atomic-state tests inject names that the real operation then
+    // owns. This models a crash-owned private leaf without claiming that an
+    // unrelated filename or a synthetic short write is part of the protocol.
+    static TEST_AUTHORITY_TEMPORARY_NAMES: std::cell::RefCell<std::collections::VecDeque<std::ffi::OsString>> =
+        const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+}
+
+#[cfg(test)]
+fn set_test_authority_temporary_names(names: impl IntoIterator<Item = std::ffi::OsString>) {
+    TEST_AUTHORITY_TEMPORARY_NAMES.with(|queued| {
+        *queued.borrow_mut() = names.into_iter().collect();
+    });
+}
+
+#[cfg(any(unix, windows))]
+fn authority_private_temp_name() -> std::ffi::OsString {
+    #[cfg(test)]
+    if let Some(name) =
+        TEST_AUTHORITY_TEMPORARY_NAMES.with(|queued| queued.borrow_mut().pop_front())
+    {
+        return name;
+    }
+    use std::sync::atomic::Ordering;
+    std::ffi::OsString::from(format!(
+        ".autopilot-v2-stage-{}-{}",
+        std::process::id(),
+        NEXT_AUTHORITY_TEMPORARY.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
+#[cfg(unix)]
+fn authority_create_once(path: &Path, data: &[u8], max_bytes: usize) -> Result<(), RunnerError> {
+    authority_create_once_inner(path, data, max_bytes, 0o600, false)
+}
+
+#[cfg(unix)]
+fn authority_create_once_with_mode(
+    path: &Path,
+    data: &[u8],
+    max_bytes: usize,
+    mode: u32,
+) -> Result<(), RunnerError> {
+    authority_create_once_inner(path, data, max_bytes, mode, true)
+}
+
+#[cfg(unix)]
+fn authority_create_once_inner(
+    path: &Path,
+    data: &[u8],
+    max_bytes: usize,
+    mode: u32,
+    exact_mode: bool,
+) -> Result<(), RunnerError> {
+    use rustix::fs::{AtFlags, Mode, OFlags, linkat, openat, unlinkat};
+    use rustix::io::Errno;
+
+    let (parent, name) = authority_open_parent(path, true)?;
+    for _ in 0..AUTHORITY_CREATE_ONCE_TEMP_ATTEMPTS {
+        let temporary = authority_private_temp_name();
+        let stage = openat(
+            &parent,
+            &temporary,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::from_raw_mode(mode.try_into().expect("validated binary leaf mode")),
+        );
+        let fd = match stage {
+            Ok(fd) => fd,
+            // A private leaf collision is never final-artifact reuse. It may
+            // be a crash remnant, so leave it for forensics and try another
+            // bounded operation-owned name.
+            Err(Errno::EXIST) => continue,
+            Err(error) => return Err(RunnerError::Io(error.to_string())),
+        };
+        let mut file = fs::File::from(fd);
+        let staged = (|| -> Result<(), RunnerError> {
+            if !file.metadata().map_err(io_error)?.file_type().is_file() {
+                return Err(RunnerError::InvalidTransport(
+                    "create-once staged authority descriptor is not regular".to_owned(),
+                ));
+            }
+            if exact_mode {
+                // `openat(..., mode)` is filtered by umask. Set and inspect
+                // the held descriptor so published Git modes are never approximate.
+                use std::os::unix::fs::PermissionsExt;
+                file.set_permissions(fs::Permissions::from_mode(mode))
+                    .map_err(io_error)?;
+                if file.metadata().map_err(io_error)?.permissions().mode() & 0o777 != mode {
+                    return Err(RunnerError::InvalidSpec(
+                        "create-once staged authority exact mode drift".to_owned(),
+                    ));
+                }
+            }
+            file.write_all(data).map_err(io_error)?;
+            file.sync_all().map_err(io_error)?;
+            if exact_mode {
+                use std::os::unix::fs::PermissionsExt;
+                if file.metadata().map_err(io_error)?.permissions().mode() & 0o777 != mode {
+                    return Err(RunnerError::InvalidSpec(
+                        "create-once staged authority exact mode drift".to_owned(),
+                    ));
+                }
+            }
+            drop(file);
+
+            // Core serializes writers for this package-owned parent. The
+            // private O_EXCL leaf and held parent handle avoid a
+            // check-then-open publication walk; linkat itself is the atomic
+            // no-replacement final-name operation.
+            match linkat(&parent, &temporary, &parent, &name, AtFlags::empty()) {
+                Ok(()) => {
+                    parent.sync_all().map_err(io_error)?;
+                    Ok(())
+                }
+                Err(Errno::EXIST) => {
+                    let existing = authority_read_from_parent_with_mode(
+                        &parent,
+                        &name,
+                        max_bytes,
+                        exact_mode.then_some(mode),
+                    )?;
+                    if existing == data {
+                        Ok(())
+                    } else {
+                        Err(RunnerError::InvalidSpec(format!(
+                            "create-once artifact collision at {}",
+                            path.display()
+                        )))
+                    }
+                }
+                Err(error) => Err(RunnerError::Io(error.to_string())),
+            }
+        })();
+        // This call owns precisely `temporary`; no cleanup scans or removes a
+        // prior process's staged leaf after a crash.
+        let cleanup = unlinkat(&parent, &temporary, AtFlags::empty());
+        return match (staged, cleanup) {
+            (Ok(()), Ok(())) => {
+                parent.sync_all().map_err(io_error)?;
+                Ok(())
+            }
+            (Ok(()), Err(error)) => Err(RunnerError::Io(error.to_string())),
+            (Err(error), Ok(()) | Err(_)) => Err(error),
+        };
+    }
+    Err(RunnerError::InvalidSpec(format!(
+        "create-once private staging-name collision retries exhausted after {AUTHORITY_CREATE_ONCE_TEMP_ATTEMPTS} attempts at {}",
+        path.display()
+    )))
+}
+
+#[cfg(windows)]
+fn nt_authority_open(
+    parent: Option<&fs::File>,
+    name: &std::ffi::OsStr,
+    desired_access: u32,
+    disposition: u32,
+    options: u32,
+    file_attributes: u32,
+) -> Result<fs::File, i32> {
+    use std::os::windows::{
+        ffi::OsStrExt,
+        io::{AsRawHandle, FromRawHandle},
+    };
+    use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+    use windows_sys::Wdk::Storage::FileSystem::NtCreateFile;
+    use windows_sys::Win32::Foundation::{
+        HANDLE, OBJ_CASE_INSENSITIVE, OBJ_DONT_REPARSE, UNICODE_STRING,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+
+    let mut wide = name.encode_wide().collect::<Vec<_>>();
+    let byte_len = wide
+        .len()
+        .checked_mul(2)
+        .and_then(|n| u16::try_from(n).ok())
+        .ok_or(-1)?;
+    let mut object_name = UNICODE_STRING {
+        Length: byte_len,
+        MaximumLength: byte_len,
+        Buffer: wide.as_mut_ptr(),
+    };
+    let mut attributes = OBJECT_ATTRIBUTES {
+        Length: u32::try_from(std::mem::size_of::<OBJECT_ATTRIBUTES>()).map_err(|_| -1)?,
+        RootDirectory: parent.map_or(std::ptr::null_mut(), |file| file.as_raw_handle() as HANDLE),
+        ObjectName: &mut object_name,
+        Attributes: OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE,
+        SecurityDescriptor: std::ptr::null(),
+        SecurityQualityOfService: std::ptr::null(),
+    };
+    let mut status = IO_STATUS_BLOCK::default();
+    let mut handle: HANDLE = std::ptr::null_mut();
+    // NtCreateFile is the Windows handle-relative primitive: RootDirectory is
+    // the held parent handle and OBJ_DONT_REPARSE rejects every reparse point.
+    let result = unsafe {
+        NtCreateFile(
+            &mut handle,
+            desired_access,
+            &mut attributes,
+            &mut status,
+            std::ptr::null(),
+            file_attributes,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            disposition,
+            options,
+            std::ptr::null(),
+            0,
+        )
+    };
+    if result < 0 {
+        return Err(result);
+    }
+    // SAFETY: NtCreateFile returned an owned, synchronous file handle.
+    Ok(unsafe { fs::File::from_raw_handle(handle) })
+}
+
+#[cfg(windows)]
+fn authority_open_parent(
+    path: &Path,
+    create: bool,
+) -> Result<(fs::File, std::ffi::OsString), RunnerError> {
+    use windows_sys::Wdk::Storage::FileSystem::{
+        FILE_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_IF, FILE_OPEN_REPARSE_POINT,
+        FILE_SYNCHRONOUS_IO_NONALERT,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ATTRIBUTE_DIRECTORY, FILE_LIST_DIRECTORY,
+        SYNCHRONIZE,
+    };
+
+    let text = path.to_str().ok_or_else(|| {
+        RunnerError::InvalidTransport("Windows authority path is not UTF-8".to_owned())
+    })?;
+    let bytes = text.as_bytes();
+    if bytes.len() < 3
+        || !bytes[0].is_ascii_alphabetic()
+        || bytes[1] != b':'
+        || !matches!(bytes[2], b'\\' | b'/')
+    {
+        return Err(RunnerError::InvalidTransport(
+            "Windows authority path must use an absolute drive root".to_owned(),
+        ));
+    }
+    let root = std::ffi::OsString::from(format!("\\??\\{}\\", &text[..2]));
+    let options = FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT;
+    let mut current = nt_authority_open(
+        None,
+        &root,
+        FILE_LIST_DIRECTORY | SYNCHRONIZE,
+        FILE_OPEN,
+        options,
+        FILE_ATTRIBUTE_DIRECTORY,
+    )
+    .map_err(|status| {
+        RunnerError::Io(format!("NtCreateFile authority drive failed: {status:#x}"))
+    })?;
+    if windows_metadata_is_reparse(&current.metadata().map_err(io_error)?) {
+        return Err(RunnerError::InvalidTransport(
+            "authority drive root is a reparse point".to_owned(),
+        ));
+    }
+    let parent = path.parent().expect("validated authority path has parent");
+    for component in parent.components() {
+        let Component::Normal(name) = component else {
+            continue;
+        };
+        let disposition = if create { FILE_OPEN_IF } else { FILE_OPEN };
+        current = nt_authority_open(
+            Some(&current),
+            name,
+            FILE_LIST_DIRECTORY
+                | SYNCHRONIZE
+                | if create {
+                    FILE_ADD_SUBDIRECTORY | FILE_ADD_FILE
+                } else {
+                    0
+                },
+            disposition,
+            options,
+            FILE_ATTRIBUTE_DIRECTORY,
+        )
+        .map_err(|status| {
+            RunnerError::Io(format!(
+                "NtCreateFile authority directory failed: {status:#x}"
+            ))
+        })?;
+        let metadata = current.metadata().map_err(io_error)?;
+        if !metadata.file_type().is_dir() || windows_metadata_is_reparse(&metadata) {
+            return Err(RunnerError::InvalidTransport(
+                "authority path component is not a non-reparse directory".to_owned(),
+            ));
+        }
+    }
+    Ok((current, path.file_name().unwrap().to_os_string()))
+}
+
+#[cfg(windows)]
+fn authority_read_from_parent(
+    parent: &fs::File,
+    name: &std::ffi::OsStr,
+    max_bytes: usize,
+) -> Result<Vec<u8>, RunnerError> {
+    use windows_sys::Wdk::Storage::FileSystem::{
+        FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{FILE_GENERIC_READ, SYNCHRONIZE};
+    let file = nt_authority_open(
+        Some(parent),
+        name,
+        FILE_GENERIC_READ | SYNCHRONIZE,
+        FILE_OPEN,
+        FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+        windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL,
+    )
+    .map_err(|status| {
+        RunnerError::Io(format!("NtCreateFile authority file failed: {status:#x}"))
+    })?;
+    let metadata = file.metadata().map_err(io_error)?;
+    if !metadata.file_type().is_file() || windows_metadata_is_reparse(&metadata) {
+        return Err(RunnerError::InvalidSpec(
+            "authority read refused non-regular/reparse descriptor".to_owned(),
+        ));
+    }
+    let len = usize::try_from(metadata.len())
+        .map_err(|_| RunnerError::InvalidSpec("authority read length overflow".to_owned()))?;
+    if len > max_bytes {
+        return Err(RunnerError::InvalidSpec(format!(
+            "authority read oversized: {len} bytes exceeds {max_bytes}"
+        )));
+    }
+    let mut bytes = Vec::with_capacity(len.min(max_bytes));
+    file.take(
+        u64::try_from(max_bytes)
+            .unwrap_or(u64::MAX)
+            .saturating_add(1),
+    )
+    .read_to_end(&mut bytes)
+    .map_err(io_error)?;
+    if bytes.len() > max_bytes {
+        return Err(RunnerError::InvalidSpec(format!(
+            "authority read oversized after read: more than {max_bytes} bytes"
+        )));
+    }
+    Ok(bytes)
+}
+
+#[cfg(windows)]
+fn authority_read(path: &Path, max_bytes: usize) -> Result<Vec<u8>, RunnerError> {
+    let (parent, name) = authority_open_parent(path, false)?;
+    authority_read_from_parent(&parent, &name, max_bytes)
+}
+
+#[cfg(windows)]
+fn authority_create_once(path: &Path, data: &[u8], max_bytes: usize) -> Result<(), RunnerError> {
+    use windows_sys::Wdk::Storage::FileSystem::{
+        FILE_CREATE, FILE_NON_DIRECTORY_FILE, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_WRITE, SYNCHRONIZE,
+    };
+
+    let (parent, name) = authority_open_parent(path, true)?;
+    for _ in 0..AUTHORITY_CREATE_ONCE_TEMP_ATTEMPTS {
+        let temporary = authority_private_temp_name();
+        let mut file = match nt_authority_open(
+            Some(&parent),
+            &temporary,
+            FILE_GENERIC_WRITE | DELETE | SYNCHRONIZE,
+            FILE_CREATE,
+            FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+            FILE_ATTRIBUTE_NORMAL,
+        ) {
+            Ok(file) => file,
+            // As on Unix, a stale private name selects another bounded fresh
+            // operation-owned name rather than being interpreted as final reuse.
+            Err(STATUS_OBJECT_NAME_COLLISION) => continue,
+            Err(status) => {
+                return Err(RunnerError::Io(format!(
+                    "NtCreateFile stage failed: {status:#x}"
+                )));
+            }
+        };
+        let staged = (|| -> Result<(), RunnerError> {
+            let metadata = file.metadata().map_err(io_error)?;
+            if !metadata.file_type().is_file() || windows_metadata_is_reparse(&metadata) {
+                return Err(RunnerError::InvalidTransport(
+                    "create-once staged authority descriptor is not regular".to_owned(),
+                ));
+            }
+            file.write_all(data).map_err(io_error)?;
+            file.sync_all().map_err(io_error)?;
+            match nt_publish_hard_link_no_replace(&file, &parent, &name) {
+                Ok(()) => flush_authority_parent_windows(&parent),
+                Err(status) if status == STATUS_OBJECT_NAME_COLLISION => {
+                    let existing = authority_read_from_parent(&parent, &name, max_bytes)?;
+                    if existing == data {
+                        Ok(())
+                    } else {
+                        Err(RunnerError::InvalidSpec(format!(
+                            "create-once artifact collision at {}",
+                            path.display()
+                        )))
+                    }
+                }
+                Err(status) => Err(RunnerError::Io(format!(
+                    "NtSetInformationFile no-replace publication failed: {status:#x}"
+                ))),
+            }
+        })();
+        // The staged descriptor is the sole operation-owned cleanup capability;
+        // do not reopen or sweep by pathname after a crash.
+        let cleanup = nt_delete_staged_file(&file);
+        drop(file);
+        return match (staged, cleanup) {
+            (Ok(()), Ok(())) => flush_authority_parent_windows(&parent),
+            (Ok(()), Err(status)) => Err(RunnerError::Io(format!(
+                "NtSetInformationFile staged cleanup failed: {status:#x}"
+            ))),
+            (Err(error), Ok(()) | Err(_)) => Err(error),
+        };
+    }
+    Err(RunnerError::InvalidSpec(format!(
+        "create-once private staging-name collision retries exhausted after {AUTHORITY_CREATE_ONCE_TEMP_ATTEMPTS} attempts at {}",
+        path.display()
+    )))
+}
+
+#[cfg(windows)]
+const STATUS_OBJECT_NAME_COLLISION: i32 = 0xC000_0035_u32 as i32;
+
+#[cfg(windows)]
+fn nt_publish_hard_link_no_replace(
+    staged: &fs::File,
+    parent: &fs::File,
+    final_name: &std::ffi::OsStr,
+) -> Result<(), i32> {
+    use std::os::windows::{ffi::OsStrExt, io::AsRawHandle};
+    use windows_sys::Wdk::Storage::FileSystem::{
+        FILE_LINK_INFORMATION, FILE_LINK_INFORMATION_0, FileLinkInformation, NtSetInformationFile,
+    };
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+
+    let wide = final_name.encode_wide().collect::<Vec<_>>();
+    let name_bytes = wide.len().checked_mul(2).ok_or(-1)?;
+    let name_bytes = u32::try_from(name_bytes).map_err(|_| -1)?;
+    let offset = std::mem::offset_of!(FILE_LINK_INFORMATION, FileName);
+    let bytes = offset
+        .checked_add(usize::try_from(name_bytes).map_err(|_| -1)?)
+        .ok_or(-1)?;
+    let words = bytes
+        .checked_add(std::mem::size_of::<usize>() - 1)
+        .ok_or(-1)?
+        / std::mem::size_of::<usize>();
+    let mut buffer = vec![0_usize; words];
+    let information = buffer.as_mut_ptr().cast::<FILE_LINK_INFORMATION>();
+    // SAFETY: `buffer` has pointer alignment and enough storage for the
+    // documented variable-length FILE_LINK_INFORMATION record.
+    unsafe {
+        information.write(FILE_LINK_INFORMATION {
+            Anonymous: FILE_LINK_INFORMATION_0 {
+                ReplaceIfExists: false,
+            },
+            RootDirectory: parent.as_raw_handle() as HANDLE,
+            FileNameLength: name_bytes,
+            FileName: [0],
+        });
+        std::ptr::copy_nonoverlapping(
+            wide.as_ptr(),
+            (information.cast::<u8>().add(offset)).cast::<u16>(),
+            wide.len(),
+        );
+    }
+    let mut status_block = IO_STATUS_BLOCK::default();
+    // SAFETY: all handles are held, and the record points to the aligned live
+    // buffer for this synchronous NtSetInformationFile call.
+    let status = unsafe {
+        NtSetInformationFile(
+            staged.as_raw_handle() as HANDLE,
+            &mut status_block,
+            information.cast(),
+            u32::try_from(bytes).map_err(|_| -1)?,
+            FileLinkInformation,
+        )
+    };
+    if status < 0 { Err(status) } else { Ok(()) }
+}
+
+#[cfg(windows)]
+fn nt_delete_staged_file(file: &fs::File) -> Result<(), i32> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Wdk::Storage::FileSystem::{
+        FILE_DISPOSITION_INFORMATION, FileDispositionInformation, NtSetInformationFile,
+    };
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+
+    let information = FILE_DISPOSITION_INFORMATION { DeleteFile: true };
+    let mut status_block = IO_STATUS_BLOCK::default();
+    // SAFETY: this held staged descriptor was opened with DELETE access.
+    let status = unsafe {
+        NtSetInformationFile(
+            file.as_raw_handle() as HANDLE,
+            &mut status_block,
+            (&information as *const FILE_DISPOSITION_INFORMATION).cast(),
+            u32::try_from(std::mem::size_of::<FILE_DISPOSITION_INFORMATION>()).map_err(|_| -1)?,
+            FileDispositionInformation,
+        )
+    };
+    if status < 0 { Err(status) } else { Ok(()) }
+}
+
+#[cfg(windows)]
+fn flush_authority_parent_windows(parent: &fs::File) -> Result<(), RunnerError> {
+    // INVALID_FUNCTION is the only documented unsupported directory-flush
+    // status tolerated here; no pathname reopen is substituted.
+    if let Err(error) = parent.sync_all()
+        && error.raw_os_error() != Some(1)
+    {
+        return Err(io_error(error));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn windows_metadata_is_reparse(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(any(unix, windows)))]
+fn authority_read(_path: &Path, _max_bytes: usize) -> Result<Vec<u8>, RunnerError> {
+    Err(RunnerError::InvalidTransport(
+        "capability-rooted authority reads are unsupported on this platform".to_owned(),
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn authority_create_once(_path: &Path, _data: &[u8], _max_bytes: usize) -> Result<(), RunnerError> {
+    Err(RunnerError::InvalidTransport(
+        "capability-rooted authority writes are unsupported on this platform".to_owned(),
+    ))
 }
 
 pub fn read_bounded_file(path: &Path, max_bytes: usize) -> Result<Vec<u8>, RunnerError> {
@@ -3974,8 +5524,11 @@ fn open_read_no_follow(path: &Path) -> std::io::Result<fs::File> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn open_read_no_follow(path: &Path) -> std::io::Result<fs::File> {
-    OpenOptions::new().read(true).open(path)
+fn open_read_no_follow(_path: &Path) -> std::io::Result<fs::File> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "no-follow authority reads are unavailable on this platform",
+    ))
 }
 
 pub(crate) fn reject_link_components_for_path(path: &Path) -> Result<(), RunnerError> {
@@ -4020,419 +5573,6 @@ fn to_contract_path(path: &Path) -> Result<ContractPath, RunnerError> {
 
 fn canonical_current_dir() -> Result<PathBuf, RunnerError> {
     fs::canonicalize(env::current_dir().map_err(io_error)?).map_err(io_error)
-}
-
-pub fn repository_authority(cwd: &Path) -> Result<RepositoryAuthority, RunnerError> {
-    compute_repository_authority(cwd)
-}
-
-pub fn repository_authority_binding(
-    cwd: &Path,
-    workstream: &str,
-) -> Result<RepositoryAuthorityBinding, RunnerError> {
-    let manifest = compute_repository_authority(cwd)?;
-    let path = repository_authority_manifest_path(Path::new(&manifest.repo_root), workstream);
-    reject_link_components_for_path(&path)?;
-    let bytes =
-        serde_json::to_vec_pretty(&manifest).map_err(|error| RunnerError::Io(error.to_string()))?;
-    if bytes.len() > REPOSITORY_AUTHORITY_MANIFEST_MAX_BYTES {
-        return Err(RunnerError::InvalidSpec(format!(
-            "repository authority manifest oversized: {} bytes exceeds {REPOSITORY_AUTHORITY_MANIFEST_MAX_BYTES}",
-            bytes.len()
-        )));
-    }
-    write_parent_file_create_once_exact(&path, &bytes)?;
-    let stored = read_bounded_file(&path, REPOSITORY_AUTHORITY_MANIFEST_MAX_BYTES)?;
-    if stored != bytes {
-        return Err(RunnerError::InvalidSpec(format!(
-            "repository authority manifest digest drift at {}",
-            path.display()
-        )));
-    }
-    let digest = sha256_hex(&stored);
-    Ok(RepositoryAuthorityBinding {
-        path: path_to_string(&path)?,
-        digest,
-        manifest,
-    })
-}
-
-pub fn read_repository_authority_binding(
-    path: &Path,
-    expected_digest: &str,
-) -> Result<RepositoryAuthorityBinding, RunnerError> {
-    let bytes = read_bounded_file(path, REPOSITORY_AUTHORITY_MANIFEST_MAX_BYTES)?;
-    let digest = sha256_hex(&bytes);
-    if digest != expected_digest {
-        return Err(RunnerError::InvalidSpec(format!(
-            "repository authority digest drift: expected {expected_digest}, got {digest}"
-        )));
-    }
-    let manifest: RepositoryAuthority = serde_json::from_slice(&bytes)
-        .map_err(|error| RunnerError::InvalidSpec(format!("repository authority json: {error}")))?;
-    validate_repository_manifest_shape(&manifest)?;
-    verify_repository_authority_live(&manifest)?;
-    Ok(RepositoryAuthorityBinding {
-        path: path_to_string(path)?,
-        digest,
-        manifest,
-    })
-}
-
-fn compute_repository_authority(cwd: &Path) -> Result<RepositoryAuthority, RunnerError> {
-    reject_link_components_for_path(cwd)?;
-    let repo_root_raw = git_stdout_runner(cwd, &["rev-parse", "--show-toplevel"])?;
-    let repo_root = fs::canonicalize(repo_root_raw.trim()).map_err(io_error)?;
-    reject_link_components_for_path(&repo_root)?;
-    let first = live_repository_snapshot(&repo_root)?;
-    if !first.status_porcelain.is_empty() {
-        return Err(RunnerError::InvalidSpec(format!(
-            "repository authority requires clean status including nonignored untracked files: {}",
-            first.status_porcelain.replace('\n', ";")
-        )));
-    }
-    let tracked_sources = tracked_sources_from_head(&repo_root, &first.head_commit)?;
-    let second = live_repository_snapshot(&repo_root)?;
-    if first != second {
-        return Err(RunnerError::InvalidSpec(
-            "repository authority moved while manifest was being built".to_owned(),
-        ));
-    }
-    let manifest = RepositoryAuthority {
-        schema: "autopilot.repository_authority.v1".to_owned(),
-        repo_root: path_to_string(&repo_root)?,
-        head_commit: first.head_commit,
-        head_tree: first.head_tree,
-        status_porcelain: first.status_porcelain,
-        tracked_sources,
-    };
-    validate_repository_manifest_shape(&manifest)?;
-    Ok(manifest)
-}
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-struct LiveRepositorySnapshot {
-    head_commit: String,
-    head_tree: String,
-    status_porcelain: String,
-}
-
-fn live_repository_snapshot(repo_root: &Path) -> Result<LiveRepositorySnapshot, RunnerError> {
-    let head_commit = git_stdout_runner(repo_root, &["rev-parse", "--verify", "HEAD^{commit}"])?;
-    let head_tree = git_stdout_runner(repo_root, &["rev-parse", "--verify", "HEAD^{tree}"])?;
-    let status_porcelain = repository_status_porcelain(repo_root)?;
-    Ok(LiveRepositorySnapshot {
-        head_commit: head_commit.trim().to_owned(),
-        head_tree: head_tree.trim().to_owned(),
-        status_porcelain,
-    })
-}
-
-fn repository_status_porcelain(repo_root: &Path) -> Result<String, RunnerError> {
-    let mut stdout = git_stdout_runner_bounded(
-        repo_root,
-        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
-        REPOSITORY_AUTHORITY_STATUS_MAX_STDOUT_BYTES,
-        "git status",
-    )?;
-    let ignored_pi = git_stdout_runner_bounded(
-        repo_root,
-        &[
-            "status",
-            "--porcelain=v1",
-            "-z",
-            "--untracked-files=all",
-            "--ignored=matching",
-            "--",
-            ".pi",
-        ],
-        REPOSITORY_AUTHORITY_STATUS_MAX_STDOUT_BYTES,
-        "git status ignored .pi",
-    )?;
-    stdout.extend_from_slice(&ignored_pi);
-    let mut foreign = BTreeSet::new();
-    for record in stdout
-        .split(|byte| *byte == 0)
-        .filter(|record| !record.is_empty())
-    {
-        if record.len() < 4 || record[2] != b' ' {
-            return Err(RunnerError::InvalidSpec(
-                "git status emitted a malformed porcelain-v1 record".to_owned(),
-            ));
-        }
-        let status = &record[..2];
-        let path = std::str::from_utf8(&record[3..])
-            .map_err(|error| RunnerError::InvalidSpec(format!("git status path utf8: {error}")))?;
-        let untracked = status == b"??";
-        let ignored = status == b"!!";
-        if ignored && !is_pi_namespace_path(path) {
-            continue;
-        }
-        if !(untracked || ignored) || !matches_package_owned_runtime_path(path) {
-            foreign.insert(format!("{} {path}", String::from_utf8_lossy(status)));
-        }
-    }
-    Ok(foreign.into_iter().collect::<Vec<_>>().join("\n"))
-}
-
-fn is_pi_namespace_path(path: &str) -> bool {
-    matches!(path, ".pi" | ".pi/") || path.starts_with(".pi/")
-}
-
-fn matches_package_owned_runtime_path(path: &str) -> bool {
-    path == ".pi/autopilot"
-        || path.starts_with(".pi/autopilot/")
-        || path == ".pi/tasks"
-        || path.starts_with(".pi/tasks/")
-}
-
-fn tracked_sources_from_head(
-    repo_root: &Path,
-    head_commit: &str,
-) -> Result<Vec<RepositoryTrackedSource>, RunnerError> {
-    let stdout = git_stdout_runner_bounded(
-        repo_root,
-        &["ls-tree", "-r", "-z", "--full-tree", head_commit],
-        REPOSITORY_AUTHORITY_LS_TREE_MAX_STDOUT_BYTES,
-        "git ls-tree",
-    )?;
-    let mut sources = Vec::new();
-    for raw in stdout
-        .split(|byte| *byte == 0)
-        .filter(|raw| !raw.is_empty())
-    {
-        if raw.len() > REPOSITORY_AUTHORITY_LS_TREE_MAX_RECORD_BYTES {
-            return Err(RunnerError::InvalidSpec(format!(
-                "git ls-tree record oversized: {} bytes exceeds {REPOSITORY_AUTHORITY_LS_TREE_MAX_RECORD_BYTES}",
-                raw.len()
-            )));
-        }
-        let record = std::str::from_utf8(raw)
-            .map_err(|error| RunnerError::InvalidSpec(format!("git ls-tree utf8: {error}")))?;
-        let (header, path) = record.split_once('\t').ok_or_else(|| {
-            RunnerError::InvalidSpec(format!("git ls-tree malformed record: {record:?}"))
-        })?;
-        if path.len() > REPOSITORY_AUTHORITY_LS_TREE_MAX_PATH_BYTES {
-            return Err(RunnerError::InvalidSpec(format!(
-                "git ls-tree path oversized: {} bytes exceeds {REPOSITORY_AUTHORITY_LS_TREE_MAX_PATH_BYTES}: {path:?}",
-                path.len()
-            )));
-        }
-        let mut parts = header.split_whitespace();
-        let mode = parts.next().ok_or_else(|| {
-            RunnerError::InvalidSpec(format!("git ls-tree missing mode: {record:?}"))
-        })?;
-        let kind = parts.next().ok_or_else(|| {
-            RunnerError::InvalidSpec(format!("git ls-tree missing type: {record:?}"))
-        })?;
-        let object = parts.next().ok_or_else(|| {
-            RunnerError::InvalidSpec(format!("git ls-tree missing object: {record:?}"))
-        })?;
-        if parts.next().is_some() || path.trim().is_empty() {
-            return Err(RunnerError::InvalidSpec(format!(
-                "git ls-tree malformed tracked source: {record:?}"
-            )));
-        }
-        match (mode, kind) {
-            ("100644" | "100755", "blob") => {}
-            ("120000", "blob") => {
-                return Err(RunnerError::InvalidSpec(format!(
-                    "repository authority rejects tracked symlink mode 120000: {path}"
-                )));
-            }
-            (_, "commit") => {
-                return Err(RunnerError::InvalidSpec(format!(
-                    "repository authority rejects gitlink/submodule tracked source mode {mode}: {path}"
-                )));
-            }
-            _ => {
-                return Err(RunnerError::InvalidSpec(format!(
-                    "repository authority unsupported tracked source mode/type: mode={mode} type={kind} path={path}"
-                )));
-            }
-        }
-        if sources.len() >= REPOSITORY_AUTHORITY_MAX_TRACKED_SOURCES {
-            return Err(RunnerError::InvalidSpec(format!(
-                "repository authority tracked source inventory exceeds {REPOSITORY_AUTHORITY_MAX_TRACKED_SOURCES} entries"
-            )));
-        }
-        sources.push(RepositoryTrackedSource {
-            path: path.to_owned(),
-            mode: mode.to_owned(),
-            blob: object.to_owned(),
-            whole_file_anchor: format!("git://{head_commit}/{path}#whole-file"),
-        });
-    }
-    if sources.is_empty() {
-        return Err(RunnerError::InvalidSpec(
-            "repository authority tracked source inventory is empty".to_owned(),
-        ));
-    }
-    Ok(sources)
-}
-
-fn git_stdout_runner_bounded(
-    repo: &Path,
-    args: &[&str],
-    max_stdout_bytes: usize,
-    label: &str,
-) -> Result<Vec<u8>, RunnerError> {
-    let mut child = Command::new("git")
-        .current_dir(repo)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(io_error)?;
-    let mut stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| RunnerError::InvalidSpec(format!("{label} stdout pipe unavailable")))?;
-    let mut data = Vec::new();
-    let mut buffer = [0_u8; 8192];
-    loop {
-        let count = stdout.read(&mut buffer).map_err(io_error)?;
-        if count == 0 {
-            break;
-        }
-        let next_len = data
-            .len()
-            .checked_add(count)
-            .ok_or_else(|| RunnerError::InvalidSpec(format!("{label} stdout length overflow")))?;
-        if next_len > max_stdout_bytes {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(RunnerError::InvalidSpec(format!(
-                "{label} stdout oversized: more than {max_stdout_bytes} bytes"
-            )));
-        }
-        data.extend_from_slice(&buffer[..count]);
-    }
-    let output = child.wait_with_output().map_err(io_error)?;
-    if !output.status.success() {
-        return Err(RunnerError::InvalidSpec(format!(
-            "{label} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )));
-    }
-    Ok(data)
-}
-
-fn validate_repository_manifest_shape(manifest: &RepositoryAuthority) -> Result<(), RunnerError> {
-    if manifest.schema != "autopilot.repository_authority.v1"
-        || manifest.repo_root.trim().is_empty()
-        || manifest.head_commit.trim().is_empty()
-        || manifest.head_tree.trim().is_empty()
-    {
-        return Err(RunnerError::InvalidSpec(
-            "repository authority manifest missing identity fields".to_owned(),
-        ));
-    }
-    let root = Path::new(&manifest.repo_root);
-    if !root.is_absolute() {
-        return Err(RunnerError::InvalidSpec(
-            "repository authority root is not absolute".to_owned(),
-        ));
-    }
-    let canonical_root = fs::canonicalize(root).map_err(io_error)?;
-    if canonical_root != root {
-        return Err(RunnerError::InvalidSpec(format!(
-            "repository authority canonical root drift: manifest={} canonical={}",
-            root.display(),
-            canonical_root.display()
-        )));
-    }
-    reject_link_components_for_path(root)?;
-    if manifest.status_porcelain.contains('\0') {
-        return Err(RunnerError::InvalidSpec(
-            "repository authority status is malformed".to_owned(),
-        ));
-    }
-    let mut seen = BTreeSet::new();
-    for source in &manifest.tracked_sources {
-        if source.path.trim().is_empty()
-            || source.path.contains('\0')
-            || source.path.contains('\\')
-            || Path::new(&source.path).is_absolute()
-            || !matches!(source.mode.as_str(), "100644" | "100755")
-            || source.blob.trim().is_empty()
-            || source.whole_file_anchor
-                != format!("git://{}/{}#whole-file", manifest.head_commit, source.path)
-        {
-            return Err(RunnerError::InvalidSpec(format!(
-                "repository authority malformed tracked source: {} mode={}",
-                source.path, source.mode
-            )));
-        }
-        if !seen.insert(source.path.clone()) {
-            return Err(RunnerError::InvalidSpec(format!(
-                "repository authority duplicate tracked source: {}",
-                source.path
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn verify_repository_authority_live(manifest: &RepositoryAuthority) -> Result<(), RunnerError> {
-    let root = Path::new(&manifest.repo_root);
-    let live = live_repository_snapshot(root)?;
-    if live.head_commit != manifest.head_commit
-        || live.head_tree != manifest.head_tree
-        || live.status_porcelain != manifest.status_porcelain
-    {
-        return Err(RunnerError::InvalidSpec(format!(
-            "repository authority live drift: expected head={} tree={} clean_status_len={}, got head={} tree={} status_len={}",
-            manifest.head_commit,
-            manifest.head_tree,
-            manifest.status_porcelain.len(),
-            live.head_commit,
-            live.head_tree,
-            live.status_porcelain.len()
-        )));
-    }
-    Ok(())
-}
-
-fn repository_authority_manifest_path(repo_root: &Path, workstream: &str) -> PathBuf {
-    repo_root
-        .join(".pi/autopilot")
-        .join(workstream)
-        .join("planning")
-        .join("repository-authority.v1.json")
-}
-
-fn path_uri_component(path: &str) -> String {
-    Path::new(path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("repository-authority.v1.json")
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
-fn git_stdout_runner(repo: &Path, args: &[&str]) -> Result<String, RunnerError> {
-    let output = Command::new("git")
-        .current_dir(repo)
-        .args(args)
-        .output()
-        .map_err(io_error)?;
-    if !output.status.success() {
-        return Err(RunnerError::InvalidSpec(format!(
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        )));
-    }
-    String::from_utf8(output.stdout)
-        .map_err(|error| RunnerError::InvalidSpec(format!("git stdout utf8: {error}")))
 }
 
 fn absolute_path(path: &Path) -> Result<PathBuf, RunnerError> {
@@ -4996,6 +6136,221 @@ pub fn establish_delivery_package(
     package_facts_for_head(&worktree, package_commit.trim().to_owned())
 }
 
+#[cfg(unix)]
+pub fn establish_delivery_package_v4(
+    result: &DeliveryResult,
+    expected: &DeliveryExpectation,
+    artifact: &DeliveryAssignmentArtifactV4,
+) -> Result<PackageFacts, DeliveryRejection> {
+    materializer_v4::replay_v4_materialization(artifact)
+        .map_err(|_| DeliveryRejection::GitState)?;
+    validate_delivery_pre_package(result, expected)?;
+    let worktree = canonical_delivery_worktree(result, expected)?;
+    verify_distinct_git_worktree(&worktree, &expected.base_commit)
+        .map_err(|_| DeliveryRejection::GitState)?;
+    let paths = v4_current_package_delta(result, expected, artifact, &worktree)?;
+    if !v4_status_is_exact(&worktree, &paths, artifact)
+        || !v4_targets_are_regular(&worktree, &paths)
+    {
+        return Err(DeliveryRejection::GitState);
+    }
+    git_status_checked(&worktree, &["reset", "--mixed", "HEAD"])
+        .map_err(|_| DeliveryRejection::GitState)?;
+    git_status_checked_with_paths(&worktree, &["add", "--"], &paths)
+        .map_err(|_| DeliveryRejection::GitState)?;
+    let mut staged = git_nul_paths(
+        &git_stdout_bytes_checked(
+            &worktree,
+            &["diff", "--cached", "--name-only", "-z", "HEAD", "--"],
+        )
+        .map_err(|_| DeliveryRejection::GitState)?,
+    );
+    staged.sort();
+    if path_bytes(&paths) != staged || !v4_targets_are_regular(&worktree, &paths) {
+        return Err(DeliveryRejection::GitState);
+    }
+    git_status_checked(
+        &worktree,
+        &[
+            "commit",
+            "--no-gpg-sign",
+            "-m",
+            "autopilot delivery package",
+        ],
+    )
+    .map_err(|_| DeliveryRejection::GitState)?;
+    let commit = git_stdout_checked(&worktree, &["rev-parse", "--verify", "HEAD^{commit}"])
+        .map_err(|_| DeliveryRejection::GitState)?;
+    package_facts_for_head(&worktree, commit.trim().to_owned())
+}
+
+#[cfg(unix)]
+pub fn accept_delivery_v4_with_package_facts(
+    result: &DeliveryResult,
+    expected: &DeliveryExpectation,
+    artifact: &DeliveryAssignmentArtifactV4,
+    package: &PackageFacts,
+) -> Result<AcceptedDelivery, DeliveryRejection> {
+    materializer_v4::replay_v4_materialization(artifact)
+        .map_err(|_| DeliveryRejection::GitState)?;
+    validate_delivery_pre_package(result, expected)?;
+    let worktree = canonical_delivery_worktree(result, expected)?;
+    let paths = v4_current_package_delta(result, expected, artifact, &worktree)?;
+    verify_package_git_state(
+        &worktree,
+        &expected.base_commit,
+        &package.package_commit,
+        &package.package_tree,
+        &paths,
+        false,
+    )?;
+    if !v4_status_is_exact(&worktree, &[], artifact) {
+        return Err(DeliveryRejection::GitState);
+    }
+    Ok(AcceptedDelivery {
+        package_commit: package.package_commit.clone(),
+        package_tree: package.package_tree.clone(),
+        changed_paths: paths,
+        audit_ref: result.execution_audit_ref.clone(),
+        focused_evidence_refs: result.focused_evidence_refs.clone(),
+    })
+}
+
+#[cfg(unix)]
+fn v4_current_package_delta(
+    result: &DeliveryResult,
+    expected: &DeliveryExpectation,
+    artifact: &DeliveryAssignmentArtifactV4,
+    worktree: &Path,
+) -> Result<Vec<String>, DeliveryRejection> {
+    let mut paths = claimed_changed_paths(result)?;
+    for leaf in &artifact.materialization.baseline {
+        if v4_baseline_leaf_needs_stage(worktree, &expected.base_commit, leaf)? {
+            paths.push(leaf.destination.0.clone());
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    if paths.len()
+        != result.actual_changed_paths.len()
+            + paths
+                .iter()
+                .filter(|path| {
+                    artifact
+                        .materialization
+                        .baseline
+                        .iter()
+                        .any(|leaf| leaf.destination.0 == **path)
+                })
+                .count()
+    {
+        return Err(DeliveryRejection::GitState);
+    }
+    Ok(paths)
+}
+
+#[cfg(unix)]
+fn v4_baseline_leaf_needs_stage(
+    worktree: &Path,
+    base_commit: &Sha,
+    leaf: &CoreBaselineLeafV1,
+) -> Result<bool, DeliveryRejection> {
+    let output = git_output_bounded(
+        worktree,
+        &["ls-tree", "-z", &base_commit.0, "--"],
+        std::slice::from_ref(&leaf.destination.0),
+    )
+    .map_err(|_| DeliveryRejection::GitState)?;
+    if !output.status.success() {
+        return Err(DeliveryRejection::GitState);
+    }
+    let Some(row) = output
+        .stdout
+        .strip_suffix(&[0])
+        .filter(|row| !row.is_empty())
+    else {
+        return Ok(true);
+    };
+    let tab = row
+        .iter()
+        .position(|byte| *byte == b'\t')
+        .ok_or(DeliveryRejection::GitState)?;
+    let (header, path_with_tab) = row.split_at(tab);
+    let path = &path_with_tab[1..];
+    if path != leaf.destination.0.as_bytes() {
+        return Err(DeliveryRejection::GitState);
+    }
+    let expected_mode = match leaf.mode.as_str() {
+        "100644" => 0o644,
+        "100755" => 0o755,
+        _ => return Err(DeliveryRejection::GitState),
+    };
+    if header.split(|byte| *byte == b' ').next() != Some(leaf.mode.as_bytes()) {
+        return Err(DeliveryRejection::GitState);
+    }
+    let current = read_binary_leaf_exact_mode(
+        &worktree.join(&leaf.destination.0),
+        MAX_AUTHORITY_SOURCE_BYTES,
+        expected_mode,
+    )
+    .map_err(|_| DeliveryRejection::GitState)?;
+    let object = format!("{}:{}", base_commit.0, leaf.destination.0);
+    let base = git_stdout_bytes_checked(worktree, &["show", &object])
+        .map_err(|_| DeliveryRejection::GitState)?;
+    if base != current || sha256_hex(&base) != leaf.bytes_sha256 {
+        return Err(DeliveryRejection::GitState);
+    }
+    Ok(false)
+}
+
+#[cfg(unix)]
+fn v4_status_is_exact(
+    worktree: &Path,
+    paths: &[String],
+    artifact: &DeliveryAssignmentArtifactV4,
+) -> bool {
+    let mut actual =
+        match git_stdout_bytes_checked(worktree, &["diff", "--name-only", "-z", "HEAD", "--"]) {
+            Ok(paths) => git_nul_paths(&paths),
+            Err(_) => return false,
+        };
+    let untracked = match git_stdout_bytes_checked(
+        worktree,
+        &["ls-files", "--others", "--exclude-standard", "-z", "--"],
+    ) {
+        Ok(paths) => git_nul_paths(&paths),
+        Err(_) => return false,
+    };
+    actual.extend(untracked);
+    actual.sort();
+    actual.dedup();
+    let mut expected = path_bytes(paths);
+    for path in [
+        &artifact.materialization.intention_path,
+        &artifact.materialization.receipt_path,
+    ] {
+        let Ok(path) = Path::new(path).strip_prefix(worktree) else {
+            return false;
+        };
+        let Some(path) = path.to_str() else {
+            return false;
+        };
+        expected.push(path.as_bytes().to_vec());
+    }
+    expected.sort();
+    expected.dedup();
+    actual == expected
+}
+
+#[cfg(unix)]
+fn v4_targets_are_regular(worktree: &Path, paths: &[String]) -> bool {
+    paths.iter().all(|path| {
+        let absolute = worktree.join(path);
+        reject_link_components_for_path(&absolute).is_ok()
+            && fs::symlink_metadata(absolute).is_ok_and(|metadata| metadata.file_type().is_file())
+    })
+}
+
 pub fn accept_delivery_with_package_facts(
     carriers: &[DeliveryResult],
     expected: &DeliveryExpectation,
@@ -5458,20 +6813,119 @@ pub(crate) fn git_output_bounded_with_limits(
     max_stdout_bytes: usize,
     max_stderr_bytes: usize,
 ) -> Result<std::process::Output, String> {
+    git_output_bounded_with_limits_inner(
+        cwd,
+        args,
+        paths,
+        max_stdout_bytes,
+        max_stderr_bytes,
+        GitCommandEnvironment::OrdinaryDeliveryInherited,
+        None,
+    )
+}
+
+/// Runs a Git authority read with a Core-owned environment. This intentionally
+/// differs from ordinary delivery/package Git helpers, which retain their
+/// inherited behavior through `GitCommandEnvironment::OrdinaryDeliveryInherited`.
+pub(crate) fn authority_git_output_bounded_with_limits(
+    cwd: &Path,
+    args: &[&str],
+    paths: &[String],
+    max_stdout_bytes: usize,
+    max_stderr_bytes: usize,
+) -> Result<std::process::Output, String> {
+    git_output_bounded_with_limits_inner(
+        cwd,
+        args,
+        paths,
+        max_stdout_bytes,
+        max_stderr_bytes,
+        GitCommandEnvironment::AuthorityOwned,
+        None,
+    )
+}
+
+/// Authority-owned Git read with bounded Core-provided stdin. Batch object
+/// readers use this instead of inheriting a caller's Git selectors or stdin.
+pub(crate) fn authority_git_output_bounded_with_input(
+    cwd: &Path,
+    args: &[&str],
+    paths: &[String],
+    input: &[u8],
+    max_stdout_bytes: usize,
+    max_stderr_bytes: usize,
+) -> Result<std::process::Output, String> {
+    git_output_bounded_with_limits_inner(
+        cwd,
+        args,
+        paths,
+        max_stdout_bytes,
+        max_stderr_bytes,
+        GitCommandEnvironment::AuthorityOwned,
+        Some(input),
+    )
+}
+
+#[derive(Clone, Copy)]
+enum GitCommandEnvironment {
+    /// Package/delivery commands preserve their legacy inherited Git behavior.
+    OrdinaryDeliveryInherited,
+    /// Repository and Validator V3 authority reads use only Core-owned Git
+    /// selectors, after dynamically removing every inherited `GIT_*` key.
+    AuthorityOwned,
+}
+
+fn configure_authority_git_environment(command: &mut Command) {
+    for (name, _) in env::vars_os() {
+        if name.as_encoded_bytes().starts_with(b"GIT_") {
+            command.env_remove(name);
+        }
+    }
+    for (name, value) in AUTHORITY_GIT_ENVIRONMENT {
+        command.env(name, value);
+    }
+}
+
+fn git_output_bounded_with_limits_inner(
+    cwd: &Path,
+    args: &[&str],
+    paths: &[String],
+    max_stdout_bytes: usize,
+    max_stderr_bytes: usize,
+    environment: GitCommandEnvironment,
+    input: Option<&[u8]>,
+) -> Result<std::process::Output, String> {
     let mut command = Command::new("git");
     command
         .current_dir(cwd)
         .args(args)
         .args(paths)
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if matches!(environment, GitCommandEnvironment::AuthorityOwned) {
+        configure_authority_git_environment(&mut command);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
     let mut child = command.spawn().map_err(|error| error.to_string())?;
+    if let Some(input) = input {
+        let Some(mut stdin) = child.stdin.take() else {
+            terminate_git_process(&mut child);
+            return Err("git stdin pipe unavailable".to_owned());
+        };
+        if let Err(error) = stdin.write_all(input) {
+            terminate_git_process(&mut child);
+            return Err(error.to_string());
+        }
+    }
     let Some(stdout) = child.stdout.take() else {
         terminate_git_process(&mut child);
         return Err("git stdout pipe unavailable".to_owned());
@@ -5617,6 +7071,7 @@ pub(crate) fn validate_child_boundary(
         "planning.scout-dossier.v1" => "planning.scout-dossier.v1",
         "planning.questions.v1" => "planning.questions.v1",
         "planning.work-map.v1" => "planning.work-map.v1",
+        "planning.work-map.v2" => "planning.work-map.v2",
         "planning.plan-review.v1" => "planning.plan-review.v1",
         _ => "planning.questions.v1",
     });
@@ -5645,6 +7100,7 @@ pub(crate) fn validate_child_boundary(
             };
             crate::planning::accept_work_map_for_atoms(raw, &runtime, &atom_ids, digest)
         }
+        "planning.work-map.v2" => crate::planning::accept_work_map_v2(raw, &runtime),
         "planning.plan-review.v1" => crate::planning::accept_plan_review(raw, &runtime),
         other => {
             runtime.reject(format!("unknown-boundary:{other}"))?;
@@ -5752,6 +7208,143 @@ mod bounded_io_tests {
     use super::*;
 
     #[test]
+    fn bug_187_ordinary_delivery_roles_have_literal_package_identity() {
+        for role_id in ["implementer", "fixer-integrator"] {
+            let identity = expected_delivery_identity(
+                &Id("main".to_owned()),
+                &Id("L1".to_owned()),
+                &Id(role_id.to_owned()),
+                1,
+            )
+            .expect("ordinary delivery role identity");
+            assert_eq!(identity.assignment_id.0, "assignment-main-L1");
+            assert_eq!(identity.action_id.0, "action-main-L1");
+        }
+        assert_eq!(
+            expected_delivery_identity(
+                &Id("main".to_owned()),
+                &Id("L1".to_owned()),
+                &Id("unknown-delivery-role".to_owned()),
+                1,
+            )
+            .expect_err("unknown role must not receive ordinary identity")
+            .to_string(),
+            "delivery identity rejects unsupported role: unknown-delivery-role"
+        );
+        assert_eq!(
+            expected_delivery_identity(
+                &Id("main".to_owned()),
+                &Id("L1".to_owned()),
+                &Id("implementer".to_owned()),
+                0,
+            )
+            .expect_err("ordinary delivery requires a nonzero attempt")
+            .to_string(),
+            "delivery identity requires attempt >= 1: role=implementer"
+        );
+        assert_eq!(
+            expected_delivery_identity(
+                &Id("main".to_owned()),
+                &Id("L1".to_owned()),
+                &Id("recovery-engineer".to_owned()),
+                2,
+            )
+            .expect_err("attempt two exceeds the package recovery bound")
+            .to_string(),
+            "recovery delivery attempt 2 exceeds package maximum 1"
+        );
+    }
+
+    #[test]
+    fn authority_git_environment_removes_inherited_git_keys_without_touching_delivery() {
+        const HELPER: &str = "PI_AUTHORITY_GIT_ENVIRONMENT_UNIT_HELPER";
+        if env::var_os(HELPER).is_none() {
+            let output = Command::new(env::current_exe().expect("current test executable"))
+                .args([
+                    "--exact",
+                    "runner::bounded_io_tests::authority_git_environment_removes_inherited_git_keys_without_touching_delivery",
+                    "--nocapture",
+                ])
+                .env(HELPER, "1")
+                .env("GIT_ARBITRARY_AUTHORITY_TEST", "must-be-removed")
+                .env("GIT_DIR", "/hostile/git-dir")
+                .env("GIT_CONFIG_COUNT", "1")
+                .env("GIT_CONFIG_KEY_0", "core.abbrev")
+                .env("GIT_CONFIG_VALUE_0", "4")
+                .env("GIT_ATTR_NOSYSTEM", "0")
+                .output()
+                .expect("spawn isolated authority environment helper");
+            assert!(
+                output.status.success(),
+                "isolated authority environment helper failed: stdout={} stderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let inherited_git_keys = env::vars_os()
+            .map(|(name, _)| name)
+            .filter(|name| name.as_encoded_bytes().starts_with(b"GIT_"))
+            .collect::<Vec<_>>();
+        assert!(
+            inherited_git_keys
+                .iter()
+                .any(|name| name == "GIT_ARBITRARY_AUTHORITY_TEST"),
+            "isolated helper must inherit an arbitrary GIT_* key"
+        );
+        let mut authority = Command::new("git");
+        configure_authority_git_environment(&mut authority);
+        let overrides = authority
+            .get_envs()
+            .map(|(name, value)| (name.to_os_string(), value.map(|value| value.to_os_string())))
+            .collect::<BTreeMap<_, _>>();
+        for name in inherited_git_keys {
+            let trusted = AUTHORITY_GIT_ENVIRONMENT
+                .iter()
+                .find_map(|(trusted_name, value)| (name == *trusted_name).then_some(*value));
+            match trusted {
+                Some(value) => assert_eq!(
+                    overrides.get(&name).and_then(|value| value.as_deref()),
+                    Some(std::ffi::OsStr::new(value)),
+                    "authority-owned {name:?} must replace the inherited value"
+                ),
+                None => assert!(
+                    matches!(overrides.get(&name), Some(None)),
+                    "inherited non-authority {name:?} must be explicitly removed"
+                ),
+            }
+        }
+        assert_eq!(
+            overrides
+                .get(&std::ffi::OsString::from("GIT_ATTR_NOSYSTEM"))
+                .and_then(|value| value.as_deref()),
+            Some(std::ffi::OsStr::new("1")),
+            "authority command must disable inherited system Git attributes"
+        );
+        for (name, value) in &overrides {
+            if name.as_encoded_bytes().starts_with(b"GIT_") {
+                let trusted = AUTHORITY_GIT_ENVIRONMENT
+                    .iter()
+                    .find_map(|(trusted_name, value)| (name == *trusted_name).then_some(*value));
+                assert_eq!(
+                    value.as_deref(),
+                    trusted.map(std::ffi::OsStr::new),
+                    "authority command installed an untrusted Git environment override: {name:?}"
+                );
+            }
+        }
+
+        // Ordinary delivery commands intentionally receive no authority
+        // overrides and continue to inherit their legacy Git environment.
+        let ordinary = Command::new("git");
+        assert!(
+            ordinary.get_envs().next().is_none(),
+            "ordinary delivery Git configuration must remain untouched"
+        );
+    }
+
+    #[test]
     fn bounded_git_stderr_overflow_terminates_the_process_group() {
         let temp = fs::canonicalize(std::env::temp_dir()).expect("canonical temp root");
         let root = temp.join(format!(
@@ -5801,6 +7394,113 @@ mod bounded_io_tests {
         assert!(output.stdout.is_empty());
         assert!(output.stderr.is_empty());
         fs::remove_dir_all(root).expect("remove bounded git fixture");
+    }
+
+    fn atomic_test_root(label: &str) -> PathBuf {
+        // macOS commonly spells its real temporary directory through `/var`.
+        // Capability traversal must start at the canonical directory rather
+        // than walking that symlink as though it were an authority component.
+        let temporary = fs::canonicalize(std::env::temp_dir()).expect("canonical temporary root");
+        let root = temporary.join(format!(
+            "pi-autopilot-atomic-{label}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("atomic fixture root");
+        fs::canonicalize(root).expect("canonical atomic fixture root")
+    }
+
+    fn atomic_staged_name(label: &str) -> std::ffi::OsString {
+        std::ffi::OsString::from(format!(
+            ".autopilot-v2-stage-test-{label}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ))
+    }
+
+    #[test]
+    fn atomic_create_once_restarts_after_a_partial_staged_leaf() {
+        let root = atomic_test_root("partial");
+        let final_path = root.join("authority/final.json");
+        let parent = final_path.parent().unwrap();
+        fs::create_dir_all(parent).unwrap();
+        let stale = atomic_staged_name("partial-crash");
+        let fresh = atomic_staged_name("partial-retry");
+        // A crash after an incomplete write leaves the real private staging
+        // leaf. The hook makes the retry encounter that exact leaf first.
+        fs::write(parent.join(&stale), b"partial").unwrap();
+        set_test_authority_temporary_names([stale.clone(), fresh]);
+        write_bounded_file_create_once(&final_path, b"complete", 64).unwrap();
+        assert_eq!(
+            read_bounded_authority_file(&final_path, 64).unwrap(),
+            b"complete"
+        );
+        assert_eq!(fs::read(parent.join(stale)).unwrap(), b"partial");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn atomic_create_once_restarts_after_a_complete_staged_leaf() {
+        let root = atomic_test_root("complete");
+        let final_path = root.join("authority/final.json");
+        let parent = final_path.parent().unwrap();
+        fs::create_dir_all(parent).unwrap();
+        let stale = atomic_staged_name("complete-crash");
+        let fresh = atomic_staged_name("complete-retry");
+        // An abandoned complete private leaf is forensic evidence only; a
+        // retry must publish its own fresh exact final leaf.
+        fs::write(parent.join(&stale), b"complete").unwrap();
+        set_test_authority_temporary_names([stale.clone(), fresh]);
+        write_bounded_file_create_once(&final_path, b"complete", 64).unwrap();
+        assert_eq!(
+            read_bounded_authority_file(&final_path, 64).unwrap(),
+            b"complete"
+        );
+        assert!(parent.join(stale).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_create_once_restarts_after_publish_before_temp_cleanup() {
+        let root = atomic_test_root("published");
+        let final_path = root.join("authority/final.json");
+        let parent = final_path.parent().unwrap();
+        fs::create_dir_all(parent).unwrap();
+        let staged = atomic_staged_name("published-crash");
+        let fresh = atomic_staged_name("published-retry");
+        fs::write(parent.join(&staged), b"complete").unwrap();
+        fs::hard_link(parent.join(&staged), &final_path).unwrap();
+        set_test_authority_temporary_names([fresh]);
+        write_bounded_file_create_once(&final_path, b"complete", 64).unwrap();
+        assert_eq!(
+            read_bounded_authority_file(&final_path, 64).unwrap(),
+            b"complete"
+        );
+        assert!(
+            parent.join(staged).exists(),
+            "a restart must not sweep another operation's private temp"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn atomic_create_once_reuses_exact_final_and_rejects_mismatch() {
+        let root = atomic_test_root("reuse");
+        let final_path = root.join("authority/final.json");
+        set_test_authority_temporary_names(std::iter::empty());
+        write_bounded_file_create_once(&final_path, b"complete", 64).unwrap();
+        write_bounded_file_create_once(&final_path, b"complete", 64).unwrap();
+        let error = write_bounded_file_create_once(&final_path, b"different", 64).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "runner spec refused: create-once artifact collision at {}",
+                final_path.display()
+            )
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

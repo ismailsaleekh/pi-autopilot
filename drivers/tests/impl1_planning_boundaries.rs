@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -9,7 +10,8 @@ use drivers::runner::{self, PlanningRunnerRequest, RunnerTaskDocument};
 use drivers::seam::{self, CoreState};
 use drivers::vcs::GitVcs;
 use kernel::generated::{
-    ContractId, Id, ModeId, PlanningAtomKind, Ref, SeamEnvelope, TaskAtom, TaskAtoms,
+    ContractId, Digest, Id, ModeId, PlanningAtomKind, Ref, SeamEnvelope, TaskAtom, TaskAtoms,
+    TerminalRoute, ToolName,
 };
 use serde_json::json;
 use sha2::{Digest as ShaDigest, Sha256};
@@ -67,14 +69,12 @@ fn runner_child_repairs_unknown_links_from_bound_atom_registry() {
     fixture.install_transport();
     let (registry_path, registry_digest) =
         fixture.write_atom_registry(&[("TE01-W-001", "planning-ws-task-extractor-01")]);
-    fixture.install_fake_pi(&[work_map(&["A1", "A2", "A3"]), work_map(&["TE01-W-001"])]);
-    let issue = fixture.issue_planning(
-        "plan-compiler",
-        "initial-plan",
-        "planning.work-map.v1",
-        None,
-        Some((registry_path, registry_digest)),
-    );
+    fixture.install_fake_pi(&[
+        work_map_v1(&["A1", "A2", "A3"]),
+        work_map_v1(&["TE01-W-001"]),
+    ]);
+    let issue = fixture.issue_legacy_work_map_v1(registry_path, registry_digest);
+    assert_eq!(issue.binding.boundary_id.0, "planning.work-map.v1");
 
     drivers::runner::child::main(&["--spec".to_owned(), issue.binding.spec_path.clone()]).unwrap();
 
@@ -213,7 +213,7 @@ fn approved_units_preserve_atom_links() {
     fs::create_dir_all(fixture.root.join(".pi/autopilot/ws")).unwrap();
     fs::write(
         fixture.root.join(".pi/autopilot/ws/work-map.md"),
-        work_map(&["TE01-W-001", "TE02-C-002"]),
+        work_map_v2(&["TE01-W-001", "TE02-C-002"]),
     )
     .unwrap();
     let mut state = CoreState::open(None).unwrap();
@@ -235,7 +235,7 @@ fn approved_units_preserve_atom_links() {
         "plan review should approve via seam: {status}"
     );
     let approved =
-        fs::read_to_string(fixture.root.join(".pi/autopilot/ws/approved-plan.json")).unwrap();
+        fs::read_to_string(fixture.root.join(".pi/autopilot/ws/approved-plan.v2.json")).unwrap();
     assert!(
         approved.contains("TE01-W-001"),
         "approved unit decisions must retain work-map links: {approved}"
@@ -530,7 +530,7 @@ fn task_extractor_prompt_contains_manifest_and_non_task_roles_do_not() {
     let compiler = fixture.issue_planning(
         "plan-compiler",
         "initial-plan",
-        "planning.work-map.v1",
+        "planning.work-map.v2",
         None,
         Some(atom_registry),
     );
@@ -601,6 +601,7 @@ fn oversized_planning_prompt_refuses_before_prompt_spec_or_carrier_write() {
         atom_id_prefix: Some("TE01-".to_owned()),
         atom_registry_path: None,
         atom_registry_digest: None,
+        terminal_route: None,
         accepted_planning_artifacts: Vec::new(),
     };
     let paths = runner::planning_paths(&fixture.root, "ws", &assignment_id);
@@ -684,6 +685,7 @@ impl<'a> PlanningIssueSpec<'a> {
 
 struct Fixture {
     root: PathBuf,
+    v2_subject_bindings: RefCell<Vec<runner::IssuedRunnerBinding>>,
 }
 
 impl Fixture {
@@ -705,7 +707,10 @@ impl Fixture {
                     vcs.stage_all(&root).unwrap();
                     vcs.snapshot(&root, "fixture root").unwrap();
                     std::env::set_current_dir(&root).unwrap();
-                    return Self { root };
+                    return Self {
+                        root,
+                        v2_subject_bindings: RefCell::new(Vec::new()),
+                    };
                 }
                 Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
                 Err(error) => panic!("fixture root {root:?}: {error}"),
@@ -792,6 +797,11 @@ def emit(value):
     print(json.dumps(value, separators=(",", ":")), flush=True)
 
 
+if "--version" in sys.argv:
+    print("pi 0.84.1")
+    sys.exit(0)
+
+
 provider = arg_value("--provider")
 model = arg_value("--model")
 thinking = arg_value("--thinking")
@@ -800,8 +810,12 @@ mode = arg_value("--mode")
 session_dir = arg_value("--session-dir")
 addon_path = arg_value("-e")
 active_tools = sorted(filter(None, arg_value("--tools").split(",")))
-submit_tools = [tool for tool in active_tools if tool.startswith("autopilot_submit_")]
 bindings = {submit_bindings}
+profile_id = os.environ.get("AUTOPILOT_TERMINAL_PROFILE", "")
+terminal_tool, boundary, result_contract, schema_digest = bindings.get(profile_id, ("", "", "", ""))
+if terminal_tool not in active_tools:
+    sys.stderr.write("fake pi: exact terminal profile tool is not active\n")
+    sys.exit(64)
 if not session_dir:
     sys.stderr.write("fake pi: --session-dir is required\n")
     sys.exit(64)
@@ -820,9 +834,6 @@ runtime_path = os.path.normpath(os.path.join(os.path.dirname(addon_path), "..", 
 with open(runtime_path, "rb") as handle:
     runtime_bytes = handle.read()
 addon_digest = hashlib.sha256(addon_bytes + b"\x00" + runtime_bytes).hexdigest()
-terminal_tool = next((tool for tool in active_tools if tool.startswith("autopilot_submit_")), "")
-boundary, result_contract, schema_digest = bindings.get(terminal_tool, ("", "", ""))
-profile_id = os.environ.get("AUTOPILOT_TERMINAL_PROFILE", "")
 receipt = {{"type":"custom","customType":"pi-autopilot:child-tools","data":{{"self_digest":addon_digest,"profile_id":profile_id,"tool_name":terminal_tool,"boundary_id":boundary,"result_contract":result_contract,"schema_digest":schema_digest,"binding":os.environ.get("AUTOPILOT_CARRIER_BINDING", ""),"active_tools":active_tools}},"id":"receipt-1","parentId":None}}
 
 if mode == "rpc":
@@ -845,9 +856,8 @@ if mode == "rpc":
             with open(session_path, "a", encoding="utf-8") as handle:
                 handle.write(entry + "\n")
             emit({{"type":"response","id":command_id,"command":command_type,"success":True}})
-            tool = submit_tools[0]
-            boundary, result_contract, schema_digest = bindings[tool]
-            details = {{"profile_id":os.environ.get("AUTOPILOT_TERMINAL_PROFILE", ""),"tool_name":tool,"boundary_id":boundary,"result_contract":result_contract,"schema_digest":schema_digest,"binding":os.environ.get("AUTOPILOT_CARRIER_BINDING", ""),"payload":json.loads(content)}}
+            tool = terminal_tool
+            details = {{"profile_id":profile_id,"tool_name":tool,"boundary_id":boundary,"result_contract":result_contract,"schema_digest":schema_digest,"binding":os.environ.get("AUTOPILOT_CARRIER_BINDING", ""),"payload":json.loads(content)}}
             call_id = "call_fake_submit"
             emit({{"type":"agent_start"}})
             emit({{"type":"turn_start"}})
@@ -891,104 +901,237 @@ else:
         )
     }
 
+    fn issue_legacy_work_map_v1(
+        &self,
+        registry_path: String,
+        registry_digest: String,
+    ) -> runner::IssuedRunnerAction {
+        let mut issue = self.issue_planning(
+            "plan-compiler",
+            "initial-plan",
+            "planning.work-map.v2",
+            None,
+            Some((registry_path.clone(), registry_digest.clone())),
+        );
+        let profile = kernel::generated::TERMINAL_PROFILES
+            .iter()
+            .find(|row| {
+                row.0 == "planning.work-map.v1:autopilot_submit_plan_cluster"
+                    && row.1 == "autopilot_submit_plan_cluster"
+                    && row.2 == "planning.work-map.v1"
+                    && row.3 == "planning.work-map.v1"
+            })
+            .expect("exact historical V1 compiler terminal profile");
+        let contract_digest = drivers::contract_authority::contract_digest(profile.2)
+            .expect("historical V1 contract digest");
+        let spec_path = PathBuf::from(&issue.binding.spec_path);
+        let mut spec: serde_json::Value =
+            serde_json::from_slice(&fs::read(&spec_path).expect("issued V2 spec"))
+                .expect("issued V2 spec JSON");
+        let run_id = Id(spec["run_id"].as_str().expect("run_id").to_owned());
+        let boundary_id = ContractId(profile.2.to_owned());
+        let session_id = runner::session_id_for(
+            &run_id,
+            &issue.binding.workstream,
+            &issue.binding.assignment_id,
+            &issue.binding.role_id,
+            &issue.binding.mode,
+            &boundary_id,
+        );
+        let prompt = format!(
+            "{}\n\n{}",
+            drivers::contract_authority::render_contract_authority(profile.2)
+                .expect("historical V1 contract authority"),
+            planning::atom_link_manifest_for_boundary(
+                Path::new(&registry_path),
+                &registry_digest,
+                profile.2,
+            )
+            .expect("historical V1 atom manifest"),
+        );
+        fs::write(&issue.binding.prompt_path, &prompt).expect("historical V1 prompt");
+        spec["boundary_id"] = json!(profile.2);
+        spec["boundary_digest"] = json!(contract_digest);
+        spec["result_contract"] = json!(profile.3);
+        spec["result_contract_digest"] = json!(contract_digest);
+        spec["terminal_profile_id"] = json!(profile.0);
+        spec["allowed_tools"] = json!(
+            runner::resolve_role_tools("plan-compiler", profile.0)
+                .expect("historical V1 compiler tools")
+                .active
+        );
+        spec["unavailable_tools"] = json!(
+            runner::resolve_role_tools("plan-compiler", profile.0)
+                .expect("historical V1 compiler unavailable tools")
+                .unavailable
+        );
+        spec["session_id"] = json!(session_id.0);
+        spec["prompt_digest"] = json!(sha256_hex(prompt.as_bytes()));
+        spec.as_object_mut()
+            .expect("issued spec object")
+            .remove("terminal_route");
+        let spec_bytes = serde_json::to_vec_pretty(&spec).expect("historical V1 spec JSON");
+        fs::write(&spec_path, &spec_bytes).expect("historical V1 spec");
+        issue.binding.boundary_id = boundary_id.clone();
+        issue.binding.result_contract = ContractId(profile.3.to_owned());
+        issue.binding.boundary_digest = contract_digest.clone();
+        issue.binding.result_contract_digest = contract_digest;
+        issue.binding.prompt_digest = sha256_hex(prompt.as_bytes());
+        issue.binding.spec_digest = sha256_hex(&spec_bytes);
+        issue.binding.session_id = session_id;
+        issue.binding.terminal_route = None;
+        issue
+    }
+
     fn accepted_artifacts_for_role(
         &self,
         role: &str,
     ) -> Vec<runner::AcceptedPlanningArtifactBinding> {
-        let categories: &[(&str, &str, &str, &str)] = match role {
-            "plan-compiler" => &[
-                (
-                    "task-atoms",
-                    "planning.task-atoms.v1",
-                    "task-extractor",
-                    "planning-ws-task-extractor-01",
-                ),
-                (
-                    "scout-findings",
-                    "planning.scout-dossier.v1",
-                    "repository-scout",
-                    "planning-ws-repository-scout-01",
-                ),
-            ],
-            "plan-reviewer" => &[
-                (
-                    "task-atoms",
-                    "planning.task-atoms.v1",
-                    "task-extractor",
-                    "planning-ws-task-extractor-01",
-                ),
-                (
-                    "scout-findings",
-                    "planning.scout-dossier.v1",
-                    "repository-scout",
-                    "planning-ws-repository-scout-01",
-                ),
-                (
-                    "compiler-work-maps",
-                    "planning.work-map.v1",
-                    "plan-compiler",
-                    "planning-ws-plan-compiler-01",
-                ),
-                (
-                    "synthesized-work-map",
-                    "planning.work-map.v1",
-                    "plan-synthesizer",
-                    "planning-ws-plan-synthesizer-02",
-                ),
-            ],
-            _ => &[],
+        let legacy = |category_id, boundary_id, role_id, assignment_id| {
+            self.write_accepted_artifact(category_id, boundary_id, role_id, assignment_id)
         };
-        categories
-            .iter()
-            .map(|(category_id, boundary_id, role_id, assignment_id)| {
-                let path = self
-                    .root
-                    .join("accepted")
-                    .join(format!("{category_id}.json"));
-                fs::create_dir_all(path.parent().unwrap()).unwrap();
-                let artifact = if *category_id == "synthesized-work-map" {
-                    json!({
-                        "schema":"autopilot.planning_carrier.v1",
-                        "action_id":format!("action-{assignment_id}"),
-                        "assignment_id":assignment_id,
-                        "run_revision":1,
-                        "workstream":"ws",
-                        "role_id":role_id,
-                        "mode":"initial-plan",
-                        "boundary_id":boundary_id,
-                        "result_contract":boundary_id,
-                        "prompt_path":"fixture-prompt",
-                        "prompt_digest":"fixture-prompt-digest",
-                        "boundary_digest":"fixture-boundary-digest",
-                        "result_contract_digest":"fixture-contract-digest",
-                        "settings_digest":"fixture-settings-digest",
-                        "context_digest":"fixture-context-digest",
-                        "skills_digest":"fixture-skills-digest",
-                        "subscription_digest":"fixture-subscription-digest",
-                        "spec_digest":"fixture-spec-digest",
-                        "spec_path":"fixture-spec",
-                        "carrier_path":path.display().to_string(),
-                        "raw_output":work_map(&["TE01-W-001", "TE02-C-002"]),
-                    })
-                } else {
-                    json!({
-                        "category_id": category_id,
-                        "boundary_id": boundary_id,
-                        "assignment_id": assignment_id,
-                    })
-                };
-                let bytes = serde_json::to_vec_pretty(&artifact).unwrap();
-                fs::write(&path, &bytes).unwrap();
-                runner::AcceptedPlanningArtifactBinding {
-                    category_id: (*category_id).to_owned(),
-                    assignment_id: Id((*assignment_id).to_owned()),
-                    role_id: Id((*role_id).to_owned()),
-                    boundary_id: ContractId((*boundary_id).to_owned()),
-                    path: path.display().to_string(),
-                    digest: sha256_hex(&bytes),
-                }
-            })
-            .collect()
+        match role {
+            "plan-compiler" => vec![
+                legacy(
+                    "task-atoms",
+                    "planning.task-atoms.v1",
+                    "task-extractor",
+                    "planning-ws-task-extractor-01",
+                ),
+                legacy(
+                    "scout-findings",
+                    "planning.scout-dossier.v1",
+                    "repository-scout",
+                    "planning-ws-repository-scout-01",
+                ),
+            ],
+            "plan-reviewer" => {
+                let registry = self.write_atom_registry(&[
+                    ("TE01-W-001", "planning-ws-task-extractor-01"),
+                    ("TE02-C-002", "planning-ws-task-extractor-02"),
+                ]);
+                let compiler = self.issue_planning_with_assignment(
+                    "plan-compiler",
+                    "initial-plan",
+                    "planning.work-map.v2",
+                    "planning-ws-plan-compiler-01",
+                    None,
+                    Some(registry.clone()),
+                );
+                self.overwrite_carrier_raw(
+                    &compiler.binding,
+                    work_map_v2(&["TE01-W-001", "TE02-C-002"]),
+                );
+                let compiler_artifact =
+                    self.accepted_v2_work_map_artifact("compiler-work-maps", &compiler.binding);
+                let synthesizer = self.issue_planning_with_assignment_and_artifacts(
+                    "plan-synthesizer",
+                    "initial-plan",
+                    "planning.work-map.v2",
+                    "planning-ws-plan-synthesizer-02",
+                    None,
+                    Some(registry),
+                    vec![
+                        legacy(
+                            "task-atoms",
+                            "planning.task-atoms.v1",
+                            "task-extractor",
+                            "planning-ws-task-extractor-01",
+                        ),
+                        legacy(
+                            "scout-findings",
+                            "planning.scout-dossier.v1",
+                            "repository-scout",
+                            "planning-ws-repository-scout-01",
+                        ),
+                        compiler_artifact.clone(),
+                    ],
+                );
+                self.overwrite_carrier_raw(
+                    &synthesizer.binding,
+                    work_map_v2(&["TE01-W-001", "TE02-C-002"]),
+                );
+                self.v2_subject_bindings
+                    .borrow_mut()
+                    .extend([compiler.binding.clone(), synthesizer.binding.clone()]);
+                vec![
+                    legacy(
+                        "task-atoms",
+                        "planning.task-atoms.v1",
+                        "task-extractor",
+                        "planning-ws-task-extractor-01",
+                    ),
+                    legacy(
+                        "scout-findings",
+                        "planning.scout-dossier.v1",
+                        "repository-scout",
+                        "planning-ws-repository-scout-01",
+                    ),
+                    compiler_artifact,
+                    self.accepted_v2_work_map_artifact(
+                        "synthesized-work-map",
+                        &synthesizer.binding,
+                    ),
+                ]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn write_accepted_artifact(
+        &self,
+        category_id: &str,
+        boundary_id: &str,
+        role_id: &str,
+        assignment_id: &str,
+    ) -> runner::AcceptedPlanningArtifactBinding {
+        let path = self
+            .root
+            .join("accepted")
+            .join(format!("{category_id}.json"));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let bytes = serde_json::to_vec_pretty(&json!({
+            "category_id": category_id,
+            "boundary_id": boundary_id,
+            "assignment_id": assignment_id,
+        }))
+        .unwrap();
+        fs::write(&path, &bytes).unwrap();
+        runner::AcceptedPlanningArtifactBinding {
+            category_id: category_id.to_owned(),
+            assignment_id: Id(assignment_id.to_owned()),
+            role_id: Id(role_id.to_owned()),
+            boundary_id: ContractId(boundary_id.to_owned()),
+            terminal_route: None,
+            path: path.display().to_string(),
+            digest: sha256_hex(&bytes),
+        }
+    }
+
+    fn accepted_v2_work_map_artifact(
+        &self,
+        category_id: &str,
+        binding: &runner::IssuedRunnerBinding,
+    ) -> runner::AcceptedPlanningArtifactBinding {
+        assert_eq!(binding.boundary_id.0, "planning.work-map.v2");
+        let terminal_route = work_map_v2_terminal_route(&binding.role_id.0, &binding.mode.0);
+        assert_eq!(binding.terminal_route.as_ref(), Some(&terminal_route));
+        let bytes = fs::read(&binding.carrier_path).unwrap();
+        let carrier: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(carrier["schema"], "autopilot.planning_carrier.v2");
+        assert_eq!(
+            carrier["terminal_route"],
+            serde_json::to_value(&terminal_route).unwrap()
+        );
+        runner::AcceptedPlanningArtifactBinding {
+            category_id: category_id.to_owned(),
+            assignment_id: binding.assignment_id.clone(),
+            role_id: binding.role_id.clone(),
+            boundary_id: binding.boundary_id.clone(),
+            terminal_route: Some(terminal_route),
+            path: binding.carrier_path.clone(),
+            digest: sha256_hex(&bytes),
+        }
     }
 
     fn write_atom_registry(&self, atoms: &[(&str, &str)]) -> (String, String) {
@@ -1046,6 +1189,9 @@ else:
         let assignment_id = spec.assignment_id.to_owned();
         let issue = self.issue_planning_from_spec(spec);
         self.overwrite_carrier_raw(&issue.binding, raw);
+        for source in self.v2_subject_bindings.borrow().iter() {
+            self.append_ref(state, &runner::binding_ref(source).unwrap());
+        }
         self.append_ref(state, &runner::binding_ref(&issue.binding).unwrap());
         self.append_ref(state, &Ref(assignment_id));
         issue.binding
@@ -1071,7 +1217,40 @@ else:
         })
     }
 
+    fn issue_planning_with_assignment_and_artifacts(
+        &self,
+        role: &str,
+        mode: &str,
+        boundary: &str,
+        assignment_id: &str,
+        prefix: Option<&str>,
+        registry: Option<(String, String)>,
+        accepted_planning_artifacts: Vec<runner::AcceptedPlanningArtifactBinding>,
+    ) -> runner::IssuedRunnerAction {
+        self.issue_planning_from_spec_with_artifacts(
+            PlanningIssueSpec {
+                role,
+                mode,
+                boundary,
+                assignment_id,
+                prefix,
+                registry,
+                run_revision: 1,
+            },
+            accepted_planning_artifacts,
+        )
+    }
+
     fn issue_planning_from_spec(&self, spec: PlanningIssueSpec<'_>) -> runner::IssuedRunnerAction {
+        let accepted_planning_artifacts = self.accepted_artifacts_for_role(spec.role);
+        self.issue_planning_from_spec_with_artifacts(spec, accepted_planning_artifacts)
+    }
+
+    fn issue_planning_from_spec_with_artifacts(
+        &self,
+        spec: PlanningIssueSpec<'_>,
+        accepted_planning_artifacts: Vec<runner::AcceptedPlanningArtifactBinding>,
+    ) -> runner::IssuedRunnerAction {
         let (registry_path, registry_digest) = match spec.registry {
             Some((p, d)) => (Some(p), Some(d)),
             None => (None, None),
@@ -1098,7 +1277,9 @@ else:
             atom_id_prefix: spec.prefix.map(str::to_owned),
             atom_registry_path: registry_path,
             atom_registry_digest: registry_digest,
-            accepted_planning_artifacts: self.accepted_artifacts_for_role(spec.role),
+            terminal_route: (spec.boundary == "planning.work-map.v2")
+                .then(|| work_map_v2_terminal_route(spec.role, spec.mode)),
+            accepted_planning_artifacts,
         };
         runner::planning_issue(&request).unwrap()
     }
@@ -1156,8 +1337,30 @@ else:
         binding: &runner::IssuedRunnerBinding,
         raw: String,
     ) -> String {
-        let response = self.agent_response(state, binding, raw);
+        let v2_subject = self.v2_subject_bindings.borrow().iter().any(|source| {
+            source.boundary_id.0 == "planning.work-map.v2"
+                && binding.planning_subject_path.as_deref() == Some(&source.carrier_path)
+        });
+        let response = if v2_subject {
+            self.task_completed_response(state, binding)
+        } else {
+            self.agent_response(state, binding, raw)
+        };
         response_status(&response)
+    }
+
+    fn task_completed_response(
+        &self,
+        state: &mut CoreState,
+        binding: &runner::IssuedRunnerBinding,
+    ) -> SeamEnvelope {
+        let frame = json!({"v":1,"id":1,"kind":"task-completed","payload":{
+            "task_id":format!("task-{}", binding.action_id.0),
+            "action_id":binding.action_id.0,
+            "assignment_id":binding.assignment_id.0,
+            "status":"completed",
+        }});
+        seam::handle_line(&frame.to_string(), state).unwrap()
     }
 
     fn append_ref(&self, state: &mut CoreState, reference: &Ref) {
@@ -1264,8 +1467,9 @@ fn carrier_raw_output(binding: &runner::IssuedRunnerBinding) -> String {
 }
 
 fn carrier_value_from_spec(spec_path: &Path, raw: &str) -> serde_json::Value {
-    let spec: serde_json::Value = serde_json::from_slice(&fs::read(spec_path).unwrap()).unwrap();
-    json!({
+    let spec_bytes = fs::read(spec_path).unwrap();
+    let spec: serde_json::Value = serde_json::from_slice(&spec_bytes).unwrap();
+    let mut carrier = json!({
         "schema":"autopilot.planning_carrier.v1",
         "action_id":spec["action_id"],
         "assignment_id":spec["assignment_id"],
@@ -1283,37 +1487,39 @@ fn carrier_value_from_spec(spec_path: &Path, raw: &str) -> serde_json::Value {
         "context_digest":spec["context_digest"],
         "skills_digest":spec["skills_digest"],
         "subscription_digest":spec["subscription_digest"],
-        "spec_digest":sha256_hex(&fs::read(spec_path).unwrap()),
+        "spec_digest":sha256_hex(&spec_bytes),
         "spec_path":spec["spec_path"],
         "carrier_path":spec["carrier_path"],
         "raw_output":raw,
-    })
+    });
+    if spec["boundary_id"] != "planning.work-map.v2" {
+        return carrier;
+    }
+
+    let typed_spec: kernel::generated::AgentRunSpec = serde_json::from_value(spec.clone()).unwrap();
+    let route = work_map_v2_terminal_route(&typed_spec.role_id.0, &typed_spec.mode.0);
+    assert_eq!(typed_spec.terminal_route.as_ref(), Some(&route));
+    assert_eq!(typed_spec.boundary_id.0, "planning.work-map.v2");
+    assert_eq!(typed_spec.result_contract.0, "planning.work-map.v2");
+    carrier["schema"] = json!("autopilot.planning_carrier.v2");
+    carrier["runtime_extension_digest"] = spec["runtime_extension_digest"].clone();
+    carrier["carrier_channel"] = json!("tool");
+    carrier["tool_name"] = json!(route.tool_name.0);
+    carrier["tool_schema_digest"] = json!(route.schema_digest.0);
+    carrier["carrier_binding"] = json!(runner::child::carrier_binding(&typed_spec));
+    carrier["pi_version"] = json!("pi 0.84.1");
+    carrier["terminal_route"] = serde_json::to_value(route).unwrap();
+    carrier["atom_registry_path"] = spec["atom_registry_path"].clone();
+    carrier["atom_registry_digest"] = spec["atom_registry_digest"].clone();
+    carrier["repository_manifest_path"] = spec["repository_manifest_path"].clone();
+    carrier["repository_manifest_digest"] = spec["repository_manifest_digest"].clone();
+    carrier["repository_head_commit"] = spec["repository_head_commit"].clone();
+    carrier["repository_head_tree"] = spec["repository_head_tree"].clone();
+    carrier
 }
 
 fn carrier_value(binding: &runner::IssuedRunnerBinding, raw: &str) -> serde_json::Value {
-    json!({
-        "schema":"autopilot.planning_carrier.v1",
-        "action_id":binding.action_id.0,
-        "assignment_id":binding.assignment_id.0,
-        "run_revision":binding.run_revision,
-        "workstream":binding.workstream.0,
-        "role_id":binding.role_id.0,
-        "mode":binding.mode.0,
-        "boundary_id":binding.boundary_id.0,
-        "result_contract":binding.result_contract.0,
-        "prompt_path":binding.prompt_path,
-        "prompt_digest":binding.prompt_digest,
-        "boundary_digest":binding.boundary_digest,
-        "result_contract_digest":binding.result_contract_digest,
-        "settings_digest":binding.settings_digest,
-        "context_digest":binding.context_digest,
-        "skills_digest":binding.skills_digest,
-        "subscription_digest":binding.subscription_digest,
-        "spec_digest":binding.spec_digest,
-        "spec_path":binding.spec_path,
-        "carrier_path":binding.carrier_path,
-        "raw_output":raw,
-    })
+    carrier_value_from_spec(Path::new(&binding.spec_path), raw)
 }
 
 fn task_atoms(id: &str) -> String {
@@ -1432,8 +1638,13 @@ fn planning_doc(path: &str, class: TaskDocumentClass, body: &str) -> TaskDocumen
     }
 }
 
-fn work_map(links: &[&str]) -> String {
+fn work_map_v1(links: &[&str]) -> String {
     json!({"units":[{"id":"U1","kind":"implementation","objective":"Implement unit","criteria":["done"],"depends_on":[],"files":["src/lib.rs"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"package_checks":[],"links":links}]})
+        .to_string()
+}
+
+fn work_map_v2(links: &[&str]) -> String {
+    json!({"schema":"planning.work-map.v2","units":[{"id":"U1","kind":"implementation","objective":"Implement unit","criteria":["done"],"depends_on":[],"files":["src/lib.rs"],"package_scope_files":[],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"package_proofs":[],"vendor_bindings":[],"provenance_manifest_destination":null,"links":links}]})
         .to_string()
 }
 
@@ -1481,6 +1692,46 @@ fn task_file_digest(class: &str, authority_set_id: &str, body: &str) -> String {
     sha256_hex(format!("{marker}\nauthority_set_id: {authority_set_id}\n\n{body}").as_bytes())
 }
 
+fn work_map_v2_terminal_route(role_id: &str, mode: &str) -> TerminalRoute {
+    const BOUNDARY: &str = "planning.work-map.v2";
+    const SCHEMA_DIGEST: &str = "07750be5a58112e8b3f956f261d33ef75e3a71b9b13b75be2192cfc43adbbc9a";
+    let (profile_id, tool_name) = match (role_id, mode) {
+        ("plan-compiler", "initial-plan") => (
+            "planning.work-map.v2:autopilot_submit_plan_cluster",
+            "autopilot_submit_plan_cluster",
+        ),
+        ("plan-synthesizer", "initial-plan") => (
+            "planning.work-map.v2:autopilot_submit_synthesis",
+            "autopilot_submit_synthesis",
+        ),
+        other => panic!("no fresh V2 planning terminal route for {other:?}"),
+    };
+    let rows = kernel::generated::TERMINAL_PROFILES
+        .iter()
+        .filter(|row| {
+            row.0 == profile_id
+                && row.1 == tool_name
+                && row.2 == BOUNDARY
+                && row.3 == BOUNDARY
+                && row.4 == SCHEMA_DIGEST
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rows.len(),
+        1,
+        "generated V2 terminal route drift for {role_id}"
+    );
+    let row = rows[0];
+    TerminalRoute {
+        version: "v2".to_owned(),
+        profile_id: row.0.to_owned(),
+        tool_name: ToolName(row.1.to_owned()),
+        boundary_id: ContractId(row.2.to_owned()),
+        result_contract: ContractId(row.3.to_owned()),
+        schema_digest: Digest(row.4.to_owned()),
+    }
+}
+
 fn submit_bindings_py() -> String {
     let rows = kernel::generated::TERMINAL_PROFILES
         .iter()
@@ -1488,8 +1739,10 @@ fn submit_bindings_py() -> String {
             boundary_id.get(..9) == Some("planning.")
                 && tool_name.get(..17) == Some("autopilot_submit_")
         })
-        .map(|(_, tool_name, boundary_id, result_contract, digest)| {
-            format!("    {tool_name:?}: ({boundary_id:?}, {result_contract:?}, {digest:?})")
+        .map(|(profile_id, tool_name, boundary_id, result_contract, digest)| {
+            format!(
+                "    {profile_id:?}: ({tool_name:?}, {boundary_id:?}, {result_contract:?}, {digest:?})"
+            )
         })
         .collect::<Vec<_>>()
         .join(",\n");

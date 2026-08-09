@@ -13,6 +13,13 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.4", features = ["fs"] }
+
+[target.'cfg(windows)'.dependencies]
+# NtCreateFile is required for handle-relative, no-reparse V2 authority I/O.
+windows-sys = { version = "0.61.2", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO"] }
+
 [dev-dependencies]
 kdl = { workspace = true }
 
@@ -199,6 +206,26 @@ path = "../tests/packed_install.rs"
 [[test]]
 name = "live_end_to_end"
 path = "../tests/live_end_to_end.rs"
+
+[[test]]
+name = "bug_188_v2_admission"
+path = "../tests/bug_188_v2_admission.rs"
+
+[[test]]
+name = "approved_plan_v2_binding"
+path = "../tests/approved_plan_v2_binding.rs"
+
+[[test]]
+name = "work_map_v2_routing"
+path = "../tests/work_map_v2_routing.rs"
+
+[[test]]
+name = "work_map_v2_live_capture"
+path = "../tests/work_map_v2_live_capture.rs"
+
+[[test]]
+name = "delivery_v4_materializer"
+path = "../tests/delivery_v4_materializer.rs"
 
 [lints]
 workspace = true

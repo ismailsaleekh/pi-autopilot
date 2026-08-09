@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -158,6 +159,67 @@ test("delivery policy confines edit/write and package-approved command reference
   } finally {
     cleanup();
   }
+});
+
+test("V5 binds canonical V4 receipt, protected union snapshots, and empty vendoring", { concurrency: false }, async () => {
+  const fixture = makeV4Fixture();
+  try {
+    const write = fixture.tools.get("write")!, edit = fixture.tools.get("edit")!;
+    const protectedPath = join(fixture.worktree, "vendor/a.bin"), before = readFileSync(protectedPath);
+    await assert.rejects(() => write.execute("protected-write", { path: "vendor/a.bin", content: "bad" }), /blocked/);
+    await assert.rejects(() => edit.execute("protected-edit", { path: "vendor/a.bin", edits: [{ oldText: "A", newText: "B" }] }), /blocked/);
+    assert.deepEqual(readFileSync(protectedPath), before, "protected bytes remain unchanged before effect");
+    await write.execute("mutable-write", { path: "src/authored.rs", content: "authored\n" });
+    const command = await fixture.tools.get(APPROVED_COMMAND_TOOL)!.execute("v5-noop", { command_id: "CMD-U1-1" }) as { content: Array<{ text: string }> };
+    assert.equal(command.content[0]!.text, "v5", "snapshot reads mutable and protected exact union");
+    assert.equal(fixture.policy.executionLedger().entries.length, 1);
+    chmodSync(protectedPath, 0o744);
+    assert.throws(() => loadDeliveryPolicyFromEnv(fixture.env as never, fixture.worktree), /protected baseline byte\/mode drift/);
+  } finally { cleanup(); }
+
+  const parserCases: Array<[string, (assignment: Record<string, unknown>, receipt: Record<string, unknown>, fixture: Fixture) => void]> = [
+    ["canonical receipt extra field", (_assignment, receipt) => { receipt["extra"] = true; }],
+    ["wrong receipt identity", (_assignment, receipt) => { receipt["assignment_id"] = "other"; }],
+    ["wrong receipt intention", (_assignment, receipt) => { receipt["intention_path"] = "/other/intention.json"; }],
+    ["wrong receipt worktree", (_assignment, receipt, fixture) => { receipt["worktree"] = fixture.foreign; }],
+    ["extra receipt baseline", (_assignment, receipt) => { (receipt["completed_baseline"] as unknown[]).push({ ...(receipt["completed_baseline"] as Array<Record<string, unknown>>)[0]! }); }],
+    ["missing receipt baseline", (_assignment, receipt) => { (receipt["completed_baseline"] as unknown[]).pop(); }],
+    ["reordered receipt baseline", (_assignment, receipt) => { (receipt["completed_baseline"] as unknown[]).reverse(); }],
+    ["selected extra destination", (assignment) => { const row = (assignment["selected_vendoring"] as Array<Record<string, unknown>>)[0]!; const binding = { ...(row["vendor_bindings"] as Array<Record<string, unknown>>)[0]!, binding_id: "B-extra", destination: "vendor/extra.bin" }; (row["vendor_bindings"] as unknown[]).push(binding); }],
+    ["selected missing destination", (assignment) => { ((assignment["selected_vendoring"] as Array<Record<string, unknown>>)[0]!["vendor_bindings"] as Array<Record<string, unknown>>)[0]!["destination"] = "vendor/missing.bin"; }],
+    ["0600 instead of exact 0644", (_assignment, _receipt, fixture) => { chmodSync(join(fixture.worktree, "vendor/a.bin"), 0o600); }],
+    ["0777 instead of exact 0755", (assignment, receipt, fixture) => {
+      const row = (assignment["selected_vendoring"] as Array<Record<string, unknown>>)[0]!;
+      (row["vendor_bindings"] as Array<Record<string, unknown>>)[0]!["origin_mode"] = "100755";
+      const baseline = (assignment["materialization"] as Record<string, unknown>)["baseline"] as Array<Record<string, unknown>>;
+      baseline[0]!["mode"] = "100755";
+      ((receipt["completed_baseline"] as Array<Record<string, unknown>>)[0])!["mode"] = "100755";
+      chmodSync(join(fixture.worktree, "vendor/a.bin"), 0o777);
+    }],
+  ];
+  for (const [label, mutate] of parserCases) {
+    const malformed = makeV4Fixture();
+    try {
+      const assignment = JSON.parse(readFileSync(malformed.assignmentPath, "utf8")) as Record<string, unknown>;
+      const materialization = assignment["materialization"] as Record<string, unknown>;
+      const receiptPath = materialization["receipt_path"] as string;
+      const receipt = JSON.parse(readFileSync(receiptPath, "utf8")) as Record<string, unknown>;
+      mutate(assignment, receipt, malformed);
+      const receiptBytes = Buffer.from(canonicalTestJson(receipt));
+      writeFileSync(receiptPath, receiptBytes);
+      materialization["receipt_digest"] = createHash("sha256").update(receiptBytes).digest("hex");
+      writeFileSync(malformed.assignmentPath, JSON.stringify(assignment));
+      rebindFixtureEnv(malformed);
+      assert.throws(() => loadDeliveryPolicyFromEnv(malformed.env as never, malformed.worktree), /autopilot V5 (receipt authority drift|baseline\/selected authority drift|protected baseline byte\/mode drift)/, label);
+    } finally { cleanup(); }
+  }
+
+  const empty = makeV4Fixture(true);
+  try {
+    await empty.tools.get("write")!.execute("empty-vendor-mutable", { path: "src/authored.rs", content: "ok\n" });
+    await empty.tools.get(APPROVED_COMMAND_TOOL)!.execute("empty-vendor-noop", { command_id: "CMD-U1-1" });
+    assert.equal(empty.policy.receipt().protected_core_leaf_count, 0);
+  } finally { cleanup(); }
 });
 
 test("BUG-186 approved commands cannot receive success for authoring delivery files", { concurrency: false }, async () => {
@@ -620,6 +682,27 @@ function makeFixture(registerTools = true): Fixture {
   }
   return { root, worktree, foreign, assignmentPath, env, policy, tools };
 }
+
+function makeV4Fixture(emptyVendoring = false): Fixture {
+  const root = mkdtempSync(join(realpathSync.native(tmpdir()), "autopilot-policy-v5-")); roots.push(root);
+  const worktree = join(root, "worktree"), foreign = join(root, "foreign"); mkdirSync(join(worktree, "src"), { recursive: true }); mkdirSync(join(worktree, "vendor"), { recursive: true }); mkdirSync(foreign);
+  const command = "printf v5"; const files = emptyVendoring ? ["src/authored.rs"] : ["vendor/a.bin", "vendor/manifest.tsv", "src/authored.rs"];
+  const vendor = Buffer.from([65, 0, 255]), digest = createHash("sha256").update(vendor).digest("hex");
+  const rows = emptyVendoring ? [{ unit_id: "U1", provenance_manifest_destination: null, vendor_bindings: [] }] : [{ unit_id: "U1", provenance_manifest_destination: "vendor/manifest.tsv", vendor_bindings: [{ binding_id: "B1", origin_path: "origin/a.bin", destination: "vendor/a.bin", origin_anchor: "git://head/origin/a.bin#whole-file", origin_git_blob_oid: "a".repeat(40), origin_mode: "100644", origin_bytes_sha256: digest }] }];
+  const baseline = emptyVendoring ? [] : [{ destination: "vendor/a.bin", unit_id: "U1", kind: "vendor", binding_id: "B1", mode: "100644", bytes_sha256: digest, origin_path: "origin/a.bin", origin_anchor: "git://head/origin/a.bin#whole-file", origin_git_blob_oid: "a".repeat(40) }, { destination: "vendor/manifest.tsv", unit_id: "U1", kind: "manifest", binding_id: null, mode: "100644", bytes_sha256: createHash("sha256").update("origin/a.bin\tvendor/a.bin\tsha256:" + digest + "\n").digest("hex"), origin_path: null, origin_anchor: null, origin_git_blob_oid: null }];
+  if (!emptyVendoring) { writeFileSync(join(worktree, "vendor/a.bin"), vendor); writeFileSync(join(worktree, "vendor/manifest.tsv"), `origin/a.bin\tvendor/a.bin\tsha256:${digest}\n`); chmodSync(join(worktree, "vendor/a.bin"), 0o644); chmodSync(join(worktree, "vendor/manifest.tsv"), 0o644); }
+  const receiptPath = join(root, "receipt.json"), intentionPath = join(root, "intention.json"), intentionDigest = "b".repeat(64);
+  const receipt = { schema: "autopilot.core_materialization_receipt.v1", intention_path: intentionPath, intention_digest: intentionDigest, workstream: "main", assignment_id: "assignment-main-L1", lane_id: "L1", attempt: 1, base_commit: "0123456789abcdef0123456789abcdef01234567", worktree, completed_baseline: baseline };
+  const receiptBytes = Buffer.from(canonicalTestJson(receipt)); writeFileSync(receiptPath, receiptBytes); const receiptDigest = createHash("sha256").update(receiptBytes).digest("hex");
+  const assignment = { schema: "autopilot.delivery_assignment.v4", workstream: "main", assignment_id: "assignment-main-L1", lane_id: "L1", attempt: 1, base_commit: receipt.base_commit, worktree, ordered_units: [{ id: "U1", kind: "implementation", files, commands: [{ command, expected: "prints v5" }], package_checks: [] }], approved_commands: [{ command_id: "CMD-U1-1", unit_id: "U1", command_ordinal: 1, command_digest: approvedCommandDigest("U1", 1, command) }], recovery: null, approved_plan_binding_path: join(root, "binding.json"), approved_plan_binding_digest: "c".repeat(64), approved_image_digest: "d".repeat(64), selected_vendoring: rows, materialization: { intention_path: intentionPath, intention_digest: intentionDigest, receipt_path: receiptPath, receipt_digest: receiptDigest, baseline } };
+  const assignmentPath = join(root, "assignment-v4.json"), bytes = Buffer.from(JSON.stringify(assignment, null, 2)); writeFileSync(assignmentPath, bytes); const assignmentDigest = createHash("sha256").update(bytes).digest("hex");
+  const env = { AUTOPILOT_DELIVERY_ASSIGNMENT_PATH: assignmentPath, AUTOPILOT_DELIVERY_ASSIGNMENT_DIGEST: assignmentDigest, AUTOPILOT_DELIVERY_WORKTREE: worktree, AUTOPILOT_DELIVERY_CWD: worktree, AUTOPILOT_DELIVERY_ASSIGNMENT_ID: assignment.assignment_id, AUTOPILOT_DELIVERY_WORKSTREAM: assignment.workstream, AUTOPILOT_DELIVERY_LANE_ID: assignment.lane_id, AUTOPILOT_DELIVERY_ATTEMPT: "1", AUTOPILOT_DELIVERY_BASE_COMMIT: assignment.base_commit, AUTOPILOT_DELIVERY_POLICY_DIGEST: deliveryPolicyDigest({ assignmentPath, assignmentDigest, worktree, cwd: worktree, version: "autopilot.delivery_tool_policy.v5" }) };
+  const policy = loadDeliveryPolicyFromEnv(env as never, worktree), tools = new Map<string, RegisteredTool>(); registerDeliveryPolicyTools({ registerTool(tool: RegisteredTool) { tools.set(tool.name, tool); } } as never, policy);
+  return { root, worktree, foreign, assignmentPath, env, policy, tools };
+}
+
+function canonicalTestJson(value: unknown): string { if (Array.isArray(value)) return `[${value.map(canonicalTestJson).join(",")}]`; if (value !== null && typeof value === "object") return `{${Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => `${JSON.stringify(key)}:${canonicalTestJson(item)}`).join(",")}}`; return JSON.stringify(value) ?? "null"; }
+function rebindFixtureEnv(fixture: Fixture): void { const bytes = readFileSync(fixture.assignmentPath); const digest = createHash("sha256").update(bytes).digest("hex"); fixture.env.AUTOPILOT_DELIVERY_ASSIGNMENT_DIGEST = digest; fixture.env.AUTOPILOT_DELIVERY_POLICY_DIGEST = deliveryPolicyDigest({ assignmentPath: fixture.assignmentPath, assignmentDigest: digest, worktree: fixture.worktree, cwd: fixture.worktree, version: "autopilot.delivery_tool_policy.v5" }); }
 
 function approvedCommandDigest(unitId: string, ordinal: number, command: string): string {
   return createHash("sha256")

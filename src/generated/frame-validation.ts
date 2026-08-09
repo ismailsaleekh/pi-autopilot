@@ -196,6 +196,10 @@ const FRAME_VALIDATION_DESCRIPTORS = {
     "package-check-kind": [
       "clean-exact-package-tip"
     ],
+    "package_proof_kind_v2": [
+      "clean-exact-package-tip",
+      "vendored-bytes-match-origin"
+    ],
     "plan_unit_kind": [
       "implementation"
     ],

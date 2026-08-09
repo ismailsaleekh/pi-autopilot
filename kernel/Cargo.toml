@@ -51,5 +51,9 @@ path = "../tests/scheduler_order.rs"
 name = "parallel_cap_scope"
 path = "../tests/parallel_cap_scope.rs"
 
+[[test]]
+name = "vendoring_contracts"
+path = "../tests/vendoring_contracts.rs"
+
 [lints]
 workspace = true

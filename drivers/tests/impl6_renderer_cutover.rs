@@ -7,7 +7,7 @@ use std::sync::{Mutex, OnceLock};
 use drivers::runner::{self, PlanningRunnerRequest, RunnerTaskDocument};
 use drivers::seam::{self, CoreState};
 use drivers::vcs::GitVcs;
-use kernel::generated::{ContractId, Id, ModeId, SeamEnvelope};
+use kernel::generated::{ContractId, Digest, Id, ModeId, SeamEnvelope, TerminalRoute, ToolName};
 use serde_json::json;
 use sha2::{Digest as ShaDigest, Sha256};
 
@@ -155,7 +155,7 @@ fn on_demand_source_anchor_is_manifest_bound_without_gap() {
                 "planning-ws-plan-compiler-01",
                 "plan-compiler",
                 "initial-plan",
-                "planning.work-map.v1",
+                "planning.work-map.v2",
             )
             .registry(registry)
             .accepted_planning_artifacts(artifacts),
@@ -199,6 +199,7 @@ fn full_planning_run_renders_no_mandatory_or_required_context_gaps() {
     let mut pending =
         spawn_spec_paths(&command("autopilot-plan ws task.md context.md", &mut state));
     let mut issued_prompts = Vec::new();
+    let mut final_status = None;
 
     while let Some(spec_path) = pending.pop() {
         let spec: serde_json::Value =
@@ -206,16 +207,20 @@ fn full_planning_run_renders_no_mandatory_or_required_context_gaps() {
         issued_prompts.push(PathBuf::from(spec["prompt_path"].as_str().unwrap()));
         let raw = raw_output_for_spec(&spec);
         let response = agent_response_from_spec(&spec_path, &raw, &mut state);
-        if response_status(&response).contains("ready-to-execute") {
+        let status = response_status(&response);
+        if status.contains("ready-to-execute") {
+            final_status = Some(status);
             break;
         }
         pending.extend(spawn_spec_paths(&response));
     }
 
     assert!(
-        response_status(&command("autopilot-status", &mut state)).contains("ready-to-execute")
-            || repo.join(".pi/autopilot/ws/approved-plan.json").exists(),
-        "planning run did not reach ready-to-execute"
+        final_status
+            .as_deref()
+            .is_some_and(|status| status.contains("ready-to-execute"))
+            && repo.join(".pi/autopilot/ws/approved-plan.v2.json").exists(),
+        "planning run must reach ready-to-execute and write approved-plan.v2.json: {final_status:?}"
     );
     let reviewer_prompt =
         repo.join(".pi/autopilot/ws/planning/prompts/planning-ws-plan-reviewer-01.md");
@@ -480,6 +485,8 @@ impl Fixture {
             atom_id_prefix: spec.atom_id_prefix,
             atom_registry_path,
             atom_registry_digest,
+            terminal_route: (spec.boundary == "planning.work-map.v2")
+                .then(|| work_map_v2_terminal_route(&spec.role, &spec.mode)),
             accepted_planning_artifacts: spec.accepted_planning_artifacts,
         })
     }
@@ -524,6 +531,7 @@ impl Fixture {
             assignment_id: Id(assignment_id.to_owned()),
             role_id: Id(role_id.to_owned()),
             boundary_id: ContractId(boundary_id.to_owned()),
+            terminal_route: None,
             path: path.display().to_string(),
             digest: sha256_hex(&bytes),
         }
@@ -587,14 +595,19 @@ fn agent_response_from_spec(spec_path: &Path, raw: &str, state: &mut CoreState) 
     let carrier_path = carrier["carrier_path"].as_str().unwrap();
     fs::create_dir_all(Path::new(carrier_path).parent().unwrap()).unwrap();
     fs::write(carrier_path, serde_json::to_vec_pretty(&carrier).unwrap()).unwrap();
-    let assignment_id = carrier["assignment_id"].as_str().unwrap();
-    let frame = json!({"v":1,"id":1,"kind":"agent-result","payload":{"assignment_id":assignment_id,"carrier":carrier}});
+    let frame = json!({"v":1,"id":1,"kind":"task-completed","payload":{
+        "task_id":format!("task-{}", carrier["action_id"].as_str().unwrap()),
+        "action_id":carrier["action_id"],
+        "assignment_id":carrier["assignment_id"],
+        "status":"completed",
+    }});
     seam::handle_line(&frame.to_string(), state).unwrap()
 }
 
 fn carrier_value_from_spec(spec_path: &Path, raw: &str) -> serde_json::Value {
-    let spec: serde_json::Value = serde_json::from_slice(&fs::read(spec_path).unwrap()).unwrap();
-    json!({
+    let spec_bytes = fs::read(spec_path).unwrap();
+    let spec: serde_json::Value = serde_json::from_slice(&spec_bytes).unwrap();
+    let mut carrier = json!({
         "schema":"autopilot.planning_carrier.v1",
         "action_id":spec["action_id"],
         "assignment_id":spec["assignment_id"],
@@ -612,11 +625,80 @@ fn carrier_value_from_spec(spec_path: &Path, raw: &str) -> serde_json::Value {
         "context_digest":spec["context_digest"],
         "skills_digest":spec["skills_digest"],
         "subscription_digest":spec["subscription_digest"],
-        "spec_digest":sha256_hex(&fs::read(spec_path).unwrap()),
+        "spec_digest":sha256_hex(&spec_bytes),
         "spec_path":spec["spec_path"],
         "carrier_path":spec["carrier_path"],
         "raw_output":raw,
-    })
+    });
+    if spec["boundary_id"] != "planning.work-map.v2" {
+        return carrier;
+    }
+
+    let typed_spec: kernel::generated::AgentRunSpec = serde_json::from_value(spec.clone()).unwrap();
+    let route = issued_v2_work_map_route(&typed_spec);
+    carrier["schema"] = json!("autopilot.planning_carrier.v2");
+    carrier["runtime_extension_digest"] = spec["runtime_extension_digest"].clone();
+    carrier["carrier_channel"] = json!("tool");
+    carrier["tool_name"] = json!(route.tool_name.0);
+    carrier["tool_schema_digest"] = json!(route.schema_digest.0);
+    carrier["carrier_binding"] = json!(runner::child::carrier_binding(&typed_spec));
+    carrier["pi_version"] = json!("pi 0.84.1");
+    carrier["terminal_route"] = serde_json::to_value(route).unwrap();
+    carrier["atom_registry_path"] = spec["atom_registry_path"].clone();
+    carrier["atom_registry_digest"] = spec["atom_registry_digest"].clone();
+    carrier["repository_manifest_path"] = spec["repository_manifest_path"].clone();
+    carrier["repository_manifest_digest"] = spec["repository_manifest_digest"].clone();
+    carrier["repository_head_commit"] = spec["repository_head_commit"].clone();
+    carrier["repository_head_tree"] = spec["repository_head_tree"].clone();
+    carrier
+}
+
+fn issued_v2_work_map_route(spec: &kernel::generated::AgentRunSpec) -> TerminalRoute {
+    assert_eq!(spec.boundary_id.0, "planning.work-map.v2");
+    assert_eq!(spec.result_contract.0, "planning.work-map.v2");
+    let route = work_map_v2_terminal_route(&spec.role_id.0, &spec.mode.0);
+    assert_eq!(
+        spec.terminal_profile_id.as_deref(),
+        Some(route.profile_id.as_str())
+    );
+    assert_eq!(spec.terminal_route.as_ref(), Some(&route));
+    route
+}
+
+fn work_map_v2_terminal_route(role_id: &str, mode: &str) -> TerminalRoute {
+    const BOUNDARY: &str = "planning.work-map.v2";
+    const SCHEMA_DIGEST: &str = "07750be5a58112e8b3f956f261d33ef75e3a71b9b13b75be2192cfc43adbbc9a";
+    let (profile_id, tool_name) = match (role_id, mode) {
+        ("plan-compiler", "initial-plan") => (
+            "planning.work-map.v2:autopilot_submit_plan_cluster",
+            "autopilot_submit_plan_cluster",
+        ),
+        ("plan-synthesizer", "initial-plan") => (
+            "planning.work-map.v2:autopilot_submit_synthesis",
+            "autopilot_submit_synthesis",
+        ),
+        other => panic!("unexpected issued V2 work-map role/mode: {other:?}"),
+    };
+    let rows = kernel::generated::TERMINAL_PROFILES
+        .iter()
+        .filter(|row| {
+            row.0 == profile_id
+                && row.1 == tool_name
+                && row.2 == BOUNDARY
+                && row.3 == BOUNDARY
+                && row.4 == SCHEMA_DIGEST
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 1, "generated V2 terminal route drift");
+    let row = rows[0];
+    TerminalRoute {
+        version: "v2".to_owned(),
+        profile_id: row.0.to_owned(),
+        tool_name: ToolName(row.1.to_owned()),
+        boundary_id: ContractId(row.2.to_owned()),
+        result_contract: ContractId(row.3.to_owned()),
+        schema_digest: Digest(row.4.to_owned()),
+    }
 }
 
 fn raw_output_for_spec(spec: &serde_json::Value) -> String {
@@ -627,9 +709,15 @@ fn raw_output_for_spec(spec: &serde_json::Value) -> String {
         }
         "planning.scout-dossier.v1" => json!({"findings":[{"path":"task.md","observation":"task authority exists","evidence_ref":"task.md"}]}).to_string(),
         "planning.work-map.v1" => json!({"units":[{"id":"U1","kind":"implementation","objective":"Implement unit","criteria":["done"],"depends_on":[],"files":["src/lib.rs"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"package_checks":[],"links":["TE01-W-001"]}]}).to_string(),
+        "planning.work-map.v2" => strict_v2_work_map(),
         "planning.plan-review.v1" => json!({"verdicts": seam::REQUIRED_PLAN_REVIEW_CRITERIA.iter().map(|criterion| json!({"criterion_id": criterion, "verdict": "pass"})).collect::<Vec<_>>()}).to_string(),
         other => panic!("unsupported boundary in test: {other}"),
     }
+}
+
+fn strict_v2_work_map() -> String {
+    json!({"schema":"planning.work-map.v2","units":[{"id":"U1","kind":"implementation","objective":"Implement unit","criteria":["done"],"depends_on":[],"files":["src/lib.rs"],"package_scope_files":[],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"package_proofs":[],"vendor_bindings":[],"provenance_manifest_destination":null,"links":["TE01-W-001"]}]})
+        .to_string()
 }
 
 fn spawn_spec_paths(response: &SeamEnvelope) -> Vec<PathBuf> {

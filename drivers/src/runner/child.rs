@@ -109,6 +109,12 @@ struct ChildDeliveryPolicyReceipt {
     allowed_unit_file_count: usize,
     approved_command_count: usize,
     active_overrides: Vec<String>,
+    #[serde(default)]
+    mutable_authored_leaf_count: Option<usize>,
+    #[serde(default)]
+    protected_core_leaf_count: Option<usize>,
+    #[serde(default)]
+    baseline_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
@@ -635,14 +641,29 @@ pub fn main(args: &[String]) -> Result<(), String> {
         &spec,
         prompt,
     );
-    let (attempt, prepared) = match result {
+    let (attempt, mut prepared) = match result {
         Ok(prepared) => prepared,
         Err(error) => {
             let _ = runner.shutdown();
             return Err(error);
         }
     };
+    let pi_version = runner.pi_version().map(str::to_owned);
     runner.shutdown()?;
+    if spec
+        .terminal_route
+        .as_ref()
+        .is_some_and(|route| route.version == "v2")
+    {
+        let version = pi_version.ok_or_else(|| {
+            "agent-run V2 observation lacks exact Pi --version evidence".to_owned()
+        })?;
+        prepared
+            .carrier
+            .as_object_mut()
+            .ok_or_else(|| "agent-run V2 carrier is not an object".to_owned())?
+            .insert("pi_version".to_owned(), serde_json::json!(version));
+    }
     persist_prepared_carrier(&spec, prepared)?;
     append_attempt_event(&spec, attempt, "accepted", AttemptEventDetail::none())
         .map_err(|error| error.to_string())?;
@@ -1129,27 +1150,6 @@ fn validate_delivery_policy_receipt(
         .worktree
         .as_ref()
         .ok_or_else(|| "agent-run delivery missing worktree".to_owned())?;
-    let expected_policy_digest = super::delivery_policy_digest(
-        &assignment_path.0,
-        &assignment_digest.0,
-        &worktree.0,
-        &spec.cwd.0,
-    );
-    if receipt.version != super::DELIVERY_POLICY_VERSION
-        || receipt.assignment_path != assignment_path.0
-        || receipt.assignment_digest != assignment_digest.0
-        || receipt.worktree != worktree.0
-        || receipt.cwd != spec.cwd.0
-        || receipt.policy_digest != expected_policy_digest
-        || receipt.active_overrides
-            != vec![
-                super::APPROVED_COMMAND_TOOL.to_owned(),
-                "edit".to_owned(),
-                "write".to_owned(),
-            ]
-    {
-        return Err("agent-run delivery policy receipt drift".to_owned());
-    }
     let bytes = super::read_bounded_file(
         Path::new(&assignment_path.0),
         super::DELIVERY_ASSIGNMENT_MAX_BYTES,
@@ -1158,22 +1158,85 @@ fn validate_delivery_policy_receipt(
     if sha256_hex(&bytes) != assignment_digest.0 {
         return Err("agent-run delivery policy assignment digest drift".to_owned());
     }
-    let artifact: super::DeliveryAssignmentArtifact = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("agent-run delivery policy assignment json: {error}"))?;
-    let allowed_unit_file_count = artifact
-        .ordered_units
-        .iter()
-        .flat_map(|unit| unit.files.iter().map(|path| path.0.as_str()))
-        .collect::<BTreeSet<_>>()
-        .len();
-    super::validate_approved_command_bindings(&artifact)?;
-    let approved_command_count = artifact.approved_commands.len();
-    if receipt.allowed_unit_file_count != allowed_unit_file_count
-        || receipt.approved_command_count != approved_command_count
-        || allowed_unit_file_count == 0
-        || approved_command_count == 0
-    {
-        return Err("agent-run delivery policy receipt authority count drift".to_owned());
+    let common = receipt.assignment_path == assignment_path.0
+        && receipt.assignment_digest == assignment_digest.0
+        && receipt.worktree == worktree.0
+        && receipt.cwd == spec.cwd.0
+        && receipt.active_overrides
+            == vec![
+                super::APPROVED_COMMAND_TOOL.to_owned(),
+                "edit".to_owned(),
+                "write".to_owned(),
+            ];
+    match super::read_delivery_assignment_artifact(&bytes)? {
+        super::DeliveryAssignmentArtifactReader::V3(artifact) => {
+            let count = artifact
+                .ordered_units
+                .iter()
+                .flat_map(|unit| unit.files.iter())
+                .collect::<BTreeSet<_>>()
+                .len();
+            super::validate_approved_command_bindings(&artifact)?;
+            if !common
+                || receipt.version != super::DELIVERY_POLICY_VERSION
+                || receipt.policy_digest
+                    != super::delivery_policy_digest(
+                        &assignment_path.0,
+                        &assignment_digest.0,
+                        &worktree.0,
+                        &spec.cwd.0,
+                    )
+                || receipt.allowed_unit_file_count != count
+                || receipt.approved_command_count != artifact.approved_commands.len()
+                || receipt.mutable_authored_leaf_count.is_some()
+                || receipt.protected_core_leaf_count.is_some()
+                || receipt.baseline_digest.is_some()
+                || count == 0
+                || artifact.approved_commands.is_empty()
+            {
+                return Err("agent-run delivery policy receipt drift".to_owned());
+            }
+        }
+        super::DeliveryAssignmentArtifactReader::V4(artifact) => {
+            super::materializer_v4::replay_v4_materialization(&artifact)?;
+            let files = artifact
+                .ordered_units
+                .iter()
+                .flat_map(|unit| unit.files.iter().map(|path| path.0.as_str()))
+                .collect::<BTreeSet<_>>();
+            let protected = artifact
+                .materialization
+                .baseline
+                .iter()
+                .map(|leaf| leaf.destination.0.as_str())
+                .collect::<BTreeSet<_>>();
+            if !protected.is_subset(&files)
+                || protected.len() != artifact.materialization.baseline.len()
+            {
+                return Err("agent-run V4 protected baseline drift".to_owned());
+            }
+            let mutable = files.len() - protected.len();
+            if !common
+                || receipt.version != super::DELIVERY_POLICY_V5_VERSION
+                || receipt.policy_digest
+                    != super::delivery_policy_digest_v5(
+                        &assignment_path.0,
+                        &assignment_digest.0,
+                        &worktree.0,
+                        &spec.cwd.0,
+                    )
+                || receipt.allowed_unit_file_count != files.len()
+                || receipt.approved_command_count != artifact.approved_commands.len()
+                || receipt.mutable_authored_leaf_count != Some(mutable)
+                || receipt.protected_core_leaf_count != Some(protected.len())
+                || receipt.baseline_digest.as_deref()
+                    != Some(&artifact.materialization.receipt_digest)
+                || mutable == 0
+                || artifact.approved_commands.is_empty()
+            {
+                return Err("agent-run delivery V4/V5 policy receipt authority drift".to_owned());
+            }
+        }
     }
     Ok(())
 }
@@ -1269,6 +1332,10 @@ fn normalize_child_tool_receipt_data(
 }
 
 impl RpcAssignment {
+    fn pi_version(&self) -> Option<&str> {
+        self.client.pi_version()
+    }
+
     fn spawn_and_configure(spec: &AgentRunSpec) -> Result<Self, String> {
         let tools = spec
             .allowed_tools
@@ -1347,12 +1414,30 @@ impl RpcAssignment {
                     lane_id: lane_id.0.clone(),
                     attempt,
                     base_commit: base_commit.0.clone(),
-                    policy_digest: super::delivery_policy_digest(
-                        &assignment_path.0,
-                        &assignment_digest.0,
-                        &worktree.0,
-                        &spec.cwd.0,
-                    ),
+                    policy_digest: match super::read_delivery_assignment_artifact(
+                        &super::read_bounded_file(
+                            Path::new(&assignment_path.0),
+                            super::DELIVERY_ASSIGNMENT_MAX_BYTES,
+                        )
+                        .map_err(|error| format!("agent-run delivery assignment read: {error}"))?,
+                    )? {
+                        super::DeliveryAssignmentArtifactReader::V3(_) => {
+                            super::delivery_policy_digest(
+                                &assignment_path.0,
+                                &assignment_digest.0,
+                                &worktree.0,
+                                &spec.cwd.0,
+                            )
+                        }
+                        super::DeliveryAssignmentArtifactReader::V4(_) => {
+                            super::delivery_policy_digest_v5(
+                                &assignment_path.0,
+                                &assignment_digest.0,
+                                &worktree.0,
+                                &spec.cwd.0,
+                            )
+                        }
+                    },
                 });
             }
             if spec.boundary_id.0 == "autopilot.validation_submission.v3" {
@@ -3061,6 +3146,7 @@ fn validate_spec(strict: &AgentRunSpec, spec_path: &Path) -> Result<(), String> 
     validate_runtime_addon(strict)?;
     validate_digests(strict)?;
     validate_session_identity(strict)?;
+    validate_terminal_route(strict)?;
     validate_delivery_identity(strict)?;
     validate_planning_documents(strict)?;
     validate_planning_atom_bindings(strict)?;
@@ -3172,6 +3258,57 @@ fn validate_route_and_role(strict: &AgentRunSpec) -> Result<(), String> {
                 strict.assignment_kind, strict.boundary_id.0, strict.result_contract.0
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_terminal_route(strict: &AgentRunSpec) -> Result<(), String> {
+    let planning = matches!(
+        strict.assignment_kind,
+        kernel::generated::ValidationAssignmentKind::PlanningReview
+    );
+    if !planning {
+        return if strict.terminal_route.is_none() {
+            Ok(())
+        } else {
+            Err("agent-run non-planning spec has a terminal route record".to_owned())
+        };
+    }
+    let Some(route) = strict.terminal_route.as_ref() else {
+        return if strict.boundary_id.0 == "planning.work-map.v2" {
+            Err("agent-run V2 planning spec missing terminal route record".to_owned())
+        } else {
+            // A known legacy V1 spec is read only through its explicit
+            // historical authority path; missing routing metadata never
+            // selects V2 or infers a new route.
+            Ok(())
+        };
+    };
+    let expected = super::terminal_route_for(
+        &strict.role_id.0,
+        &strict.boundary_id.0,
+        &strict.result_contract.0,
+    )
+    .map_err(|error| error.to_string())?;
+    if route != &expected
+        || route.profile_id != strict.terminal_profile_id.as_deref().unwrap_or_default()
+        || route.boundary_id != strict.boundary_id
+        || route.result_contract != strict.result_contract
+    {
+        return Err("agent-run terminal route tuple drift".to_owned());
+    }
+    if strict.boundary_id.0 == "planning.work-map.v2"
+        && (route.version != "v2"
+            || strict.atom_registry_path.is_none()
+            || strict.atom_registry_digest.is_none()
+            || strict.repository_manifest_path.is_none()
+            || strict.repository_manifest_digest.is_none()
+            || strict.repository_head_commit.is_none()
+            || strict.repository_head_tree.is_none())
+    {
+        return Err(
+            "agent-run V2 work-map route lacks exact route or authority binding".to_owned(),
+        );
     }
     Ok(())
 }
@@ -3403,12 +3540,16 @@ fn validate_delivery_identity(strict: &AgentRunSpec) -> Result<(), String> {
             worktree.0, strict.cwd.0
         ));
     }
-    let (expected_action, expected_assignment) =
-        super::expected_delivery_identity(&strict.workstream, lane_id, &strict.role_id, attempt);
-    if strict.assignment_id != expected_assignment || strict.action_id != expected_action {
+    let expected =
+        super::expected_delivery_identity(&strict.workstream, lane_id, &strict.role_id, attempt)
+            .map_err(|error| error.to_string())?;
+    if strict.assignment_id != expected.assignment_id || strict.action_id != expected.action_id {
         return Err(format!(
             "agent-run delivery action/assignment drift: expected {}/{}, got {}/{}",
-            expected_action.0, expected_assignment.0, strict.action_id.0, strict.assignment_id.0
+            expected.action_id.0,
+            expected.assignment_id.0,
+            strict.action_id.0,
+            strict.assignment_id.0
         ));
     }
     let bytes = super::read_bounded_file(
@@ -3419,9 +3560,37 @@ fn validate_delivery_identity(strict: &AgentRunSpec) -> Result<(), String> {
     if sha256_hex(&bytes) != assignment_digest.0 {
         return Err("agent-run delivery assignment digest drift".to_owned());
     }
-    let artifact: super::DeliveryAssignmentArtifact = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("agent-run delivery assignment json: {error}"))?;
-    validate_delivery_assignment_artifact(strict, &artifact, lane_id, base_commit, worktree)?;
+    match super::read_delivery_assignment_artifact(&bytes)? {
+        super::DeliveryAssignmentArtifactReader::V3(artifact) => {
+            validate_delivery_assignment_artifact(
+                strict,
+                &artifact,
+                lane_id,
+                attempt,
+                base_commit,
+                worktree,
+            )?
+        }
+        super::DeliveryAssignmentArtifactReader::V4(artifact) => {
+            if artifact.workstream != strict.workstream
+                || artifact.assignment_id != strict.assignment_id
+                || artifact.lane_id != *lane_id
+                || artifact.attempt != attempt
+                || artifact.base_commit != *base_commit
+                || artifact.worktree != worktree.0
+                || artifact.ordered_units.is_empty()
+            {
+                return Err("agent-run V4 delivery assignment authority drift".to_owned());
+            }
+            super::validate_delivery_recovery_binding(
+                &strict.role_id,
+                &strict.mode,
+                attempt,
+                artifact.recovery.as_ref(),
+            )?;
+            super::materializer_v4::replay_v4_materialization(&artifact)?;
+        }
+    }
     Ok(())
 }
 
@@ -3429,6 +3598,7 @@ fn validate_delivery_assignment_artifact(
     strict: &AgentRunSpec,
     artifact: &super::DeliveryAssignmentArtifact,
     lane_id: &kernel::generated::Id,
+    attempt: u32,
     base_commit: &kernel::generated::Sha,
     worktree: &kernel::generated::Path,
 ) -> Result<(), String> {
@@ -3436,7 +3606,7 @@ fn validate_delivery_assignment_artifact(
         || artifact.workstream != strict.workstream
         || artifact.assignment_id != strict.assignment_id
         || artifact.lane_id != *lane_id
-        || artifact.attempt != strict.attempt.unwrap_or_default()
+        || artifact.attempt != attempt
         || artifact.base_commit != *base_commit
         || artifact.worktree != worktree.0
         || artifact.ordered_units.is_empty()
@@ -3446,6 +3616,7 @@ fn validate_delivery_assignment_artifact(
     super::validate_delivery_recovery_binding(
         &strict.role_id,
         &strict.mode,
+        attempt,
         artifact.recovery.as_ref(),
     )?;
     super::validate_approved_command_bindings(artifact)?;
@@ -3939,7 +4110,7 @@ fn validate_planning_atom_bindings(strict: &AgentRunSpec) -> Result<(), String> 
                 return Err("agent-run task atoms cannot bind atom registry".to_owned());
             }
         }
-        "planning.work-map.v1" => {
+        "planning.work-map.v1" | "planning.work-map.v2" => {
             if strict.atom_id_prefix.is_some() {
                 return Err("agent-run work-map cannot bind atom_id_prefix".to_owned());
             }
@@ -4098,7 +4269,10 @@ fn render_repair_prompt(
         prompt.push_str("\n\n");
         prompt.push_str(&planning_task_source_manifest_for_spec(spec)?);
     }
-    if spec.boundary_id.0 == "planning.work-map.v1" {
+    if matches!(
+        spec.boundary_id.0.as_str(),
+        "planning.work-map.v1" | "planning.work-map.v2"
+    ) {
         prompt.push_str("\n\n");
         prompt.push_str(&planning_work_map_authority_for_spec(spec)?);
     }
@@ -4284,11 +4458,21 @@ fn planning_task_source_manifest_for_spec(spec: &AgentRunSpec) -> Result<String,
 }
 
 fn planning_work_map_authority_for_spec(spec: &AgentRunSpec) -> Result<String, ValueRejection> {
-    let authority = crate::contract_authority::render_contract_authority("planning.work-map.v1")
-        .map_err(|error| {
+    let boundary = match spec.boundary_id.0.as_str() {
+        "planning.work-map.v1" | "planning.work-map.v2" => spec.boundary_id.0.as_str(),
+        other => {
+            return Err(value_rejection(
+                "work_map_boundary",
+                "exact planning.work-map.v1 or planning.work-map.v2 boundary",
+                other,
+            ));
+        }
+    };
+    let authority =
+        crate::contract_authority::render_contract_authority(boundary).map_err(|error| {
             value_rejection(
                 "work_map_admission_authority",
-                "package-generated planning.work-map.v1 admission authority",
+                format!("package-generated {boundary} admission authority"),
                 error.to_string(),
             )
         })?;
@@ -4299,14 +4483,15 @@ fn planning_work_map_authority_for_spec(spec: &AgentRunSpec) -> Result<String, V
             error,
         )
     })?;
-    let manifest = crate::planning::atom_link_manifest_for_registry(Path::new(path), digest)
-        .map_err(|error| {
-            value_rejection(
-                "atom_registry",
-                "digest-verified package-authoritative atom-link manifest",
-                format!("{error:?}"),
-            )
-        })?;
+    let manifest =
+        crate::planning::atom_link_manifest_for_boundary(Path::new(path), digest, boundary)
+            .map_err(|error| {
+                value_rejection(
+                    "atom_registry",
+                    "digest-verified package-authoritative atom-link manifest",
+                    format!("{error:?}"),
+                )
+            })?;
     Ok(format!("{authority}\n\n{manifest}"))
 }
 
@@ -4885,8 +5070,22 @@ fn prepare_carrier(
             error.actual().to_owned(),
         )
     })?;
-    let carrier = serde_json::json!({
-        "schema": "autopilot.planning_carrier.v1",
+    let v2_route = spec
+        .terminal_route
+        .as_ref()
+        .filter(|route| route.version == "v2");
+    if spec.boundary_id.0 == "planning.work-map.v2" && v2_route.is_none() {
+        return Err(CarrierRejection::Identity(
+            "V2 work-map carrier lacks its issued exact route".to_owned(),
+        ));
+    }
+    let carrier_schema = if v2_route.is_some() {
+        "autopilot.planning_carrier.v2"
+    } else {
+        "autopilot.planning_carrier.v1"
+    };
+    let mut carrier = serde_json::json!({
+        "schema": carrier_schema,
         "action_id": spec.action_id.0,
         "assignment_id": spec.assignment_id.0,
         "run_revision": spec.run_revision,
@@ -4915,6 +5114,70 @@ fn prepare_carrier(
         "carrier_binding": terminal.details.binding,
         "raw_output": raw_output,
     });
+    if let Some(route) = v2_route {
+        let atom_registry_path = spec.atom_registry_path.as_ref().ok_or_else(|| {
+            CarrierRejection::Identity("V2 work-map carrier missing atom registry path".to_owned())
+        })?;
+        let atom_registry_digest = spec.atom_registry_digest.as_ref().ok_or_else(|| {
+            CarrierRejection::Identity(
+                "V2 work-map carrier missing atom registry digest".to_owned(),
+            )
+        })?;
+        let repository_manifest_path = spec.repository_manifest_path.as_ref().ok_or_else(|| {
+            CarrierRejection::Identity(
+                "V2 work-map carrier missing repository manifest path".to_owned(),
+            )
+        })?;
+        let repository_manifest_digest =
+            spec.repository_manifest_digest.as_ref().ok_or_else(|| {
+                CarrierRejection::Identity(
+                    "V2 work-map carrier missing repository manifest digest".to_owned(),
+                )
+            })?;
+        let repository_head_commit = spec.repository_head_commit.as_ref().ok_or_else(|| {
+            CarrierRejection::Identity(
+                "V2 work-map carrier missing repository head commit".to_owned(),
+            )
+        })?;
+        let repository_head_tree = spec.repository_head_tree.as_ref().ok_or_else(|| {
+            CarrierRejection::Identity(
+                "V2 work-map carrier missing repository head tree".to_owned(),
+            )
+        })?;
+        let object = carrier.as_object_mut().expect("planning carrier object");
+        object.insert(
+            "terminal_route".to_owned(),
+            serde_json::to_value(route).map_err(|error| {
+                CarrierRejection::Identity(format!(
+                    "V2 terminal route serialization failed: {error}"
+                ))
+            })?,
+        );
+        object.insert(
+            "atom_registry_path".to_owned(),
+            serde_json::json!(atom_registry_path.0),
+        );
+        object.insert(
+            "atom_registry_digest".to_owned(),
+            serde_json::json!(atom_registry_digest.0),
+        );
+        object.insert(
+            "repository_manifest_path".to_owned(),
+            serde_json::json!(repository_manifest_path.0),
+        );
+        object.insert(
+            "repository_manifest_digest".to_owned(),
+            serde_json::json!(repository_manifest_digest.0),
+        );
+        object.insert(
+            "repository_head_commit".to_owned(),
+            serde_json::json!(repository_head_commit.0),
+        );
+        object.insert(
+            "repository_head_tree".to_owned(),
+            serde_json::json!(repository_head_tree.0),
+        );
+    }
     Ok(PreparedCarrier {
         carrier,
         artifacts: Vec::new(),
@@ -4958,19 +5221,23 @@ fn validate_delivery_submission(
             "digest drift",
         ));
     }
-    let assignment: super::DeliveryAssignmentArtifact =
-        serde_json::from_slice(&bytes).map_err(|error| {
-            value_rejection("assignment", "valid delivery assignment", error.to_string())
-        })?;
-    super::admit_delivery_submission_with_assignment(submission, &assignment, required).map_err(
-        |error| {
-            value_rejection(
-                "delivery_submission",
-                "closed succeeded/blocked delivery admission shape",
-                error,
-            )
-        },
-    )?;
+    match super::read_delivery_assignment_artifact(&bytes).map_err(|error| {
+        value_rejection("assignment", "schema-selected delivery assignment", error)
+    })? {
+        super::DeliveryAssignmentArtifactReader::V3(assignment) => {
+            super::admit_delivery_submission_with_assignment(submission, &assignment, required)
+        }
+        super::DeliveryAssignmentArtifactReader::V4(assignment) => {
+            super::materializer_v4::admit_delivery_submission_v4(submission, &assignment, required)
+        }
+    }
+    .map_err(|error| {
+        value_rejection(
+            "delivery_submission",
+            "closed succeeded/blocked delivery admission shape",
+            error,
+        )
+    })?;
     Ok(())
 }
 
@@ -5862,20 +6129,42 @@ fn package_tool_result(
             .as_ref()
             .expect("validated delivery assignment digest");
         let worktree = spec.worktree.as_ref().expect("validated delivery worktree");
-        audit.as_object_mut().expect("tool audit is object").insert(
-            "delivery_policy".to_owned(),
-            serde_json::json!({
-                "version": super::DELIVERY_POLICY_VERSION,
-                "assignment_path": assignment_path.0,
-                "assignment_digest": assignment_digest.0,
-                "worktree": worktree.0,
-                "cwd": spec.cwd.0,
-                "policy_digest": super::delivery_policy_digest(
+        let bytes = super::read_bounded_file(
+            Path::new(&assignment_path.0),
+            super::DELIVERY_ASSIGNMENT_MAX_BYTES,
+        )
+        .expect("validated delivery assignment bytes");
+        let (version, policy_digest) = match super::read_delivery_assignment_artifact(&bytes)
+            .expect("validated schema-selected delivery assignment")
+        {
+            super::DeliveryAssignmentArtifactReader::V3(_) => (
+                super::DELIVERY_POLICY_VERSION,
+                super::delivery_policy_digest(
                     &assignment_path.0,
                     &assignment_digest.0,
                     &worktree.0,
                     &spec.cwd.0,
                 ),
+            ),
+            super::DeliveryAssignmentArtifactReader::V4(_) => (
+                super::DELIVERY_POLICY_V5_VERSION,
+                super::delivery_policy_digest_v5(
+                    &assignment_path.0,
+                    &assignment_digest.0,
+                    &worktree.0,
+                    &spec.cwd.0,
+                ),
+            ),
+        };
+        audit.as_object_mut().expect("tool audit is object").insert(
+            "delivery_policy".to_owned(),
+            serde_json::json!({
+                "version": version,
+                "assignment_path": assignment_path.0,
+                "assignment_digest": assignment_digest.0,
+                "worktree": worktree.0,
+                "cwd": spec.cwd.0,
+                "policy_digest": policy_digest,
                 "active_overrides": [super::APPROVED_COMMAND_TOOL, "edit", "write"],
                 "denials": denial_ledger.expect("validated delivery denial ledger"),
                 "command_executions": execution_ledger.expect("validated delivery command execution ledger"),

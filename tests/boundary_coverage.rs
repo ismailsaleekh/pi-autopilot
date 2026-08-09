@@ -8,7 +8,7 @@ use std::{
 use drivers::planning::{
     ATOM_REGISTRY_MAX_BYTES, MODEL_BOUNDARIES, accept_plan_review, accept_questions,
     accept_scout_dossier, accept_task_atoms, accept_work_map, accept_work_map_for_atoms,
-    boundary_runtime,
+    accept_work_map_v2, boundary_runtime,
 };
 use drivers::transcript::{
     BoundaryModeTable, TranscriptProvenance, TranscriptRecord, TranscriptStore,
@@ -17,8 +17,9 @@ use kernel::{
     boundary::{
         BOUNDARIES, BoundaryDescriptor, BoundaryMode, BoundaryRuntime, Producer, Rejection,
     },
-    generated::Id,
+    generated::{Id, RecoveryDisposition, WorkMapV2},
 };
+use serde::Deserialize;
 use sha2::{Digest as ShaDigest, Sha256};
 
 static BOUNDARY_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -81,6 +82,175 @@ fn model_boundaries_are_enforced_or_loudly_reported_in_record_phase() {
 #[test]
 fn boundary_coverage() {
     model_boundaries_are_enforced_or_loudly_reported_in_record_phase();
+}
+
+const V2_CAPTURE_REPORT_SHA256: &str =
+    "174d50e13ba5c519c0d36708fd013e167e88dbd8caf76d77ec49b95ed9f62bd7";
+const V2_CAPTURE_RAW_OUTPUT_DESCRIPTION: &str =
+    "raw_output is Core-normalized terminal payload JSON after Pi decoded the tool payload.";
+const V2_CAPTURE_PROVIDER: &str = "openai-codex";
+const V2_CAPTURE_MODEL: &str = "gpt-5.6-sol";
+const V2_CAPTURE_THINKING: &str = "xhigh";
+const V2_CAPTURE_PI_VERSION: &str = "0.84.1";
+const V2_CAPTURE_CHANNEL: &str = "subscription";
+const V2_CAPTURE_ADMISSION: &str = "accepted";
+
+struct WorkMapV2CaptureExpectation {
+    role: &'static str,
+    mode: &'static str,
+    profile: &'static str,
+    tool: &'static str,
+    schema_digest: &'static str,
+    raw_output_digest: &'static str,
+    session_id: &'static str,
+}
+
+const V2_CAPTURE_EXPECTATIONS: [WorkMapV2CaptureExpectation; 3] = [
+    WorkMapV2CaptureExpectation {
+        role: "plan-compiler",
+        mode: "initial-plan",
+        profile: "planning.work-map.v2:autopilot_submit_plan_cluster",
+        tool: "autopilot_submit_plan_cluster",
+        schema_digest: "07750be5a58112e8b3f956f261d33ef75e3a71b9b13b75be2192cfc43adbbc9a",
+        raw_output_digest: "caf1a60fb5fbc739df828b8884dc25fe575bc67a0a3813269726cd070486bb3d",
+        session_id: "autopilot-planning-work-map-v2-capture-plan-compiler-01-8d8db3407e5756df",
+    },
+    WorkMapV2CaptureExpectation {
+        role: "plan-synthesizer",
+        mode: "initial-plan",
+        profile: "planning.work-map.v2:autopilot_submit_synthesis",
+        tool: "autopilot_submit_synthesis",
+        schema_digest: "07750be5a58112e8b3f956f261d33ef75e3a71b9b13b75be2192cfc43adbbc9a",
+        raw_output_digest: "caf1a60fb5fbc739df828b8884dc25fe575bc67a0a3813269726cd070486bb3d",
+        session_id: "autopilot-planning-work-map-v2-capture-plan-synthesizer-01-8f4e00ace2043e95",
+    },
+    WorkMapV2CaptureExpectation {
+        role: "recovery-engineer",
+        mode: "planning-repair",
+        profile: "recovery-work-map.v2",
+        tool: "autopilot_emit_status",
+        schema_digest: "3efc6b230002a7216a3e471441a755672f2a750658483e7882b1fa3edb549495",
+        raw_output_digest: "ebc3dfb687a0d4e5a16342d6e3f40c69300859c0c6af37896a7c0beb69aa7f52",
+        session_id: "autopilot-planning-work-map-v2-capture-recovery-engineer-01-bbe13aadd6b8787c",
+    },
+];
+
+#[derive(Deserialize)]
+struct WorkMapV2CaptureReport {
+    schema: String,
+    raw_output_description: String,
+    records: Vec<WorkMapV2CaptureRecord>,
+}
+
+#[derive(Deserialize)]
+struct WorkMapV2CaptureRecord {
+    role: String,
+    mode: String,
+    profile: String,
+    tool: String,
+    schema_digest: String,
+    provider: String,
+    model: String,
+    thinking: String,
+    route: String,
+    pi_version: String,
+    raw_output_digest: String,
+    raw_output: String,
+    session_id: String,
+    strict_admission: String,
+}
+
+#[test]
+fn work_map_v2_genuine_subscription_capture_is_exact_and_replays() {
+    let evidence_dir = transcript_root().join("planning.work-map.v2");
+    let report_bytes = fs::read(evidence_dir.join("capture-report.json"))
+        .expect("copied WorkMap V2 capture report");
+    assert_eq!(sha256_hex(&report_bytes), V2_CAPTURE_REPORT_SHA256);
+    assert_eq!(
+        fs::read(evidence_dir.join("capture-report.sha256")).expect("copied report digest"),
+        format!("{V2_CAPTURE_REPORT_SHA256}\n").into_bytes()
+    );
+
+    let report: WorkMapV2CaptureReport =
+        serde_json::from_slice(&report_bytes).expect("closed copied capture report");
+    assert_eq!(report.schema, "autopilot.work_map_v2_capture_report.v1");
+    assert_eq!(
+        report.raw_output_description, V2_CAPTURE_RAW_OUTPUT_DESCRIPTION,
+        "the report describes Core-normalized terminal payloads, not provider bytes"
+    );
+    assert_eq!(report.records.len(), V2_CAPTURE_EXPECTATIONS.len());
+
+    let transcripts = TranscriptStore::new(transcript_root())
+        .load_boundary("planning.work-map.v2")
+        .expect("V2 transcript envelope");
+    assert_eq!(transcripts.len(), V2_CAPTURE_EXPECTATIONS.len());
+    let mut sessions = BTreeSet::new();
+    for ((expected, evidence), transcript) in V2_CAPTURE_EXPECTATIONS
+        .iter()
+        .zip(&report.records)
+        .zip(&transcripts)
+    {
+        assert_eq!(evidence.role, expected.role);
+        assert_eq!(evidence.mode, expected.mode);
+        assert_eq!(evidence.profile, expected.profile);
+        assert_eq!(evidence.tool, expected.tool);
+        assert_eq!(evidence.schema_digest, expected.schema_digest);
+        assert_eq!(evidence.provider, V2_CAPTURE_PROVIDER);
+        assert_eq!(evidence.model, V2_CAPTURE_MODEL);
+        assert_eq!(evidence.thinking, V2_CAPTURE_THINKING);
+        assert_eq!(evidence.route, V2_CAPTURE_CHANNEL);
+        assert_eq!(evidence.pi_version, V2_CAPTURE_PI_VERSION);
+        assert_eq!(evidence.strict_admission, V2_CAPTURE_ADMISSION);
+        assert_eq!(evidence.raw_output_digest, expected.raw_output_digest);
+        assert_eq!(evidence.session_id, expected.session_id);
+
+        assert_eq!(transcript.schema, "autopilot.transcript.v1");
+        assert_eq!(transcript.boundary_id, "planning.work-map.v2");
+        let provenance = transcript.provenance.as_ref().expect("capture provenance");
+        assert_eq!(provenance.provider, V2_CAPTURE_PROVIDER);
+        assert_eq!(provenance.model, V2_CAPTURE_MODEL);
+        assert_eq!(provenance.thinking, V2_CAPTURE_THINKING);
+        assert_eq!(provenance.session_id, expected.session_id);
+        assert!(
+            sessions.insert(provenance.session_id.as_str()),
+            "capture session ids must remain distinct"
+        );
+        assert_eq!(
+            transcript.raw_output.as_bytes(),
+            evidence.raw_output.as_bytes()
+        );
+        assert_eq!(
+            sha256_hex(transcript.raw_output.as_bytes()),
+            expected.raw_output_digest
+        );
+        assert_eq!(
+            sha256_hex(evidence.raw_output.as_bytes()),
+            evidence.raw_output_digest
+        );
+
+        let raw = transcript.replay().expect("replayable V2 transcript");
+        replay_work_map_v2(raw).expect("exact V2 model boundary parser accepts capture");
+        let work_map: WorkMapV2 =
+            serde_json::from_str(raw).expect("replayed closed V2 payload parses");
+        assert_eq!(work_map.schema.0, "planning.work-map.v2");
+        if expected.role == "recovery-engineer" {
+            assert_eq!(
+                work_map
+                    .recovery
+                    .as_ref()
+                    .map(|recovery| &recovery.disposition),
+                Some(&RecoveryDisposition::NoDefect),
+                "recovery capture remains the closed no-defect V2 payload"
+            );
+        } else {
+            assert!(
+                work_map.recovery.is_none(),
+                "ordinary {} capture must not gain recovery evidence",
+                expected.role
+            );
+        }
+    }
+    assert_eq!(sessions.len(), V2_CAPTURE_EXPECTATIONS.len());
 }
 
 #[test]
@@ -1299,6 +1469,7 @@ fn replay_plan(boundary_id: &str) -> Option<ReplayPlan> {
         "planning.scout-dossier.v1" => Some(ReplayPlan::Raw(replay_scout_dossier)),
         "planning.questions.v1" => Some(ReplayPlan::Raw(replay_questions)),
         "planning.work-map.v1" => Some(ReplayPlan::Raw(replay_work_map)),
+        "planning.work-map.v2" => Some(ReplayPlan::Raw(replay_work_map_v2)),
         "planning.plan-review.v1" => Some(ReplayPlan::Raw(replay_plan_review)),
         "allocation.lane-proposal.v1" | "validation.verdict.v1" => Some(ReplayPlan::TypedOnly),
         _ => None,
@@ -1325,6 +1496,9 @@ fn replay_questions(raw: &str) -> Result<(), Rejection> {
 }
 fn replay_work_map(raw: &str) -> Result<(), Rejection> {
     replay_with(raw, "planning.work-map.v1", accept_work_map)
+}
+fn replay_work_map_v2(raw: &str) -> Result<(), Rejection> {
+    replay_with(raw, "planning.work-map.v2", accept_work_map_v2)
 }
 fn replay_plan_review(raw: &str) -> Result<(), Rejection> {
     replay_with(raw, "planning.plan-review.v1", accept_plan_review)

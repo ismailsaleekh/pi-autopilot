@@ -49,6 +49,9 @@ type AnyError = Box<dyn std::error::Error>;
 pub struct CoreState {
     event_path: Option<PathBuf>,
     state: State,
+    /// Exact rows are retained alongside the aggregate State because V2
+    /// ready authority is one event-scoped root, never a join across refs.
+    events: Vec<EventRow>,
 }
 #[derive(Clone, Debug)]
 pub struct Route {
@@ -65,12 +68,14 @@ pub struct ParsedCommand {
 
 impl CoreState {
     pub fn open(event_path: Option<PathBuf>) -> Result<Self, AnyError> {
+        let (state, events) = match event_path.as_deref() {
+            Some(path) => replay_path(path)?,
+            None => (State::EMPTY, Vec::new()),
+        };
         Ok(Self {
-            state: match event_path.as_deref() {
-                Some(path) => replay_path(path)?,
-                None => State::EMPTY,
-            },
             event_path,
+            state,
+            events,
         })
     }
     fn append(&mut self, kind: EventKind, artifact_refs: Vec<Ref>) -> Result<(), AnyError> {
@@ -93,6 +98,7 @@ impl CoreState {
             append_event(path, &event)?;
         }
         self.state = apply(self.state.clone(), &event);
+        self.events.push(event);
         Ok(())
     }
     fn summary(&self) -> String {
@@ -367,11 +373,10 @@ fn advance_run(
     if let Some(envelope) = resume_pending_delivery_recovery(id, workstream, state)? {
         return Ok(AdvanceRunOutcome::Dispatched(envelope));
     }
-    let approved_artifact = read_approved_plan_artifact(workstream)
+    let approved_artifact = read_approved_plan_artifact(workstream, state)
         .map_err(|error| format!("CONTEXT_GAP:approved-plan:{error}"))?;
     let repository_authority = approved_artifact
-        .repository_authority
-        .as_ref()
+        .repository_authority()
         .ok_or_else(|| "CONTEXT_GAP:approved-plan:missing repository authority".to_owned())?;
     let cwd = fs::canonicalize(std::env::current_dir()?)?;
     ensure_run_main_at_approved_baseline(
@@ -380,11 +385,11 @@ fn advance_run(
         repository_authority,
         delivery_execution_started(state),
     )?;
-    let approved = approved_artifact.units;
-    let submission = allocation_submission_from_plan(workstream, &approved, state)
+    let approved = approved_artifact.units();
+    let submission = allocation_submission_from_plan(workstream, approved, state)
         .map_err(|error| format!("CONTEXT_GAP:allocation:{error}"))?;
     let allocation = allocation::validate_allocation(
-        &approved,
+        approved,
         &submission,
         AllocationPolicy {
             parallel_cap: 8,
@@ -392,7 +397,7 @@ fn advance_run(
         },
     )
     .map_err(|error| format!("allocation:{error:?}"))?;
-    let readiness = lane_readiness_from_events(&submission.lanes, &approved, state);
+    let readiness = lane_readiness_from_events(&submission.lanes, approved, state);
     let resources =
         host_resource_facts().map_err(|error| format!("CONTEXT_GAP:resources:{error}"))?;
     let mut selected = dispatch::select_ready_lanes(&DispatchInput {
@@ -409,17 +414,27 @@ fn advance_run(
     // marker cannot silently re-enable double dispatch.
     selected.retain(|lane_id| !lane_has_live_delivery(state, lane_id));
     if let Some(lane_id) = selected.first() {
-        let assignment = assignment(workstream, lane_id, &approved, &submission)?;
-        let issue = runner::delivery_issue_with_facts(
-            &assignment,
-            &runner::RunnerTransportFacts::from_env()?,
-        )?;
+        // The ready-root enum is the explicit version authority. V1 keeps the
+        // historical V3 assignment/policy path; only a rooted V2 image enters
+        // V4 materialization before prompt/spec/carrier issuance.
+        let facts = runner::RunnerTransportFacts::from_env()?;
+        let issue = match &approved_artifact {
+            ApprovedPlanAuthority::V1(_) => {
+                let assignment = assignment(workstream, lane_id, approved, &submission)?;
+                runner::delivery_issue_with_facts(&assignment, &facts)?
+            }
+            ApprovedPlanAuthority::V2 { artifact, root } => {
+                let assignment =
+                    assignment_v4(workstream, lane_id, approved, &submission, artifact, root)?;
+                runner::delivery_issue_v4_with_facts(&assignment, &facts)?
+            }
+        };
         append_runner_invocation(state, &issue.binding)?;
         let envelope = controlled_spawn(id, issue.action, state, "delivery")?;
         return Ok(AdvanceRunOutcome::Dispatched(envelope));
     }
 
-    let diagnostics = advance_diagnostics(state, &submission, &approved, &readiness, &selected);
+    let diagnostics = advance_diagnostics(state, &submission, approved, &readiness, &selected);
     if active_or_unknown_work(state) || queued_candidates(state) > 0 {
         Ok(AdvanceRunOutcome::Waiting(format!(
             "dispatch:waiting:{};{}",
@@ -449,8 +464,7 @@ fn resume_pending_validation_recovery(
     validation_ids.sort();
     validation_ids.dedup();
     for validation_id in validation_ids {
-        let validation = issued_binding_for_assignment(state, &idv(&validation_id))
-            .ok_or_else(|| format!("recovery resume missing validation binding {validation_id}"))?;
+        let validation = strict_recovery_source_binding(state, &idv(&validation_id))?;
         if validation.workstream.0 != workstream
             || validation.role_id.0 != "validator"
             || !terminal_consumed(state, &validation)
@@ -465,8 +479,10 @@ fn resume_pending_validation_recovery(
         let producer_id = producer_ids
             .first()
             .ok_or_else(|| "recovery resume validation missing producer".to_owned())?;
-        let recovery_id = idv(&format!("recovery-{}-a1", producer_id.0));
-        if let Some(recovery) = issued_binding_for_assignment(state, &recovery_id) {
+        let producer = strict_recovery_source_binding(state, producer_id)?;
+        if let Some(recovery) =
+            recovery_binding_for_resume(state, &producer, &validation.assignment_id)?
+        {
             if terminal_consumed(state, &recovery) || launch_ack_consumed(state, &recovery) {
                 continue;
             }
@@ -523,16 +539,19 @@ fn resume_pending_delivery_recovery(
     source_ids.sort();
     source_ids.dedup();
     for source_id in source_ids {
-        let source = issued_binding_for_assignment(state, &idv(&source_id))
-            .ok_or_else(|| format!("recovery resume missing source binding {source_id}"))?;
+        let source = strict_recovery_source_binding(state, &idv(&source_id))?;
         if source.workstream.0 != workstream
             || source.result_contract.0 != "autopilot.delivery_result.v2"
             || !terminal_consumed(state, &source)
         {
             continue;
         }
-        let recovery_assignment_id = idv(&format!("recovery-{}-a1", source.assignment_id.0));
-        if let Some(recovery) = issued_binding_for_assignment(state, &recovery_assignment_id) {
+        // Re-hash the durable source before inspecting any recovery directive or
+        // re-emitting a child. A locally refreshed spec cannot replace the issued
+        // assignment digest retained in the runner binding.
+        read_delivery_assignment_artifact(&source)?;
+        if let Some(recovery) = recovery_binding_for_resume(state, &source, &source.assignment_id)?
+        {
             if terminal_consumed(state, &recovery) || launch_ack_consumed(state, &recovery) {
                 continue;
             }
@@ -603,20 +622,22 @@ fn lane_has_live_delivery(state: &CoreState, lane_id: &Id) -> bool {
 fn satisfied_forward_gate_refs(
     workstream: &str,
     lane_id: Option<&Id>,
+    state: &CoreState,
 ) -> Result<Vec<Ref>, AnyError> {
     let Some(lane_id) = lane_id else {
         return Ok(Vec::new());
     };
-    let approved = read_approved_plan(workstream)
+    let approved = read_approved_plan_artifact(workstream, state)
         .map_err(|error| format!("CONTEXT_GAP:approved-plan:{error}"))?;
-    let unit = approved
+    let units = approved.units();
+    let unit = units
         .iter()
         .enumerate()
         .find(|(index, _)| approved_lane_id(*index) == *lane_id)
         .map(|(_, unit)| unit)
         .ok_or_else(|| format!("forward-gate:unknown-lane:{}", lane_id.0))?;
     let criterion = Id(format!("unit-complete:{}", unit.id.0));
-    Ok(approved
+    Ok(units
         .iter()
         .any(|other| other.predecessor_forward_criteria.contains(&criterion))
         .then(|| Ref(format!("gate:{}", criterion.0)))
@@ -764,7 +785,10 @@ fn accept_planning_carrier(
     state: &mut CoreState,
     terminal: Option<&HostToCoreTaskCompletedPayload>,
 ) -> Result<SeamEnvelope, AnyError> {
-    if carrier.schema != "autopilot.planning_carrier.v1" || carrier.assignment_id != assignment_id.0
+    if !matches!(
+        carrier.schema.as_str(),
+        "autopilot.planning_carrier.v1" | "autopilot.planning_carrier.v2"
+    ) || carrier.assignment_id != assignment_id.0
     {
         return done(
             id,
@@ -778,6 +802,27 @@ fn accept_planning_carrier(
     if let Err(error) = validate_planning_binding(&carrier, &binding) {
         return done(id, rejection("agent-carrier-binding", &error));
     }
+    if carrier.schema == "autopilot.planning_carrier.v2"
+        && let Err(error) = verify_v2_observed_carrier(&carrier, &binding)
+    {
+        return done(id, rejection("agent-carrier-v2", &error));
+    }
+    let v2_admission = if carrier.schema == "autopilot.planning_carrier.v2" {
+        match admit_v2_work_map(state, &binding, true) {
+            Ok(admitted) => Some(admitted),
+            Err(error) => return done(id, rejection("agent-carrier-v2", &error)),
+        }
+    } else {
+        None
+    };
+    let review_v2_subject = if carrier.boundary_id == "planning.plan-review.v1" {
+        match planning_subject_is_v2(&binding) {
+            Ok(value) => value,
+            Err(error) => return done(id, rejection("planning-subject", &error)),
+        }
+    } else {
+        false
+    };
     if planning_result_consumed(state, &binding) {
         return done(
             id,
@@ -797,12 +842,29 @@ fn accept_planning_carrier(
             ),
         );
     }
-    if let Err(error) = validate_agent_output(&binding, &carrier.raw_output) {
+    if v2_admission.is_none()
+        && let Err(error) = validate_agent_output(&binding, &carrier.raw_output)
+    {
         return done(id, boundary_status(&error));
     }
-    let recovery_admission = match validate_recovery_work_map(&carrier, &binding) {
-        Ok(admission) => admission,
-        Err(error) => return done(id, rejection("planning-recovery", &error)),
+    let recovery_admission = match v2_admission.as_ref() {
+        Some(admitted) => match admitted.recovery_disposition() {
+            Some(
+                kernel::generated::RecoveryDisposition::RequiresNewAuthority
+                | kernel::generated::RecoveryDisposition::InfrastructureBlocked
+                | kernel::generated::RecoveryDisposition::UnsafeBlocked,
+            ) => PlanningRecoveryAdmission::FailClosed(
+                admitted
+                    .recovery_disposition()
+                    .expect("matched V2 blocked recovery disposition")
+                    .clone(),
+            ),
+            _ => PlanningRecoveryAdmission::Continue,
+        },
+        None => match validate_recovery_work_map(&carrier, &binding) {
+            Ok(admission) => admission,
+            Err(error) => return done(id, rejection("planning-recovery", &error)),
+        },
     };
     let review_rejection = (carrier.boundary_id == "planning.plan-review.v1")
         .then(|| review_approves_execution(&carrier.raw_output).err())
@@ -866,19 +928,68 @@ fn accept_planning_carrier(
         );
     }
     if !first_review_requires_recovery
+        && v2_admission.is_none()
         && let Err(error) = apply_planning_side_effects(&carrier, &binding)
     {
         return done(id, rejection("planning-postprocess", &error));
     }
     if let Some(payload) = terminal {
-        append_terminal_event(state, payload, &binding)?;
-        record_task_completion_control(state, payload)?;
+        // V2 approval roots image/binding before terminal completion is
+        // consumed and before the ready event is appended.
+        if !review_v2_subject {
+            append_terminal_event(state, payload, &binding)?;
+            record_task_completion_control(state, payload)?;
+        }
     } else if first_review_requires_recovery {
         return done(
             id,
             rejection(
                 "planning-recovery",
                 "blocked first review requires durable terminal evidence",
+            ),
+        );
+    }
+    if carrier.boundary_id == "planning.plan-review.v1"
+        && !first_review_requires_recovery
+        && review_v2_subject
+    {
+        let promotion = match promote_v2_review_subject(state, &binding) {
+            Ok(value) => value,
+            Err(error) => return done(id, rejection("approved-plan-v2", &error)),
+        };
+        if let Err(error) =
+            read_approved_plan_v2(&promotion.binding_path, &promotion.binding_sha256)
+        {
+            return done(id, rejection("approved-plan-v2", &error));
+        }
+        let payload = terminal.ok_or_else(|| {
+            "approved V2 final review requires durable terminal completion evidence".to_owned()
+        })?;
+        // This is deliberately one append.  Files may be create-once orphans
+        // after a crash, but terminal consumption and completion-control facts
+        // never exist without the event-rooted V2 binding/image authority.
+        let ready_root = ApprovedPlanV2ReadyRootV1 {
+            schema: APPROVED_PLAN_V2_READY_ROOT_SCHEMA.to_owned(),
+            workstream: carrier.workstream.clone(),
+            binding_path: promotion.binding_path.display().to_string(),
+            binding_sha256: promotion.binding_sha256,
+            approved_plan_sha256: promotion.approved_plan_sha256,
+            final_review_action_id: binding.action_id.0.clone(),
+            final_review_assignment_id: binding.assignment_id.0.clone(),
+            final_review_run_revision: binding.run_revision,
+        };
+        let mut root_refs = v2_final_approval_root_refs(state, payload, &binding)?;
+        root_refs.extend([
+            approved_plan_v2_ready_root_ref(&ready_root)?,
+            planning_result_consumed_ref(&binding),
+        ]);
+        state.append(EventKind("planning:ready-to-execute".to_owned()), root_refs)?;
+        return done(
+            id,
+            format!(
+                "ready-to-execute:workstream={};{}",
+                carrier.workstream,
+                state.summary()
             ),
         );
     }
@@ -945,7 +1056,10 @@ fn accept_planning_carrier(
         "planning:recovery-required"
     } else if carrier.role_id == "recovery-engineer"
         && carrier.mode == "planning-repair"
-        && carrier.boundary_id == "planning.work-map.v1"
+        && matches!(
+            carrier.boundary_id.as_str(),
+            "planning.work-map.v1" | "planning.work-map.v2"
+        )
     {
         let baseline_path = binding
             .planning_subject_path
@@ -979,7 +1093,10 @@ fn accept_planning_carrier(
             let input_set = read_planning_input_set(&carrier.workstream)
                 .map_err(|error| format!("CONTEXT_GAP:planning-manifest:{error}"))?;
             let needs_atom_registry = next.iter().any(|assignment| {
-                assignment.boundary_id.as_deref() == Some("planning.work-map.v1")
+                matches!(
+                    assignment.boundary_id.as_deref(),
+                    Some("planning.work-map.v1" | "planning.work-map.v2")
+                )
             });
             let atom_registry = if needs_atom_registry {
                 match ensure_atom_registry(&carrier.workstream, state) {
@@ -1248,26 +1365,56 @@ fn route_task_completed(
                 }
             }
         }
-        let package = match runner::establish_delivery_package(&result, &expected) {
-            Ok(value) => value,
-            Err(error) => {
-                return done(id, rejection("delivery-rejected", &format!("{error:?}")));
+        let (_package, accepted) = match validated.assignment.v4.as_ref() {
+            Some(artifact) => {
+                let package = runner::establish_delivery_package_v4(&result, &expected, artifact);
+                let accepted =
+                    package
+                        .as_ref()
+                        .map_err(|error| error.clone())
+                        .and_then(|package| {
+                            runner::accept_delivery_v4_with_package_facts(
+                                &result, &expected, artifact, package,
+                            )
+                        });
+                match (package, accepted) {
+                    (Ok(package), Ok(accepted)) => (package, accepted),
+                    (Err(error), _) | (_, Err(error)) => {
+                        return done(id, rejection("delivery-rejected", &format!("{error:?}")));
+                    }
+                }
+            }
+            None => {
+                let package = match runner::establish_delivery_package(&result, &expected) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return done(id, rejection("delivery-rejected", &format!("{error:?}")));
+                    }
+                };
+                let accepted = match runner::accept_delivery_with_package_facts(
+                    std::slice::from_ref(&result),
+                    &expected,
+                    &package,
+                ) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return done(id, rejection("delivery-rejected", &format!("{error:?}")));
+                    }
+                };
+                (package, accepted)
             }
         };
-        let accepted = match runner::accept_delivery_with_package_facts(
-            std::slice::from_ref(&result),
-            &expected,
-            &package,
-        ) {
-            Ok(value) => value,
-            Err(error) => {
-                return done(id, rejection("delivery-rejected", &format!("{error:?}")));
+        let package_authority = match validated.assignment.v4.as_ref() {
+            Some(artifact) => {
+                runner::ValidationPackageAuthority::RootedV4(Box::new(artifact.clone()))
             }
+            None => runner::ValidationPackageAuthority::LegacyV3,
         };
         let validation_issue = match validation_issue_for_delivery(
             &binding,
             &accepted,
             &validated.command_executions,
+            package_authority,
             state.state.revision,
         ) {
             Ok(value) => value,
@@ -1326,6 +1473,13 @@ fn validate_planning_binding(
     carrier: &AgentCarrier,
     binding: &runner::IssuedRunnerBinding,
 ) -> Result<(), String> {
+    if (binding.boundary_id.0 == "planning.work-map.v2"
+        && carrier.schema != "autopilot.planning_carrier.v2")
+        || (binding.boundary_id.0 != "planning.work-map.v2"
+            && carrier.schema == "autopilot.planning_carrier.v2")
+    {
+        return Err("planning carrier schema/version boundary mismatch".to_owned());
+    }
     if carrier.action_id != binding.action_id.0
         || carrier.assignment_id != binding.assignment_id.0
         || carrier.run_revision != binding.run_revision
@@ -1356,6 +1510,17 @@ fn validate_planning_binding(
     }
     if binding.result_contract.0 == "autopilot.delivery_result.v2" {
         return Err("planning carrier for delivery binding".to_owned());
+    }
+    Ok(())
+}
+
+fn verify_v2_observed_carrier(
+    observed: &AgentCarrier,
+    binding: &runner::IssuedRunnerBinding,
+) -> Result<(), String> {
+    let verified = read_verified_agent_carrier_v2(binding)?;
+    if observed.raw_output.as_bytes() != verified.source.raw_work_map_payload() {
+        return Err("V2 observed carrier raw output differs from sealed carrier".to_owned());
     }
     Ok(())
 }
@@ -1397,6 +1562,37 @@ fn planning_result_consumed(state: &CoreState, binding: &runner::IssuedRunnerBin
         .state
         .refs
         .contains_key(&planning_result_consumed_ref(binding))
+}
+
+fn v2_final_approval_root_refs(
+    state: &CoreState,
+    payload: &HostToCoreTaskCompletedPayload,
+    binding: &runner::IssuedRunnerBinding,
+) -> Result<Vec<Ref>, AnyError> {
+    let task_binding = serde_json::json!({"task_id":payload.task_id,"action_id":payload.action_id,"assignment_id":payload.assignment_id,"run_revision":binding.run_revision});
+    let config = crate::watchdog::WatchdogConfig::package()
+        .map_err(|error| format!("watchdog:policy:{error:?}"))?;
+    let turn = config.completed_turn(
+        active_work(state),
+        Id(format!("watchdog-action-{}", state.state.revision + 1)),
+        state.state.revision + 1,
+    );
+    Ok(vec![
+        Ref(payload.task_id.0.clone()),
+        Ref(payload.action_id.0.clone()),
+        Ref(payload.assignment_id.0.clone()),
+        Ref(payload.status.clone()),
+        Ref(binding.run_revision.to_string()),
+        Ref(format!("task-binding:{task_binding}")),
+        terminal_consumed_ref(binding),
+        Ref("module-wired:watchdog".to_owned()),
+        Ref(format!("watchdog-effects:{}", turn.effects.len())),
+        Ref(format!(
+            "watchdog-semantic-authority:{}",
+            turn.has_semantic_authority()
+        )),
+        Ref("completion-control:rooted".to_owned()),
+    ])
 }
 
 fn append_terminal_event(
@@ -1495,10 +1691,15 @@ fn terminal_status_allowed(status: &str) -> bool {
     matches!(status, "completed" | "failed" | "killed")
 }
 
+struct ValidatedDeliveryAssignment {
+    legacy: runner::DeliveryAssignmentArtifact,
+    v4: Option<runner::DeliveryAssignmentArtifactV4>,
+}
+
 fn validate_delivery_assignment_binding(
     spec: &kernel::generated::AgentRunSpec,
     binding: &runner::IssuedRunnerBinding,
-) -> Result<runner::DeliveryAssignmentArtifact, String> {
+) -> Result<ValidatedDeliveryAssignment, String> {
     let binding_assignment_path = binding
         .assignment_path
         .as_deref()
@@ -1524,22 +1725,44 @@ fn validate_delivery_assignment_binding(
     if sha256_hex_local(&bytes) != binding_assignment_digest {
         return Err("delivery assignment digest drift".to_owned());
     }
-    let artifact: runner::DeliveryAssignmentArtifact = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("delivery assignment json:{error}"))?;
-    if artifact.schema != "autopilot.delivery_assignment.v3"
-        || artifact.workstream != binding.workstream
-        || artifact.assignment_id != binding.assignment_id
-        || Some(&artifact.lane_id) != binding.lane_id.as_ref()
-        || Some(artifact.attempt) != binding.attempt
-        || Some(&artifact.base_commit) != binding.base_commit.as_ref()
-        || Some(artifact.worktree.as_str()) != binding.worktree.as_deref()
-        || artifact.ordered_units.is_empty()
+    let artifact = runner::read_delivery_assignment_artifact(&bytes)?;
+    let (legacy, v4) = match artifact {
+        runner::DeliveryAssignmentArtifactReader::V3(artifact) => {
+            if artifact.schema != "autopilot.delivery_assignment.v3" {
+                return Err("delivery V3 schema drift".to_owned());
+            }
+            (artifact, None)
+        }
+        runner::DeliveryAssignmentArtifactReader::V4(artifact) => {
+            runner::materializer_v4::replay_v4_materialization(&artifact)?;
+            let legacy = runner::DeliveryAssignmentArtifact {
+                schema: "autopilot.delivery_assignment.v3".to_owned(),
+                workstream: artifact.workstream.clone(),
+                assignment_id: artifact.assignment_id.clone(),
+                lane_id: artifact.lane_id.clone(),
+                attempt: artifact.attempt,
+                base_commit: artifact.base_commit.clone(),
+                worktree: artifact.worktree.clone(),
+                ordered_units: artifact.ordered_units.clone(),
+                approved_commands: artifact.approved_commands.clone(),
+                recovery: artifact.recovery.clone(),
+            };
+            (legacy, Some(artifact))
+        }
+    };
+    if legacy.workstream != binding.workstream
+        || legacy.assignment_id != binding.assignment_id
+        || Some(&legacy.lane_id) != binding.lane_id.as_ref()
+        || Some(legacy.attempt) != binding.attempt
+        || Some(&legacy.base_commit) != binding.base_commit.as_ref()
+        || Some(legacy.worktree.as_str()) != binding.worktree.as_deref()
+        || legacy.ordered_units.is_empty()
     {
         return Err("delivery assignment artifact identity drift".to_owned());
     }
-    validate_delivery_artifact_units(&artifact.ordered_units)?;
-    runner::validate_approved_command_bindings(&artifact)?;
-    Ok(artifact)
+    validate_delivery_artifact_units(&legacy.ordered_units)?;
+    runner::validate_approved_command_bindings(&legacy)?;
+    Ok(ValidatedDeliveryAssignment { legacy, v4 })
 }
 
 fn validate_delivery_artifact_units(units: &[ApprovedUnit]) -> Result<(), String> {
@@ -1633,7 +1856,7 @@ fn validate_delivery_artifact_units(units: &[ApprovedUnit]) -> Result<(), String
 }
 
 struct ValidatedDeliveryFacts {
-    assignment: runner::DeliveryAssignmentArtifact,
+    assignment: ValidatedDeliveryAssignment,
     denial_ledger: runner::child::DeliveryPolicyDenialLedger,
     command_executions: Vec<runner::VerifiedCommandExecution>,
 }
@@ -1723,11 +1946,18 @@ fn validate_delivery_result_v2(
     let spec: kernel::generated::AgentRunSpec =
         serde_json::from_slice(spec_bytes).map_err(|error| error.to_string())?;
     let assignment = validate_delivery_assignment_binding(&spec, binding)?;
-    runner::admit_delivery_submission_with_assignment(
-        &result.submission,
-        &assignment,
-        binding.required_focused_evidence as usize,
-    )?;
+    match assignment.v4.as_ref() {
+        Some(artifact) => runner::materializer_v4::admit_delivery_submission_v4(
+            &result.submission,
+            artifact,
+            binding.required_focused_evidence as usize,
+        ),
+        None => runner::admit_delivery_submission_with_assignment(
+            &result.submission,
+            &assignment.legacy,
+            binding.required_focused_evidence as usize,
+        ),
+    }?;
     let profile = runner::terminal_profile_for(
         &binding.role_id.0,
         &binding.boundary_id.0,
@@ -1754,7 +1984,7 @@ fn validate_delivery_result_v2(
     let (denial_ledger, command_execution_ledger) =
         validate_delivery_tool_audit_policy(&audit, &spec, result)?;
     let command_executions = validate_delivery_command_executions(
-        &assignment,
+        &assignment.legacy,
         &command_execution_ledger,
         &result.submission,
         Path::new(&result.worktree.0),
@@ -1799,12 +2029,32 @@ fn validate_delivery_tool_audit_policy(
         .worktree
         .as_ref()
         .ok_or_else(|| "delivery audit spec missing worktree".to_owned())?;
-    let expected_policy_digest = runner::delivery_policy_digest(
-        &assignment_path.0,
-        &assignment_digest.0,
-        &worktree.0,
-        &spec.cwd.0,
-    );
+    let assignment_bytes = runner::read_bounded_file(
+        Path::new(&assignment_path.0),
+        runner::DELIVERY_ASSIGNMENT_MAX_BYTES,
+    )
+    .map_err(|error| error.to_string())?;
+    let (expected_version, expected_policy_digest) =
+        match runner::read_delivery_assignment_artifact(&assignment_bytes)? {
+            runner::DeliveryAssignmentArtifactReader::V3(_) => (
+                runner::DELIVERY_POLICY_VERSION,
+                runner::delivery_policy_digest(
+                    &assignment_path.0,
+                    &assignment_digest.0,
+                    &worktree.0,
+                    &spec.cwd.0,
+                ),
+            ),
+            runner::DeliveryAssignmentArtifactReader::V4(_) => (
+                runner::DELIVERY_POLICY_V5_VERSION,
+                runner::delivery_policy_digest_v5(
+                    &assignment_path.0,
+                    &assignment_digest.0,
+                    &worktree.0,
+                    &spec.cwd.0,
+                ),
+            ),
+        };
     if audit.schema != "autopilot.tool_audit.v2"
         || audit.tool_call_id != result.tool_call_id
         || audit.profile_id != result.terminal_profile_id
@@ -1814,7 +2064,7 @@ fn validate_delivery_tool_audit_policy(
         || audit.schema_digest != result.tool_schema_digest.0
         || audit.binding != result.carrier_binding.0
         || audit.submission_digest != result.submission_digest.0
-        || policy.version != runner::DELIVERY_POLICY_VERSION
+        || policy.version != expected_version
         || policy.assignment_path != assignment_path.0
         || policy.assignment_digest != assignment_digest.0
         || policy.worktree != worktree.0
@@ -2223,6 +2473,15 @@ fn is_git_oid(value: &str) -> bool {
             .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase())
 }
 
+pub mod approved_plan_v2;
+pub(crate) use approved_plan_v2::write_approved_plan_v2;
+pub use approved_plan_v2::{
+    APPROVED_PLAN_V2_BINDING_SCHEMA, APPROVED_PLAN_V2_BOUNDARY, APPROVED_PLAN_V2_SCHEMA,
+    ApprovedPlanArtifactV2, ApprovedPlanV2BindingV1, ApprovedPlanV2Promotion,
+    ApprovedPlanV2RecoverySubjectBindingV1, read_approved_plan_v2,
+    write_approved_plan_v2_for_test_only,
+};
+
 include!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../data/seam_real_producers.rs"
@@ -2308,17 +2567,22 @@ fn write_frame<W: Write>(writer: &mut W, frame: &SeamEnvelope) -> Result<(), Any
     writer.flush()?;
     Ok(())
 }
-fn replay_path(path: &Path) -> Result<State, AnyError> {
+fn replay_path(path: &Path) -> Result<(State, Vec<EventRow>), AnyError> {
     let file = match File::open(path) {
         Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(State::EMPTY),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok((State::EMPTY, Vec::new()));
+        }
         Err(error) => return Err(error.into()),
     };
     let mut state = State::EMPTY;
+    let mut events = Vec::new();
     for line in io::BufReader::new(file).lines() {
-        state = apply(state, &serde_json::from_str::<EventRow>(&line?)?);
+        let event = serde_json::from_str::<EventRow>(&line?)?;
+        state = apply(state, &event);
+        events.push(event);
     }
-    Ok(state)
+    Ok((state, events))
 }
 fn append_event(path: &Path, event: &EventRow) -> Result<(), AnyError> {
     if let Some(parent) = path.parent() {
@@ -3219,8 +3483,7 @@ fn repair_needed_v3(
         .producer_assignment_ids
         .first()
         .ok_or_else(|| "v3 validation recovery missing producer assignment".to_owned())?;
-    let producer = issued_binding_for_assignment(state, producer_id)
-        .ok_or_else(|| "v3 validation recovery missing producer binding".to_owned())?;
+    let producer = strict_recovery_source_binding(state, producer_id)?;
     let policy = crate::repair::SemanticRecoveryPolicy::package()?;
     if producer.role_id.0 == "recovery-engineer" || result.semantic_round > policy.max_attempts {
         state.append(
@@ -3375,6 +3638,7 @@ fn repair_needed_v3(
             ],
         )?;
     }
+    let source_v4 = delivery_assignment_v4_for_binding(&producer)?;
     let assignment = recovery_runner_assignment(
         &producer,
         Sha(result.exact_commit.0.clone()),
@@ -3382,7 +3646,15 @@ fn repair_needed_v3(
         directive,
         state.state.revision,
     )?;
-    spawn_recovery_assignment(id, assignment, state, "validation:recovery-required")
+    match source_v4 {
+        Some(source) => spawn_recovery_assignment_v4(
+            id,
+            recovery_v4_assignment(assignment, source),
+            state,
+            "validation:recovery-required",
+        ),
+        None => spawn_recovery_assignment(id, assignment, state, "validation:recovery-required"),
+    }
 }
 
 fn integrate_validated_candidate_v2(
@@ -3525,6 +3797,7 @@ fn integrate_validated_candidate(
         .chain(satisfied_forward_gate_refs(
             workstream,
             binding.lane_id.as_ref(),
+            state,
         )?)
         .collect::<Vec<_>>(),
     )?;
@@ -3581,17 +3854,270 @@ fn conflict_response(
     )
 }
 
-fn issued_binding_for_assignment(
+fn strict_recovery_bindings(
     state: &CoreState,
-    assignment_id: &Id,
-) -> Option<runner::IssuedRunnerBinding> {
+) -> Result<Vec<runner::IssuedRunnerBinding>, AnyError> {
     state
         .state
         .refs
         .keys()
-        .filter_map(|reference| runner::decode_binding_ref(&reference.0))
+        .filter(|reference| reference.0.starts_with(runner::ISSUED_BINDING_REF_PREFIX))
+        .map(|reference| {
+            runner::decode_binding_ref(&reference.0)
+                .ok_or_else(|| "recovery durable runner binding ref is malformed".into())
+        })
+        .collect()
+}
+
+fn strict_recovery_source_binding(
+    state: &CoreState,
+    assignment_id: &Id,
+) -> Result<runner::IssuedRunnerBinding, AnyError> {
+    let mut matches = strict_recovery_bindings(state)?
+        .into_iter()
         .filter(|binding| binding.assignment_id == *assignment_id)
-        .max_by_key(|binding| binding.run_revision)
+        .collect::<Vec<_>>();
+    match matches.len() {
+        1 => Ok(matches.pop().expect("one matching recovery source binding")),
+        0 => Err(format!(
+            "recovery source binding missing for assignment {}",
+            assignment_id.0
+        )
+        .into()),
+        count => Err(format!(
+            "recovery source binding duplicate for assignment {}: {count}",
+            assignment_id.0
+        )
+        .into()),
+    }
+}
+
+fn recovery_binding_for_resume(
+    state: &CoreState,
+    identity_source: &runner::IssuedRunnerBinding,
+    trigger_assignment_id: &Id,
+) -> Result<Option<runner::IssuedRunnerBinding>, AnyError> {
+    let lane_id = identity_source.lane_id.as_ref().ok_or_else(|| {
+        format!(
+            "recovery resume identity source missing lane_id {}",
+            identity_source.assignment_id.0
+        )
+    })?;
+    let mut matches = Vec::new();
+    for candidate in strict_recovery_bindings(state)?
+        .into_iter()
+        .filter(|candidate| {
+            candidate.workstream == identity_source.workstream
+                && candidate.role_id.0 == "recovery-engineer"
+                && candidate.lane_id.as_ref() == Some(lane_id)
+        })
+    {
+        let attempt = candidate.attempt.ok_or_else(|| {
+            format!(
+                "recovery resume binding missing selected attempt {}",
+                candidate.assignment_id.0
+            )
+        })?;
+        let expected = runner::expected_delivery_identity(
+            &candidate.workstream,
+            lane_id,
+            &candidate.role_id,
+            attempt,
+        )?;
+        if candidate.action_id != expected.action_id
+            || candidate.assignment_id != expected.assignment_id
+        {
+            return Err(format!(
+                "recovery resume binding identity drift: expected {}/{}, got {}/{}",
+                expected.action_id.0,
+                expected.assignment_id.0,
+                candidate.action_id.0,
+                candidate.assignment_id.0
+            )
+            .into());
+        }
+        let artifact = read_delivery_assignment_artifact(&candidate)?;
+        if artifact
+            .recovery
+            .as_ref()
+            .is_some_and(|directive| directive.trigger_assignment_id == *trigger_assignment_id)
+        {
+            matches.push(candidate);
+        }
+    }
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(matches.pop()),
+        count => Err(format!(
+            "recovery resume has ambiguous durable recovery bindings for {}: {count}",
+            trigger_assignment_id.0
+        )
+        .into()),
+    }
+}
+
+#[cfg(test)]
+mod recovery_resume_binding_tests {
+    use super::*;
+
+    fn unit() -> ApprovedUnit {
+        let criterion = Id("criterion-U1".to_owned());
+        ApprovedUnit {
+            id: Id("U1".to_owned()),
+            kind: kernel::generated::PlanUnitKind::Implementation,
+            objective: "durable canonical recovery binding".to_owned(),
+            operator_order: 1,
+            decisions: Vec::new(),
+            criteria: vec![criterion.clone()],
+            criterion_text: vec![crate::allocation::ApprovedCriterion {
+                id: criterion,
+                text: "canonical binding is selected".to_owned(),
+            }],
+            dependencies: Vec::new(),
+            predecessor_forward_criteria: Vec::new(),
+            downstream_release_edges: vec![Id("edge-U1".to_owned())],
+            files: vec![kernel::generated::Path("src/lib.rs".to_owned())],
+            commands: vec![kernel::generated::PlanUnitCommand {
+                command: "cargo test --lib".to_owned(),
+                expected: "pass".to_owned(),
+                effect: kernel::generated::CommandEffect::NoEffect,
+                generated_paths: Vec::new(),
+                handling: kernel::generated::CommandEffectHandling::None,
+                scope_preservation: "final state remains in the approved file".to_owned(),
+            }],
+            package_checks: Vec::new(),
+        }
+    }
+
+    fn binding(
+        action_id: &str,
+        assignment_id: &str,
+        role_id: &str,
+        mode: &str,
+        lane_id: &str,
+        attempt: u32,
+        root: &Path,
+    ) -> runner::IssuedRunnerBinding {
+        runner::IssuedRunnerBinding {
+            action_id: Id(action_id.to_owned()),
+            assignment_id: Id(assignment_id.to_owned()),
+            run_revision: 7,
+            workstream: Id("main".to_owned()),
+            role_id: Id(role_id.to_owned()),
+            mode: ModeId(mode.to_owned()),
+            boundary_id: kernel::generated::ContractId(
+                "autopilot.delivery_submission.v2".to_owned(),
+            ),
+            result_contract: kernel::generated::ContractId(
+                "autopilot.delivery_result.v2".to_owned(),
+            ),
+            prompt_path: root.join("prompt.md").display().to_string(),
+            prompt_digest: "a".repeat(64),
+            spec_path: root.join("spec.json").display().to_string(),
+            spec_digest: "b".repeat(64),
+            carrier_path: root.join("carrier.json").display().to_string(),
+            session_id: Id("session".to_owned()),
+            boundary_digest: "c".repeat(64),
+            result_contract_digest: "d".repeat(64),
+            settings_digest: "e".repeat(64),
+            context_digest: "f".repeat(64),
+            skills_digest: "0".repeat(64),
+            subscription_digest: "1".repeat(64),
+            terminal_route: None,
+            assignment_path: None,
+            assignment_digest: None,
+            repository_manifest_path: None,
+            repository_manifest_digest: None,
+            repository_head_commit: None,
+            repository_head_tree: None,
+            mode_parameter: None,
+            planning_subject_assignment_id: None,
+            planning_subject_path: None,
+            planning_subject_digest: None,
+            lane_id: Some(Id(lane_id.to_owned())),
+            attempt: Some(attempt),
+            base_commit: Some(Sha("base".to_owned())),
+            worktree: Some(root.display().to_string()),
+            required_focused_evidence: 2,
+        }
+    }
+
+    #[test]
+    fn bug_187_recovery_resume_selects_durable_canonical_binding_without_source_id_parsing() {
+        let root = fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temporary root")
+            .join(format!(
+                "pi-autopilot-bug187-canonical-recovery-{}",
+                std::process::id()
+            ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("recovery binding root");
+        let source_id = "opaque-source-identity-not-a-recovery-id";
+        let lane_id = "Lsynthetic";
+        let recovery_id = "recovery-assignment-main-Lsynthetic-a1";
+        let recovery_action = "action-recovery-assignment-main-Lsynthetic-a1";
+        let source = binding(
+            "opaque-source-action",
+            source_id,
+            "implementer",
+            "lane-delivery",
+            lane_id,
+            1,
+            &root,
+        );
+        let mut recovery = binding(
+            recovery_action,
+            recovery_id,
+            "recovery-engineer",
+            "failed-test",
+            lane_id,
+            1,
+            &root,
+        );
+        let artifact = runner::DeliveryAssignmentArtifact {
+            schema: "autopilot.delivery_assignment.v3".to_owned(),
+            workstream: recovery.workstream.clone(),
+            assignment_id: recovery.assignment_id.clone(),
+            lane_id: recovery.lane_id.clone().expect("recovery lane"),
+            attempt: 1,
+            base_commit: recovery.base_commit.clone().expect("recovery base"),
+            worktree: root.display().to_string(),
+            approved_commands: runner::approved_command_bindings(&[unit()]),
+            ordered_units: vec![unit()],
+            recovery: Some(runner::RecoveryDirective {
+                schema: "autopilot.recovery_directive.v1".to_owned(),
+                trigger_phase: "validation".to_owned(),
+                repair_mode: ModeId("failed-test".to_owned()),
+                trigger_assignment_id: Id(source_id.to_owned()),
+                diagnosis_refs: vec![Ref("validation-carrier:synthetic".to_owned())],
+                diagnosis_ids: vec![Id("F-synthetic".to_owned())],
+                diagnosis_details: vec!["synthetic durable directive".to_owned()],
+                original_gate: format!("validator:{source_id}:semantic-round-1"),
+                attempt_budget: 1,
+            }),
+        };
+        let artifact_path = root.join("recovery-assignment.json");
+        let artifact_bytes = serde_json::to_vec_pretty(&artifact).expect("recovery artifact");
+        fs::write(&artifact_path, &artifact_bytes).expect("write recovery artifact");
+        recovery.assignment_path = Some(artifact_path.display().to_string());
+        recovery.assignment_digest = Some(sha256_hex_local(&artifact_bytes));
+
+        let mut state = CoreState::open(None).expect("core state");
+        state
+            .state
+            .refs
+            .insert(runner::binding_ref(&source).expect("source ref"), 1);
+        state
+            .state
+            .refs
+            .insert(runner::binding_ref(&recovery).expect("recovery ref"), 1);
+        let selected = recovery_binding_for_resume(&state, &source, &source.assignment_id)
+            .expect("canonical durable recovery selection")
+            .expect("one canonical recovery binding");
+        assert_eq!(selected.assignment_id.0, recovery_id);
+        assert_eq!(selected.action_id.0, recovery_action);
+        let _ = fs::remove_dir_all(&root);
+    }
 }
 
 fn lane_blocker_ref(binding: &runner::IssuedRunnerBinding) -> Result<Ref, String> {
@@ -3691,7 +4217,7 @@ fn assess_blocked_delivery_recovery(
     let snapshot = match runner::inspect_blocked_delivery_snapshot(
         Path::new(worktree),
         base_commit,
-        &facts.assignment.ordered_units,
+        &facts.assignment.legacy.ordered_units,
     ) {
         Ok(snapshot) => snapshot,
         Err(error) => return Ok(DeliveryRecoveryDecision::Unsafe(error)),
@@ -3760,16 +4286,17 @@ fn recovery_runner_assignment(
     );
     let role_id = idv("recovery-engineer");
     let attempt = 1;
-    let (action_id, assignment_id) =
-        runner::expected_delivery_identity(&source.workstream, &lane_id, &role_id, attempt);
+    let identity =
+        runner::expected_delivery_identity(&source.workstream, &lane_id, &role_id, attempt)
+            .map_err(|error| error.to_string())?;
     let session_file = PathBuf::from(format!(
         ".pi/autopilot/{}/{}.session.json",
-        source.workstream.0, assignment_id.0
+        source.workstream.0, identity.assignment_id.0
     ));
     Ok(RunnerAssignment {
         workstream: source.workstream.clone(),
-        action_id,
-        assignment_id,
+        action_id: identity.action_id,
+        assignment_id: identity.assignment_id,
         role_id,
         mode: directive.repair_mode.clone(),
         run_revision,
@@ -3782,6 +4309,91 @@ fn recovery_runner_assignment(
         approved_units,
         recovery: Some(directive),
     })
+}
+
+fn recovery_v4_assignment(
+    legacy: RunnerAssignment,
+    source: runner::DeliveryAssignmentArtifactV4,
+) -> runner::RunnerAssignmentV4 {
+    runner::RunnerAssignmentV4 {
+        workstream: legacy.workstream,
+        action_id: legacy.action_id,
+        assignment_id: legacy.assignment_id,
+        role_id: legacy.role_id,
+        mode: legacy.mode,
+        run_revision: legacy.run_revision,
+        lane_id: legacy.lane_id,
+        attempt: legacy.attempt,
+        // Recovery authority selected the current package tip.  The retained
+        // materialization receipt still carries its original pinned source
+        // base and identity; replay checks those separately.
+        base_commit: legacy.base_commit,
+        worktree: legacy.worktree,
+        session_file: legacy.session_file,
+        roster_assignment: legacy.roster_assignment,
+        approved_units: legacy.approved_units,
+        recovery: legacy.recovery,
+        approved_plan_binding_path: source.approved_plan_binding_path,
+        approved_plan_binding_digest: source.approved_plan_binding_digest,
+        approved_image_digest: source.approved_image_digest,
+        selected_vendoring: source.selected_vendoring,
+        materialization: source.materialization,
+    }
+}
+
+fn spawn_recovery_assignment_v4(
+    id: u64,
+    assignment: runner::RunnerAssignmentV4,
+    state: &mut CoreState,
+    event_kind: &str,
+) -> Result<SeamEnvelope, AnyError> {
+    let directive = assignment
+        .recovery
+        .as_ref()
+        .ok_or_else(|| "recovery V4 spawn missing directive".to_owned())?;
+    let trigger_assignment_id = directive.trigger_assignment_id.0.clone();
+    let attempt_budget = directive.attempt_budget;
+    let issue = runner::delivery_issue_v4_with_facts(
+        &assignment,
+        &runner::RunnerTransportFacts::from_env().map_err(|error| error.to_string())?,
+    )?;
+    append_runner_invocation(state, &issue.binding)?;
+    state.append(
+        EventKind(event_kind.to_owned()),
+        vec![
+            Ref("module-wired:recovery-engineer".to_owned()),
+            Ref(issue.binding.assignment_id.0.clone()),
+            Ref(format!("recovery-trigger:{trigger_assignment_id}")),
+            Ref(format!("recovery-issued:{trigger_assignment_id}")),
+            Ref(format!("recovery-attempt:1-of-{attempt_budget}")),
+        ],
+    )?;
+    controlled_spawn(id, issue.action, state, "semantic-recovery")
+}
+
+fn delivery_assignment_v4_for_binding(
+    binding: &runner::IssuedRunnerBinding,
+) -> Result<Option<runner::DeliveryAssignmentArtifactV4>, String> {
+    let path = binding
+        .assignment_path
+        .as_ref()
+        .ok_or_else(|| "delivery binding missing assignment path".to_owned())?;
+    let digest = binding
+        .assignment_digest
+        .as_ref()
+        .ok_or_else(|| "delivery binding missing assignment digest".to_owned())?;
+    let bytes = runner::read_bounded_file(Path::new(path), runner::DELIVERY_ASSIGNMENT_MAX_BYTES)
+        .map_err(|error| error.to_string())?;
+    if sha256_hex_local(&bytes) != *digest {
+        return Err("delivery assignment digest drift".to_owned());
+    }
+    match runner::read_delivery_assignment_artifact(&bytes)? {
+        runner::DeliveryAssignmentArtifactReader::V3(_) => Ok(None),
+        runner::DeliveryAssignmentArtifactReader::V4(artifact) => {
+            runner::materializer_v4::replay_v4_materialization(&artifact)?;
+            Ok(Some(artifact))
+        }
+    }
 }
 
 fn spawn_recovery_assignment(
@@ -3857,6 +4469,7 @@ fn issue_delivery_recovery(
         original_gate: "autopilot.delivery_submission.v2".to_owned(),
         attempt_budget: crate::repair::SemanticRecoveryPolicy::package()?.max_attempts,
     };
+    let source_v4 = delivery_assignment_v4_for_binding(binding)?;
     let assignment = recovery_runner_assignment(
         binding,
         base_commit,
@@ -3864,7 +4477,15 @@ fn issue_delivery_recovery(
         directive,
         state.state.revision,
     )?;
-    spawn_recovery_assignment(id, assignment, state, "delivery:recovery-required")
+    match source_v4 {
+        Some(source) => spawn_recovery_assignment_v4(
+            id,
+            recovery_v4_assignment(assignment, source),
+            state,
+            "delivery:recovery-required",
+        ),
+        None => spawn_recovery_assignment(id, assignment, state, "delivery:recovery-required"),
+    }
 }
 
 fn repair_needed(
@@ -3878,12 +4499,7 @@ fn repair_needed(
         .producer_assignment_ids
         .first()
         .ok_or_else(|| "validation recovery missing producer assignment".to_owned())?;
-    let producer = issued_binding_for_assignment(state, producer_id).ok_or_else(|| {
-        format!(
-            "validation recovery missing producer binding {}",
-            producer_id.0
-        )
-    })?;
+    let producer = strict_recovery_source_binding(state, producer_id)?;
     let policy = crate::repair::SemanticRecoveryPolicy::package()?;
     if producer.role_id.0 == "recovery-engineer" || result.semantic_round > policy.max_attempts {
         state.append(
@@ -4026,6 +4642,7 @@ fn repair_needed(
             ],
         )?;
     }
+    let source_v4 = delivery_assignment_v4_for_binding(&producer)?;
     let assignment = recovery_runner_assignment(
         &producer,
         Sha(result.exact_commit.0.clone()),
@@ -4033,13 +4650,22 @@ fn repair_needed(
         directive,
         state.state.revision,
     )?;
-    spawn_recovery_assignment(id, assignment, state, "validation:recovery-required")
+    match source_v4 {
+        Some(source) => spawn_recovery_assignment_v4(
+            id,
+            recovery_v4_assignment(assignment, source),
+            state,
+            "validation:recovery-required",
+        ),
+        None => spawn_recovery_assignment(id, assignment, state, "validation:recovery-required"),
+    }
 }
 
 fn validation_issue_for_delivery(
     binding: &runner::IssuedRunnerBinding,
     accepted: &runner::AcceptedDelivery,
     command_executions: &[runner::VerifiedCommandExecution],
+    package_authority: runner::ValidationPackageAuthority,
     run_revision: u64,
 ) -> Result<runner::IssuedRunnerAction, String> {
     if binding.role_id.0 == "validator" || binding.assignment_id.0.contains("validator") {
@@ -4099,15 +4725,16 @@ fn validation_issue_for_delivery(
                 .clone()
                 .ok_or_else(|| "delivery binding missing assignment_digest".to_owned())?,
             approved_command_executions: command_executions.to_vec(),
+            package_authority,
         },
         &runner::RunnerTransportFacts::from_env().map_err(|error| error.to_string())?,
     )
     .map_err(|error| error.to_string())
 }
 
-fn read_delivery_assignment_units(
+fn read_delivery_assignment_artifact(
     binding: &runner::IssuedRunnerBinding,
-) -> Result<Vec<ApprovedUnit>, String> {
+) -> Result<runner::DeliveryAssignmentArtifact, String> {
     let path = binding
         .assignment_path
         .as_ref()
@@ -4124,17 +4751,61 @@ fn read_delivery_assignment_units(
     if sha256_hex_local(&bytes) != *digest {
         return Err("delivery assignment digest drift".to_owned());
     }
-    let artifact: runner::DeliveryAssignmentArtifact = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("delivery assignment json:{error}"))?;
-    if artifact.schema != "autopilot.delivery_assignment.v3"
+    let artifact = match runner::read_delivery_assignment_artifact(&bytes)? {
+        runner::DeliveryAssignmentArtifactReader::V3(artifact) => artifact,
+        runner::DeliveryAssignmentArtifactReader::V4(artifact) => {
+            runner::materializer_v4::replay_v4_materialization(&artifact)?;
+            runner::DeliveryAssignmentArtifact {
+                schema: "autopilot.delivery_assignment.v3".to_owned(),
+                workstream: artifact.workstream,
+                assignment_id: artifact.assignment_id,
+                lane_id: artifact.lane_id,
+                attempt: artifact.attempt,
+                base_commit: artifact.base_commit,
+                worktree: artifact.worktree,
+                ordered_units: artifact.ordered_units,
+                approved_commands: artifact.approved_commands,
+                recovery: artifact.recovery,
+            }
+        }
+    };
+    let lane_id = binding
+        .lane_id
+        .as_ref()
+        .ok_or_else(|| "delivery binding missing lane_id".to_owned())?;
+    let attempt = binding
+        .attempt
+        .ok_or_else(|| "delivery binding missing attempt".to_owned())?;
+    let expected =
+        runner::expected_delivery_identity(&binding.workstream, lane_id, &binding.role_id, attempt)
+            .map_err(|error| format!("delivery binding identity: {error}"))?;
+    if binding.action_id != expected.action_id
+        || binding.assignment_id != expected.assignment_id
+        || artifact.schema != "autopilot.delivery_assignment.v3"
+        || artifact.workstream != binding.workstream
         || artifact.assignment_id != binding.assignment_id
-        || binding.lane_id.as_ref() != Some(&artifact.lane_id)
+        || artifact.lane_id != *lane_id
+        || artifact.attempt != attempt
+        || binding.base_commit.as_ref() != Some(&artifact.base_commit)
+        || binding.worktree.as_deref() != Some(artifact.worktree.as_str())
         || artifact.ordered_units.is_empty()
     {
         return Err("delivery assignment identity drift".to_owned());
     }
+    runner::validate_delivery_recovery_binding(
+        &binding.role_id,
+        &binding.mode,
+        attempt,
+        artifact.recovery.as_ref(),
+    )?;
     runner::validate_approved_command_bindings(&artifact)?;
-    Ok(artifact.ordered_units)
+    Ok(artifact)
+}
+
+fn read_delivery_assignment_units(
+    binding: &runner::IssuedRunnerBinding,
+) -> Result<Vec<ApprovedUnit>, String> {
+    read_delivery_assignment_artifact(binding).map(|artifact| artifact.ordered_units)
 }
 
 fn focused_integration_checks(
@@ -4501,11 +5172,11 @@ fn execution_complete_snapshot(
     {
         return Ok(None);
     }
-    let approved = match read_approved_plan(workstream) {
+    let approved = match read_approved_plan_artifact(workstream, state) {
         Ok(value) => value,
         Err(_) => return Ok(None),
     };
-    let required_count = approved.len();
+    let required_count = approved.units().len();
     if required_count == 0 {
         return Ok(None);
     }

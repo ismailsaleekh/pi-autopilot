@@ -1,0 +1,37 @@
+{
+  "records": [
+    {
+      "schema": "autopilot.transcript.v1",
+      "boundary_id": "planning.work-map.v2",
+      "raw_output": "{\"schema\":\"planning.work-map.v2\",\"units\":[{\"commands\":[{\"command\":\"test -f src/captured.txt && git diff --check -- src/captured.txt\",\"effect\":\"no-effect\",\"expected\":\"Exits zero when src/captured.txt exists as a regular file and its candidate diff has no whitespace errors.\",\"generated_paths\":[],\"handling\":\"none\",\"scope_preservation\":\"The command only reads src/captured.txt and Git diff metadata, creates no persistent Git-visible artifacts, and therefore leaves final Git-visible state within the sole approved unit file, src/captured.txt.\"}],\"criteria\":[\"src/captured.txt is the unit's sole implementation-owned leaf and remains a regular file.\",\"Delivery introduces no vendored bytes, provenance manifest, package-closure proof, or changes outside src/captured.txt.\"],\"depends_on\":[],\"files\":[\"src/captured.txt\"],\"id\":\"capture-owned-leaf\",\"kind\":\"implementation\",\"links\":[\"capture-atom-1\"],\"objective\":\"Deliver the capture work exclusively through the single approved implementation leaf, src/captured.txt, without vendoring or scope expansion.\",\"package_proofs\":[],\"package_scope_files\":[],\"provenance_manifest_destination\":null,\"vendor_bindings\":[]}]}",
+      "provenance": {
+        "provider": "openai-codex",
+        "model": "gpt-5.6-sol",
+        "thinking": "xhigh",
+        "session_id": "autopilot-planning-work-map-v2-capture-plan-compiler-01-8d8db3407e5756df"
+      }
+    },
+    {
+      "schema": "autopilot.transcript.v1",
+      "boundary_id": "planning.work-map.v2",
+      "raw_output": "{\"schema\":\"planning.work-map.v2\",\"units\":[{\"commands\":[{\"command\":\"test -f src/captured.txt && git diff --check -- src/captured.txt\",\"effect\":\"no-effect\",\"expected\":\"Exits zero when src/captured.txt exists as a regular file and its candidate diff has no whitespace errors.\",\"generated_paths\":[],\"handling\":\"none\",\"scope_preservation\":\"The command only reads src/captured.txt and Git diff metadata, creates no persistent Git-visible artifacts, and therefore leaves final Git-visible state within the sole approved unit file, src/captured.txt.\"}],\"criteria\":[\"src/captured.txt is the unit's sole implementation-owned leaf and remains a regular file.\",\"Delivery introduces no vendored bytes, provenance manifest, package-closure proof, or changes outside src/captured.txt.\"],\"depends_on\":[],\"files\":[\"src/captured.txt\"],\"id\":\"capture-owned-leaf\",\"kind\":\"implementation\",\"links\":[\"capture-atom-1\"],\"objective\":\"Deliver the capture work exclusively through the single approved implementation leaf, src/captured.txt, without vendoring or scope expansion.\",\"package_proofs\":[],\"package_scope_files\":[],\"provenance_manifest_destination\":null,\"vendor_bindings\":[]}]}",
+      "provenance": {
+        "provider": "openai-codex",
+        "model": "gpt-5.6-sol",
+        "thinking": "xhigh",
+        "session_id": "autopilot-planning-work-map-v2-capture-plan-synthesizer-01-8f4e00ace2043e95"
+      }
+    },
+    {
+      "schema": "autopilot.transcript.v1",
+      "boundary_id": "planning.work-map.v2",
+      "raw_output": "{\"recovery\":{\"actions\":[\"Performed no objective correction because independent comparison found the existing objective already expresses the complete authorized work: one implementation leaf at src/captured.txt, no vendoring, and no scope expansion.\",\"Preserved the canonical V2 work map byte-for-byte at the typed field level and returned it for unchanged full plan review.\"],\"affected_unit_ids\":[],\"diagnosis_refs\":[\".pi/autopilot/work-map-v2-capture/planning/fixture-inputs/blocked-review.json#/verdicts/0\"],\"disposition\":\"no-defect\",\"preserved_authority\":[\"Preserved the sole unit id and ordering, capture-owned-leaf.\",\"Preserved objective, criteria, command and command-effect contract, files, empty package scope and proofs, null manifest destination, empty vendor bindings, empty dependencies, and the exact capture-atom-1 link.\",\"Preserved task.md authority limiting the map to exactly one no-vendor V2 implementation unit owning only src/captured.txt with a nonempty no-effect verification command.\",\"Preserved repository authority at HEAD 5468e00b47332cdc72a8185b185b78b9875fe1a8 and made no repository mutation.\"],\"repair_evidence_refs\":[\"task.md#whole-file\",\".pi/autopilot/work-map-v2-capture/planning/carriers/planning-work-map-v2-capture-plan-synthesizer-01.json#/raw_output\",\".pi/autopilot/work-map-v2-capture/planning/carriers/planning-work-map-v2-capture-plan-compiler-01.json#/raw_output\",\".pi/autopilot/work-map-v2-capture/planning/fixture-inputs/task-atoms.json#/atoms/0\",\".pi/autopilot/work-map-v2-capture/planning/atom-registry.v1.json#/atoms/0\",\".pi/autopilot/work-map-v2-capture/planning/fixture-inputs/scout-findings.json#/findings/0\",\".pi/autopilot/work-map-v2-capture/planning/repository-authority.v1.json#/tracked_sources/2\",\"src/captured.txt#whole-file\"],\"root_cause\":\"The blocked verdict is a deterministic capture checkpoint rather than evidence of a semantic plan defect: its own finding states that the typed synthesized map is otherwise unchanged and directs no-defect absent an independently necessary objective-only repair. Independent review found no such necessity. The existing objective exactly matches task.md and capture-atom-1 by limiting delivery to src/captured.txt without vendoring or scope expansion; the immutable files, command, criteria, links, and no-vendor package fields also satisfy that authority. Changing the objective would therefore invent a correction unsupported by the rejection or source authority.\"},\"schema\":\"planning.work-map.v2\",\"units\":[{\"commands\":[{\"command\":\"test -f src/captured.txt && git diff --check -- src/captured.txt\",\"effect\":\"no-effect\",\"expected\":\"Exits zero when src/captured.txt exists as a regular file and its candidate diff has no whitespace errors.\",\"generated_paths\":[],\"handling\":\"none\",\"scope_preservation\":\"The command only reads src/captured.txt and Git diff metadata, creates no persistent Git-visible artifacts, and therefore leaves final Git-visible state within the sole approved unit file, src/captured.txt.\"}],\"criteria\":[\"src/captured.txt is the unit's sole implementation-owned leaf and remains a regular file.\",\"Delivery introduces no vendored bytes, provenance manifest, package-closure proof, or changes outside src/captured.txt.\"],\"depends_on\":[],\"files\":[\"src/captured.txt\"],\"id\":\"capture-owned-leaf\",\"kind\":\"implementation\",\"links\":[\"capture-atom-1\"],\"objective\":\"Deliver the capture work exclusively through the single approved implementation leaf, src/captured.txt, without vendoring or scope expansion.\",\"package_proofs\":[],\"package_scope_files\":[],\"provenance_manifest_destination\":null,\"vendor_bindings\":[]}]}",
+      "provenance": {
+        "provider": "openai-codex",
+        "model": "gpt-5.6-sol",
+        "thinking": "xhigh",
+        "session_id": "autopilot-planning-work-map-v2-capture-recovery-engineer-01-bbe13aadd6b8787c"
+      }
+    }
+  ]
+}

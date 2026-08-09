@@ -1,6 +1,3 @@
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Component, Path};
-
 use kernel::boundary::Rejection;
 use kernel::generated::{
     AllocationLaneProposal, CommandEffect, CommandEffectHandling, Id, PackageCheckKind,
@@ -9,6 +6,7 @@ use kernel::generated::{
 };
 use kernel_macros::acceptance_boundary;
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::roles::kdl::boundary_runtime;
 
@@ -38,25 +36,13 @@ pub struct ApprovedCriterion {
     pub text: String,
 }
 
-pub fn approved_path_is_safe(path: &kernel::generated::Path) -> bool {
-    let raw = path.0.as_str();
-    !raw.is_empty()
-        && raw.trim() == raw
-        && !raw
-            .chars()
-            .any(|character| matches!(character, '\0' | '\\' | '*' | '?' | '[' | ']' | '{' | '}'))
-        && !Path::new(raw).is_absolute()
-        && raw.split('/').all(|component| {
-            !component.is_empty()
-                && component != "."
-                && component != ".."
-                && component != ".git"
-                && component != ".pi"
-        })
-        && Path::new(raw)
-            .components()
-            .all(|component| matches!(component, Component::Normal(_)))
-}
+pub mod vendoring_v2;
+pub use vendoring_v2::{
+    APPROVED_PACKAGE_PROOFS_V2_MAX, APPROVED_VENDOR_BINDINGS_V2_MAX,
+    APPROVED_VENDOR_SOURCE_SHA256_BYTES, ApprovedPackageProofV2, ApprovedUnitPackageAuthorityV2,
+    ApprovedUnitVendoringV2, ApprovedVendorBindingV2, approved_path_is_safe,
+    path_authority_collides, validate_approved_v2_authority,
+};
 
 pub fn validate_exact_unit_file_authority(paths: &[ContractPath]) -> Result<(), String> {
     if paths.is_empty() {

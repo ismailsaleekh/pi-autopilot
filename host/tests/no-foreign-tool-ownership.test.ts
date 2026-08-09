@@ -93,13 +93,13 @@ test("extension registers exactly the session lifecycle hooks and no tool interc
 /**
  * BUG-184 REPLACEMENT. This test previously asserted `toolNames.length > 0`
  * immediately after loading the packaged entrypoint, which PINNED the defect:
- * it required the 7 planning tools to be registered eagerly, in every session,
- * including sessions that never use Autopilot. The surviving obligation is that
- * whenever tools DO exist they are all `autopilot_`-prefixed and no tool hook
- * is registered; the zero-at-load and exact-7-after-activation claims live in
- * host/tests/activation-scoping.test.ts.
+ * it required planning tools to be registered eagerly in every session,
+ * including sessions that never use Autopilot. The parent owns no terminal
+ * descriptors at load or after activation: exact profile selection and its one
+ * descriptor belong to the child. The child-profile registration contract is
+ * covered by host/tests/terminal-profile-extension.test.ts.
  */
-test("BUG-184: packaged entrypoint registers no tool at load and only autopilot-prefixed tools ever", async () => {
+test("BUG-184: packaged parent owns no terminal tools before or after activation", async () => {
   const toolNames: string[] = [];
   const hookNames: string[] = [];
   const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
@@ -127,15 +127,15 @@ test("BUG-184: packaged entrypoint registers no tool at load and only autopilot-
       processIdentity: "pid:test:started:1",
     } as never);
 
-    assert.deepEqual(hookNames.filter((name) => name.startsWith("tool_")), []);
+    assert.deepEqual(hookNames.filter((name) => name.startsWith("tool_")), [], "parent must not register tool hooks");
     assert.deepEqual(toolNames, [], "entrypoint must register no tool at load time");
 
     const ctx = { hasUI: false, mode: "json", ui: { notify() {} }, sessionManager: { getSessionId: () => "019faf00-0000-7000-8000-0000000000cc" } };
     await hooks.get("session_start")?.({ reason: "startup" }, ctx);
     await commands.get("autopilot-plan")?.handler("main A.md B.md C.md CTX.md", ctx);
 
-    assert.equal(toolNames.length, 7);
-    assert.deepEqual(toolNames.filter((name) => !name.startsWith("autopilot_")), []);
+    assert.deepEqual(hookNames.filter((name) => name.startsWith("tool_")), [], "activation must not add a tool hook");
+    assert.deepEqual(toolNames, [], "activated parent must not own a terminal descriptor; the selected child profile owns exactly one");
   } finally {
     rmSync(stateRoot, { recursive: true, force: true });
   }

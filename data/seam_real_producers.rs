@@ -45,19 +45,42 @@ struct AgentCarrier {
     carrier_path: String,
     raw_output: String,
 }
-#[derive(Debug, Deserialize, Serialize)]
-struct ApprovedPlanArtifact {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    repository_authority: Option<ApprovedRepositoryAuthority>,
-    units: Vec<ApprovedUnit>,
+
+pub const APPROVED_PLAN_V1_BOUNDARY: &str = "planning.work-map.v1";
+const APPROVED_PLAN_V2_READY_ROOT_PREFIX: &str = "approved-plan-v2-ready-root:";
+const APPROVED_PLAN_V2_READY_ROOT_SCHEMA: &str = "autopilot.approved_plan_v2_ready_root.v1";
+
+/// The one event-scoped V2 readiness authority. Its canonical JSON lives in
+/// exactly one ref and has no self digest; the external binding digest is an
+/// explicit field of this record.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ApprovedPlanV2ReadyRootV1 {
+    schema: String,
+    workstream: String,
+    binding_path: String,
+    binding_sha256: String,
+    approved_plan_sha256: String,
+    final_review_action_id: String,
+    final_review_assignment_id: String,
+    final_review_run_revision: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct ApprovedRepositoryAuthority {
-    manifest_path: String,
-    manifest_digest: String,
-    head_commit: Sha,
-    head_tree: Sha,
+/// The durable, deliberately unversioned legacy authority. Its historical
+/// serde behavior (including unknown-field acceptance) is unchanged.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ApprovedPlanArtifactV1 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_authority: Option<ApprovedRepositoryAuthority>,
+    pub units: Vec<ApprovedUnit>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ApprovedRepositoryAuthority {
+    pub manifest_path: String,
+    pub manifest_digest: String,
+    pub head_commit: Sha,
+    pub head_tree: Sha,
 }
 
 pub const REQUIRED_PLAN_REVIEW_CRITERIA: [&str; 7] =
@@ -108,6 +131,7 @@ fn planning_bg_action(workstream: &str, assignment: &AgentAssignment, run_revisi
         atom_id_prefix: assignment.atom_id_prefix.clone(),
         atom_registry_path: atom_registry.as_ref().map(|(path, _)| path.clone()),
         atom_registry_digest: atom_registry.as_ref().map(|(_, digest)| digest.clone()),
+        terminal_route: assignment.terminal_route.clone(),
         accepted_planning_artifacts,
     })
 }
@@ -123,11 +147,12 @@ fn planning_wave_actions(
     let accepted_artifacts = accepted_planning_artifacts_for_issue(workstream, state)?;
     let mut actions = Vec::new();
     for assignment in assignments {
-        let registry = if assignment.boundary_id.as_deref() == Some("planning.work-map.v1") {
-            atom_registry.clone()
-        } else {
-            None
-        };
+        let registry = matches!(
+            assignment.boundary_id.as_deref(),
+            Some("planning.work-map.v1" | "planning.work-map.v2")
+        )
+        .then(|| atom_registry.clone())
+        .flatten();
         let issue = planning_bg_action(
             workstream,
             assignment,
@@ -300,7 +325,7 @@ fn write_planning_manifest(workstream: &str, input_set: &planning::TaskInputSet,
     let context_doc = runner_doc_from_task(context);
     let assignment_rows = assignments.iter().map(|item| {
         assignment_mode_parameter(assignments, item)
-            .map(|mode_parameter| serde_json::json!({"assignment_id":item.assignment_id,"role":item.role,"mode":item.mode,"mode_parameter":mode_parameter,"boundary_id":item.boundary_id,"ordinal":item.ordinal,"atom_id_prefix":item.atom_id_prefix}))
+            .map(|mode_parameter| serde_json::json!({"assignment_id":item.assignment_id,"role":item.role,"mode":item.mode,"mode_parameter":mode_parameter,"boundary_id":item.boundary_id,"terminal_route":item.terminal_route,"ordinal":item.ordinal,"atom_id_prefix":item.atom_id_prefix}))
     }).collect::<Result<Vec<_>, _>>()?;
     let body = serde_json::json!({"workstream":workstream,"authority_set_id":input_set.authority_set_id,"authority_paths":input_set.authority_documents.iter().map(|item| &item.path).collect::<Vec<_>>(),"authority_documents":authority_docs,"context_documents":context_docs,"context":{"path":context.path,"class":"context/non-authority","digest":context.digest},"context_document":context_doc,"file_digests":input_set.authority_documents.iter().chain(input_set.context_documents.iter()).map(|item| serde_json::json!({"path":item.path,"class":format!("{:?}", item.class),"digest":item.digest})).collect::<Vec<_>>(),"atoms":inventory.atoms.len(),"verified_facts":dossier.verified_facts,"planning_wave_cap":schedule.planning_wave_cap,"planning_max_attempts":schedule.planning_max_attempts,"planning_waves":schedule.waves,"assignments":assignment_rows});
     let bytes = serde_json::to_vec_pretty(&body)?;
@@ -351,6 +376,7 @@ fn read_planning_schedule_manifest(workstream: &str) -> Result<planning::Plannin
             role: item["role"].as_str().ok_or_else(|| format!("manifest assignment {index} missing role"))?.to_owned(),
             mode: item["mode"].as_str().ok_or_else(|| format!("manifest assignment {index} missing mode"))?.to_owned(),
             boundary_id: item.get("boundary_id").and_then(|value| value.as_str()).map(str::to_owned),
+            terminal_route: item.get("terminal_route").filter(|value| !value.is_null()).map(|value| serde_json::from_value(value.clone())).transpose().map_err(|error| format!("manifest assignment {index} terminal route: {error}"))?,
             ordinal: item.get("ordinal").and_then(|value| value.as_u64()).and_then(|value| u8::try_from(value).ok()).ok_or_else(|| format!("manifest assignment {index} missing ordinal"))?,
             atom_id_prefix: item.get("atom_id_prefix").and_then(|value| value.as_str()).map(str::to_owned),
         });
@@ -504,6 +530,7 @@ fn accepted_planning_artifacts_for_issue(workstream: &str, state: &CoreState) ->
                     assignment_id: binding.assignment_id.clone(),
                     role_id: binding.role_id.clone(),
                     boundary_id: binding.result_contract.clone(),
+                    terminal_route: binding.terminal_route.clone(),
                     path: binding.carrier_path.clone(),
                     digest: digest.clone(),
                 },
@@ -526,9 +553,9 @@ fn accepted_artifact_categories_for_role(role: &str, boundary_id: &str) -> Resul
     let categories = match (role, boundary_id) {
         ("task-extractor", "planning.task-atoms.v1") => &["task-atoms"][..],
         ("repository-scout" | "context-curator", "planning.scout-dossier.v1") => &["scout-findings"][..],
-        ("plan-compiler", "planning.work-map.v1") => &["compiler-work-maps"][..],
-        ("plan-synthesizer", "planning.work-map.v1") => &["synthesized-work-map"][..],
-        ("recovery-engineer", "planning.work-map.v1") => &["synthesized-work-map", "recovery-work-map"][..],
+        ("plan-compiler", "planning.work-map.v2") => &["compiler-work-maps"][..],
+        ("plan-synthesizer", "planning.work-map.v2") => &["synthesized-work-map"][..],
+        ("recovery-engineer", "planning.work-map.v2") => &["synthesized-work-map", "recovery-work-map"][..],
         ("plan-reviewer", "planning.plan-review.v1") => &["review-verdicts"][..],
         ("contradiction-resolver", "planning.questions.v1") => &["contradiction-bundle"][..],
         _ if boundary_id.starts_with("planning.") => {
@@ -553,27 +580,447 @@ fn write_immutable_work_map(path: &Path, raw: &str, label: &str) -> Result<(), A
 fn write_work_map(workstream: &str, raw: &str) -> Result<(), AnyError> { write_immutable_work_map(&work_map_path(workstream), raw, "work-map") }
 fn write_recovery_work_map(workstream: &str, raw: &str) -> Result<(), AnyError> { write_immutable_work_map(&recovery_work_map_path(workstream), raw, "recovery-work-map") }
 fn write_approved_plan(workstream: &str, repository_authority: ApprovedRepositoryAuthority, units: &[ApprovedUnit]) -> Result<(), AnyError> {
-    validate_approved_units(units)?;
-    let artifact = ApprovedPlanArtifact { repository_authority: Some(repository_authority), units: units.to_vec() };
-    let bytes = serde_json::to_vec_pretty(&artifact)?;
-    let path = plan_path(workstream);
-    if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
-    match OpenOptions::new().write(true).create_new(true).open(&path) {
-        Ok(mut file) => { file.write_all(&bytes)?; file.sync_all()?; Ok(()) }
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let existing = fs::read(&path)?;
-            if existing == bytes { Ok(()) } else { Err("CONTEXT_GAP:approved-plan:digest drift".into()) }
-        }
-        Err(error) => Err(error.into()),
-    }
+    let artifact = ApprovedPlanArtifactV1 { repository_authority: Some(repository_authority), units: units.to_vec() };
+    write_approved_plan_v1_legacy(&plan_path(workstream), &artifact)
+        .map(|_| ())
+        .map_err(|error| format!("CONTEXT_GAP:approved-plan:{error}").into())
 }
-fn read_approved_plan_artifact(workstream: &str) -> Result<ApprovedPlanArtifact, String> {
-    let text = fs::read_to_string(plan_path(workstream)).map_err(|error| error.to_string())?;
-    let artifact: ApprovedPlanArtifact = serde_json::from_str(&text).map_err(|error| error.to_string())?;
-    validate_approved_units(&artifact.units).map_err(|error| error.to_string())?;
+
+/// Explicitly writes the legacy authority only when the caller has already
+/// selected the V1 boundary/result-contract from durable evidence.
+pub fn write_approved_plan_v1_legacy(path: &Path, artifact: &ApprovedPlanArtifactV1) -> Result<String, String> {
+    validate_approved_plan_v1(artifact)?;
+    let bytes = serde_json::to_vec_pretty(artifact).map_err(|error| error.to_string())?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(mut file) => {
+            file.write_all(&bytes).map_err(|error| error.to_string())?;
+            file.sync_all().map_err(|error| error.to_string())?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let existing = fs::read(path).map_err(|error| error.to_string())?;
+            if existing != bytes {
+                return Err("digest drift".to_owned());
+            }
+        }
+        Err(error) => return Err(error.to_string()),
+    }
+    Ok(sha256_hex_local(&bytes))
+}
+
+/// Explicit V1 reader.  Missing schema JSON is never selected by shape: only a
+/// caller that supplies the exact durable legacy evidence reaches this parser.
+pub fn read_approved_plan_v1_legacy(
+    path: &Path,
+    expected_source_boundary: &str,
+    expected_result_contract: &str,
+) -> Result<ApprovedPlanArtifactV1, String> {
+    validate_approved_plan_expected_v1(expected_source_boundary, expected_result_contract)?;
+    // Exact pre-Wave3C V1 behavior: explicit selection reads normal UTF-8
+    // text with no new regular-file, size, or canonical-byte restriction.
+    let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let artifact: ApprovedPlanArtifactV1 =
+        serde_json::from_str(&text).map_err(|error| error.to_string())?;
+    validate_approved_plan_v1(&artifact)?;
     Ok(artifact)
 }
-fn read_approved_plan(workstream: &str) -> Result<Vec<ApprovedUnit>, String> { Ok(read_approved_plan_artifact(workstream)?.units) }
+
+fn validate_approved_plan_v1(artifact: &ApprovedPlanArtifactV1) -> Result<(), String> {
+    validate_approved_units(&artifact.units).map_err(|error| error.to_string())
+}
+
+fn validate_approved_plan_expected_v1(
+    expected_source_boundary: &str,
+    expected_result_contract: &str,
+) -> Result<(), String> {
+    if expected_source_boundary != APPROVED_PLAN_V1_BOUNDARY
+        || expected_result_contract != APPROVED_PLAN_V1_BOUNDARY
+    {
+        return Err("approved-plan-v1 caller did not supply exact legacy boundary evidence".to_owned());
+    }
+    Ok(())
+}
+
+/// Internal version-preserving approved-plan authority. V2 rows remain typed
+/// through readiness, allocation, and restart; a V2 image is never projected
+/// into the legacy artifact shape.
+enum ApprovedPlanAuthority {
+    V1(ApprovedPlanArtifactV1),
+    /// Retain the one accepted ready-event root with the replayed image.  A
+    /// later delivery cannot promote copied assignment rows into a new oracle.
+    V2 { artifact: ApprovedPlanArtifactV2, root: ApprovedPlanV2ReadyRootV1 },
+}
+
+impl ApprovedPlanAuthority {
+    fn repository_authority(&self) -> Option<&ApprovedRepositoryAuthority> {
+        match self {
+            Self::V1(artifact) => artifact.repository_authority.as_ref(),
+            Self::V2 { artifact, .. } => Some(&artifact.repository_authority),
+        }
+    }
+
+    fn units(&self) -> &[ApprovedUnit] {
+        match self {
+            Self::V1(artifact) => &artifact.units,
+            Self::V2 { artifact, .. } => &artifact.units,
+        }
+    }
+}
+
+fn approved_plan_v2_ready_root_ref(root: &ApprovedPlanV2ReadyRootV1) -> Result<Ref, String> {
+    let bytes = crate::evidence::canonical_json(root).map_err(|error| error.to_string())?;
+    let json = String::from_utf8(bytes)
+        .map_err(|_| "approved-plan-v2 ready root canonical JSON is not UTF-8".to_owned())?;
+    Ok(Ref(format!("{APPROVED_PLAN_V2_READY_ROOT_PREFIX}{json}")))
+}
+
+fn parse_approved_plan_v2_ready_root(
+    reference: &Ref,
+) -> Result<Option<ApprovedPlanV2ReadyRootV1>, String> {
+    let Some(json) = reference.0.strip_prefix(APPROVED_PLAN_V2_READY_ROOT_PREFIX) else {
+        return Ok(None);
+    };
+    let root: ApprovedPlanV2ReadyRootV1 = serde_json::from_str(json)
+        .map_err(|error| format!("approved-plan-v2 ready root JSON: {error}"))?;
+    if crate::evidence::canonical_json(&root).map_err(|error| error.to_string())?
+        != json.as_bytes()
+        || root.schema != APPROVED_PLAN_V2_READY_ROOT_SCHEMA
+        || !ready_root_workstream_is_valid(&root.workstream)
+        || !ready_root_sha256_is_valid(&root.binding_sha256)
+        || !ready_root_sha256_is_valid(&root.approved_plan_sha256)
+        || root.binding_path.trim().is_empty()
+        || root.final_review_action_id.trim().is_empty()
+        || root.final_review_assignment_id.trim().is_empty()
+    {
+        return Err("approved-plan-v2 ready root is malformed".to_owned());
+    }
+    Ok(Some(root))
+}
+
+fn ready_root_workstream_is_valid(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+fn ready_root_sha256_is_valid(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn event_has_one_ref(event: &EventRow, value: &str) -> bool {
+    event
+        .artifact_refs
+        .iter()
+        .filter(|reference| reference.0 == value)
+        .count()
+        == 1
+}
+
+fn v2_ready_event_is_complete(event: &EventRow, root: &ApprovedPlanV2ReadyRootV1) -> bool {
+    let terminal = format!(
+        "terminal-consumed:{}:{}:{}",
+        root.final_review_action_id,
+        root.final_review_assignment_id,
+        root.final_review_run_revision
+    );
+    let planning = format!(
+        "planning-result-consumed:{}:{}:{}",
+        root.final_review_action_id,
+        root.final_review_assignment_id,
+        root.final_review_run_revision
+    );
+    event_has_one_ref(event, &terminal)
+        && event_has_one_ref(event, &planning)
+        && event_has_one_ref(event, "completion-control:rooted")
+        && event_has_one_ref(event, "module-wired:watchdog")
+        && event
+            .artifact_refs
+            .iter()
+            .filter(|reference| reference.0.starts_with("watchdog-effects:"))
+            .count()
+            == 1
+        && event
+            .artifact_refs
+            .iter()
+            .filter(|reference| reference.0.starts_with("watchdog-semantic-authority:"))
+            .count()
+            == 1
+}
+
+fn v2_ready_root_for_workstream(
+    state: &CoreState,
+    workstream: &str,
+) -> Result<Option<ApprovedPlanV2ReadyRootV1>, String> {
+    let mut matching = Vec::new();
+    for event in &state.events {
+        let roots = event
+            .artifact_refs
+            .iter()
+            .filter(|reference| reference.0.starts_with(APPROVED_PLAN_V2_READY_ROOT_PREFIX))
+            .map(parse_approved_plan_v2_ready_root)
+            .collect::<Result<Vec<_>, _>>()?;
+        if event.kind.0 != "planning:ready-to-execute" && !roots.is_empty() {
+            return Err("approved-plan-v2 ready root appears outside ready event".to_owned());
+        }
+        if event.kind.0 != "planning:ready-to-execute" {
+            continue;
+        }
+        for root in roots.iter().flatten() {
+            if root.workstream == workstream {
+                if roots.len() != 1 || !v2_ready_event_is_complete(event, root) {
+                    return Err("approved-plan-v2 ready root event is incomplete or split".to_owned());
+                }
+                matching.push(root.clone());
+            }
+        }
+    }
+    match matching.len() {
+        0 => Ok(None),
+        1 => Ok(matching.pop()),
+        _ => Err("approved-plan-v2 ready root is ambiguous".to_owned()),
+    }
+}
+
+/// Select only one canonical event-scoped V2 root, or the exact V1 ref in one
+/// ready event. A V2 image/binding orphan never falls through to V1.
+fn read_approved_plan_artifact(
+    workstream: &str,
+    state: &CoreState,
+) -> Result<ApprovedPlanAuthority, String> {
+    if let Some(root) = v2_ready_root_for_workstream(state, workstream)? {
+        let expected_binding = std::env::current_dir()
+            .map_err(|error| format!("approved-plan-v2 ready root current directory: {error}"))?
+            .join(workstream_dir(workstream))
+            .join("approved-plan.v2-binding.json");
+        if root.binding_path != expected_binding.display().to_string() {
+            return Err("approved-plan-v2 ready root binding path is not exact".to_owned());
+        }
+        let binding_bytes = runner::read_bounded_authority_file(
+            Path::new(&root.binding_path),
+            approved_plan_v2::APPROVED_PLAN_V2_BINDING_MAX_BYTES,
+        )
+        .map_err(|error| format!("approved-plan-v2 ready root binding read: {error}"))?;
+        if sha256_hex_local(&binding_bytes) != root.binding_sha256 {
+            return Err("approved-plan-v2 ready root binding digest mismatch".to_owned());
+        }
+        let binding: ApprovedPlanV2BindingV1 = serde_json::from_slice(&binding_bytes)
+            .map_err(|error| format!("approved-plan-v2 ready root binding JSON: {error}"))?;
+        if binding.workstream != root.workstream
+            || binding.approved_plan_sha256 != root.approved_plan_sha256
+        {
+            return Err("approved-plan-v2 ready root binding/image authority drift".to_owned());
+        }
+        let artifact = read_approved_plan_v2(Path::new(&root.binding_path), &root.binding_sha256)?;
+        if artifact.repository_authority.manifest_path
+            != PathBuf::from(&artifact.repository_authority.manifest_path).display().to_string()
+        {
+            return Err("approved-plan-v2 repository authority path is not stable".to_owned());
+        }
+        return Ok(ApprovedPlanAuthority::V2 { artifact, root });
+    }
+
+    let v2_image = workstream_dir(workstream).join("approved-plan.v2.json");
+    let v2_binding = workstream_dir(workstream).join("approved-plan.v2-binding.json");
+    if v2_image.exists() || v2_binding.exists() {
+        return Err("approved-plan-v2 image/binding orphan has no ready-event authority".to_owned());
+    }
+    let v1_path = plan_path(workstream);
+    let ready_events = state
+        .events
+        .iter()
+        .filter(|event| event.kind.0 == "planning:ready-to-execute")
+        .collect::<Vec<_>>();
+    if !ready_events.is_empty()
+        && ready_events
+            .iter()
+            .filter(|event| event_has_one_ref(event, &v1_path.display().to_string()))
+            .count()
+            != 1
+    {
+        return Err("approved-plan-v1 ready root lacks exact durable plan path".to_owned());
+    }
+    read_approved_plan_v1_legacy(
+        &v1_path,
+        APPROVED_PLAN_V1_BOUNDARY,
+        APPROVED_PLAN_V1_BOUNDARY,
+    )
+    .map(ApprovedPlanAuthority::V1)
+}
+fn read_verified_agent_carrier_v2(
+    binding: &runner::IssuedRunnerBinding,
+) -> Result<planning::work_map_v2::VerifiedWorkMapV2ActualCarrier, String> {
+    let manifest_path = binding
+        .repository_manifest_path
+        .as_deref()
+        .ok_or_else(|| "V2 binding lacks repository manifest path".to_owned())?;
+    let manifest_digest = binding
+        .repository_manifest_digest
+        .as_deref()
+        .ok_or_else(|| "V2 binding lacks repository manifest digest".to_owned())?;
+    let repository = runner::read_repository_authority_binding(Path::new(manifest_path), manifest_digest)
+        .map_err(|error| format!("V2 binding repository authority: {error}"))?;
+    let run_root = runner::repository_authority_run_root(&repository)
+        .map_err(|error| format!("V2 binding repository/run authority: {error}"))?;
+    let verified = planning::work_map_v2::verify_work_map_v2_actual_carrier_authority(
+        Path::new(&binding.carrier_path),
+        &run_root,
+        Path::new(&binding.spec_path),
+        &binding.spec_digest,
+    )?;
+    let carrier = &verified.authority;
+    if carrier.action_id != binding.action_id.0
+        || carrier.assignment_id != binding.assignment_id.0
+        || carrier.run_revision != binding.run_revision
+        || carrier.workstream != binding.workstream.0
+        || carrier.role_id != binding.role_id.0
+        || carrier.mode != binding.mode.0
+        || carrier.boundary_id != binding.boundary_id.0
+        || carrier.result_contract != binding.result_contract.0
+        || carrier.prompt_path != binding.prompt_path
+        || carrier.prompt_digest != binding.prompt_digest
+        || carrier.boundary_digest != binding.boundary_digest
+        || carrier.result_contract_digest != binding.result_contract_digest
+        || carrier.settings_digest != binding.settings_digest
+        || carrier.context_digest != binding.context_digest
+        || carrier.skills_digest != binding.skills_digest
+        || carrier.subscription_digest != binding.subscription_digest
+        || carrier.spec_path != binding.spec_path
+        || carrier.spec_digest != binding.spec_digest
+        || carrier.carrier_path != binding.carrier_path
+    {
+        return Err("V2 carrier issued binding drift".to_owned());
+    }
+    let route = binding
+        .terminal_route
+        .as_ref()
+        .ok_or_else(|| "V2 binding lacks terminal route".to_owned())?;
+    let expected_route = runner::terminal_route_for(
+        &binding.role_id.0,
+        &binding.boundary_id.0,
+        &binding.result_contract.0,
+    )
+    .map_err(|error| format!("V2 role/profile mapping: {error}"))?;
+    if route != &expected_route || carrier.terminal_route != expected_route {
+        return Err("V2 carrier terminal route role/profile tuple drift".to_owned());
+    }
+    if binding.repository_manifest_path.as_deref()
+        != Some(carrier.repository_manifest_path.as_str())
+        || binding.repository_manifest_digest.as_deref()
+            != Some(carrier.repository_manifest_digest.as_str())
+        || binding.repository_head_commit.as_ref().map(|value| value.0.as_str())
+            != Some(carrier.repository_head_commit.as_str())
+        || binding.repository_head_tree.as_ref().map(|value| value.0.as_str())
+            != Some(carrier.repository_head_tree.as_str())
+    {
+        return Err("V2 carrier binding repository authority drift".to_owned());
+    }
+    Ok(verified)
+}
+
+fn v2_subject_binding(
+    state: &CoreState,
+    binding: &runner::IssuedRunnerBinding,
+) -> Result<runner::IssuedRunnerBinding, String> {
+    let assignment = binding
+        .planning_subject_assignment_id
+        .as_ref()
+        .ok_or_else(|| "V2 recovery missing typed subject assignment".to_owned())?;
+    let path = binding
+        .planning_subject_path
+        .as_ref()
+        .ok_or_else(|| "V2 recovery missing typed subject path".to_owned())?;
+    let digest = binding
+        .planning_subject_digest
+        .as_ref()
+        .ok_or_else(|| "V2 recovery missing typed subject digest".to_owned())?;
+    let mut matches = state
+        .state
+        .refs
+        .keys()
+        .filter_map(|reference| runner::decode_binding_ref(&reference.0))
+        .filter(|candidate| {
+            if candidate.assignment_id != *assignment || candidate.carrier_path != *path {
+                return false;
+            }
+            runner::read_bounded_authority_file(
+                Path::new(&candidate.carrier_path),
+                MAX_TERMINAL_CARRIER_BYTES,
+            )
+            .map(|bytes| sha256_hex_local(&bytes) == *digest)
+            .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+    match matches.len() {
+        1 => Ok(matches.remove(0)),
+        0 => Err("V2 recovery typed subject binding is absent or drifted".to_owned()),
+        _ => Err("V2 recovery typed subject binding is ambiguous".to_owned()),
+    }
+}
+
+fn admit_v2_work_map(
+    state: &CoreState,
+    binding: &runner::IssuedRunnerBinding,
+    permit_recovery: bool,
+) -> Result<planning::ApprovedWorkMapV2, String> {
+    let verified = read_verified_agent_carrier_v2(binding)?;
+    let carrier = &verified.authority;
+    let repository = runner::read_repository_authority_binding(
+        Path::new(&carrier.repository_manifest_path),
+        &carrier.repository_manifest_digest,
+    )
+    .map_err(|error| format!("V2 carrier repository authority: {error}"))?;
+    if repository.manifest.head_commit != carrier.repository_head_commit
+        || repository.manifest.head_tree != carrier.repository_head_tree
+    {
+        return Err("V2 carrier repository head/tree drift".to_owned());
+    }
+    let recovery_subject = if carrier.role_id == "recovery-engineer" {
+        if !permit_recovery || carrier.mode != "planning-repair" || carrier.terminal_route.profile_id != "recovery-work-map.v2" {
+            return Err("V2 recovery role/mode/profile drift".to_owned());
+        }
+        let subject_binding = v2_subject_binding(state, binding)?;
+        Some(admit_v2_work_map(state, &subject_binding, false)?)
+    } else {
+        if carrier.terminal_route.profile_id == "recovery-work-map.v2" || !permit_recovery && carrier.role_id == "recovery-engineer" {
+            return Err("V2 typed subject/recovery role mixing".to_owned());
+        }
+        None
+    };
+    planning::work_map_v2::admit_work_map_v2_verified_carrier(
+        verified.source.raw_work_map_payload(),
+        verified.source.path(),
+        verified.source.raw_bytes(),
+        planning::WorkMapV2AdmissionContext {
+            atom_registry_path: Path::new(&carrier.atom_registry_path),
+            atom_registry_digest: &carrier.atom_registry_digest,
+            repository_authority: &repository,
+            recovery_subject: recovery_subject.as_ref(),
+        },
+    )
+    .map_err(|error| format!("V2 strict Core admission: {error}"))
+}
+
+fn promote_v2_review_subject(
+    state: &CoreState,
+    review_binding: &runner::IssuedRunnerBinding,
+) -> Result<ApprovedPlanV2Promotion, String> {
+    let subject = v2_subject_binding(state, review_binding)?;
+    let admitted = admit_v2_work_map(state, &subject, true)?;
+    let root = PathBuf::from(&admitted.repository_authority().manifest.repo_root)
+        .join(".pi/autopilot")
+        .join(&review_binding.workstream.0);
+    let image = root.join("approved-plan.v2.json");
+    let binding = root.join("approved-plan.v2-binding.json");
+    write_approved_plan_v2(&review_binding.workstream.0, &image, &binding, &admitted)
+}
+
 fn approved_repository_authority_for_carrier(carrier: &AgentCarrier) -> Result<ApprovedRepositoryAuthority, String> {
     let spec_bytes = fs::read(&carrier.spec_path).map_err(|error| format!("spec-read:{}:{error}", carrier.spec_path))?;
     let spec_digest = sha256_hex_local(&spec_bytes);
@@ -593,6 +1040,30 @@ fn approved_repository_authority_for_carrier(carrier: &AgentCarrier) -> Result<A
 enum PlanningRecoveryAdmission {
     Continue,
     FailClosed(kernel::generated::RecoveryDisposition),
+}
+
+fn planning_subject_is_v2(binding: &runner::IssuedRunnerBinding) -> Result<bool, String> {
+    let path = binding
+        .planning_subject_path
+        .as_ref()
+        .ok_or_else(|| format!("planning subject missing path for {}", binding.assignment_id.0))?;
+    let expected_digest = binding
+        .planning_subject_digest
+        .as_ref()
+        .ok_or_else(|| format!("planning subject missing digest for {}", binding.assignment_id.0))?;
+    let bytes = runner::read_bounded_authority_file(Path::new(path), MAX_TERMINAL_CARRIER_BYTES)
+        .map_err(|error| format!("planning typed subject read: {error}"))?;
+    let actual = sha256_hex_local(&bytes);
+    if &actual != expected_digest {
+        return Err(format!("planning typed subject digest drift expected={expected_digest} got={actual}"));
+    }
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("planning typed subject carrier JSON: {error}"))?;
+    match value.get("schema").and_then(|value| value.as_str()) {
+        Some("autopilot.planning_carrier.v2") => Ok(true),
+        Some("autopilot.planning_carrier.v1") => Ok(false),
+        _ => Err("planning typed subject has no recognized version authority".to_owned()),
+    }
 }
 
 fn planning_subject_raw(binding: &runner::IssuedRunnerBinding) -> Result<String, String> {
@@ -728,6 +1199,10 @@ fn apply_planning_side_effects(carrier: &AgentCarrier, binding: &runner::IssuedR
     }
     if carrier.boundary_id == "planning.plan-review.v1" {
         review_approves_execution(&carrier.raw_output)?;
+        if planning_subject_is_v2(binding)? {
+            // V2 approval is promoted only by the event-rooted Core path.
+            return Ok(());
+        }
         let work_map = planning_subject_raw(binding)
             .map_err(|error| format!("CONTEXT_GAP:approved-plan:subject:{error}"))?;
         let units = parse_approved_units(&work_map).map_err(|error| format!("CONTEXT_GAP:approved-plan:{error}"))?;
@@ -892,28 +1367,90 @@ fn lane_readiness_from_events(lanes: &[AllocationLaneProposal], approved: &[Appr
 fn active_implementers(state: &CoreState) -> usize { state.state.refs.keys().filter_map(|reference| runner::decode_binding_ref(&reference.0)).filter(|binding| binding.role_id.0 == "implementer" && !terminal_consumed(state, binding)).count() }
 fn active_recovery_engineers(state: &CoreState) -> usize { state.state.refs.keys().filter_map(|reference| runner::decode_binding_ref(&reference.0)).filter(|binding| binding.role_id.0 == "recovery-engineer" && !terminal_consumed(state, binding)).count() }
 fn assignment(workstream: &str, lane_id: &Id, approved: &[ApprovedUnit], submission: &AllocationSubmission) -> Result<RunnerAssignment, AnyError> {
+    assignment_with_worktree_cleanliness(workstream, lane_id, approved, submission, true)
+}
+
+/// V3 must retain its historical clean launch gate. V4's Core materializer
+/// owns restart/replay residue checks, so it receives an existing worktree
+/// without this preemptive clean rejection.
+fn assignment_with_worktree_cleanliness(
+    workstream: &str,
+    lane_id: &Id,
+    approved: &[ApprovedUnit],
+    submission: &AllocationSubmission,
+    require_clean: bool,
+) -> Result<RunnerAssignment, AnyError> {
     let cwd = fs::canonicalize(std::env::current_dir()?)?;
     let base = selected_delivery_base(&cwd, workstream).map_err(|error| format!("CONTEXT_GAP:base-commit:{error}"))?;
-    let worktree = prepare_delivery_worktree(&cwd, workstream, lane_id, &base).map_err(|error| format!("CONTEXT_GAP:worktree:{error}"))?;
+    let worktree = prepare_delivery_worktree(&cwd, workstream, lane_id, &base, require_clean).map_err(|error| format!("CONTEXT_GAP:worktree:{error}"))?;
     let lane = submission.lanes.iter().find(|lane| lane.lane_id == *lane_id).ok_or_else(|| format!("CONTEXT_GAP:assignment:unknown lane {}", lane_id.0))?;
     let approved_units = lane.ordered_unit_ids.iter().map(|unit_id| approved.iter().find(|unit| unit.id == *unit_id).cloned().ok_or_else(|| format!("CONTEXT_GAP:assignment:unknown unit {}", unit_id.0))).collect::<Result<Vec<_>, _>>()?;
+    let workstream = idv(workstream);
+    let role_id = idv("implementer");
+    let attempt = 1;
+    let identity = runner::expected_delivery_identity(&workstream, lane_id, &role_id, attempt)?;
+    let session_file = PathBuf::from(format!(".pi/autopilot/{}/session.json", workstream.0));
     Ok(RunnerAssignment {
-        workstream: idv(workstream),
-        action_id: idv(&format!("action-{workstream}-{}", lane_id.0)),
-        assignment_id: idv(&format!("assignment-{workstream}-{}", lane_id.0)),
-        role_id: idv("implementer"),
+        workstream,
+        action_id: identity.action_id,
+        assignment_id: identity.assignment_id,
+        role_id,
         mode: ModeId("lane-delivery".to_owned()),
         run_revision: 1,
         lane_id: lane_id.clone(),
-        attempt: 1,
+        attempt,
         base_commit: base,
         worktree,
-        session_file: PathBuf::from(format!(".pi/autopilot/{workstream}/session.json")),
+        session_file,
         roster_assignment: "openai-codex/gpt-subscription".to_owned(),
         approved_units,
         recovery: None,
     })
 }
+fn assignment_v4(
+    workstream: &str,
+    lane_id: &Id,
+    approved: &[ApprovedUnit],
+    submission: &AllocationSubmission,
+    image: &ApprovedPlanArtifactV2,
+    root: &ApprovedPlanV2ReadyRootV1,
+) -> Result<runner::RunnerAssignmentV4, AnyError> {
+    let legacy = assignment_with_worktree_cleanliness(workstream, lane_id, approved, submission, false)?;
+    let by_unit = image
+        .vendoring
+        .iter()
+        .map(|row| (row.unit_id.clone(), row))
+        .collect::<BTreeMap<_, _>>();
+    let selected_vendoring = legacy
+        .approved_units
+        .iter()
+        .map(|unit| {
+            by_unit.get(&unit.id).cloned().cloned().ok_or_else(|| {
+                format!("CONTEXT_GAP:V4 missing vendoring row for selected unit {}", unit.id.0)
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let materialization = runner::materializer_v4::materialize_v4(
+        &runner::CoreMaterializationRequestV4 {
+            workstream: legacy.workstream.clone(), assignment_id: legacy.assignment_id.clone(),
+            lane_id: legacy.lane_id.clone(), attempt: legacy.attempt, base_commit: legacy.base_commit.clone(),
+            worktree: legacy.worktree.clone(), approved_plan_binding_path: root.binding_path.clone(),
+            approved_plan_binding_digest: root.binding_sha256.clone(), approved_image_digest: root.approved_plan_sha256.clone(),
+            selected_units: legacy.approved_units.clone(), selected_vendoring: selected_vendoring.clone(),
+        },
+        image,
+    ).map_err(|error| format!("CONTEXT_GAP:V4 core materialization:{error}"))?;
+    Ok(runner::RunnerAssignmentV4 {
+        workstream: legacy.workstream, action_id: legacy.action_id, assignment_id: legacy.assignment_id,
+        role_id: legacy.role_id, mode: legacy.mode, run_revision: legacy.run_revision, lane_id: legacy.lane_id,
+        attempt: legacy.attempt, base_commit: legacy.base_commit, worktree: legacy.worktree,
+        session_file: legacy.session_file, roster_assignment: legacy.roster_assignment,
+        approved_units: legacy.approved_units, recovery: legacy.recovery,
+        approved_plan_binding_path: root.binding_path.clone(), approved_plan_binding_digest: root.binding_sha256.clone(),
+        approved_image_digest: root.approved_plan_sha256.clone(), selected_vendoring, materialization,
+    })
+}
+
 fn selected_delivery_base(repo: &Path, workstream: &str) -> Result<Sha, String> {
     let run_main = run_main_ref(workstream);
     let first = git_stdout(repo, &["rev-parse", "--verify", &format!("{run_main}^{{commit}}")])
@@ -925,7 +1462,13 @@ fn selected_delivery_base(repo: &Path, workstream: &str) -> Result<Sha, String> 
     if first != second { return Err(format!("run-main moved while selecting base: first={first} second={second}")); }
     Ok(Sha(first.to_owned()))
 }
-fn prepare_delivery_worktree(repo: &Path, workstream: &str, lane_id: &Id, base: &Sha) -> Result<PathBuf, String> {
+fn prepare_delivery_worktree(
+    repo: &Path,
+    workstream: &str,
+    lane_id: &Id,
+    base: &Sha,
+    require_clean: bool,
+) -> Result<PathBuf, String> {
     let worktree = repo.join(".pi/autopilot").join(workstream).join("worktrees").join(&lane_id.0);
     let branch = lane_branch_ref(workstream, lane_id, 1);
     runner::reject_link_components_for_path(&worktree).map_err(|error| error.to_string())?;
@@ -962,8 +1505,10 @@ fn prepare_delivery_worktree(repo: &Path, workstream: &str, lane_id: &Id, base: 
     let branch_tip = git_stdout(repo.as_path(), &["rev-parse", "--verify", &format!("{branch}^{{commit}}")])?;
     if branch_tip.trim() != base.0 { return Err(format!("delivery branch tip drift: expected {}, got {}", base.0, branch_tip.trim())); }
     if head.trim() != base.0 { return Err(format!("delivery worktree head drift: expected {}, got {}", base.0, head.trim())); }
-    let status = git_stdout(&canonical, &["status", "--porcelain"])?;
-    if !status.trim().is_empty() { return Err("delivery worktree is dirty before launch".to_owned()); }
+    if require_clean {
+        let status = git_stdout(&canonical, &["status", "--porcelain"])?;
+        if !status.trim().is_empty() { return Err("delivery worktree is dirty before launch".to_owned()); }
+    }
     Ok(canonical)
 }
 fn host_resource_facts() -> Result<ResourceFacts, String> { Ok(ResourceFacts { free_storage_bytes: df_available_bytes(std::env::current_dir().map_err(|error| error.to_string())?)?, projected_storage_bytes: 1, available_memory_bytes: available_memory_bytes()?, physical_memory_bytes: physical_memory_bytes()? }) }

@@ -16,7 +16,7 @@ import { test } from "node:test";
 import { Compile } from "typebox/compile";
 
 import childExtension from "../../src/generated/child-extension.ts";
-import { registerSubmitTools } from "../../child-runtime/child-extension-runtime.ts";
+import { ValidationReadPolicy } from "../../child-runtime/child-extension-runtime.ts";
 import { SUBMIT_TOOLS } from "../../src/generated/tool-schemas.ts";
 
 interface RegisteredTool {
@@ -62,12 +62,40 @@ function canonicalJson(value: unknown): string {
   return encoded;
 }
 
-test("terminal profiles carry the exact per-profile schema digest", () => {
-  assert.equal(SUBMIT_TOOLS.length, 11);
+const EXPECTED_TERMINAL_PROFILES = [
+  ["delivery-status.v2", "autopilot_emit_status", "autopilot.delivery_submission.v2", "autopilot.delivery_result.v2"],
+  ["planning.plan-review.v1:autopilot_submit_review", "autopilot_submit_review", "planning.plan-review.v1", "planning.plan-review.v1"],
+  ["planning.questions.v1:autopilot_submit_resolution", "autopilot_submit_resolution", "planning.questions.v1", "planning.questions.v1"],
+  ["planning.scout-dossier.v1:autopilot_submit_context", "autopilot_submit_context", "planning.scout-dossier.v1", "planning.scout-dossier.v1"],
+  ["planning.scout-dossier.v1:autopilot_submit_scout_report", "autopilot_submit_scout_report", "planning.scout-dossier.v1", "planning.scout-dossier.v1"],
+  ["planning.task-atoms.v1:autopilot_submit_atoms", "autopilot_submit_atoms", "planning.task-atoms.v1", "planning.task-atoms.v1"],
+  ["planning.work-map.v1:autopilot_submit_plan_cluster", "autopilot_submit_plan_cluster", "planning.work-map.v1", "planning.work-map.v1"],
+  ["planning.work-map.v1:autopilot_submit_synthesis", "autopilot_submit_synthesis", "planning.work-map.v1", "planning.work-map.v1"],
+  ["planning.work-map.v2:autopilot_submit_plan_cluster", "autopilot_submit_plan_cluster", "planning.work-map.v2", "planning.work-map.v2"],
+  ["planning.work-map.v2:autopilot_submit_synthesis", "autopilot_submit_synthesis", "planning.work-map.v2", "planning.work-map.v2"],
+  ["recovery-work-map.v1", "autopilot_emit_status", "planning.work-map.v1", "planning.work-map.v1"],
+  ["recovery-work-map.v2", "autopilot_emit_status", "planning.work-map.v2", "planning.work-map.v2"],
+  ["validation-status.v2", "autopilot_emit_status", "autopilot.validation_submission.v2", "autopilot.validation_result.v2"],
+  ["validation-status.v3", "autopilot_emit_status", "autopilot.validation_submission.v3", "autopilot.validation_result.v3"],
+] as const;
+
+test("terminal profiles carry the exact hard-coded descriptor tuples and schema digests", () => {
+  assert.equal(SUBMIT_TOOLS.length, 14);
+  assert.deepEqual(
+    SUBMIT_TOOLS.map(({ profile_id, name, boundary_id, result_contract }) =>
+      [profile_id, name, boundary_id, result_contract]),
+    EXPECTED_TERMINAL_PROFILES,
+  );
   for (const descriptor of SUBMIT_TOOLS) {
     const digest = createHash("sha256").update(canonicalJson(descriptor.parameters)).digest("hex");
     assert.equal(descriptor.schema_digest, digest, descriptor.profile_id);
   }
+  const duplicatePublicNames = SUBMIT_TOOLS
+    .map((tool) => tool.name)
+    .filter((name, index, names) => names.indexOf(name) !== index)
+    .filter((name, index, names) => names.indexOf(name) === index)
+    .sort();
+  assert.deepEqual(duplicatePublicNames, ["autopilot_emit_status", "autopilot_submit_plan_cluster", "autopilot_submit_synthesis"]);
   const regular = SUBMIT_TOOLS.find(
     (tool) => tool.profile_id === "planning.work-map.v1:autopilot_submit_synthesis",
   );
@@ -79,20 +107,19 @@ test("terminal profiles carry the exact per-profile schema digest", () => {
   assert.notEqual(recovery.schema_digest, regular.schema_digest);
 });
 
-test("parent planning registration excludes the Recovery Engineer child-only terminal", () => {
-  const names: string[] = [];
-  registerSubmitTools(
-    { registerTool(tool: { name: string }) { names.push(tool.name); } } as never,
-    SUBMIT_TOOLS,
-    import.meta.url,
+test("no parent bulk planning terminal registration remains", () => {
+  const runtime = readFileSync(
+    new URL("../../child-runtime/child-extension-runtime.ts", import.meta.url),
+    "utf8",
   );
-  assert.deepEqual(
-    names,
-    SUBMIT_TOOLS
-      .filter((tool) => tool.boundary_id.startsWith("planning.") && tool.name !== "autopilot_emit_status")
-      .map((tool) => tool.name),
+  const wrapper = readFileSync(
+    new URL("../../src/generated/child-extension.ts", import.meta.url),
+    "utf8",
   );
-  assert(!names.includes("autopilot_emit_status"));
+  const parent = readFileSync(new URL("../../extensions/autopilot.ts", import.meta.url), "utf8");
+  assert(!runtime.includes("registerSubmitTools"));
+  assert(!wrapper.includes("registerSubmitTools"));
+  assert(!parent.includes("registerSubmitTools"));
 });
 
 function installDeliveryPolicyEnv(): { assignmentPath: string; assignmentDigest: string; policyDigest: string; worktree: string } {
@@ -199,6 +226,19 @@ function clearValidationPolicyEnv(): void {
   while (validationTempDirs.length > 0) rmSync(validationTempDirs.pop()!, { recursive: true, force: true });
 }
 
+test("V2 package proof receipt citations are rejected before validation read exposure", () => {
+  assert.throws(
+    () => new ValidationReadPolicy("context", "0".repeat(64), process.cwd(), [{
+      evidence_ref: "v2-package-proof-receipt:proof:deadbeef",
+      kind: "delivery-v2-package-proof",
+      source_path: "src.txt",
+      blob_digest: "0".repeat(64),
+      line_count: 1,
+    }]),
+    /source\/diff-only/,
+  );
+});
+
 test("selected terminal profile registers exactly one same-name schema", { concurrency: false }, async () => {
   const previousProfile = process.env.AUTOPILOT_TERMINAL_PROFILE;
   const previousBinding = process.env.AUTOPILOT_CARRIER_BINDING;
@@ -208,8 +248,15 @@ test("selected terminal profile registers exactly one same-name schema", { concu
     const wrapperDigest = createHash("sha256")
       .update(Buffer.concat([readFileSync(wrapperUrl), Buffer.from([0]), readFileSync(runtimeUrl)]))
       .digest("hex");
-    assert.equal(SUBMIT_TOOLS.length, 11);
-    for (const expected of SUBMIT_TOOLS) {
+    assert.equal(SUBMIT_TOOLS.length, 14);
+    for (const [profileId, name, boundaryId, resultContract] of EXPECTED_TERMINAL_PROFILES) {
+      const expected = SUBMIT_TOOLS.find((descriptor) =>
+        descriptor.profile_id === profileId
+        && descriptor.name === name
+        && descriptor.boundary_id === boundaryId
+        && descriptor.result_contract === resultContract,
+      );
+      assert.ok(expected, `missing hard-coded descriptor ${profileId}`);
       process.env.AUTOPILOT_TERMINAL_PROFILE = expected.profile_id;
       process.env.AUTOPILOT_CARRIER_BINDING = "binding-test";
       clearDeliveryPolicyEnv();

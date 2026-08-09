@@ -6,11 +6,11 @@ planning_wave_cap default=7
 planning_launch_attempts max=1
 assignment_role "task-extractor" count=7 mode="inventory" boundary="planning.task-atoms.v1" atom_namespace="TE"
 assignment_role "repository-scout" count=5 mode="initial-grounding" boundary="planning.scout-dossier.v1"
-assignment_role "plan-compiler" count=5 mode="initial-plan" boundary="planning.work-map.v1"
+assignment_role "plan-compiler" count=5 mode="initial-plan" boundary="planning.work-map.v2"
 assignment_role "context-curator" count=1 mode="planning-context" boundary="planning.scout-dossier.v1"
-assignment_role "plan-synthesizer" count=2 mode="initial-plan" boundary="planning.work-map.v1"
+assignment_role "plan-synthesizer" count=2 mode="initial-plan" boundary="planning.work-map.v2"
 assignment_role "plan-reviewer" count=2 mode="full-review" boundary="planning.plan-review.v1"
-assignment_role "recovery-engineer" count=1 mode="planning-repair" boundary="planning.work-map.v1"
+assignment_role "recovery-engineer" count=1 mode="planning-repair" boundary="planning.work-map.v2"
 assignment_role "contradiction-resolver" count=3 mode="fact-resolution" boundary="planning.questions.v1"
 planning_wave "P1.extract" role="task-extractor"
 planning_wave "P2.scout" role="repository-scout" depends="P1.extract"
@@ -60,7 +60,7 @@ phase "P4" question="What complete work map and proof system implements it?" rep
   artifact "assumptions"
   artifact "deviations"
   artifact "dispositions"
-  boundary "planning.work-map.v1"
+  boundary "planning.work-map.v2"
 }
 
 phase "P5" question="Does literal execution imply mission delivery?" repository_source=#false {

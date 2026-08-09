@@ -351,9 +351,14 @@ async function completePlanningFromSpawn(transport, firstActions) {
     assert.ok(action !== undefined, "planning ran out of assignments before ready-to-execute");
     if (consumed.has(action.assignment_id)) continue;
     consumed.add(action.assignment_id);
-    const frame = await transport.request("agent-result", {
-      assignment_id: action.assignment_id,
-      carrier: planningCarrierForAction(action),
+    const carrier = planningCarrierForAction(action);
+    // Mirror the real Host terminal path: Core reads the exact durable carrier
+    // while accepting this terminal observation.
+    const frame = await transport.request("task-completed", {
+      task_id: `task-${carrier.action_id}`,
+      action_id: carrier.action_id,
+      assignment_id: carrier.assignment_id,
+      status: "completed",
     }, 5000);
     for (const next of spawnedActions(frame)) {
       // A later wave may re-announce an assignment that is already queued or consumed;
@@ -387,6 +392,20 @@ function planningCarrierForAction(action) {
   const specPath = specPathFromCommand(action.bg_run.command);
   const specBytes = readFileSync(specPath);
   const spec = JSON.parse(specBytes.toString("utf8"));
+  const rawOutput = replayOutputForSpec(spec, specPath);
+  const hasV2Route = spec.terminal_route?.version === "v2";
+  const isV2WorkMap = spec.boundary_id === "planning.work-map.v2";
+  const carrier = hasV2Route || isV2WorkMap
+    ? planningV2CarrierForSpec(spec, specBytes, specPath, rawOutput)
+    : planningV1CarrierForSpec(spec, specBytes, specPath, rawOutput);
+  mkdirSync(dirname(spec.carrier_path), { recursive: true });
+  // Core re-reads this exact V2 authority object; do not persist a projection.
+  writeFileSync(spec.carrier_path, JSON.stringify(carrier), "utf8");
+  return carrier;
+}
+
+function planningV1CarrierForSpec(spec, specBytes, specPath, rawOutput) {
+  // Keep the historical V1 carrier field order and shape unchanged.
   const carrier = {
     schema: "autopilot.planning_carrier.v1",
     action_id: spec.action_id,
@@ -402,25 +421,107 @@ function planningCarrierForAction(action) {
     spec_digest: sha256(specBytes),
     spec_path: specPath,
     carrier_path: spec.carrier_path,
-    raw_output: replayOutputForSpec(spec, specPath),
+    raw_output: rawOutput,
   };
   for (const key of ["boundary_digest", "result_contract_digest", "settings_digest", "context_digest", "skills_digest", "subscription_digest"]) {
     if (typeof spec[key] === "string") carrier[key] = spec[key];
   }
-  mkdirSync(dirname(spec.carrier_path), { recursive: true });
-  writeFileSync(spec.carrier_path, JSON.stringify(carrier), "utf8");
   return carrier;
 }
 
+function planningV2CarrierForSpec(spec, specBytes, specPath, rawOutput) {
+  const route = requireObject(spec.terminal_route, "V2 planning spec terminal_route");
+  assert.equal(requireString(route.version, "V2 terminal route version"), "v2");
+  assert.equal(requireString(spec.boundary_id, "V2 planning spec boundary_id"), "planning.work-map.v2");
+  assert.equal(requireString(route.boundary_id, "V2 terminal route boundary_id"), spec.boundary_id);
+  assert.equal(requireString(route.result_contract, "V2 terminal route result_contract"), spec.result_contract);
+  const terminalProfileId = requireString(spec.terminal_profile_id, "V2 planning spec terminal_profile_id");
+  assert.equal(requireString(route.profile_id, "V2 terminal route profile_id"), terminalProfileId);
+
+  return {
+    schema: "autopilot.planning_carrier.v2",
+    action_id: requireString(spec.action_id, "V2 planning spec action_id"),
+    assignment_id: requireString(spec.assignment_id, "V2 planning spec assignment_id"),
+    run_revision: requireRunRevision(spec.run_revision, "V2 planning spec run_revision"),
+    workstream: requireString(spec.workstream, "V2 planning spec workstream"),
+    role_id: requireString(spec.role_id, "V2 planning spec role_id"),
+    mode: requireString(spec.mode, "V2 planning spec mode"),
+    boundary_id: requireString(spec.boundary_id, "V2 planning spec boundary_id"),
+    result_contract: requireString(spec.result_contract, "V2 planning spec result_contract"),
+    prompt_path: requireString(spec.prompt_path, "V2 planning spec prompt_path"),
+    prompt_digest: requireString(spec.prompt_digest, "V2 planning spec prompt_digest"),
+    boundary_digest: requireString(spec.boundary_digest, "V2 planning spec boundary_digest"),
+    result_contract_digest: requireString(spec.result_contract_digest, "V2 planning spec result_contract_digest"),
+    settings_digest: requireString(spec.settings_digest, "V2 planning spec settings_digest"),
+    context_digest: requireString(spec.context_digest, "V2 planning spec context_digest"),
+    skills_digest: requireString(spec.skills_digest, "V2 planning spec skills_digest"),
+    subscription_digest: requireString(spec.subscription_digest, "V2 planning spec subscription_digest"),
+    runtime_extension_digest: requireString(spec.runtime_extension_digest, "V2 planning spec runtime_extension_digest"),
+    spec_digest: sha256(specBytes),
+    spec_path: requireString(spec.spec_path, "V2 planning spec spec_path"),
+    carrier_path: requireString(spec.carrier_path, "V2 planning spec carrier_path"),
+    carrier_channel: "tool",
+    tool_name: requireString(route.tool_name, "V2 terminal route tool_name"),
+    tool_schema_digest: requireString(route.schema_digest, "V2 terminal route schema_digest"),
+    carrier_binding: planningCarrierBinding(spec),
+    pi_version: "pi 0.84.1",
+    terminal_route: route,
+    atom_registry_path: requireString(spec.atom_registry_path, "V2 planning spec atom_registry_path"),
+    atom_registry_digest: requireString(spec.atom_registry_digest, "V2 planning spec atom_registry_digest"),
+    repository_manifest_path: requireString(spec.repository_manifest_path, "V2 planning spec repository_manifest_path"),
+    repository_manifest_digest: requireString(spec.repository_manifest_digest, "V2 planning spec repository_manifest_digest"),
+    repository_head_commit: requireString(spec.repository_head_commit, "V2 planning spec repository_head_commit"),
+    repository_head_tree: requireString(spec.repository_head_tree, "V2 planning spec repository_head_tree"),
+    raw_output: rawOutput,
+  };
+}
+
+function planningCarrierBinding(spec) {
+  // Mirrors drivers/src/runner/child.rs::carrier_binding without using any receipt.
+  const material = [
+    "autopilot.tool-carrier.v2",
+    requireString(spec.run_id, "V2 planning spec run_id"),
+    requireString(spec.action_id, "V2 planning spec action_id"),
+    requireString(spec.assignment_id, "V2 planning spec assignment_id"),
+    String(requireRunRevision(spec.run_revision, "V2 planning spec run_revision")),
+    requireString(spec.boundary_id, "V2 planning spec boundary_id"),
+    requireString(spec.result_contract, "V2 planning spec result_contract"),
+    requireString(spec.terminal_profile_id, "V2 planning spec terminal_profile_id"),
+    requireString(spec.runtime_extension_digest, "V2 planning spec runtime_extension_digest"),
+    requireString(spec.prompt_digest, "V2 planning spec prompt_digest"),
+  ].join("\0");
+  return sha256(material);
+}
+
 function replayOutputForSpec(spec, specPath) {
-  const raw = transcript(spec.boundary_id);
-  if (spec.boundary_id === "planning.task-atoms.v1") {
+  const boundaryId = requireString(spec.boundary_id, "planning replay spec boundary_id");
+  const raw = transcript(boundaryId === "planning.work-map.v2" ? "planning.work-map.v1" : boundaryId);
+  if (boundaryId === "planning.task-atoms.v1") {
     return namespaceLegacyTaskAtoms(raw, spec);
   }
-  if (spec.boundary_id === "planning.work-map.v1") {
+  if (boundaryId === "planning.work-map.v1") {
     return namespaceLegacyWorkMapLinks(raw, spec, specPath);
   }
+  if (boundaryId === "planning.work-map.v2") {
+    return v2FromLegacyWorkMap(namespaceLegacyWorkMapLinks(raw, spec, specPath));
+  }
   return raw;
+}
+
+function v2FromLegacyWorkMap(raw) {
+  const value = JSON.parse(raw);
+  assert.ok(Array.isArray(value.units) && value.units.length > 0, "legacy work-map replay records must expose units[]");
+  value.schema = "planning.work-map.v2";
+  // V1 records overlap by design; the V2 fixture has one deterministic owner.
+  value.units.length = 1;
+  for (const unit of value.units) {
+    delete unit.package_checks;
+    unit.package_scope_files = [];
+    unit.package_proofs = [];
+    unit.vendor_bindings = [];
+    unit.provenance_manifest_destination = null;
+  }
+  return JSON.stringify(value);
 }
 
 function namespaceLegacyTaskAtoms(raw, spec) {
@@ -541,8 +642,19 @@ function atomLocalToFullIds(spec, specPath) {
   return localToFull;
 }
 
+function requireObject(value, label) {
+  assert.ok(value !== null && typeof value === "object" && !Array.isArray(value), label);
+  return value;
+}
+
 function requireString(value, label) {
   assert.equal(typeof value, "string", label);
+  return value;
+}
+
+function requireRunRevision(value, label) {
+  assert.equal(typeof value, "number", label);
+  assert.ok(Number.isSafeInteger(value) && value >= 0, `${label} must be a non-negative safe integer`);
   return value;
 }
 

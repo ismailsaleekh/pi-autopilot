@@ -599,6 +599,658 @@ export const WORK_MAP_CLOSED_TOOL_PARAMETERS = {
 } as TSchema;
 export const WORK_MAP_CLOSED_TOOL_SCHEMA_DIGEST = "b6b5f80aedcf8382f840f311bac4fdf1a6db5d83e0cf25eb46840e90043f8493";
 
+export const WORK_MAP_V2_TOOL_PARAMETERS = {
+  "additionalProperties": true,
+  "properties": {
+    "recovery": {
+      "additionalProperties": true,
+      "description": "Optional V2 recovery diagnosis with all supplied evidence fields required.",
+      "properties": {
+        "actions": {
+          "description": "Surgical corrections performed, or the evidence-backed reason no correction is admissible.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "affected_unit_ids": {
+          "description": "Exact units changed; empty only for no-defect or a fail-closed disposition.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "diagnosis_refs": {
+          "description": "Exact rejected-review or runtime-diagnosis evidence inspected independently.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "disposition": {
+          "description": "Typed conclusion after independent diagnosis: repaired/no-defect may return to the same gate; authority, infrastructure, and unsafe outcomes fail closed.",
+          "enum": [
+            "repaired",
+            "no-defect",
+            "requires-new-authority",
+            "infrastructure-blocked",
+            "unsafe-blocked"
+          ],
+          "type": "string"
+        },
+        "preserved_authority": {
+          "description": "Original authority, scope, tests, gates, and unaffected behavior preserved.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "repair_evidence_refs": {
+          "description": "Evidence supporting the disposition and same-gate revalidation or fail-closed result.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "root_cause": {
+          "description": "Evidence-backed root cause; may correct rather than repeat the runtime diagnosis.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "disposition",
+        "diagnosis_refs",
+        "root_cause",
+        "affected_unit_ids",
+        "actions",
+        "preserved_authority",
+        "repair_evidence_refs"
+      ],
+      "type": "object"
+    },
+    "schema": {
+      "const": "planning.work-map.v2",
+      "maxLength": 64,
+      "type": "string"
+    },
+    "units": {
+      "description": "Fresh executable implementation units.",
+      "items": {
+        "additionalProperties": true,
+        "properties": {
+          "commands": {
+            "description": "Existing closed verification command shape; commands never materialize or copy files.",
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "command": {
+                  "type": "string"
+                },
+                "effect": {
+                  "description": "Closed Git-visible persistent repository effect classification; no-effect means the final command leaves no persistent Git-visible repo state.",
+                  "enum": [
+                    "no-effect",
+                    "declared-predictable",
+                    "unknown-generated"
+                  ],
+                  "type": "string"
+                },
+                "expected": {
+                  "type": "string"
+                },
+                "generated_paths": {
+                  "description": "Exact normalized repo-relative Git-visible persistent generated artifact paths only, empty unless effect is declared-predictable; external temporary paths are not generated_paths.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "handling": {
+                  "description": "Closed handling authority for Git-visible generated artifacts; no-effect requires none, unknown-generated requires run-isolated.",
+                  "enum": [
+                    "none",
+                    "run-isolated",
+                    "exact-cleanup-before-scope-gate",
+                    "block-if-created"
+                  ],
+                  "type": "string"
+                },
+                "scope_preservation": {
+                  "description": "Nonempty final-scope-check statement proving verification leaves final Git-visible state inside approved unit files.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "command",
+                "expected",
+                "effect",
+                "generated_paths",
+                "handling",
+                "scope_preservation"
+              ],
+              "type": "object"
+            },
+            "maxItems": 256,
+            "minItems": 1,
+            "type": "array"
+          },
+          "criteria": {
+            "items": {
+              "maxLength": 4096,
+              "type": "string"
+            },
+            "maxItems": 256,
+            "minItems": 1,
+            "type": "array"
+          },
+          "depends_on": {
+            "description": "Exact declared predecessor unit ids.",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 256,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "files": {
+            "description": "Exclusive exact normalized repository-relative implementation-authority leaves only.",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 256,
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "id": {
+            "maxLength": 256,
+            "type": "string"
+          },
+          "kind": {
+            "description": "Closed delivery disposition reused without widening its vocabulary.",
+            "enum": [
+              "implementation"
+            ],
+            "type": "string"
+          },
+          "links": {
+            "description": "Exact bound atom ids.",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 256,
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "objective": {
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "package_proofs": {
+            "description": "Explicit array; [] is allowed only for the stated no-proof case.",
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "criterion_ordinals": {
+                  "items": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "maxItems": 256,
+                  "minItems": 1,
+                  "type": "array",
+                  "uniqueItems": true
+                },
+                "expected": {
+                  "maxLength": 4096,
+                  "type": "string"
+                },
+                "kind": {
+                  "enum": [
+                    "clean-exact-package-tip",
+                    "vendored-bytes-match-origin"
+                  ],
+                  "type": "string"
+                },
+                "proof_id": {
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                "vendor_binding_ids": {
+                  "description": "Explicit []; clean-tip proof uses no binding ids. Validator V3 permits 257 citation records; independent proof needs origin and destination citations plus one diff record (2*n + 1 <= 257).",
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 128,
+                  "type": "array",
+                  "uniqueItems": true
+                }
+              },
+              "required": [
+                "proof_id",
+                "kind",
+                "criterion_ordinals",
+                "expected",
+                "vendor_binding_ids"
+              ],
+              "type": "object"
+            },
+            "maxItems": 256,
+            "type": "array"
+          },
+          "package_scope_files": {
+            "description": "Explicit exact package/read closure leaves only; [] is required on every nonclosure unit and never grants child write authority.",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 256,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "provenance_manifest_destination": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Explicit null is the no-manifest form."
+          },
+          "vendor_bindings": {
+            "description": "Explicit array; [] is the no-vendor form. Validator V3 permits 257 citation records; independent proof needs origin and destination citations plus one diff record (2*n + 1 <= 257).",
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "binding_id": {
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                "destination": {
+                  "description": "Exact normalized repository-relative destination path.",
+                  "maxLength": 4096,
+                  "type": "string"
+                },
+                "origin_anchor": {
+                  "description": "Immutable whole-file origin anchor; Core V2 admission requires a nonempty value.",
+                  "maxLength": 4096,
+                  "type": "string"
+                },
+                "origin_path": {
+                  "description": "Exact normalized repository-relative origin path.",
+                  "maxLength": 4096,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "binding_id",
+                "origin_path",
+                "destination",
+                "origin_anchor"
+              ],
+              "type": "object"
+            },
+            "maxItems": 128,
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "objective",
+          "criteria",
+          "depends_on",
+          "files",
+          "package_scope_files",
+          "commands",
+          "package_proofs",
+          "vendor_bindings",
+          "provenance_manifest_destination",
+          "links"
+        ],
+        "type": "object"
+      },
+      "maxItems": 256,
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema",
+    "units"
+  ],
+  "type": "object"
+} as TSchema;
+export const WORK_MAP_V2_TOOL_SCHEMA_DIGEST = "07750be5a58112e8b3f956f261d33ef75e3a71b9b13b75be2192cfc43adbbc9a";
+
+export const WORK_MAP_V2_CLOSED_TOOL_PARAMETERS = {
+  "additionalProperties": false,
+  "properties": {
+    "recovery": {
+      "additionalProperties": false,
+      "description": "Optional V2 recovery diagnosis with all supplied evidence fields required.",
+      "properties": {
+        "actions": {
+          "description": "Surgical corrections performed, or the evidence-backed reason no correction is admissible.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "affected_unit_ids": {
+          "description": "Exact units changed; empty only for no-defect or a fail-closed disposition.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "diagnosis_refs": {
+          "description": "Exact rejected-review or runtime-diagnosis evidence inspected independently.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "disposition": {
+          "description": "Typed conclusion after independent diagnosis: repaired/no-defect may return to the same gate; authority, infrastructure, and unsafe outcomes fail closed.",
+          "enum": [
+            "repaired",
+            "no-defect",
+            "requires-new-authority",
+            "infrastructure-blocked",
+            "unsafe-blocked"
+          ],
+          "type": "string"
+        },
+        "preserved_authority": {
+          "description": "Original authority, scope, tests, gates, and unaffected behavior preserved.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "repair_evidence_refs": {
+          "description": "Evidence supporting the disposition and same-gate revalidation or fail-closed result.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "root_cause": {
+          "description": "Evidence-backed root cause; may correct rather than repeat the runtime diagnosis.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "disposition",
+        "diagnosis_refs",
+        "root_cause",
+        "affected_unit_ids",
+        "actions",
+        "preserved_authority",
+        "repair_evidence_refs"
+      ],
+      "type": "object"
+    },
+    "schema": {
+      "const": "planning.work-map.v2",
+      "maxLength": 64,
+      "type": "string"
+    },
+    "units": {
+      "description": "Fresh executable implementation units.",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "commands": {
+            "description": "Existing closed verification command shape; commands never materialize or copy files.",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "command": {
+                  "type": "string"
+                },
+                "effect": {
+                  "description": "Closed Git-visible persistent repository effect classification; no-effect means the final command leaves no persistent Git-visible repo state.",
+                  "enum": [
+                    "no-effect",
+                    "declared-predictable",
+                    "unknown-generated"
+                  ],
+                  "type": "string"
+                },
+                "expected": {
+                  "type": "string"
+                },
+                "generated_paths": {
+                  "description": "Exact normalized repo-relative Git-visible persistent generated artifact paths only, empty unless effect is declared-predictable; external temporary paths are not generated_paths.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "handling": {
+                  "description": "Closed handling authority for Git-visible generated artifacts; no-effect requires none, unknown-generated requires run-isolated.",
+                  "enum": [
+                    "none",
+                    "run-isolated",
+                    "exact-cleanup-before-scope-gate",
+                    "block-if-created"
+                  ],
+                  "type": "string"
+                },
+                "scope_preservation": {
+                  "description": "Nonempty final-scope-check statement proving verification leaves final Git-visible state inside approved unit files.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "command",
+                "expected",
+                "effect",
+                "generated_paths",
+                "handling",
+                "scope_preservation"
+              ],
+              "type": "object"
+            },
+            "maxItems": 256,
+            "minItems": 1,
+            "type": "array"
+          },
+          "criteria": {
+            "items": {
+              "maxLength": 4096,
+              "type": "string"
+            },
+            "maxItems": 256,
+            "minItems": 1,
+            "type": "array"
+          },
+          "depends_on": {
+            "description": "Exact declared predecessor unit ids.",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 256,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "files": {
+            "description": "Exclusive exact normalized repository-relative implementation-authority leaves only.",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 256,
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "id": {
+            "maxLength": 256,
+            "type": "string"
+          },
+          "kind": {
+            "description": "Closed delivery disposition reused without widening its vocabulary.",
+            "enum": [
+              "implementation"
+            ],
+            "type": "string"
+          },
+          "links": {
+            "description": "Exact bound atom ids.",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 256,
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "objective": {
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "package_proofs": {
+            "description": "Explicit array; [] is allowed only for the stated no-proof case.",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "criterion_ordinals": {
+                  "items": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "maxItems": 256,
+                  "minItems": 1,
+                  "type": "array",
+                  "uniqueItems": true
+                },
+                "expected": {
+                  "maxLength": 4096,
+                  "type": "string"
+                },
+                "kind": {
+                  "enum": [
+                    "clean-exact-package-tip",
+                    "vendored-bytes-match-origin"
+                  ],
+                  "type": "string"
+                },
+                "proof_id": {
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                "vendor_binding_ids": {
+                  "description": "Explicit []; clean-tip proof uses no binding ids. Validator V3 permits 257 citation records; independent proof needs origin and destination citations plus one diff record (2*n + 1 <= 257).",
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 128,
+                  "type": "array",
+                  "uniqueItems": true
+                }
+              },
+              "required": [
+                "proof_id",
+                "kind",
+                "criterion_ordinals",
+                "expected",
+                "vendor_binding_ids"
+              ],
+              "type": "object"
+            },
+            "maxItems": 256,
+            "type": "array"
+          },
+          "package_scope_files": {
+            "description": "Explicit exact package/read closure leaves only; [] is required on every nonclosure unit and never grants child write authority.",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 256,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "provenance_manifest_destination": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Explicit null is the no-manifest form."
+          },
+          "vendor_bindings": {
+            "description": "Explicit array; [] is the no-vendor form. Validator V3 permits 257 citation records; independent proof needs origin and destination citations plus one diff record (2*n + 1 <= 257).",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "binding_id": {
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                "destination": {
+                  "description": "Exact normalized repository-relative destination path.",
+                  "maxLength": 4096,
+                  "type": "string"
+                },
+                "origin_anchor": {
+                  "description": "Immutable whole-file origin anchor; Core V2 admission requires a nonempty value.",
+                  "maxLength": 4096,
+                  "type": "string"
+                },
+                "origin_path": {
+                  "description": "Exact normalized repository-relative origin path.",
+                  "maxLength": 4096,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "binding_id",
+                "origin_path",
+                "destination",
+                "origin_anchor"
+              ],
+              "type": "object"
+            },
+            "maxItems": 128,
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "objective",
+          "criteria",
+          "depends_on",
+          "files",
+          "package_scope_files",
+          "commands",
+          "package_proofs",
+          "vendor_bindings",
+          "provenance_manifest_destination",
+          "links"
+        ],
+        "type": "object"
+      },
+      "maxItems": 256,
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema",
+    "units"
+  ],
+  "type": "object"
+} as TSchema;
+export const WORK_MAP_V2_CLOSED_TOOL_SCHEMA_DIGEST = "3efc6b230002a7216a3e471441a755672f2a750658483e7882b1fa3edb549495";
+
 export const PLAN_REVIEW_TOOL_PARAMETERS = {
   "additionalProperties": true,
   "properties": {
@@ -1091,6 +1743,7 @@ export const TERMINAL_TOOL_SCHEMAS = {
   "planning.scout-dossier.v1": { boundary_id: "planning.scout-dossier.v1", schema_digest: SCOUT_DOSSIER_TOOL_SCHEMA_DIGEST, parameters: SCOUT_DOSSIER_TOOL_PARAMETERS },
   "planning.questions.v1": { boundary_id: "planning.questions.v1", schema_digest: QUESTIONS_TOOL_SCHEMA_DIGEST, parameters: QUESTIONS_TOOL_PARAMETERS },
   "planning.work-map.v1": { boundary_id: "planning.work-map.v1", schema_digest: WORK_MAP_TOOL_SCHEMA_DIGEST, parameters: WORK_MAP_TOOL_PARAMETERS },
+  "planning.work-map.v2": { boundary_id: "planning.work-map.v2", schema_digest: WORK_MAP_V2_TOOL_SCHEMA_DIGEST, parameters: WORK_MAP_V2_TOOL_PARAMETERS },
   "planning.plan-review.v1": { boundary_id: "planning.plan-review.v1", schema_digest: PLAN_REVIEW_TOOL_SCHEMA_DIGEST, parameters: PLAN_REVIEW_TOOL_PARAMETERS },
   "autopilot.delivery_submission.v2": { boundary_id: "autopilot.delivery_submission.v2", schema_digest: DELIVERY_SUBMISSION_V2_TOOL_SCHEMA_DIGEST, parameters: DELIVERY_SUBMISSION_V2_TOOL_PARAMETERS },
   "autopilot.validation_submission.v2": { boundary_id: "autopilot.validation_submission.v2", schema_digest: VALIDATION_SUBMISSION_V2_TOOL_SCHEMA_DIGEST, parameters: VALIDATION_SUBMISSION_V2_TOOL_PARAMETERS },
@@ -1118,7 +1771,10 @@ export const SUBMIT_TOOLS: readonly SubmitToolDescriptor[] = [
   { profile_id: "planning.task-atoms.v1:autopilot_submit_atoms", name: "autopilot_submit_atoms", label: "Submit task atoms", boundary_id: "planning.task-atoms.v1", result_contract: "planning.task-atoms.v1", schema_digest: TASK_ATOMS_TOOL_SCHEMA_DIGEST, parameters: TASK_ATOMS_TOOL_PARAMETERS },
   { profile_id: "planning.work-map.v1:autopilot_submit_plan_cluster", name: "autopilot_submit_plan_cluster", label: "Submit work map", boundary_id: "planning.work-map.v1", result_contract: "planning.work-map.v1", schema_digest: WORK_MAP_TOOL_SCHEMA_DIGEST, parameters: WORK_MAP_TOOL_PARAMETERS },
   { profile_id: "planning.work-map.v1:autopilot_submit_synthesis", name: "autopilot_submit_synthesis", label: "Submit synthesized work map", boundary_id: "planning.work-map.v1", result_contract: "planning.work-map.v1", schema_digest: WORK_MAP_TOOL_SCHEMA_DIGEST, parameters: WORK_MAP_TOOL_PARAMETERS },
+  { profile_id: "planning.work-map.v2:autopilot_submit_plan_cluster", name: "autopilot_submit_plan_cluster", label: "Submit work map v2", boundary_id: "planning.work-map.v2", result_contract: "planning.work-map.v2", schema_digest: WORK_MAP_V2_TOOL_SCHEMA_DIGEST, parameters: WORK_MAP_V2_TOOL_PARAMETERS },
+  { profile_id: "planning.work-map.v2:autopilot_submit_synthesis", name: "autopilot_submit_synthesis", label: "Submit synthesized work map v2", boundary_id: "planning.work-map.v2", result_contract: "planning.work-map.v2", schema_digest: WORK_MAP_V2_TOOL_SCHEMA_DIGEST, parameters: WORK_MAP_V2_TOOL_PARAMETERS },
   { profile_id: "recovery-work-map.v1", name: "autopilot_emit_status", label: "Submit recovered work map", boundary_id: "planning.work-map.v1", result_contract: "planning.work-map.v1", schema_digest: WORK_MAP_CLOSED_TOOL_SCHEMA_DIGEST, parameters: WORK_MAP_CLOSED_TOOL_PARAMETERS },
+  { profile_id: "recovery-work-map.v2", name: "autopilot_emit_status", label: "Submit recovered work map v2", boundary_id: "planning.work-map.v2", result_contract: "planning.work-map.v2", schema_digest: WORK_MAP_V2_CLOSED_TOOL_SCHEMA_DIGEST, parameters: WORK_MAP_V2_CLOSED_TOOL_PARAMETERS },
   { profile_id: "validation-status.v2", name: "autopilot_emit_status", label: "Submit validation status", boundary_id: "autopilot.validation_submission.v2", result_contract: "autopilot.validation_result.v2", schema_digest: VALIDATION_SUBMISSION_V2_TOOL_SCHEMA_DIGEST, parameters: VALIDATION_SUBMISSION_V2_TOOL_PARAMETERS },
   { profile_id: "validation-status.v3", name: "autopilot_emit_status", label: "Submit validation status", boundary_id: "autopilot.validation_submission.v3", result_contract: "autopilot.validation_result.v3", schema_digest: VALIDATION_SUBMISSION_V3_TOOL_SCHEMA_DIGEST, parameters: VALIDATION_SUBMISSION_V3_TOOL_PARAMETERS },
 ] as const;

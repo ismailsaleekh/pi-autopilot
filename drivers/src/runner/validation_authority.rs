@@ -7,7 +7,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
-use std::process::{Command, Stdio};
 
 use kernel::generated::{
     CriterionVerdict, FindingEffect, FindingKindV2, GitOid, Id, PackageCheckKind, Ref,
@@ -19,11 +18,19 @@ use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sha2::{Digest as ShaDigest, Sha256};
 
-use super::{read_bounded_file, reject_link_components_for_path};
+#[cfg(unix)]
+use super::{
+    CORE_V2_PACKAGE_PROOF_RECEIPT_V1_SCHEMA, CoreV2PackageProofReceiptV1,
+    validate_receipt_shape_and_subject_digest, verify_receipt_against_validation_authority,
+};
+use super::{MAX_AUTHORITY_SOURCE_BYTES, read_bounded_file, reject_link_components_for_path};
 
-pub const RECEIPT_PREFIXES: &[&str] = &["approved-command-receipt:", "package-check-receipt:"];
+pub const RECEIPT_PREFIXES: &[&str] = &[
+    "approved-command-receipt:",
+    "package-check-receipt:",
+    "v2-package-proof-receipt:",
+];
 const MAX_GIT_STDERR_BYTES: usize = 64 << 10;
-const MAX_SOURCE_BLOB_BYTES: usize = 2 << 20;
 const MAX_DIFF_BYTES: usize = 2 << 20;
 const MAX_LS_TREE_BYTES: usize = 16 << 10;
 const MAX_STATUS_BYTES: usize = 1 << 20;
@@ -114,8 +121,11 @@ pub fn derive_source_record(
             row.mode, row.kind
         ));
     }
-    git_bytes_fixed(root, &["cat-file", "blob", &row.oid], MAX_SOURCE_BLOB_BYTES)?;
-    let bytes = read_source_snapshot(root, source_path)?;
+    let bytes = git_bytes_fixed(
+        root,
+        &["cat-file", "blob", &row.oid],
+        MAX_AUTHORITY_SOURCE_BYTES,
+    )?;
     let line_count = checked_line_count(&bytes)
         .ok_or_else(|| format!("validation source line count overflow: {source_path}"))?;
     let mut value = json!({
@@ -134,14 +144,6 @@ pub fn derive_source_record(
     serde_json::from_value(value)
         .map(Some)
         .map_err(|error| error.to_string())
-}
-
-fn read_source_snapshot(root: &Path, source_path: &str) -> Result<Vec<u8>, String> {
-    if !safe_repo_path(source_path) {
-        return Err(format!("unsafe validation source path: {source_path}"));
-    }
-    super::read_bounded_file(&root.join(source_path), MAX_SOURCE_BLOB_BYTES)
-        .map_err(|error| format!("validation source snapshot read: {error:?}"))
 }
 
 pub fn derive_diff_record(
@@ -1700,8 +1702,143 @@ fn validate_receipts(
         ));
     }
 
+    let v2_order = authority
+        .package_check_receipts
+        .iter()
+        .filter_map(|record| {
+            serde_json::from_str::<Value>(&record.receipt_json.0)
+                .ok()
+                .filter(|value| {
+                    value.get("schema").and_then(Value::as_str)
+                        == Some(CORE_V2_PACKAGE_PROOF_RECEIPT_V1_SCHEMA)
+                })
+                .and_then(|value| {
+                    value
+                        .get("proof_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+        })
+        .collect::<Vec<_>>();
+    if v2_order
+        .windows(2)
+        .any(|pair| pair[0].as_bytes() >= pair[1].as_bytes())
+    {
+        rows.push(simple_row(
+            "v2-package-proof-record-order",
+            "/package_check_receipts",
+            "canonical ascending V2 proof-id record order",
+            "reordered or duplicate V2 proof records",
+        ));
+    }
+
     for (record_index, record) in authority.package_check_receipts.iter().enumerate() {
-        let parsed: Result<PackageCheckReceiptV3, _> = serde_json::from_str(&record.receipt_json.0);
+        let receipt_value: Result<Value, _> = serde_json::from_str(&record.receipt_json.0);
+        let Ok(receipt_value) = receipt_value else {
+            rows.push(simple_row(
+                "package-receipt-json",
+                &format!("/package_check_receipts/{record_index}/receipt_json"),
+                "closed package-check receipt JSON",
+                "malformed",
+            ));
+            continue;
+        };
+        let schema = receipt_value.get("schema").and_then(Value::as_str);
+        #[cfg(unix)]
+        if schema == Some(CORE_V2_PACKAGE_PROOF_RECEIPT_V1_SCHEMA)
+            || record.kind == "delivery-v2-package-proof"
+            || record
+                .evidence_ref
+                .0
+                .starts_with("v2-package-proof-receipt:")
+        {
+            let parsed: Result<CoreV2PackageProofReceiptV1, _> =
+                serde_json::from_value(receipt_value.clone());
+            let Ok(receipt) = parsed else {
+                rows.push(simple_row(
+                    "v2-package-proof-receipt-binding",
+                    &format!("/package_check_receipts/{record_index}/receipt_json"),
+                    "closed V2 package-proof receipt JSON",
+                    "malformed",
+                ));
+                continue;
+            };
+            let canonical = canonical_json_bytes(&receipt_value).ok();
+            let digest = sha256_hex(record.receipt_json.0.as_bytes());
+            let expected_ref = format!("v2-package-proof-receipt:{}:{digest}", receipt.proof_id.0);
+            let criterion_ids = sorted_ids(&record.criterion_ids);
+            if validate_receipt_shape_and_subject_digest(&receipt).is_err()
+                || record.receipt_json.0.len() > 16 * 1024
+                || canonical.as_deref() != Some(record.receipt_json.0.as_bytes())
+                || record.receipt_digest.0 != digest
+                || record.evidence_ref.0 != expected_ref
+                || record.kind != "delivery-v2-package-proof"
+                || record.binding_id != receipt.proof_id
+                || record.unit_id != receipt.unit_id
+                || record.exact_commit.0 != receipt.package_commit
+                || record.exact_tree.0 != receipt.package_tree
+                || receipt.criterion_ids != criterion_ids
+                || receipt.validator_assignment_id != authority.assignment_id
+                || receipt.base_commit != authority.base_commit.0
+                || receipt.package_commit != authority.exact_commit.0
+                || receipt.package_tree != authority.exact_tree.0
+                || receipt.changed_paths != strings(&authority.changed_paths)
+            {
+                rows.push(simple_row(
+                    "v2-package-proof-receipt-binding",
+                    &format!("/package_check_receipts/{record_index}"),
+                    "canonical exact rooted V2 package-proof receipt",
+                    "binding drift",
+                ));
+            }
+            let expected_mapped_criteria = criteria
+                .values()
+                .filter(|criterion| {
+                    criterion.unit_id == record.unit_id
+                        && receipt
+                            .criterion_ordinals
+                            .contains(&criterion.unit_criterion_ordinal)
+                })
+                .map(|criterion| criterion.criterion_id.clone())
+                .collect::<Vec<_>>();
+            if sorted_ids(&record.criterion_ids) != sorted_ids(&expected_mapped_criteria) {
+                rows.push(simple_row(
+                    "v2-package-proof-ordinal-mapping",
+                    &format!("/package_check_receipts/{record_index}/criterion_ids"),
+                    "exact rooted unit criterion-ordinal mapping",
+                    "ordinal mapping drift",
+                ));
+            }
+            if let Err(error) =
+                verify_receipt_against_validation_authority(&receipt, record, authority)
+            {
+                rows.push(simple_row(
+                    "v2-package-proof-replay",
+                    &format!("/package_check_receipts/{record_index}"),
+                    "independently replayed V2 package proof",
+                    &error,
+                ));
+            }
+            validate_receipt_inverse_mapping(
+                record,
+                criteria,
+                package_by_criterion,
+                &format!("/package_check_receipts/{record_index}/criterion_ids"),
+                "package",
+                rows,
+            );
+            continue;
+        }
+        if schema != Some("autopilot.package_check_receipt.v1") {
+            rows.push(simple_row(
+                "package-receipt-json",
+                &format!("/package_check_receipts/{record_index}/receipt_json"),
+                "closed package-check receipt JSON",
+                "malformed",
+            ));
+            continue;
+        }
+        let parsed: Result<PackageCheckReceiptV3, _> = serde_json::from_value(receipt_value);
         let Ok(receipt) = parsed else {
             rows.push(simple_row(
                 "package-receipt-json",
@@ -1971,12 +2108,11 @@ fn verify_live_artifacts(authority: &ValidationEvidenceAuthority) -> Vec<Value> 
             MAX_LS_TREE_BYTES,
         )
         .and_then(|bytes| parse_ls_tree_exact(&bytes, &source.source_path.0));
-        let git_blob = git_bytes_fixed(
+        let snapshot = git_bytes_fixed(
             root,
             &["cat-file", "blob", &source.git_blob_oid.0],
-            MAX_SOURCE_BLOB_BYTES,
+            MAX_AUTHORITY_SOURCE_BYTES,
         );
-        let snapshot = read_source_snapshot(root, &source.source_path.0);
         match tree {
             Ok(tree) => {
                 for (code, field, expected, actual) in [
@@ -2017,14 +2153,6 @@ fn verify_live_artifacts(authority: &ValidationEvidenceAuthority) -> Vec<Value> 
                 &error,
             )),
         }
-        if let Err(error) = git_blob {
-            rows.push(simple_row(
-                "source-blob-read",
-                &format!("/source_records/{source_index}/git_blob_oid"),
-                "bounded blob bytes",
-                &error,
-            ));
-        }
         match snapshot {
             Ok(bytes) => {
                 let actual_digest = sha256_hex(&bytes);
@@ -2048,9 +2176,9 @@ fn verify_live_artifacts(authority: &ValidationEvidenceAuthority) -> Vec<Value> 
                 }
             }
             Err(error) => rows.push(simple_row(
-                "source-snapshot-read",
-                &format!("/source_records/{source_index}/source_path"),
-                "bounded no-follow worktree snapshot bytes",
+                "source-blob-read",
+                &format!("/source_records/{source_index}/git_blob_oid"),
+                "bounded pinned Git blob bytes",
                 &error,
             )),
         }
@@ -2681,8 +2809,13 @@ fn parse_ls_tree_exact(bytes: &[u8], expected_path: &str) -> Result<LsTreeRow, S
 }
 
 fn git_bytes_fixed(root: &Path, args: &[&str], max_stdout: usize) -> Result<Vec<u8>, String> {
-    let output =
-        super::git_output_bounded_with_limits(root, args, &[], max_stdout, MAX_GIT_STDERR_BYTES)?;
+    let output = super::authority_git_output_bounded_with_limits(
+        root,
+        args,
+        &[],
+        max_stdout,
+        MAX_GIT_STDERR_BYTES,
+    )?;
     if !output.status.success() {
         return Err(format!(
             "git {:?} failed: {}",
@@ -2698,14 +2831,14 @@ fn git_text(root: &Path, args: &[&str], max_stdout: usize) -> Result<String, Str
 }
 
 fn git_success(root: &Path, args: &[&str]) -> bool {
-    Command::new("git")
-        .current_dir(root)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+    super::authority_git_output_bounded_with_limits(
+        root,
+        args,
+        &[],
+        MAX_GIT_STDERR_BYTES,
+        MAX_GIT_STDERR_BYTES,
+    )
+    .is_ok_and(|output| output.status.success())
 }
 
 fn nul_paths(bytes: &[u8]) -> Result<Vec<String>, String> {
@@ -3309,6 +3442,8 @@ fn compact_diagnostic_rows(rows: &mut [Value]) {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
     use super::*;
 
     fn diagnostic_authority() -> ValidationEvidenceAuthority {
@@ -3567,7 +3702,7 @@ mod tests {
     }
 
     #[test]
-    fn source_record_binds_clean_filtered_worktree_snapshot_bytes() {
+    fn source_record_binds_pinned_blob_rather_than_clean_filtered_worktree_bytes() {
         let root = std::env::temp_dir().join(format!(
             "pi-autopilot-validation-filtered-source-{}-{:?}",
             std::process::id(),
@@ -3603,7 +3738,17 @@ mod tests {
         )
         .expect("worktree bytes");
         let blob_bytes = git(&["cat-file", "blob", "HEAD:filtered.txt"]);
+        let pinned_blob_bytes = b"line one\nline two\n";
+        let filtered_worktree_bytes = b"line one\r\nline two\r\n";
+        let pinned_blob_digest = "e9024f1a07d29d52ad3aa5e1a18e94db1f3a9fd32b89e39d47c472cd99071e13";
+        let filtered_worktree_digest =
+            "6612d9c94c2da8d2544e1188348fc7baf717ffff1bacde51929a166404a41ffc";
+        let pinned_blob_oid = "e5c5c5583f49a34e86ce622b59363df99e09d4c6";
+        assert_eq!(blob_bytes, pinned_blob_bytes);
+        assert_eq!(worktree_bytes, filtered_worktree_bytes);
         assert_ne!(worktree_bytes, blob_bytes, "fixture must exercise a filter");
+        assert_eq!(sha256_hex(&blob_bytes), pinned_blob_digest);
+        assert_eq!(sha256_hex(&worktree_bytes), filtered_worktree_digest);
         assert!(git(&["status", "--porcelain=v1"]).is_empty());
         let text = |bytes: Vec<u8>| {
             String::from_utf8(bytes)
@@ -3616,11 +3761,15 @@ mod tests {
         let record = derive_source_record(&root, &exact_commit, &exact_tree, "filtered.txt")
             .expect("source authority")
             .expect("source record");
-        assert_eq!(record.blob_digest.0, sha256_hex(&worktree_bytes));
-        assert_ne!(record.blob_digest.0, sha256_hex(&blob_bytes));
+        assert_eq!(record.exact_commit, exact_commit);
+        assert_eq!(record.exact_tree, exact_tree);
+        assert_eq!(record.blob_digest.0, pinned_blob_digest);
+        assert_ne!(record.blob_digest.0, filtered_worktree_digest);
+        assert_eq!(record.line_count, 2);
+        assert_eq!(record.git_blob_oid.0, pinned_blob_oid);
         assert_eq!(
-            record.git_blob_oid.0,
-            text(git(&["rev-parse", "HEAD:filtered.txt"]))
+            text(git(&["rev-parse", "HEAD:filtered.txt"])),
+            pinned_blob_oid
         );
         std::fs::remove_dir_all(&root).expect("remove filtered fixture");
     }

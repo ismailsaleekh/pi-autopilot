@@ -325,7 +325,7 @@ fn file(path: &str, content: String) -> OutputFile {
 
 fn emit_rust_typescript(contracts: &Contracts) -> Result<(String, String)> {
     let mut rust = format!(
-        "// {GENERATED_MARKER}\n\nuse serde::{{Deserialize, Serialize}};\n\n#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]\n#[serde(transparent)]\npub struct Nullable<T>(pub Option<T>);\n\n"
+        "// {GENERATED_MARKER}\n\nuse serde::{{Deserialize, Deserializer, Serialize}};\n\n#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]\n#[serde(transparent)]\npub struct Nullable<T>(pub Option<T>);\n\nfn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Nullable<T>, D::Error>\nwhere\n    D: Deserializer<'de>,\n    T: Deserialize<'de>,\n{{\n    Option::<T>::deserialize(deserializer).map(Nullable)\n}}\n\n"
     );
     let mut ts =
         format!("// {GENERATED_MARKER}\n\nexport type JsonObject = Record<string, unknown>;\n\n");
@@ -599,6 +599,9 @@ fn emit_member(rust: &mut String, ts: &mut String, item: &Item, rust_ty: String,
         "    #[serde(rename = \"{}\")]\n",
         escape_rust_string(&item.name)
     ));
+    if item.require_explicit_null {
+        rust.push_str("    #[serde(deserialize_with = \"deserialize_required_nullable\")]\n");
+    }
     if !item.required {
         rust.push_str("    #[serde(skip_serializing_if = \"Option::is_none\")]\n");
     }
@@ -695,12 +698,10 @@ pub fn emit_child_extension() -> String {
         r#"// {GENERATED_MARKER}
 // Child add-on digest covers this wrapper plus {runtime}.
 import type {{ ExtensionAPI }} from "@earendil-works/pi-coding-agent";
-import {{ CHILD_RECEIPT_ENTRY, registerSubmitTools as registerTools,
-  runAutopilotChild }} from "{runtime}";
+import {{ CHILD_RECEIPT_ENTRY, runAutopilotChild }} from "{runtime}";
 import {{ SUBMIT_TOOLS }} from "./tool-schemas.ts";
 export {{ CHILD_RECEIPT_ENTRY }};
 export default function(pi: ExtensionAPI): void {{ runAutopilotChild(pi, SUBMIT_TOOLS, import.meta.url); }}
-export function registerSubmitTools(pi: ExtensionAPI): void {{ registerTools(pi, SUBMIT_TOOLS, import.meta.url); }}
 "#
     )
 }

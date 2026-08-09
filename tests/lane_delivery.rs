@@ -496,6 +496,7 @@ fn lane_delivery_agent_git_mutation_and_incomplete_delivery_are_refused_without_
                 .expect("assignment digest")
                 .to_owned(),
             approved_command_executions: command_executions.clone(),
+            package_authority: drivers::runner::ValidationPackageAuthority::LegacyV3,
         },
         &facts,
     )
@@ -638,6 +639,7 @@ fn lane_delivery_agent_git_mutation_and_incomplete_delivery_are_refused_without_
                 .expect("assignment digest")
                 .to_owned(),
             approved_command_executions: command_executions,
+            package_authority: drivers::runner::ValidationPackageAuthority::LegacyV3,
         },
         &facts,
     )
@@ -1324,6 +1326,14 @@ fn blocked_delivery_recovery_replays_after_crash_before_issue() {
     let recovery = core.send_json(serde_json::json!({"v":1,"id":2,"kind":"task-completed","payload":{"task_id":"task-blocked-delivery-replay","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}));
     let recovery: CoreToHostSpawnPayload =
         serde_json::from_value(recovery.payload).expect("initial recovery spawn");
+    assert_eq!(
+        recovery.action.assignment_id.0,
+        "recovery-assignment-main-L1-a1"
+    );
+    assert_eq!(
+        recovery.action.action_id.0,
+        "action-recovery-assignment-main-L1-a1"
+    );
     let event_log = core.event_log().to_path_buf();
     let root = event_log
         .ancestors()
@@ -1352,6 +1362,14 @@ fn blocked_delivery_recovery_replays_after_crash_before_issue() {
     assert_eq!(replayed.kind, "spawn", "replay response: {replayed:?}");
     let replayed: CoreToHostSpawnPayload =
         serde_json::from_value(replayed.payload).expect("replayed recovery spawn");
+    assert_eq!(
+        replayed.action.assignment_id.0,
+        "recovery-assignment-main-L1-a1"
+    );
+    assert_eq!(
+        replayed.action.action_id.0,
+        "action-recovery-assignment-main-L1-a1"
+    );
     assert_eq!(replayed.action.assignment_id, recovery.action.assignment_id);
     assert_eq!(replayed.action.action_id, recovery.action.action_id);
     let replayed_events = fs::read_to_string(&event_log).expect("replayed events");
@@ -1389,6 +1407,14 @@ fn blocked_delivery_recovery_replays_after_crash_before_issue() {
     let reemitted: CoreToHostSpawnPayload =
         serde_json::from_value(reemitted.payload).expect("reemitted recovery spawn");
     assert_eq!(
+        reemitted.action.assignment_id.0,
+        "recovery-assignment-main-L1-a1"
+    );
+    assert_eq!(
+        reemitted.action.action_id.0,
+        "action-recovery-assignment-main-L1-a1"
+    );
+    assert_eq!(
         reemitted.action.assignment_id,
         recovery.action.assignment_id
     );
@@ -1399,6 +1425,77 @@ fn blocked_delivery_recovery_replays_after_crash_before_issue() {
             .contains("recovery:resumed")
     );
     reemitter.shutdown();
+}
+
+#[test]
+fn bug_187_recovery_resume_rejects_duplicate_source_binding_before_spawn() {
+    let (root, event_log) = pending_delivery_recovery_crash("bug-187-duplicate-source");
+    let source = durable_binding_for_assignment(&event_log, "assignment-main-L1");
+    let mut duplicate = source.clone();
+    duplicate.run_revision += 1;
+    append_durable_ref(
+        &event_log,
+        runner::binding_ref(&duplicate).expect("duplicate source binding ref"),
+    );
+
+    let mut resumed = CoreProcess::spawn(&root);
+    let rejected = resumed.send_json(autopilot_command(3));
+    assert_eq!(rejected.kind, "done", "response: {rejected:?}");
+    assert!(
+        done_status(&rejected)
+            .contains("recovery source binding duplicate for assignment assignment-main-L1: 2"),
+        "response: {rejected:?}"
+    );
+    let events = fs::read_to_string(&event_log).expect("duplicate recovery events");
+    assert!(
+        !events.contains("delivery:recovery-required"),
+        "duplicate source binding spawned recovery: {events}"
+    );
+    resumed.shutdown();
+}
+
+#[test]
+fn bug_187_recovery_resume_rejects_malformed_binding_before_spawn() {
+    let (root, event_log) = pending_delivery_recovery_crash("bug-187-malformed-binding");
+    append_durable_ref(
+        &event_log,
+        Ref(format!("{}{{malformed", runner::ISSUED_BINDING_REF_PREFIX)),
+    );
+
+    let mut resumed = CoreProcess::spawn(&root);
+    let rejected = resumed.send_json(autopilot_command(3));
+    assert_eq!(rejected.kind, "done", "response: {rejected:?}");
+    assert!(
+        done_status(&rejected).contains("recovery durable runner binding ref is malformed"),
+        "response: {rejected:?}"
+    );
+    let events = fs::read_to_string(&event_log).expect("malformed recovery events");
+    assert!(
+        !events.contains("delivery:recovery-required"),
+        "malformed binding spawned recovery: {events}"
+    );
+    resumed.shutdown();
+}
+
+#[test]
+fn bug_187_recovery_resume_rejects_local_directive_tamper_before_spawn() {
+    let (root, event_log, recovery_spec) =
+        issued_delivery_recovery_crash("bug-187-directive-tamper");
+    rewrite_local_recovery_directive_and_spec(&recovery_spec);
+
+    let mut resumed = CoreProcess::spawn(&root);
+    let rejected = resumed.send_json(autopilot_command(3));
+    assert_eq!(rejected.kind, "done", "response: {rejected:?}");
+    assert!(
+        done_status(&rejected).contains("delivery assignment digest drift"),
+        "response: {rejected:?}"
+    );
+    let events = fs::read_to_string(&event_log).expect("tampered recovery events");
+    assert!(
+        !events.contains("recovery:resumed"),
+        "tampered directive re-emitted recovery: {events}"
+    );
+    resumed.shutdown();
 }
 
 #[test]
@@ -2181,6 +2278,143 @@ fn delivery_blocked_carrier_for_core_with_class_and_denials(
         "tool_audit_ref":audit_path.display().to_string(),"tool_audit_digest":sha256_hex(&audit_bytes),
         "submission_digest":submission_digest,"submission":submission
     })
+}
+
+fn recoverable_delivery_for_crash(
+    fixture_name: &str,
+) -> (CoreProcess, CoreToHostSpawnPayload, PathBuf, PathBuf) {
+    let (mut core, spawn, spec, carrier_path, _worktree) = launched_core_delivery(fixture_name);
+    fs::create_dir_all(carrier_path.parent().expect("carrier parent")).expect("carrier dir");
+    fs::write(
+        &carrier_path,
+        serde_json::to_vec_pretty(&delivery_blocked_carrier_for_core(&spec, 2))
+            .expect("blocked carrier"),
+    )
+    .expect("carrier write");
+    let recovery = core.send_json(serde_json::json!({"v":1,"id":2,"kind":"task-completed","payload":{"task_id":"task-bug-187-recovery-crash","action_id":spawn.action.action_id,"assignment_id":spawn.action.assignment_id,"status":"completed"}}));
+    assert_eq!(recovery.kind, "spawn", "recovery response: {recovery:?}");
+    let recovery: CoreToHostSpawnPayload =
+        serde_json::from_value(recovery.payload).expect("recovery spawn payload");
+    let event_log = core.event_log().to_path_buf();
+    let root = event_log
+        .ancestors()
+        .nth(4)
+        .expect("fixture root from event log")
+        .to_path_buf();
+    (core, recovery, root, event_log)
+}
+
+fn pending_delivery_recovery_crash(fixture_name: &str) -> (PathBuf, PathBuf) {
+    let (core, _recovery, root, event_log) = recoverable_delivery_for_crash(fixture_name);
+    core.shutdown();
+    let events = fs::read_to_string(&event_log).expect("events before crash projection");
+    let lines = events.lines().collect::<Vec<_>>();
+    let blocked_index = lines
+        .iter()
+        .position(|line| line.contains("agent:delivery-blocked"))
+        .expect("durable blocked event");
+    let cutoff = lines
+        .iter()
+        .enumerate()
+        .skip(blocked_index + 1)
+        .find_map(|(index, line)| line.contains("transcript:recorded").then_some(index))
+        .expect("durable transcript event before recovery issue");
+    fs::write(&event_log, format!("{}\n", lines[..=cutoff].join("\n")))
+        .expect("project crash before recovery issue");
+    (root, event_log)
+}
+
+fn issued_delivery_recovery_crash(fixture_name: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let (core, recovery, root, event_log) = recoverable_delivery_for_crash(fixture_name);
+    let recovery_spec = root.join(format!(
+        ".pi/autopilot/main/worktrees/L1/.pi/autopilot/runner/specs/{}.json",
+        recovery.action.assignment_id.0
+    ));
+    core.shutdown();
+    let events = fs::read_to_string(&event_log).expect("events after recovery issue");
+    let lines = events.lines().collect::<Vec<_>>();
+    let cutoff = lines
+        .iter()
+        .rposition(|line| line.contains("delivery:recovery-required"))
+        .expect("durable recovery issue event");
+    fs::write(&event_log, format!("{}\n", lines[..=cutoff].join("\n")))
+        .expect("project crash after recovery issue");
+    (root, event_log, recovery_spec)
+}
+
+fn durable_binding_for_assignment(
+    event_log: &Path,
+    assignment_id: &str,
+) -> runner::IssuedRunnerBinding {
+    fs::read_to_string(event_log)
+        .expect("durable events")
+        .lines()
+        .filter_map(|line| serde_json::from_str::<kernel::generated::EventRow>(line).ok())
+        .flat_map(|event| event.artifact_refs)
+        .filter_map(|reference| runner::decode_binding_ref(&reference.0))
+        .find(|binding| binding.assignment_id.0 == assignment_id)
+        .unwrap_or_else(|| panic!("missing durable binding {assignment_id}"))
+}
+
+fn append_durable_ref(event_log: &Path, reference: Ref) {
+    let events = fs::read_to_string(event_log).expect("durable events");
+    let mut lines = events.lines().map(str::to_owned).collect::<Vec<_>>();
+    let last = lines.last_mut().expect("durable event");
+    let mut event: kernel::generated::EventRow =
+        serde_json::from_str(last).expect("durable event json");
+    event.artifact_refs.push(reference);
+    *last = serde_json::to_string(&event).expect("rewritten durable event");
+    fs::write(event_log, format!("{}\n", lines.join("\n"))).expect("write durable event");
+}
+
+fn rewrite_local_recovery_directive_and_spec(spec_path: &Path) {
+    let mut spec: serde_json::Value =
+        serde_json::from_slice(&fs::read(spec_path).expect("recovery spec")).expect("spec json");
+    let assignment_path = PathBuf::from(
+        spec["assignment_path"]
+            .as_str()
+            .expect("recovery assignment path"),
+    );
+    let mut artifact: serde_json::Value =
+        serde_json::from_slice(&fs::read(&assignment_path).expect("recovery assignment artifact"))
+            .expect("recovery assignment json");
+    let directive = artifact["recovery"]
+        .as_object_mut()
+        .expect("recovery directive");
+    directive.insert(
+        "trigger_assignment_id".to_owned(),
+        serde_json::json!("forged-trigger-assignment"),
+    );
+    directive.insert("trigger_phase".to_owned(), serde_json::json!("execution"));
+    directive.insert(
+        "diagnosis_details".to_owned(),
+        serde_json::json!(["forged local diagnosis"]),
+    );
+    directive.insert(
+        "original_gate".to_owned(),
+        serde_json::json!("autopilot.delivery_submission.v2"),
+    );
+    let artifact_bytes = serde_json::to_vec_pretty(&artifact).expect("rewritten recovery artifact");
+    fs::write(&assignment_path, &artifact_bytes).expect("write rewritten recovery artifact");
+    spec["assignment_digest"] = serde_json::json!(sha256_hex(&artifact_bytes));
+    let context = serde_json::json!({
+        "workstream": spec["workstream"],
+        "lane_id": spec["lane_id"],
+        "attempt": spec["attempt"],
+        "base_commit": spec["base_commit"],
+        "worktree": spec["worktree"],
+        "required_focused_evidence": spec["required_focused_evidence"],
+        "assignment_path": spec["assignment_path"],
+        "assignment_digest": spec["assignment_digest"],
+    });
+    spec["context_digest"] = serde_json::json!(sha256_hex(
+        &serde_json::to_vec(&context).expect("delivery context bytes"),
+    ));
+    fs::write(
+        spec_path,
+        serde_json::to_vec_pretty(&spec).expect("rewritten recovery spec"),
+    )
+    .expect("write rewritten recovery spec");
 }
 
 fn git_init_for_core(root: &Path) {

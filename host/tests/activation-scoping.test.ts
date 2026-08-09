@@ -17,8 +17,9 @@ import {
  * BUG-184 — pi-autopilot ran its full runtime at load time in every Pi session.
  *
  * `pi-autopilot` is installed globally, so its extension factory executed in
- * EVERY session in EVERY directory. That registered 7 LLM tools carrying
- * promptSnippet/promptGuidelines into the system prompt of unrelated sessions,
+ * EVERY session in EVERY directory. That bulk-registered planning terminal
+ * tools carrying promptSnippet/promptGuidelines into the system prompt of
+ * unrelated sessions,
  * subscribed to the shared background EventBus, and unconditionally sent a
  * `shutdown` frame at exit — spawning the Rust Core child and rendering
  * "[pi-autopilot] Autopilot done: ok:shutdown" in sessions that never used
@@ -40,16 +41,6 @@ const EXACT_COMMANDS = Object.freeze([
   "autopilot-onboard",
   "autopilot-plan",
   "autopilot-status",
-]);
-
-const EXACT_TOOLS = Object.freeze([
-  "autopilot_submit_atoms",
-  "autopilot_submit_context",
-  "autopilot_submit_plan_cluster",
-  "autopilot_submit_resolution",
-  "autopilot_submit_review",
-  "autopilot_submit_scout_report",
-  "autopilot_submit_synthesis",
 ]);
 
 const SESSION_A = "019faf00-0000-7000-8000-00000000000a";
@@ -91,7 +82,7 @@ test("BUG-184 T1: a session that never invokes a command leaves zero Autopilot f
   }
 });
 
-test("BUG-184 T1b: the packaged entrypoint registers its 7 tools only after activation", async () => {
+test("BUG-184 T1b: activation leaves terminal descriptor ownership to the selected child profile", async () => {
   const state = tempStateRoot();
   const pi = recordingPi();
   const transport = fakeTransport();
@@ -107,7 +98,7 @@ test("BUG-184 T1b: the packaged entrypoint registers its 7 tools only after acti
     assert.deepEqual(pi.toolNames, [], "packaged entrypoint must not register tools at load");
 
     await pi.commands.get("autopilot-plan").handler("main A.md B.md C.md CTX.md", commandCtx(SESSION_A));
-    assert.deepEqual([...pi.toolNames].sort(), EXACT_TOOLS);
+    assert.deepEqual(pi.toolNames, [], "the parent owns no terminal descriptors after activation; the selected child profile registers its one descriptor");
   } finally {
     state.cleanup();
   }
@@ -210,7 +201,7 @@ test("BUG-184 T5: activation survives /reload and never reads a run-state root",
     } as never);
     await first.emit("session_start", { reason: "startup" }, ctxFor(SESSION_A));
     await first.commands.get("autopilot-plan").handler("main A.md B.md C.md CTX.md", commandCtx(SESSION_A));
-    assert.deepEqual([...first.toolNames].sort(), EXACT_TOOLS);
+    assert.deepEqual(first.toolNames, [], "the activated parent leaves terminal descriptor ownership to its selected child profile");
 
     await first.emit("session_shutdown", { reason: "reload" }, ctxFor(SESSION_A));
     // reload must PRESERVE the record
@@ -227,7 +218,7 @@ test("BUG-184 T5: activation survives /reload and never reads a run-state root",
     assert.deepEqual(second.toolNames, [], "tools must not exist before session_start restates the grant");
 
     await second.emit("session_start", { reason: "reload" }, ctxFor(SESSION_A));
-    assert.deepEqual([...second.toolNames].sort(), EXACT_TOOLS, "reload must re-arm the exact 7 tools");
+    assert.deepEqual(second.toolNames, [], "reload restores parent activation without bulk-registering child-profile terminal descriptors");
 
     assert.deepEqual(readdirSync(join(runsRoot)), ["sentinel-run-directory"], "run history must be untouched");
   } finally {
@@ -318,7 +309,7 @@ test("BUG-184 T7: activating one session leaves a concurrent session inert", asy
     await bystander.emit("session_start", { reason: "startup" }, ctxFor(SESSION_B));
     await armed.commands.get("autopilot-plan").handler("main A.md B.md C.md CTX.md", commandCtx(SESSION_A));
 
-    assert.deepEqual([...armed.toolNames].sort(), EXACT_TOOLS);
+    assert.deepEqual(armed.toolNames, [], "the activated parent leaves its terminal descriptor to the selected child profile");
     assert.deepEqual(bystander.toolNames, []);
     assert.deepEqual(bystanderTransport.calls, []);
     assert.equal(bystanderBackground.terminalSubscriptions, 0);

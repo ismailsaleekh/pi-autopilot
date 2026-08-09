@@ -34,6 +34,9 @@ pub struct RpcClient {
     stderr_completion_failed: bool,
     stderr_limit: usize,
     stderr_metrics: Arc<StderrMetrics>,
+    /// Captured only for observe-mode V2 work-map evidence. This is the
+    /// locally executed Pi binary version, not provider/model metadata.
+    pi_version: Option<String>,
 }
 impl RpcClient {
     pub fn spawn(config: RpcSpawnConfig) -> Result<Self, RpcError> {
@@ -96,6 +99,36 @@ impl RpcClient {
                 "terminal profile/binding/policy without runtime add-on".to_owned(),
             ));
         }
+        let pi_version = if matches!(
+            config.terminal_profile.as_deref(),
+            Some(
+                "planning.work-map.v2:autopilot_submit_plan_cluster"
+                    | "planning.work-map.v2:autopilot_submit_synthesis"
+                    | "recovery-work-map.v2"
+            )
+        ) {
+            let output = Command::new(&config.pi_executable)
+                .arg("--version")
+                .output()
+                .map_err(|error| RpcError::Io(format!("Pi --version failed: {error}")))?;
+            if !output.status.success() || output.stdout.len() > 4096 {
+                return Err(RpcError::ProtocolViolation(
+                    "Pi --version failed or exceeded evidence bound".to_owned(),
+                ));
+            }
+            let version = String::from_utf8(output.stdout)
+                .map_err(|error| RpcError::Utf8(error.to_string()))?
+                .trim()
+                .to_owned();
+            if version.is_empty() {
+                return Err(RpcError::ProtocolViolation(
+                    "Pi --version emitted no version".to_owned(),
+                ));
+            }
+            Some(version)
+        } else {
+            None
+        };
         std::fs::create_dir_all(&config.session_dir).map_err(|error| {
             RpcError::Io(format!(
                 "run-owned pi session directory unavailable at {}: {error}",
@@ -180,7 +213,12 @@ impl RpcClient {
             stderr_completion_failed: false,
             stderr_limit,
             stderr_metrics,
+            pi_version,
         })
+    }
+
+    pub fn pi_version(&self) -> Option<&str> {
+        self.pi_version.as_deref()
     }
     pub fn send_command(&mut self, command: RpcCommand) -> Result<(), RpcError> {
         self.protocol.register_request(&command)?;

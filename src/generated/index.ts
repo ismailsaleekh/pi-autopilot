@@ -57,6 +57,7 @@ export type FindingKindV2 = "source-defect" | "test-defect" | "contract-defect" 
 export type ForwardVerdict = "FORWARD_READY" | "FORWARD_BLOCKED" | "BLOCKED";
 export type LaneState = "allocated" | "implementing" | "forward-validating-1" | "forward-fixing" | "forward-validating-2" | "forward-ready" | "release-queued" | "forward-integrated" | "deep-validating" | "closure-needs-fix" | "repair-queued" | "closed";
 export type PackageCheckKind = "clean-exact-package-tip";
+export type PackageProofKindV2 = "clean-exact-package-tip" | "vendored-bytes-match-origin";
 export type PlanUnitKind = "implementation";
 export type PlanningAtomKind = "work" | "decision" | "constraint" | "acceptance" | "premise" | "question" | "reference";
 export type PlanningQuestionClass = "invalidated-decision" | "missing-material-decision" | "material-underdetermination" | "dod-hole" | "unsafe-irreversible";
@@ -159,6 +160,7 @@ export interface AgentRunSpec {
   runtime_extension_path?: Path | null;
   runtime_extension_digest?: Digest | null;
   terminal_profile_id?: string | null;
+  terminal_route?: TerminalRoute | null;
   unavailable_tools?: ToolName[] | null;
   producer_assignment_ids?: Id[] | null;
   validation_id?: Id | null;
@@ -942,6 +944,15 @@ export interface TaskDocument {
   body: string;
 }
 
+export interface TerminalRoute {
+  version: string;
+  profile_id: string;
+  tool_name: ToolName;
+  boundary_id: ContractId;
+  result_contract: ContractId;
+  schema_digest: Digest;
+}
+
 export interface ValidationAdmissionDiagnostic {
   schema: SchemaId;
   boundary_id: ContractId;
@@ -1424,6 +1435,52 @@ export interface PlanUnitPackageCheck {
 }
 
 export interface WorkMapRecovery {
+  disposition: RecoveryDisposition;
+  diagnosis_refs: Ref[];
+  root_cause: string;
+  affected_unit_ids: Id[];
+  actions: string[];
+  preserved_authority: string[];
+  repair_evidence_refs: Ref[];
+}
+
+export interface WorkMapV2 {
+  schema: SchemaId;
+  units: PlanUnitV2[];
+  recovery?: WorkMapRecoveryV2;
+}
+
+export interface PlanUnitV2 {
+  id: Id;
+  kind: PlanUnitKind;
+  objective: string;
+  criteria: string[];
+  depends_on: Id[];
+  files: Path[];
+  package_scope_files: Path[];
+  commands: PlanUnitCommand[];
+  package_proofs: PlanUnitPackageProofV2[];
+  vendor_bindings: PlanUnitVendorBindingV2[];
+  provenance_manifest_destination: Path | null;
+  links: Id[];
+}
+
+export interface PlanUnitPackageProofV2 {
+  proof_id: Id;
+  kind: PackageProofKindV2;
+  criterion_ordinals: number[];
+  expected: string;
+  vendor_binding_ids: Id[];
+}
+
+export interface PlanUnitVendorBindingV2 {
+  binding_id: Id;
+  origin_path: Path;
+  destination: Path;
+  origin_anchor: string;
+}
+
+export interface WorkMapRecoveryV2 {
   disposition: RecoveryDisposition;
   diagnosis_refs: Ref[];
   root_cause: string;

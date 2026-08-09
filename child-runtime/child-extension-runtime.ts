@@ -1,48 +1,20 @@
 import { createHash } from "node:crypto";
-import {
-  closeSync,
-  constants,
-  fstatSync,
-  lstatSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  readSync,
-  realpathSync,
-} from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync } from "node:fs";
 import { access, readFile, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import {
-  createBashTool,
-  createEditTool,
-  createLocalBashOperations,
-  createReadTool,
-  createWriteTool,
-  defineTool,
-  type BashOperations,
-  type EditOperations,
-  type ExtensionAPI,
-  type ReadOperations,
-  type WriteOperations,
-} from "@earendil-works/pi-coding-agent";
+import { createBashTool, createEditTool, createLocalBashOperations, createReadTool, createWriteTool, defineTool, type BashOperations, type EditOperations, type ExtensionAPI, type ReadOperations, type WriteOperations } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 import type { SubmitToolDescriptor } from "../src/generated/tool-schemas.ts";
 
-export const CHILD_RECEIPT_ENTRY = "pi-autopilot:child-tools";
-export const DELIVERY_POLICY_VERSION = "autopilot.delivery_tool_policy.v4";
-export const APPROVED_COMMAND_TOOL = "autopilot_run_approved_command";
+export const CHILD_RECEIPT_ENTRY = "pi-autopilot:child-tools"; export const DELIVERY_POLICY_VERSION = "autopilot.delivery_tool_policy.v4";
+export const DELIVERY_POLICY_V5_VERSION = "autopilot.delivery_tool_policy.v5"; export const APPROVED_COMMAND_TOOL = "autopilot_run_approved_command";
 export const DELIVERY_POLICY_OVERRIDES = [APPROVED_COMMAND_TOOL, "edit", "write"] as const;
 
-const DELIVERY_PROFILE_ID = "delivery-status.v2";
-const VALIDATION_PROFILE_ID = "validation-status.v3";
-const MAX_DELIVERY_ASSIGNMENT_BYTES = 256 * 1024;
-const MAX_DELIVERY_POLICY_DENIALS = 32;
-const MAX_APPROVED_COMMAND_EXECUTIONS = 64;
-const MAX_SCOPE_SNAPSHOT_FILE_BYTES = 64 * 1024 * 1024;
-const MAX_SCOPE_SNAPSHOT_TOTAL_BYTES = 256 * 1024 * 1024;
+const DELIVERY_PROFILE_ID = "delivery-status.v2", VALIDATION_PROFILE_ID = "validation-status.v3";
+const MAX_DELIVERY_ASSIGNMENT_BYTES = 256 * 1024, MAX_CORE_MATERIALIZATION_RECEIPT_BYTES = 512 * 1024, MAX_DELIVERY_POLICY_DENIALS = 32, MAX_APPROVED_COMMAND_EXECUTIONS = 64, MAX_SCOPE_SNAPSHOT_FILE_BYTES = 64 * 1024 * 1024, MAX_SCOPE_SNAPSHOT_TOTAL_BYTES = 256 * 1024 * 1024;
 const SCOPE_SNAPSHOT_DOMAIN = "autopilot.delivery_scope_snapshot.v1\0";
 const SCOPE_SNAPSHOT_FAILURE_DOMAIN = "autopilot.delivery_scope_snapshot_failure.v1\0";
 const DELIVERY_ENV_KEYS = [
@@ -81,16 +53,16 @@ type ValidationEvidenceReceipt = {
   active_override: "read";
 };
 
+type CoreBaselineLeaf = { destination: string; unit_id: string; kind: string; binding_id: string | null; mode: string; bytes_sha256: string; origin_path: string | null; origin_anchor: string | null; origin_git_blob_oid: string | null };
+type VendorBinding = { binding_id: string; origin_path: string; destination: string; origin_anchor: string; origin_git_blob_oid: string; origin_mode: string; origin_bytes_sha256: string };
+type VendoringRow = { unit_id: string; provenance_manifest_destination: string | null; vendor_bindings: VendorBinding[] };
+type Materialization = { intention_path: string; intention_digest: string; receipt_path: string; receipt_digest: string; baseline: CoreBaselineLeaf[] };
+type DeliveryRecovery = { trigger_assignment_id: string };
 type DeliveryAssignmentArtifact = {
-  schema: string;
-  workstream: string;
-  assignment_id: string;
-  lane_id: string;
-  attempt: number;
-  base_commit: string;
-  worktree: string;
-  ordered_units: DeliveryUnit[];
-  approved_commands: DeliveryApprovedCommandBinding[];
+  schema: string; workstream: string; assignment_id: string; lane_id: string; attempt: number;
+  base_commit: string; worktree: string; ordered_units: DeliveryUnit[];
+  approved_commands: DeliveryApprovedCommandBinding[]; protected_baseline?: CoreBaselineLeaf[];
+  baseline_digest?: string; receipt_path?: string; selected_vendoring?: VendoringRow[]; materialization?: Materialization; recovery?: DeliveryRecovery;
 };
 
 type DeliveryApprovedCommandBinding = {
@@ -143,15 +115,9 @@ type ApprovedCommandExecutionLedger = {
 };
 
 type DeliveryPolicyReceipt = {
-  version: string;
-  assignment_path: string;
-  assignment_digest: string;
-  worktree: string;
-  cwd: string;
-  policy_digest: string;
-  allowed_unit_file_count: number;
-  approved_command_count: number;
-  active_overrides: string[];
+  version: string; assignment_path: string; assignment_digest: string; worktree: string; cwd: string;
+  policy_digest: string; allowed_unit_file_count: number; approved_command_count: number; active_overrides: string[];
+  mutable_authored_leaf_count?: number; protected_core_leaf_count?: number; baseline_digest?: string;
 };
 
 export class ValidationReadPolicy {
@@ -230,9 +196,13 @@ export class DeliveryPolicy {
   readonly worktree: string;
   readonly cwd: string;
   readonly policyDigest: string;
+  readonly version: string;
   readonly allowedRelativePaths: Set<string>;
-  readonly allowedAbsolutePaths: Set<string>;
-  readonly allowedParentDirectories: Set<string>;
+  readonly protectedRelativePaths: Set<string>;
+  readonly snapshotRelativePaths: Set<string>;
+  readonly baselineDigest: string | undefined;
+  readonly allowedAbsolutePaths: Set<string>; readonly allowedParentDirectories: Set<string>;
+  readonly snapshotAbsolutePaths: Set<string>; readonly snapshotParentDirectories: Set<string>;
   readonly approvedCommands: Map<string, ApprovedCommand>;
   readonly approvedCommandBytes: Set<string>;
   readonly queue = new SerialPolicyQueue();
@@ -246,8 +216,8 @@ export class DeliveryPolicy {
     assignmentDigest: string;
     worktree: string;
     cwd: string;
-    policyDigest: string;
-    allowedRelativePaths: Set<string>;
+    policyDigest: string; version: string; allowedRelativePaths: Set<string>;
+    protectedRelativePaths: Set<string>; baselineDigest?: string;
     approvedCommands: Map<string, ApprovedCommand>;
   }) {
     this.assignmentPath = input.assignmentPath;
@@ -255,7 +225,11 @@ export class DeliveryPolicy {
     this.worktree = input.worktree;
     this.cwd = input.cwd;
     this.policyDigest = input.policyDigest;
+    this.version = input.version;
     this.allowedRelativePaths = input.allowedRelativePaths;
+    this.protectedRelativePaths = input.protectedRelativePaths;
+    this.snapshotRelativePaths = new Set([...input.allowedRelativePaths, ...input.protectedRelativePaths]);
+    this.baselineDigest = input.baselineDigest;
     this.approvedCommands = input.approvedCommands;
     this.approvedCommandBytes = new Set([...input.approvedCommands.values()].map((item) => item.command));
     this.allowedAbsolutePaths = new Set(
@@ -264,20 +238,22 @@ export class DeliveryPolicy {
     this.allowedParentDirectories = new Set(
       [...this.allowedAbsolutePaths].flatMap((absolutePath) => ancestorDirectoryChain(this.worktree, absolutePath)),
     );
+    this.snapshotAbsolutePaths = new Set(
+      [...this.snapshotRelativePaths].map((relativePath) => path.resolve(this.worktree, relativePath)),
+    );
+    this.snapshotParentDirectories = new Set(
+      [...this.snapshotAbsolutePaths].flatMap((absolutePath) => ancestorDirectoryChain(this.worktree, absolutePath)),
+    );
   }
 
   receipt(): DeliveryPolicyReceipt {
-    return {
-      version: DELIVERY_POLICY_VERSION,
-      assignment_path: this.assignmentPath,
-      assignment_digest: this.assignmentDigest,
-      worktree: this.worktree,
-      cwd: this.cwd,
-      policy_digest: this.policyDigest,
-      allowed_unit_file_count: this.allowedRelativePaths.size,
-      approved_command_count: this.approvedCommands.size,
-      active_overrides: [...DELIVERY_POLICY_OVERRIDES],
-    };
+    const common = { version: this.version, assignment_path: this.assignmentPath, assignment_digest: this.assignmentDigest,
+      worktree: this.worktree, cwd: this.cwd, policy_digest: this.policyDigest, approved_command_count: this.approvedCommands.size,
+      active_overrides: [...DELIVERY_POLICY_OVERRIDES] };
+    return this.version === DELIVERY_POLICY_VERSION
+      ? { ...common, allowed_unit_file_count: this.allowedRelativePaths.size }
+      : { ...common, allowed_unit_file_count: this.snapshotRelativePaths.size, mutable_authored_leaf_count: this.allowedRelativePaths.size,
+        protected_core_leaf_count: this.protectedRelativePaths.size, baseline_digest: this.baselineDigest };
   }
 
   recordUnapprovedCommandReference(request: { command_id: string; cwd: string }): void {
@@ -362,12 +338,6 @@ export function runAutopilotChild(
     if (validationPolicy) receipt["validation_evidence_policy"] = validationPolicy.receipt();
     pi.appendEntry(CHILD_RECEIPT_ENTRY, receipt);
   });
-}
-
-export function registerSubmitTools(pi: ExtensionAPI, tools: SubmitTools, _wrapperUrl: string): void {
-  for (const tool of tools) {
-    if (tool.boundary_id.startsWith("planning.") && tool.name !== "autopilot_emit_status") registerTool(pi, tool);
-  }
 }
 
 export function registerValidationReadOverride(pi: ExtensionAPI, policy: ValidationReadPolicy): void {
@@ -694,33 +664,21 @@ export function loadDeliveryPolicyFromEnv(env: DeliveryEnv, processCwd: string):
   ) {
     throw new Error("autopilot delivery policy has no unit files or commands");
   }
-  const policyDigest = deliveryPolicyDigest({ assignmentPath, assignmentDigest, worktree, cwd });
-  if (policyDigest !== env.AUTOPILOT_DELIVERY_POLICY_DIGEST) {
-    throw new Error("autopilot delivery policy digest drift");
-  }
-  return new DeliveryPolicy({
-    assignmentPath,
-    assignmentDigest,
-    worktree,
-    cwd,
-    policyDigest,
-    allowedRelativePaths,
-    approvedCommands,
-  });
+  const v5 = artifact.schema === "autopilot.delivery_assignment.v4";
+  const protectedRelativePaths = v5 ? validateV5Baseline(artifact, worktree, seenUnitFilePaths) : new Set<string>();
+  for (const protectedPath of protectedRelativePaths) allowedRelativePaths.delete(protectedPath);
+  if (allowedRelativePaths.size === 0) throw new Error("autopilot delivery policy has no mutable authored leaves");
+  const baselineDigest = v5 ? artifact.baseline_digest : undefined;
+  const policyDigest = deliveryPolicyDigest({ assignmentPath, assignmentDigest, worktree, cwd, version: v5 ? DELIVERY_POLICY_V5_VERSION : DELIVERY_POLICY_VERSION });
+  if (policyDigest !== env.AUTOPILOT_DELIVERY_POLICY_DIGEST) throw new Error("autopilot delivery policy digest drift");
+  return new DeliveryPolicy({ assignmentPath, assignmentDigest, worktree, cwd, policyDigest,
+    version: v5 ? DELIVERY_POLICY_V5_VERSION : DELIVERY_POLICY_VERSION, allowedRelativePaths, protectedRelativePaths, baselineDigest, approvedCommands });
 }
 
 export function deliveryPolicyDigest(input: {
-  assignmentPath: string;
-  assignmentDigest: string;
-  worktree: string;
-  cwd: string;
+  assignmentPath: string; assignmentDigest: string; worktree: string; cwd: string; version?: string;
 }): string {
-  return sha256Hex(
-    Buffer.from(
-      `${DELIVERY_POLICY_VERSION}\0${input.assignmentPath}\0${input.assignmentDigest}\0${input.worktree}\0${input.cwd}`,
-      "utf8",
-    ),
-  );
+  return sha256Hex(Buffer.from(`${input.version ?? DELIVERY_POLICY_VERSION}\0${input.assignmentPath}\0${input.assignmentDigest}\0${input.worktree}\0${input.cwd}`, "utf8"));
 }
 
 function createDeliveryBashOperations(policy: DeliveryPolicy): BashOperations {
@@ -845,9 +803,11 @@ function ensureApprovedDirectoryLevel(dir: string): void {
   if (!metadata.isDirectory()) throw new Error(`Delivery policy blocked non-directory parent: ${dir}`);
 }
 
-function assertMutationTopology(policy: DeliveryPolicy, absolutePath: string, requireExistingFile: boolean): void {
+function assertMutationTopology(policy: Pick<DeliveryPolicy, "worktree" | "allowedAbsolutePaths" | "allowedParentDirectories"> & Partial<Pick<DeliveryPolicy, "snapshotAbsolutePaths" | "snapshotParentDirectories">>, absolutePath: string, requireExistingFile: boolean, snapshot = false): void {
+  const allowedPaths = snapshot ? policy.snapshotAbsolutePaths : policy.allowedAbsolutePaths;
+  const allowedParents = snapshot ? policy.snapshotParentDirectories : policy.allowedParentDirectories;
   const resolved = path.resolve(absolutePath);
-  if (!policy.allowedAbsolutePaths.has(resolved)) {
+  if (allowedPaths === undefined || allowedParents === undefined || !allowedPaths.has(resolved)) {
     throw new Error(`Delivery policy blocked unapproved mutation target: ${absolutePath}`);
   }
   const relative = path.relative(policy.worktree, resolved);
@@ -872,7 +832,7 @@ function assertMutationTopology(policy: DeliveryPolicy, absolutePath: string, re
       if (
         (error as NodeJS.ErrnoException).code === "ENOENT" &&
         !requireExistingFile &&
-        policy.allowedParentDirectories.has(current)
+        allowedParents.has(current)
       ) {
         continue;
       }
@@ -892,27 +852,68 @@ function assertMutationTopology(policy: DeliveryPolicy, absolutePath: string, re
 }
 
 function parseDeliveryAssignment(bytes: Buffer): DeliveryAssignmentArtifact {
-  let value: unknown;
-  try {
-    value = JSON.parse(bytes.toString("utf8"));
-  } catch (error) {
-    throw new Error(`autopilot delivery assignment malformed JSON: ${error instanceof Error ? error.message : error}`);
-  }
+  let value: unknown; try { value = JSON.parse(bytes.toString("utf8")); } catch (error) {
+    throw new Error(`autopilot delivery assignment malformed JSON: ${error instanceof Error ? error.message : error}`); }
   if (value === null || typeof value !== "object") throw new Error("autopilot delivery assignment is not an object");
-  const object = value as Record<string, unknown>;
-  const ordered = object["ordered_units"];
-  if (!Array.isArray(ordered) || ordered.length === 0) throw new Error("autopilot delivery assignment has no ordered_units");
-  return {
-    schema: requiredString(object, "schema"),
-    workstream: requiredString(object, "workstream"),
-    assignment_id: requiredString(object, "assignment_id"),
-    lane_id: requiredString(object, "lane_id"),
-    attempt: requiredNumber(object, "attempt"),
-    base_commit: requiredString(object, "base_commit"),
-    worktree: requiredString(object, "worktree"),
-    ordered_units: ordered.map((unit, index) => parseDeliveryUnit(unit, index)),
-    approved_commands: parseApprovedCommandBindings(object["approved_commands"]),
-  };
+  const object = value as Record<string, unknown>; const schema = requiredString(object, "schema");
+  if (schema !== "autopilot.delivery_assignment.v3" && schema !== "autopilot.delivery_assignment.v4") throw new Error("autopilot delivery assignment schema drift");
+  const ordered = object["ordered_units"]; if (!Array.isArray(ordered) || ordered.length === 0) throw new Error("autopilot delivery assignment has no ordered_units");
+  const artifact: DeliveryAssignmentArtifact = { schema, workstream: requiredString(object, "workstream"), assignment_id: requiredString(object, "assignment_id"),
+    lane_id: requiredString(object, "lane_id"), attempt: requiredNumber(object, "attempt"), base_commit: requiredString(object, "base_commit"),
+    worktree: requiredString(object, "worktree"), ordered_units: ordered.map((unit, index) => parseDeliveryUnit(unit, index)), approved_commands: parseApprovedCommandBindings(object["approved_commands"]) };
+  return schema === "autopilot.delivery_assignment.v3" ? artifact : parseV4AssignmentTail(object, artifact);
+}
+
+function parseV4AssignmentTail(object: Record<string, unknown>, artifact: DeliveryAssignmentArtifact): DeliveryAssignmentArtifact {
+  const keys = ["schema","workstream","assignment_id","lane_id","attempt","base_commit","worktree","ordered_units","approved_commands","recovery","approved_plan_binding_path","approved_plan_binding_digest","approved_image_digest","selected_vendoring","materialization"];
+  if (Object.keys(object).length !== keys.length || Object.keys(object).some((key) => !keys.includes(key))) throw new Error("autopilot V4 delivery assignment has unknown/missing fields");
+  for (const key of ["approved_plan_binding_path","approved_plan_binding_digest","approved_image_digest"] as const) requiredString(object, key);
+  const rows = object["selected_vendoring"]; if (!Array.isArray(rows)) throw new Error("autopilot V4 selected vendoring is absent");
+  const materialization = object["materialization"]; if (materialization === null || typeof materialization !== "object") throw new Error("autopilot V4 materialization is absent");
+  const m = materialization as Record<string, unknown>; const mkeys = ["intention_path","intention_digest","receipt_path","receipt_digest","baseline"];
+  if (Object.keys(m).length !== mkeys.length || Object.keys(m).some((key) => !mkeys.includes(key)) || !Array.isArray(m["baseline"])) throw new Error("autopilot V4 materialization fields drift");
+  const baseline = m["baseline"].map((leaf, index) => parseCoreBaselineLeaf(leaf, index));
+  const parsed: Materialization = { intention_path: requiredString(m, "intention_path"), intention_digest: requiredDigest(m, "intention_digest"), receipt_path: requiredString(m, "receipt_path"), receipt_digest: requiredDigest(m, "receipt_digest"), baseline };
+  const recoveryValue = object["recovery"]; const recovery = recoveryValue === null ? undefined : recoveryValue !== null && typeof recoveryValue === "object" ? { trigger_assignment_id: requiredString(recoveryValue as Record<string, unknown>, "trigger_assignment_id") } : (() => { throw new Error("autopilot V4 recovery malformed"); })();
+  return { ...artifact, protected_baseline: baseline, baseline_digest: parsed.receipt_digest, receipt_path: parsed.receipt_path, selected_vendoring: rows.map(parseVendoringRow), materialization: parsed, recovery };
+}
+
+function nullableString(value: Record<string, unknown>, key: string): string | null { const item = value[key]; if (item !== null && typeof item !== "string") throw new Error(`autopilot V4 ${key} malformed`); return item; }
+function parseVendoringRow(value: unknown, index: number): VendoringRow {
+  if (value === null || typeof value !== "object") throw new Error(`autopilot V4 vendoring row ${index} malformed`); const row = value as Record<string, unknown>; const keys = ["unit_id","provenance_manifest_destination","vendor_bindings"];
+  if (Object.keys(row).length !== keys.length || Object.keys(row).some((key) => !keys.includes(key)) || !Array.isArray(row["vendor_bindings"])) throw new Error("autopilot V4 vendoring row fields drift");
+  const manifest = nullableString(row, "provenance_manifest_destination"); if (manifest !== null && !isSafeRelativeUnitPath(manifest)) throw new Error("autopilot V4 manifest destination drift");
+  return { unit_id: requiredString(row, "unit_id"), provenance_manifest_destination: manifest, vendor_bindings: row["vendor_bindings"].map((binding, bindingIndex) => parseVendorBinding(binding, bindingIndex)) };
+}
+function parseVendorBinding(value: unknown, index: number): VendorBinding {
+  if (value === null || typeof value !== "object") throw new Error(`autopilot V4 vendor binding ${index} malformed`); const binding = value as Record<string, unknown>; const keys = ["binding_id","origin_path","destination","origin_anchor","origin_git_blob_oid","origin_mode","origin_bytes_sha256"];
+  if (Object.keys(binding).length !== keys.length || Object.keys(binding).some((key) => !keys.includes(key))) throw new Error("autopilot V4 vendor binding fields drift");
+  const out: VendorBinding = { binding_id: requiredString(binding, "binding_id"), origin_path: requiredString(binding, "origin_path"), destination: requiredString(binding, "destination"), origin_anchor: requiredString(binding, "origin_anchor"), origin_git_blob_oid: requiredString(binding, "origin_git_blob_oid"), origin_mode: requiredString(binding, "origin_mode"), origin_bytes_sha256: requiredDigest(binding, "origin_bytes_sha256") };
+  if (!isSafeRelativeUnitPath(out.origin_path) || !isSafeRelativeUnitPath(out.destination) || !/^(100644|100755)$/.test(out.origin_mode)) throw new Error("autopilot V4 vendor binding authority drift"); return out;
+}
+function parseCoreBaselineLeaf(value: unknown, index: number): CoreBaselineLeaf {
+  if (value === null || typeof value !== "object") throw new Error(`autopilot V4 baseline leaf ${index} malformed`); const leaf = value as Record<string, unknown>; const keys = ["destination","unit_id","kind","binding_id","mode","bytes_sha256","origin_path","origin_anchor","origin_git_blob_oid"];
+  if (Object.keys(leaf).length !== keys.length || Object.keys(leaf).some((key) => !keys.includes(key))) throw new Error("autopilot V4 baseline leaf fields drift");
+  const out: CoreBaselineLeaf = { destination: requiredString(leaf, "destination"), unit_id: requiredString(leaf, "unit_id"), kind: requiredString(leaf, "kind"), binding_id: nullableString(leaf, "binding_id"), mode: requiredString(leaf, "mode"), bytes_sha256: requiredDigest(leaf, "bytes_sha256"), origin_path: nullableString(leaf, "origin_path"), origin_anchor: nullableString(leaf, "origin_anchor"), origin_git_blob_oid: nullableString(leaf, "origin_git_blob_oid") };
+  if (!isSafeRelativeUnitPath(out.destination) || !/^(100644|100755)$/.test(out.mode)) throw new Error("autopilot V4 baseline leaf authority drift"); return out;
+}
+
+function validateV5Baseline(artifact: DeliveryAssignmentArtifact, worktree: string, unitFiles: Set<string>): Set<string> {
+  const m = artifact.materialization, rows = artifact.selected_vendoring, leaves = artifact.protected_baseline;
+  if (m === undefined || rows === undefined || leaves === undefined || artifact.baseline_digest !== m.receipt_digest || artifact.receipt_path !== m.receipt_path) throw new Error("autopilot V5 baseline missing");
+  if (rows.length !== artifact.ordered_units.length || rows.some((row, index) => row.unit_id !== artifact.ordered_units[index]?.id)) throw new Error("autopilot V5 selected vendoring row drift");
+  const expected: CoreBaselineLeaf[] = []; for (const row of rows) { for (const binding of row.vendor_bindings) expected.push({ destination: binding.destination, unit_id: row.unit_id, kind: "vendor", binding_id: binding.binding_id, mode: binding.origin_mode, bytes_sha256: binding.origin_bytes_sha256, origin_path: binding.origin_path, origin_anchor: binding.origin_anchor, origin_git_blob_oid: binding.origin_git_blob_oid }); if (row.provenance_manifest_destination !== null) { const bytes = Buffer.concat([...row.vendor_bindings].sort((a, b) => Buffer.compare(Buffer.from(a.destination), Buffer.from(b.destination))).map((binding) => Buffer.from(`${binding.origin_path}\t${binding.destination}\tsha256:${binding.origin_bytes_sha256}\n`, "utf8"))); expected.push({ destination: row.provenance_manifest_destination, unit_id: row.unit_id, kind: "manifest", binding_id: null, mode: "100644", bytes_sha256: sha256Hex(bytes), origin_path: null, origin_anchor: null, origin_git_blob_oid: null }); } }
+  expected.sort((a, b) => Buffer.compare(Buffer.from(a.destination), Buffer.from(b.destination)));
+  if (canonicalJson(leaves) !== canonicalJson(expected)) throw new Error("autopilot V5 baseline/selected authority drift");
+  const receiptPath = canonicalRegularFile("receipt_path", m.receipt_path); const receiptBytes = readBoundedRegularFileSync("V5 materialization receipt", receiptPath, MAX_CORE_MATERIALIZATION_RECEIPT_BYTES);
+  if (sha256Hex(receiptBytes) !== m.receipt_digest) throw new Error("autopilot V5 receipt digest drift");
+  let receiptValue: unknown; try { receiptValue = JSON.parse(receiptBytes.toString("utf8")); } catch { throw new Error("autopilot V5 receipt malformed"); }
+  if (Buffer.compare(receiptBytes, Buffer.from(canonicalJson(receiptValue), "utf8")) !== 0 || receiptValue === null || typeof receiptValue !== "object") throw new Error("autopilot V5 receipt canonical drift");
+  const receipt = receiptValue as Record<string, unknown>; const keys = ["schema","intention_path","intention_digest","workstream","assignment_id","lane_id","attempt","base_commit","worktree","completed_baseline"];
+  const receiptAssignment = requiredString(receipt, "assignment_id"), receiptBase = requiredString(receipt, "base_commit"), recovery = artifact.recovery !== undefined;
+  if (Object.keys(receipt).length !== keys.length || Object.keys(receipt).some((key) => !keys.includes(key)) || receipt["schema"] !== "autopilot.core_materialization_receipt.v1" || requiredString(receipt, "intention_path") !== m.intention_path || requiredDigest(receipt, "intention_digest") !== m.intention_digest || requiredString(receipt, "workstream") !== artifact.workstream || (recovery ? receiptAssignment === artifact.assignment_id || receiptBase === artifact.base_commit : receiptAssignment !== artifact.assignment_id || receiptBase !== artifact.base_commit) || requiredString(receipt, "lane_id") !== artifact.lane_id || requiredNumber(receipt, "attempt") !== artifact.attempt || requiredString(receipt, "worktree") !== artifact.worktree || !Array.isArray(receipt["completed_baseline"]) || canonicalJson(receipt["completed_baseline"].map(parseCoreBaselineLeaf)) !== canonicalJson(leaves)) throw new Error("autopilot V5 receipt authority drift");
+  const protectedPaths = new Set<string>(); for (const leaf of leaves) { if (!unitFiles.has(leaf.destination) || protectedPaths.has(leaf.destination)) throw new Error("autopilot V5 baseline overlap/drift"); protectedPaths.add(leaf.destination); const absolute = path.resolve(worktree, leaf.destination); assertMutationTopology({ worktree, allowedAbsolutePaths: new Set([absolute]), allowedParentDirectories: new Set(ancestorDirectoryChain(worktree, absolute)) }, absolute, true); const bytes = readBoundedRegularFileSync("V5 Core baseline", absolute, MAX_SCOPE_SNAPSHOT_FILE_BYTES); if (sha256Hex(bytes) !== leaf.bytes_sha256 || (lstatSync(absolute).mode & 0o777) !== (leaf.mode === "100644" ? 0o644 : 0o755)) throw new Error("autopilot V5 protected baseline byte/mode drift"); }
+  return protectedPaths;
 }
 
 function parseDeliveryUnit(value: unknown, index: number): DeliveryUnit {
@@ -989,7 +990,7 @@ function parseApprovedCommandBindings(value: unknown): DeliveryApprovedCommandBi
 }
 
 function assertAssignmentIdentity(artifact: DeliveryAssignmentArtifact, env: DeliveryEnv, worktree: string): void {
-  if (artifact.schema !== "autopilot.delivery_assignment.v3") throw new Error("autopilot delivery assignment schema drift");
+  if (artifact.schema !== "autopilot.delivery_assignment.v3" && artifact.schema !== "autopilot.delivery_assignment.v4") throw new Error("autopilot delivery assignment schema drift");
   if (
     artifact.assignment_id !== env.AUTOPILOT_DELIVERY_ASSIGNMENT_ID ||
     artifact.workstream !== env.AUTOPILOT_DELIVERY_WORKSTREAM ||
@@ -1007,6 +1008,8 @@ function requiredString(object: Record<string, unknown>, key: string): string {
   if (typeof value !== "string" || value.trim() === "") throw new Error(`delivery assignment missing string ${key}`);
   return value;
 }
+
+function requiredDigest(object: Record<string, unknown>, key: string): string { const value = requiredString(object, key); if (!/^[0-9a-f]{64}$/.test(value)) throw new Error(`autopilot delivery malformed digest ${key}`); return value; }
 
 function requiredNumber(object: Record<string, unknown>, key: string): number {
   const value = object[key];
@@ -1031,7 +1034,7 @@ function isSafeRelativeUnitPath(value: string): boolean {
 }
 
 function receiptLookingRef(value: string): boolean {
-  return value.indexOf("approved-command-receipt:") === 0 || value.indexOf("package-check-receipt:") === 0;
+  return value.indexOf("approved-command-receipt:") === 0 || value.indexOf("package-check-receipt:") === 0 || value.indexOf("v2-package-proof-receipt:") === 0;
 }
 
 function checkedValidationSourcePath(value: string): string {
@@ -1122,11 +1125,11 @@ function approvedScopeSnapshotDigest(policy: DeliveryPolicy): string {
   const digest = createHash("sha256");
   digest.update(SCOPE_SNAPSHOT_DOMAIN);
   let totalBytes = 0;
-  for (const rel of [...policy.allowedRelativePaths].sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)))) {
+  for (const rel of [...policy.snapshotRelativePaths].sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)))) {
     digest.update(rel, "utf8");
     digest.update(Buffer.from([0]));
     const absolutePath = path.resolve(policy.worktree, rel);
-    assertMutationTopology(policy, absolutePath, false);
+    assertMutationTopology(policy, absolutePath, false, true);
     let descriptor: number;
     try {
       descriptor = openSync(absolutePath, constants.O_RDONLY | constants.O_NOFOLLOW);

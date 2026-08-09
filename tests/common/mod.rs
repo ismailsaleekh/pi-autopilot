@@ -10,7 +10,7 @@ pub(crate) fn planning_replay_output(
     spec_path: &Path,
     work_map_override: Option<&str>,
 ) -> String {
-    let raw = if boundary_id == "planning.work-map.v1" {
+    let raw = if matches!(boundary_id, "planning.work-map.v1" | "planning.work-map.v2") {
         work_map_override
             .map(str::to_owned)
             .unwrap_or_else(|| planning_output(boundary_id))
@@ -20,12 +20,16 @@ pub(crate) fn planning_replay_output(
     match boundary_id {
         "planning.task-atoms.v1" => namespace_legacy_task_atoms(&raw, spec),
         "planning.work-map.v1" => namespace_legacy_work_map_links(&raw, spec, spec_path),
+        "planning.work-map.v2" => {
+            v2_from_legacy_work_map(&namespace_legacy_work_map_links(&raw, spec, spec_path))
+        }
         _ => raw,
     }
 }
 
 fn planning_output(boundary_id: &str) -> String {
     match boundary_id {
+        "planning.work-map.v2" => transcript("planning.work-map.v1"),
         "planning.task-atoms.v1"
         | "planning.scout-dossier.v1"
         | "planning.work-map.v1"
@@ -33,6 +37,26 @@ fn planning_output(boundary_id: &str) -> String {
         | "planning.questions.v1" => transcript(boundary_id),
         other => panic!("unexpected planning boundary {other}"),
     }
+}
+
+fn v2_from_legacy_work_map(raw: &str) -> String {
+    let mut value: serde_json::Value = serde_json::from_str(raw).expect("legacy work-map JSON");
+    value["schema"] = serde_json::json!("planning.work-map.v2");
+    let units = value["units"].as_array_mut().expect("legacy units");
+    // Historical V1 replay transcripts intentionally exercise overlapping
+    // synthesis candidates. A V2 fixture is an independently valid exact
+    // ownership map, so retain one deterministic unit.
+    units.truncate(1);
+    for unit in units {
+        unit.as_object_mut()
+            .expect("legacy unit")
+            .remove("package_checks");
+        unit["package_scope_files"] = serde_json::json!([]);
+        unit["package_proofs"] = serde_json::json!([]);
+        unit["vendor_bindings"] = serde_json::json!([]);
+        unit["provenance_manifest_destination"] = serde_json::Value::Null;
+    }
+    serde_json::to_string(&value).expect("V2 work-map JSON")
 }
 
 fn namespace_legacy_task_atoms(raw: &str, spec: &serde_json::Value) -> String {

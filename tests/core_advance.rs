@@ -408,6 +408,14 @@ fn forward_validator_blocker_launches_one_context_bound_recovery_engineer() {
     state = fixture.state();
     let replayed_recovery = spawn_payload(send_command(&mut state, "autopilot main"));
     assert_eq!(
+        replayed_recovery.action.assignment_id.0,
+        "recovery-assignment-main-L1-a1"
+    );
+    assert_eq!(
+        replayed_recovery.action.action_id.0,
+        "action-recovery-assignment-main-L1-a1"
+    );
+    assert_eq!(
         replayed_recovery.action.assignment_id,
         recovery_spawn.action.assignment_id
     );

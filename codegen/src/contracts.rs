@@ -64,6 +64,7 @@ pub struct Item {
     pub type_id: String,
     pub required: bool,
     pub nullable: bool,
+    pub require_explicit_null: bool,
     pub constant: Option<String>,
     pub min_items: Option<u64>,
     pub max_items: Option<u64>,
@@ -307,6 +308,7 @@ fn parse_item(doc: &SourceDoc, node: &KdlNode, owner: &str) -> Result<Item> {
             "type",
             "required",
             "nullable",
+            "require_explicit_null",
             "doc",
             "constant",
             "max_bytes",
@@ -333,6 +335,17 @@ fn parse_item(doc: &SourceDoc, node: &KdlNode, owner: &str) -> Result<Item> {
     };
     let required = matches!(kind, ItemKind::Field | ItemKind::List | ItemKind::Group)
         && doc.prop_bool(node, "required")?;
+    let nullable = doc.opt_bool(node, "nullable")?.unwrap_or(false);
+    let require_explicit_null = doc
+        .opt_bool(node, "require_explicit_null")?
+        .unwrap_or(false);
+    if require_explicit_null && (!required || !nullable) {
+        return line_err(
+            doc,
+            node,
+            format!("field `{name}` in {owner} requires required=#true nullable=#true"),
+        );
+    }
     let constant = doc.opt_string(node, "constant")?.map(str::to_owned);
     if let Some(value) = constant.as_deref() {
         validate_constant(doc, node, &name, &type_id, value)?;
@@ -361,7 +374,8 @@ fn parse_item(doc: &SourceDoc, node: &KdlNode, owner: &str) -> Result<Item> {
         name,
         type_id,
         required,
-        nullable: doc.opt_bool(node, "nullable")?.unwrap_or(false),
+        nullable,
+        require_explicit_null,
         constant,
         min_items,
         max_items,

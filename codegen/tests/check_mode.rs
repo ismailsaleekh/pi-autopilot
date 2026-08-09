@@ -302,7 +302,7 @@ fn every_terminal_profile_uses_its_own_closedness_and_matches_rust() {
         .lines()
         .filter(|line| line.trim_start().starts_with("{ profile_id: \""))
         .collect::<Vec<_>>();
-    assert_eq!(rows.len(), 11, "all terminal profiles must be checked");
+    assert_eq!(rows.len(), 14, "all terminal profiles must be checked");
     for row in rows {
         let profile_id = row
             .split_once("profile_id: \"")
@@ -342,6 +342,68 @@ fn every_terminal_profile_uses_its_own_closedness_and_matches_rust() {
             assert!(row.contains("WORK_MAP_CLOSED_TOOL_PARAMETERS"));
         }
     }
+}
+
+#[test]
+fn require_explicit_null_is_limited_to_required_nullable_fields() {
+    let temp = fixture();
+    codegen_command()
+        .current_dir(temp.path())
+        .assert()
+        .success();
+    let generated = fs::read_to_string(temp.path().join("kernel/src/generated/mod.rs"))
+        .expect("read generated Rust contracts");
+    assert!(generated.contains(
+        "#[serde(rename = \"provenance_manifest_destination\")]\n    #[serde(deserialize_with = \"deserialize_required_nullable\")]\n    pub provenance_manifest_destination: Nullable<Path>,"
+    ));
+    assert!(generated.contains(
+        "#[serde(rename = \"linked_criterion\")]\n    #[serde(skip_serializing_if = \"Option::is_none\")]\n    pub linked_criterion: Option<Id>,"
+    ));
+
+    const EXPLICIT_NULL_FIELD: &str = "field \"provenance_manifest_destination\" type=\"path\" required=#true nullable=#true require_explicit_null=#true doc=\"Explicit null is the no-manifest form.\"";
+    for (label, invalid) in [
+        (
+            "optional",
+            "field \"provenance_manifest_destination\" type=\"path\" required=#false nullable=#true require_explicit_null=#true doc=\"Explicit null is the no-manifest form.\"",
+        ),
+        (
+            "non-nullable",
+            "field \"provenance_manifest_destination\" type=\"path\" required=#true require_explicit_null=#true doc=\"Explicit null is the no-manifest form.\"",
+        ),
+    ] {
+        let temp = fixture();
+        let contracts = temp.path().join("data/contracts.kdl");
+        let source = fs::read_to_string(&contracts).expect("read contracts");
+        fs::write(&contracts, source.replace(EXPLICIT_NULL_FIELD, invalid))
+            .unwrap_or_else(|error| panic!("write {label} contract: {error}"));
+        codegen_command()
+            .current_dir(temp.path())
+            .assert()
+            .code(2)
+            .stderr(predicate::str::contains(
+                "requires required=#true nullable=#true",
+            ));
+    }
+}
+
+#[test]
+fn min_bytes_is_not_a_contract_feature() {
+    let temp = fixture();
+    let contracts = temp.path().join("data/contracts.kdl");
+    let source = fs::read_to_string(&contracts).expect("read contracts");
+    fs::write(
+        &contracts,
+        source.replace(
+            "field \"origin_anchor\" type=\"string\" required=#true max_bytes=4096",
+            "field \"origin_anchor\" type=\"string\" required=#true min_bytes=1 max_bytes=4096",
+        ),
+    )
+    .expect("write min_bytes contract");
+    codegen_command()
+        .current_dir(temp.path())
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("min_bytes"));
 }
 
 #[test]
@@ -436,6 +498,95 @@ fn host_runtime_generation_and_mutations_fail_loudly() {
         .stderr(predicate::str::contains(
             "operator-answer contract shape drift",
         ));
+}
+
+#[test]
+fn v2_package_scope_codegen_mutation_regenerates_closed_schema_and_profiles() {
+    let temp = fixture();
+    codegen_command()
+        .current_dir(temp.path())
+        .assert()
+        .success();
+    let contracts = temp.path().join("data/contracts.kdl");
+    let source = fs::read_to_string(&contracts).expect("read contracts");
+    fs::write(
+        &contracts,
+        source.replacen(
+            "list \"package_scope_files\" item=\"path\" required=#true max_items=256",
+            "list \"package_scope_files\" item=\"path\" required=#true max_items=255",
+            1,
+        ),
+    )
+    .expect("mutate V2 package scope authority");
+    codegen_command()
+        .current_dir(temp.path())
+        .arg("--check")
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("generated output drift"));
+    codegen_command()
+        .current_dir(temp.path())
+        .assert()
+        .success();
+    codegen_command()
+        .current_dir(temp.path())
+        .arg("--check")
+        .assert()
+        .success();
+
+    let rust = fs::read_to_string(temp.path().join("kernel/src/generated/mod.rs"))
+        .expect("generated Rust");
+    assert!(rust.contains("pub package_scope_files: Vec<Path>"));
+    let ts = fs::read_to_string(temp.path().join("src/generated/tool-schemas.ts"))
+        .expect("generated TypeBox schemas");
+    let schema_json = ts
+        .split_once("export const WORK_MAP_V2_CLOSED_TOOL_PARAMETERS = ")
+        .expect("V2 closed schema")
+        .1
+        .split_once(" as TSchema;")
+        .expect("V2 closed schema terminator")
+        .0;
+    let schema: serde_json::Value = serde_json::from_str(schema_json).expect("closed schema JSON");
+    assert_eq!(schema["additionalProperties"], serde_json::json!(false));
+    assert_eq!(
+        schema["properties"]["units"]["items"]["properties"]["package_scope_files"]["maxItems"],
+        serde_json::json!(255)
+    );
+    // These are the independently captured post-mutation contracts. Do not
+    // derive an expected digest from the regenerated schema under test.
+    const OPEN_DIGEST: &str = "b87f4bf193429c33fd3fb69a14ec51c6e7aff6ae00c3c1d749be6c4d4e2903df";
+    const CLOSED_DIGEST: &str = "cb37f9af541a7eae8dd1577a4e7315a202fb0162da18562ac276bd71f5429198";
+    assert!(ts.contains(&format!(
+        "export const WORK_MAP_V2_TOOL_SCHEMA_DIGEST = \"{OPEN_DIGEST}\";"
+    )));
+    assert!(ts.contains(&format!(
+        "export const WORK_MAP_V2_CLOSED_TOOL_SCHEMA_DIGEST = \"{CLOSED_DIGEST}\";"
+    )));
+    for (profile_id, name, digest) in [
+        (
+            "planning.work-map.v2:autopilot_submit_plan_cluster",
+            "autopilot_submit_plan_cluster",
+            OPEN_DIGEST,
+        ),
+        (
+            "planning.work-map.v2:autopilot_submit_synthesis",
+            "autopilot_submit_synthesis",
+            OPEN_DIGEST,
+        ),
+        (
+            "recovery-work-map.v2",
+            "autopilot_emit_status",
+            CLOSED_DIGEST,
+        ),
+    ] {
+        let tuple = format!(
+            "    (\n        \"{profile_id}\",\n        \"{name}\",\n        \"planning.work-map.v2\",\n        \"planning.work-map.v2\",\n        \"{digest}\",\n    ),"
+        );
+        assert!(
+            rust.contains(&tuple),
+            "missing exact V2 profile tuple: {tuple}"
+        );
+    }
 }
 
 #[test]

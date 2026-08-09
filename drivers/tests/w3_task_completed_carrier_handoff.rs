@@ -161,6 +161,7 @@ impl Fixture {
             atom_id_prefix: Some(prefix.to_owned()),
             atom_registry_path: None,
             atom_registry_digest: None,
+            terminal_route: None,
             accepted_planning_artifacts: Vec::new(),
         })
         .unwrap();

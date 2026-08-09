@@ -9,17 +9,18 @@ use crate::roles::kdl::{attr as kdl_attr, boundary_runtime as runtime_by_id, tab
 use kernel::boundary::{BoundaryRuntime, Rejection};
 use kernel::generated::{
     Id, PlanReview, PlanningAtomRegistry, PlanningAtomRegistryAtom, Questions, Ref, SchemaId,
-    ScoutDossier, TaskAtoms, WorkMap,
+    ScoutDossier, TaskAtoms, TerminalRoute, ToolName, WorkMap, WorkMapV2,
 };
 use kernel_macros::acceptance_boundary;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as ShaDigest, Sha256};
 
-pub const MODEL_BOUNDARIES: [&str; 5] = [
+pub const MODEL_BOUNDARIES: [&str; 6] = [
     "planning.task-atoms.v1",
     "planning.scout-dossier.v1",
     "planning.questions.v1",
     "planning.work-map.v1",
+    "planning.work-map.v2",
     "planning.plan-review.v1",
 ];
 pub const REQUIRED_PLAN_REVIEW_CRITERIA: [&str; 7] = [
@@ -34,7 +35,6 @@ pub const REQUIRED_PLAN_REVIEW_CRITERIA: [&str; 7] = [
 const DRIVER_TABLES_KDL: &str = include_str!("../../../data/driver-tables.kdl");
 const PLANNING_KDL: &str = include_str!("../../../data/planning.kdl");
 pub const ATOM_REGISTRY_MAX_BYTES: usize = 256 * 1024;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AtomKind {
     Work,
@@ -156,17 +156,21 @@ pub struct PlanningPolicy {
     pub waves: Vec<PlanningWaveDeclaration>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct PlanningAgentAssignment {
     pub assignment_id: String,
     pub role: String,
     pub mode: String,
     pub boundary_id: Option<String>,
+    /// The planned exact descriptor tuple. Historical manifests may omit it;
+    /// fresh V2 issuance refuses an omission rather than inferring one.
+    #[serde(default)]
+    pub terminal_route: Option<TerminalRoute>,
     pub ordinal: u8,
     pub atom_id_prefix: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PlanningManifest {
     pub workstream: String,
     pub planning_wave_cap: usize,
@@ -247,7 +251,7 @@ pub enum PlanningWaveFailure {
     Blocked(PlanningWaveBlocked),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum PlanningWaveOutcome {
     Launch {
         wave_id: String,
@@ -524,6 +528,49 @@ fn visit_planning_wave_dependency<'a>(
     Ok(())
 }
 
+fn planning_terminal_tool(role: &str) -> Result<&'static str, PlanningError> {
+    match role {
+        "task-extractor" => Ok("autopilot_submit_atoms"),
+        "repository-scout" => Ok("autopilot_submit_scout_report"),
+        "context-curator" => Ok("autopilot_submit_context"),
+        "contradiction-resolver" => Ok("autopilot_submit_resolution"),
+        "plan-compiler" => Ok("autopilot_submit_plan_cluster"),
+        "plan-synthesizer" => Ok("autopilot_submit_synthesis"),
+        "plan-reviewer" => Ok("autopilot_submit_review"),
+        "recovery-engineer" => Ok("autopilot_emit_status"),
+        _ => Err(PlanningError::BadDeclaration(format!(
+            "planning role {role} has no terminal tool"
+        ))),
+    }
+}
+
+fn planning_terminal_route(role: &str, boundary: &str) -> Result<TerminalRoute, PlanningError> {
+    let tool = planning_terminal_tool(role)?;
+    let matches = kernel::generated::TERMINAL_PROFILES
+        .iter()
+        .filter(|row| row.1 == tool && row.2 == boundary && row.3 == boundary)
+        .collect::<Vec<_>>();
+    let [profile] = matches.as_slice() else {
+        return Err(PlanningError::BadDeclaration(format!(
+            "planning role {role} has {} exact terminal rows for {boundary}",
+            matches.len()
+        )));
+    };
+    let version = if boundary == "planning.work-map.v2" {
+        "v2"
+    } else {
+        "v1-legacy"
+    };
+    Ok(TerminalRoute {
+        version: version.to_owned(),
+        profile_id: profile.0.to_owned(),
+        tool_name: ToolName(profile.1.to_owned()),
+        boundary_id: kernel::generated::ContractId(profile.2.to_owned()),
+        result_contract: kernel::generated::ContractId(profile.3.to_owned()),
+        schema_digest: kernel::generated::Digest(profile.4.to_owned()),
+    })
+}
+
 fn assignments_for_policy(
     workstream: &str,
     policy: &PlanningPolicy,
@@ -531,18 +578,21 @@ fn assignments_for_policy(
     let mut by_role = BTreeMap::<String, Vec<PlanningAgentAssignment>>::new();
     for row in &policy.roles {
         let assignments = (1..=row.count)
-            .map(|index| PlanningAgentAssignment {
-                assignment_id: format!("planning-{workstream}-{}-{index:02}", row.role),
-                role: row.role.clone(),
-                mode: row.mode.clone(),
-                boundary_id: Some(row.boundary_id.clone()),
-                ordinal: index,
-                atom_id_prefix: row
-                    .atom_namespace
-                    .as_ref()
-                    .map(|namespace| format!("{namespace}{index:02}-")),
+            .map(|index| {
+                Ok(PlanningAgentAssignment {
+                    assignment_id: format!("planning-{workstream}-{}-{index:02}", row.role),
+                    role: row.role.clone(),
+                    mode: row.mode.clone(),
+                    boundary_id: Some(row.boundary_id.clone()),
+                    terminal_route: Some(planning_terminal_route(&row.role, &row.boundary_id)?),
+                    ordinal: index,
+                    atom_id_prefix: row
+                        .atom_namespace
+                        .as_ref()
+                        .map(|namespace| format!("{namespace}{index:02}-")),
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, PlanningError>>()?;
         by_role.insert(row.role.clone(), assignments);
     }
     let mut out = Vec::new();
@@ -1334,6 +1384,13 @@ pub fn accept_work_map(raw: &str, runtime: &BoundaryRuntime) -> Result<String, R
     validate_work_map_shape(&work_map, runtime)?;
     Ok(raw.to_owned())
 }
+/// Enforced V2 model boundary parser. Strict Core carrier admission still
+/// performs the complete authority and semantic checks after carrier sealing.
+#[acceptance_boundary(id = "planning.work-map.v2", producer = Producer::Model, visible = true, admits = "Fresh compiler, synthesizer, and recovery work maps use the exact parent-selected V2 terminal profile. Genuine Pi 0.84.1 subscription compiler, synthesizer, and recovery captures were strictly accepted in report SHA-256 174d50e13ba5c519c0d36708fd013e167e88dbd8caf76d77ec49b95ed9f62bd7; only strict Core carrier admission grants planning authority.", mode = BoundaryMode::Enforce)]
+pub fn accept_work_map_v2(raw: &str, runtime: &BoundaryRuntime) -> Result<String, Rejection> {
+    let _: WorkMapV2 = parse_model_payload(raw, runtime, "planning.work-map.v2")?;
+    Ok(raw.to_owned())
+}
 #[acceptance_boundary(id = "planning.plan-review.v1", producer = Producer::Model, visible = true, admits = "Plan review output must assign exactly one verdict to each required approval criterion and no others: review.mandatory-input-accounting, review.authority-fidelity, review.completeness-and-traceability, review.internal-consistency-and-scheduling, review.context-sufficiency, review.verification-strength, review.forward-validation. Authority-fidelity and forward-validation pass only when every units[].files value is one exact regular-file leaf, all required future destinations are enumerated, no directory/ancestor/wildcard-pattern scope remains, and commands are verification-only rather than an implementation channel. Execution is approved only when all seven exact criteria pass. On the first full review, an admitted non-pass verdict triggers exactly one fresh Recovery Engineer assignment over the rejected work map and complete finding evidence; the unchanged full-review gate then runs again. A non-pass rereview is terminal for this run. Missing, duplicate, or unknown criterion shapes remain boundary rejections and are not semantic recovery authority. Call autopilot_submit_review as the final action.", mode = BoundaryMode::Enforce)]
 pub fn accept_plan_review(raw: &str, runtime: &BoundaryRuntime) -> Result<String, Rejection> {
     let review = parse_model_payload::<PlanReview>(raw, runtime, "planning.plan-review.v1")?;
@@ -1892,6 +1949,13 @@ pub fn accept_work_map_for_atoms(
     Ok(raw.to_owned())
 }
 
+pub mod work_map_v2;
+pub use work_map_v2::{
+    ApprovedWorkMapV2, WORK_MAP_V2_MAX_DERIVED_UNIT_ID_BYTES, WORK_MAP_V2_MAX_ITEM_BYTES,
+    WORK_MAP_V2_MAX_UNITS, WorkMapV2AdmissionContext, WorkMapV2SourceCarrier, admit_work_map_v2,
+    read_work_map_v2_source_carrier,
+};
+
 fn validate_work_map_links(
     work_map: &WorkMap,
     runtime: &BoundaryRuntime,
@@ -2017,6 +2081,22 @@ pub fn atom_link_manifest_for_registry(
     path: &Path,
     expected_digest: &str,
 ) -> Result<String, PlanningError> {
+    atom_link_manifest_for_boundary(path, expected_digest, "planning.work-map.v1")
+}
+
+/// Render atom authority for the exact versioned work-map contract. The atom
+/// registry itself is shared, but its contract identity is not inferred from a
+/// payload shape or public terminal-tool name.
+pub fn atom_link_manifest_for_boundary(
+    path: &Path,
+    expected_digest: &str,
+    boundary_id: &str,
+) -> Result<String, PlanningError> {
+    if !matches!(boundary_id, "planning.work-map.v1" | "planning.work-map.v2") {
+        return Err(PlanningError::ContextGap(format!(
+            "atom-link-manifest unsupported boundary {boundary_id}"
+        )));
+    }
     let registry = load_atom_registry(path, expected_digest)?;
     let mut allowed_ids = registry
         .atoms
@@ -2026,7 +2106,7 @@ pub fn atom_link_manifest_for_registry(
     allowed_ids.sort_unstable();
     let allowed = allowed_ids.join(", ");
     Ok(format!(
-        "Package-authoritative atom-link manifest for planning.work-map.v1\natom_registry_path: {}\natom_registry_digest: {expected_digest}\nallowed_ids_sorted: [{allowed}]\nrules:\n- Each units[].links array item MUST equal exactly one atoms[].id listed above, byte-for-byte.\n- Put only one atom id in each links[] array item.\n- Do not use an `atoms:` prefix.\n- Do not use ranges (for example TE01-001..TE01-003).\n- Do not use comma groups (for example TE01-001,TE01-002).\n- Do not use task/source/scout/context/artifact references or task heading refs.\n- Do not use placeholders, empty artifact refs, or inferred expansion.\n- The package will not rewrite, expand, or infer pseudo-links; non-exact links are rejected.",
+        "Package-authoritative atom-link manifest for {boundary_id}\natom_registry_path: {}\natom_registry_digest: {expected_digest}\nallowed_ids_sorted: [{allowed}]\nrules:\n- Each units[].links array item MUST equal exactly one atoms[].id listed above, byte-for-byte.\n- Put only one atom id in each links[] array item.\n- Do not use an `atoms:` prefix.\n- Do not use ranges (for example TE01-001..TE01-003).\n- Do not use comma groups (for example TE01-001,TE01-002).\n- Do not use task/source/scout/context/artifact references or task heading refs.\n- Do not use placeholders, empty artifact refs, or inferred expansion.\n- The package will not rewrite, expand, or infer pseudo-links; non-exact links are rejected.",
         path.display()
     ))
 }

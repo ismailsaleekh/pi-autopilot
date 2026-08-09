@@ -427,6 +427,16 @@ artifact "task_document" schema="autopilot.task_document.v1" producer="Package" 
     field "body" type="string" required=#true
 }
 
+artifact "terminal_route" schema="autopilot.terminal_route.v1" producer="Package" model_produced=#false {
+    doc "Strict versioned terminal route. A fresh planning issuer selects one generated descriptor row exactly; no consumer infers a route from a tool name or payload."
+    field "version" type="string" required=#true doc="Exactly v1-legacy or v2."
+    field "profile_id" type="string" required=#true
+    field "tool_name" type="tool-name" required=#true
+    field "boundary_id" type="contract-id" required=#true
+    field "result_contract" type="contract-id" required=#true
+    field "schema_digest" type="digest" required=#true
+}
+
 artifact "agent_run_spec" schema="autopilot.agent_run_spec.v4" producer="Package" model_produced=#false {
     doc "Strict parent-Core written child runner specification for the package-contained autopilot-agent-run wrapper and Rust agent-run mode."
     field "schema" type="schema-id" required=#true constant="autopilot.agent_run_spec.v4"
@@ -475,6 +485,7 @@ artifact "agent_run_spec" schema="autopilot.agent_run_spec.v4" producer="Package
     field "runtime_extension_path" type="path" required=#false nullable=#true doc="Required for every model assignment; absolute path to the explicitly loaded codegen-anchored child-only terminal-tool add-on."
     field "runtime_extension_digest" type="digest" required=#false nullable=#true doc="Required exactly when runtime_extension_path is present; must equal the codegen-anchored digest of the file that actually loads."
     field "terminal_profile_id" type="string" required=#false nullable=#true doc="Required for every model assignment; parent-selected generated terminal profile, never inferred from model payload."
+    field "terminal_route" type="terminal_route" required=#false nullable=#true doc="Fresh planning terminal route selected as one exact generated descriptor row. Historical V1 specs omit this only under their explicit legacy reader."
     list "unavailable_tools" item="tool-name" required=#false nullable=#true doc="Role-declared capabilities omitted only by an explicit retained-unavailable data disposition."
     list "producer_assignment_ids" item="id" required=#false nullable=#true
     field "validation_id" type="id" required=#false nullable=#true
@@ -615,6 +626,53 @@ artifact "work_map" schema="planning.work-map.v1" producer="Model" model_produce
         field "expected" type="string" required=#true doc="Nonempty criterion-facing expectation proved by the package check receipt."
     }
     record "work_map_recovery" {
+        field "disposition" type="recovery-disposition" required=#true doc="Typed conclusion after independent diagnosis: repaired/no-defect may return to the same gate; authority, infrastructure, and unsafe outcomes fail closed."
+        list "diagnosis_refs" item="ref" required=#true doc="Exact rejected-review or runtime-diagnosis evidence inspected independently."
+        field "root_cause" type="string" required=#true doc="Evidence-backed root cause; may correct rather than repeat the runtime diagnosis."
+        list "affected_unit_ids" item="id" required=#true doc="Exact units changed; empty only for no-defect or a fail-closed disposition."
+        list "actions" item="string" required=#true doc="Surgical corrections performed, or the evidence-backed reason no correction is admissible."
+        list "preserved_authority" item="string" required=#true doc="Original authority, scope, tests, gates, and unaffected behavior preserved."
+        list "repair_evidence_refs" item="ref" required=#true doc="Evidence supporting the disposition and same-gate revalidation or fail-closed result."
+    }
+}
+
+artifact "work_map_v2" schema="planning.work-map.v2" producer="Model" model_produced=#true max_bytes=1048576 {
+    doc "Fresh version-isolated work map for vendoring contracts. Generated Rust types own only V2 shape; Core V2 admission owns declarative and semantic enforcement."
+    admits "Every fresh unit must explicitly emit package_scope_files, package_proofs, vendor_bindings, and provenance_manifest_destination; omission never selects a default. files are exclusive implementation-authority leaves: every exact leaf has one owner across units, and equal, ancestor, prefix, directory, glob, and inferred authority is forbidden. package_scope_files is read/package closure authority only; it never grants implementation ownership or child write authority. Both proof kinds prove package closure. With no proofs or vendor bindings every package_scope_files array must be []; otherwise exactly one closure unit owns all proofs, has package_scope_files exactly equal to the global files owner-leaf set, every other scope is [], and the closure transitively depends on every other unit. Empty vendor_bindings require a null provenance_manifest_destination and prohibit a vendored-bytes-match-origin proof. Nonempty vendor_bindings require a non-null provenance_manifest_destination and exactly one global vendored-bytes-match-origin proof whose vendor_binding_ids exactly cover all bindings, even when bindings are owned by multiple units. A clean-exact-package-tip proof has empty vendor_binding_ids. Core later mechanically canonicalizes or rejects proof ids, binding ids, destinations, and criterion mappings. A binding declares only origin_path, destination, and an immutable whole-file origin_anchor; Core derives any Git blob, mode, and raw-byte SHA. The vendored destination and provenance manifest destination must be listed in the declaring unit files; a different final closure names them only in package_scope_files. Core alone writes those bytes. Approved commands are verification-only and never a copy or materialization channel. Criteria remain semantic text while proof ordinals provide typed ownership. Call the parent-selected one of autopilot_submit_plan_cluster, autopilot_submit_synthesis, or autopilot_emit_status exactly once."
+    submit_tool "autopilot_submit_plan_cluster" label="Submit work map v2" profile="planning.work-map.v2:autopilot_submit_plan_cluster"
+    submit_tool "autopilot_submit_synthesis" label="Submit synthesized work map v2" profile="planning.work-map.v2:autopilot_submit_synthesis"
+    submit_tool "autopilot_emit_status" label="Submit recovered work map v2" profile="recovery-work-map.v2" result_contract="planning.work-map.v2" closed=#true
+    field "schema" type="schema-id" required=#true constant="planning.work-map.v2" max_bytes=64
+    list "units" item="plan_unit_v2" required=#true min_items=1 max_items=256 doc="Fresh executable implementation units."
+    field "recovery" type="work_map_recovery_v2" required=#false doc="Optional V2 recovery diagnosis with all supplied evidence fields required."
+    record "plan_unit_v2" {
+        field "id" type="id" required=#true max_bytes=256
+        field "kind" type="plan_unit_kind" required=#true doc="Closed delivery disposition reused without widening its vocabulary."
+        field "objective" type="string" required=#true max_bytes=4096
+        list "criteria" item="string" required=#true min_items=1 max_items=256 item_max_bytes=4096
+        list "depends_on" item="id" required=#true max_items=256 unique=#true doc="Exact declared predecessor unit ids."
+        list "files" item="path" required=#true min_items=1 max_items=256 unique=#true doc="Exclusive exact normalized repository-relative implementation-authority leaves only."
+        list "package_scope_files" item="path" required=#true max_items=256 unique=#true doc="Explicit exact package/read closure leaves only; [] is required on every nonclosure unit and never grants child write authority."
+        list "commands" item="plan_unit_command" required=#true min_items=1 max_items=256 doc="Existing closed verification command shape; commands never materialize or copy files."
+        list "package_proofs" item="plan_unit_package_proof_v2" required=#true max_items=256 doc="Explicit array; [] is allowed only for the stated no-proof case."
+        list "vendor_bindings" item="plan_unit_vendor_binding_v2" required=#true max_items=128 doc="Explicit array; [] is the no-vendor form. Validator V3 permits 257 citation records; independent proof needs origin and destination citations plus one diff record (2*n + 1 <= 257)."
+        field "provenance_manifest_destination" type="path" required=#true nullable=#true require_explicit_null=#true doc="Explicit null is the no-manifest form."
+        list "links" item="id" required=#true min_items=1 max_items=256 unique=#true doc="Exact bound atom ids."
+    }
+    record "plan_unit_package_proof_v2" {
+        field "proof_id" type="id" required=#true max_bytes=256
+        field "kind" type="package_proof_kind_v2" required=#true
+        list "criterion_ordinals" item="u32" required=#true min_items=1 max_items=256 unique=#true
+        field "expected" type="string" required=#true max_bytes=4096
+        list "vendor_binding_ids" item="id" required=#true max_items=128 unique=#true doc="Explicit []; clean-tip proof uses no binding ids. Validator V3 permits 257 citation records; independent proof needs origin and destination citations plus one diff record (2*n + 1 <= 257)."
+    }
+    record "plan_unit_vendor_binding_v2" {
+        field "binding_id" type="id" required=#true max_bytes=256
+        field "origin_path" type="path" required=#true max_bytes=4096 doc="Exact normalized repository-relative origin path."
+        field "destination" type="path" required=#true max_bytes=4096 doc="Exact normalized repository-relative destination path."
+        field "origin_anchor" type="string" required=#true max_bytes=4096 doc="Immutable whole-file origin anchor; Core V2 admission requires a nonempty value."
+    }
+    record "work_map_recovery_v2" {
         field "disposition" type="recovery-disposition" required=#true doc="Typed conclusion after independent diagnosis: repaired/no-defect may return to the same gate; authority, infrastructure, and unsafe outcomes fail closed."
         list "diagnosis_refs" item="ref" required=#true doc="Exact rejected-review or runtime-diagnosis evidence inspected independently."
         field "root_cause" type="string" required=#true doc="Evidence-backed root cause; may correct rather than repeat the runtime diagnosis."
@@ -1497,6 +1555,12 @@ enum "plan_unit_kind" {
 enum "package-check-kind" {
     doc "Closed Core-owned post-package invariant. The package verifies this without executing model-authored shell."
     value "clean-exact-package-tip"
+}
+
+enum "package_proof_kind_v2" {
+    doc "Closed V2 package proof kind vocabulary."
+    value "clean-exact-package-tip"
+    value "vendored-bytes-match-origin"
 }
 
 enum "command_effect" {

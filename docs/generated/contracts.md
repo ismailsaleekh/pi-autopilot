@@ -29,6 +29,7 @@ Sources: `data/contracts.kdl`.
 | autopilot_transcript_v2 | autopilot.transcript.v2 | Package | false | Receipt-backed non-authoritative replay transcript fixture. V1 transcripts remain compatibility-only. |
 | autopilot_evidence_envelope_manifest | autopilot.evidence_envelope_manifest.v1 | Package | false | Closed evidence envelope manifest. Members are exactly refs reachable from authoritative evidence events; scans/globs/prefixes are forbidden. |
 | task_document | autopilot.task_document.v1 | Package | false | Core-classified task-pack document copied into child runner specs. The digest is over the exact admitted file bytes; body_digest is over the model-visible body only. |
+| terminal_route | autopilot.terminal_route.v1 | Package | false | Strict versioned terminal route. A fresh planning issuer selects one generated descriptor row exactly; no consumer infers a route from a tool name or payload. |
 | agent_run_spec | autopilot.agent_run_spec.v4 | Package | false | Strict parent-Core written child runner specification for the package-contained autopilot-agent-run wrapper and Rust agent-run mode. |
 | run_identity | autopilot.run_identity.v1 | Package | false | Clean v2 runtime identity namespace (D76 §5.1). |
 | event_row | autopilot.event_row.v1 | Package | false | Append-only event row; events.jsonl is the sole state authority (D76 §5.4 + D77 Closure B). |
@@ -39,6 +40,7 @@ Sources: `data/contracts.kdl`.
 | scout_dossier | planning.scout-dossier.v1 | Model | true | Model-facing repository scout dossier. Shape is small; path values are checked against the pinned repository commit by the planning driver. |
 | questions | planning.questions.v1 | Model | true | Model-facing contradiction/question nominations. Empty questions are valid when no material unresolved issue remains. |
 | work_map | planning.work-map.v1 | Model | true | Model-facing work map. Link values are checked against the accepted atom registry by the planning driver. |
+| work_map_v2 | planning.work-map.v2 | Model | true | Fresh version-isolated work map for vendoring contracts. Generated Rust types own only V2 shape; Core V2 admission owns declarative and semantic enforcement. |
 | plan_review | planning.plan-review.v1 | Model | true | Model-facing plan review verdicts. Verdict is closed; finding text is optional and advisory unless the verdict requires explanation. |
 | allocation_lane_proposal | autopilot.allocation_lane_proposal.v1 | Model | true | Allocator model proposal; package validates totality, dependencies, cap, and no invented ownership (D76 §7). |
 | delivery_result | autopilot.delivery_result.v1 | Model | true | Implementer/Fixer terminal delivery carrier pending package acceptance (D76 §8.2). |
@@ -369,6 +371,12 @@ Sources: `data/contracts.kdl`.
 | task_document | field | digest | digest | true |  |  |
 | task_document | field | body_digest | digest | true |  |  |
 | task_document | field | body | string | true |  |  |
+| terminal_route | field | version | string | true |  | Exactly v1-legacy or v2. |
+| terminal_route | field | profile_id | string | true |  |  |
+| terminal_route | field | tool_name | tool-name | true |  |  |
+| terminal_route | field | boundary_id | contract-id | true |  |  |
+| terminal_route | field | result_contract | contract-id | true |  |  |
+| terminal_route | field | schema_digest | digest | true |  |  |
 | agent_run_spec | field | schema | schema-id | true |  |  |
 | agent_run_spec | field | assignment_kind | validation_assignment_kind | true |  | Explicit assignment class; no runner infers planning/delivery/validation from result_contract. |
 | agent_run_spec | field | action_id | id | true |  |  |
@@ -415,6 +423,7 @@ Sources: `data/contracts.kdl`.
 | agent_run_spec | field | runtime_extension_path | path | false | true | Required for every model assignment; absolute path to the explicitly loaded codegen-anchored child-only terminal-tool add-on. |
 | agent_run_spec | field | runtime_extension_digest | digest | false | true | Required exactly when runtime_extension_path is present; must equal the codegen-anchored digest of the file that actually loads. |
 | agent_run_spec | field | terminal_profile_id | string | false | true | Required for every model assignment; parent-selected generated terminal profile, never inferred from model payload. |
+| agent_run_spec | field | terminal_route | terminal_route | false | true | Fresh planning terminal route selected as one exact generated descriptor row. Historical V1 specs omit this only under their explicit legacy reader. |
 | agent_run_spec | list | unavailable_tools | tool-name | false | true | Role-declared capabilities omitted only by an explicit retained-unavailable data disposition. |
 | agent_run_spec | list | producer_assignment_ids | id | false | true |  |
 | agent_run_spec | field | validation_id | id | false | true |  |
@@ -496,6 +505,37 @@ Sources: `data/contracts.kdl`.
 | work_map | list | work_map_recovery.actions | string | true |  | Surgical corrections performed, or the evidence-backed reason no correction is admissible. |
 | work_map | list | work_map_recovery.preserved_authority | string | true |  | Original authority, scope, tests, gates, and unaffected behavior preserved. |
 | work_map | list | work_map_recovery.repair_evidence_refs | ref | true |  | Evidence supporting the disposition and same-gate revalidation or fail-closed result. |
+| work_map_v2 | field | schema | schema-id | true |  |  |
+| work_map_v2 | list | units | plan_unit_v2 | true |  | Fresh executable implementation units. |
+| work_map_v2 | field | recovery | work_map_recovery_v2 | false |  | Optional V2 recovery diagnosis with all supplied evidence fields required. |
+| work_map_v2 | field | plan_unit_v2.id | id | true |  |  |
+| work_map_v2 | field | plan_unit_v2.kind | plan_unit_kind | true |  | Closed delivery disposition reused without widening its vocabulary. |
+| work_map_v2 | field | plan_unit_v2.objective | string | true |  |  |
+| work_map_v2 | list | plan_unit_v2.criteria | string | true |  |  |
+| work_map_v2 | list | plan_unit_v2.depends_on | id | true |  | Exact declared predecessor unit ids. |
+| work_map_v2 | list | plan_unit_v2.files | path | true |  | Exclusive exact normalized repository-relative implementation-authority leaves only. |
+| work_map_v2 | list | plan_unit_v2.package_scope_files | path | true |  | Explicit exact package/read closure leaves only; [] is required on every nonclosure unit and never grants child write authority. |
+| work_map_v2 | list | plan_unit_v2.commands | plan_unit_command | true |  | Existing closed verification command shape; commands never materialize or copy files. |
+| work_map_v2 | list | plan_unit_v2.package_proofs | plan_unit_package_proof_v2 | true |  | Explicit array; [] is allowed only for the stated no-proof case. |
+| work_map_v2 | list | plan_unit_v2.vendor_bindings | plan_unit_vendor_binding_v2 | true |  | Explicit array; [] is the no-vendor form. Validator V3 permits 257 citation records; independent proof needs origin and destination citations plus one diff record (2*n + 1 <= 257). |
+| work_map_v2 | field | plan_unit_v2.provenance_manifest_destination | path | true | true | Explicit null is the no-manifest form. |
+| work_map_v2 | list | plan_unit_v2.links | id | true |  | Exact bound atom ids. |
+| work_map_v2 | field | plan_unit_package_proof_v2.proof_id | id | true |  |  |
+| work_map_v2 | field | plan_unit_package_proof_v2.kind | package_proof_kind_v2 | true |  |  |
+| work_map_v2 | list | plan_unit_package_proof_v2.criterion_ordinals | u32 | true |  |  |
+| work_map_v2 | field | plan_unit_package_proof_v2.expected | string | true |  |  |
+| work_map_v2 | list | plan_unit_package_proof_v2.vendor_binding_ids | id | true |  | Explicit []; clean-tip proof uses no binding ids. Validator V3 permits 257 citation records; independent proof needs origin and destination citations plus one diff record (2*n + 1 <= 257). |
+| work_map_v2 | field | plan_unit_vendor_binding_v2.binding_id | id | true |  |  |
+| work_map_v2 | field | plan_unit_vendor_binding_v2.origin_path | path | true |  | Exact normalized repository-relative origin path. |
+| work_map_v2 | field | plan_unit_vendor_binding_v2.destination | path | true |  | Exact normalized repository-relative destination path. |
+| work_map_v2 | field | plan_unit_vendor_binding_v2.origin_anchor | string | true |  | Immutable whole-file origin anchor; Core V2 admission requires a nonempty value. |
+| work_map_v2 | field | work_map_recovery_v2.disposition | recovery-disposition | true |  | Typed conclusion after independent diagnosis: repaired/no-defect may return to the same gate; authority, infrastructure, and unsafe outcomes fail closed. |
+| work_map_v2 | list | work_map_recovery_v2.diagnosis_refs | ref | true |  | Exact rejected-review or runtime-diagnosis evidence inspected independently. |
+| work_map_v2 | field | work_map_recovery_v2.root_cause | string | true |  | Evidence-backed root cause; may correct rather than repeat the runtime diagnosis. |
+| work_map_v2 | list | work_map_recovery_v2.affected_unit_ids | id | true |  | Exact units changed; empty only for no-defect or a fail-closed disposition. |
+| work_map_v2 | list | work_map_recovery_v2.actions | string | true |  | Surgical corrections performed, or the evidence-backed reason no correction is admissible. |
+| work_map_v2 | list | work_map_recovery_v2.preserved_authority | string | true |  | Original authority, scope, tests, gates, and unaffected behavior preserved. |
+| work_map_v2 | list | work_map_recovery_v2.repair_evidence_refs | ref | true |  | Evidence supporting the disposition and same-gate revalidation or fail-closed result. |
 | plan_review | list | verdicts | plan_review_verdict | true |  | Criterion verdicts. |
 | plan_review | field | plan_review_verdict.criterion_id | id | true |  |  |
 | plan_review | field | plan_review_verdict.verdict | planning_review_verdict | true |  |  |
@@ -1126,6 +1166,9 @@ Sources: `data/contracts.kdl`.
 | work_map | planning.work-map.v1 | autopilot_submit_plan_cluster | Submit work map |
 | work_map | planning.work-map.v1 | autopilot_submit_synthesis | Submit synthesized work map |
 | work_map | planning.work-map.v1 | autopilot_emit_status | Submit recovered work map |
+| work_map_v2 | planning.work-map.v2 | autopilot_submit_plan_cluster | Submit work map v2 |
+| work_map_v2 | planning.work-map.v2 | autopilot_submit_synthesis | Submit synthesized work map v2 |
+| work_map_v2 | planning.work-map.v2 | autopilot_emit_status | Submit recovered work map v2 |
 | plan_review | planning.plan-review.v1 | autopilot_submit_review | Submit plan review |
 | delivery_submission_v2 | autopilot.delivery_submission.v2 | autopilot_emit_status | Submit delivery status |
 | validation_submission_v2 | autopilot.validation_submission.v2 | autopilot_emit_status | Submit validation status |
@@ -1140,6 +1183,7 @@ Sources: `data/contracts.kdl`.
 | planning_review_verdict | pass, blocker, advisory, fail, blocked, needs-fix |
 | plan_unit_kind | implementation |
 | package-check-kind | clean-exact-package-tip |
+| package_proof_kind_v2 | clean-exact-package-tip, vendored-bytes-match-origin |
 | command_effect | no-effect, declared-predictable, unknown-generated |
 | delivery-outcome | succeeded, blocked |
 | delivery-blocker-class | semantic-repairable, requires-new-authority, infrastructure, unsafe |

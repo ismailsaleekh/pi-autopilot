@@ -14,7 +14,7 @@ use std::{
 use drivers::{runner, vcs::GitVcs};
 use kernel::generated::{
     BackgroundAction, ContractId, CoreToHostDonePayload, CoreToHostSpawnPayload,
-    CoreToHostSpawnWavePayload, CoreToHostUiPayload, EventRow, Id, ModeId, SeamEnvelope, Sha,
+    CoreToHostSpawnWavePayload, CoreToHostUiPayload, EventRow, Id, ModeId, Ref, SeamEnvelope, Sha,
 };
 use sha2::{Digest as ShaDigest, Sha256};
 
@@ -47,9 +47,13 @@ fn command_routing_all_public_commands_reach_driver_surfaces() {
     let ready = complete_planning_until_ready(plan_wave, &event_log, &repo);
     assert!(done_status(&ready).contains("ready-to-execute:workstream=main"));
     assert!(
-        fs::read_to_string(repo.join(".pi/autopilot/main/approved-plan.json"))
-            .expect("approved plan")
+        fs::read_to_string(repo.join(".pi/autopilot/main/approved-plan.v2.json"))
+            .expect("approved V2 image")
             .contains("U1")
+    );
+    assert!(
+        repo.join(".pi/autopilot/main/approved-plan.v2-binding.json")
+            .exists()
     );
 
     let run = send_with_log("autopilot main", &event_log, Some(&repo));
@@ -357,7 +361,11 @@ fn plan_review_refuses_tampered_repository_authority_manifest() {
         status.contains("repository authority digest drift"),
         "{status}"
     );
-    assert!(!repo.join(".pi/autopilot/main/approved-plan.json").exists());
+    assert!(
+        !repo
+            .join(".pi/autopilot/main/approved-plan.v2.json")
+            .exists()
+    );
 }
 
 #[test]
@@ -390,15 +398,15 @@ fn real_plan_compiler_prompt_renders_full_work_map_authority_and_atom_manifest()
     let prompt = fs::read_to_string(&prompt_path).expect("compiler prompt");
     assert_eq!(sha256_hex(prompt.as_bytes()), spec["prompt_digest"]);
     assert!(
-        prompt.contains("Package-generated admission authority for planning.work-map.v1"),
+        prompt.contains("Package-generated admission authority for planning.work-map.v2"),
         "{prompt}"
     );
     assert!(
-        prompt.contains(kernel::generated::WORK_MAP_ADMITS),
+        prompt.contains(kernel::generated::WORK_MAP_V2_ADMITS),
         "{prompt}"
     );
     assert!(
-        prompt.contains("Package-authoritative atom-link manifest for planning.work-map.v1"),
+        prompt.contains("Package-authoritative atom-link manifest for planning.work-map.v2"),
         "{prompt}"
     );
     let registry_digest = spec["atom_registry_digest"]
@@ -415,23 +423,19 @@ fn real_plan_compiler_prompt_renders_full_work_map_authority_and_atom_manifest()
     }
     for required in [
         "Each units[].links array item MUST equal exactly one atoms[].id",
-        "Each units[].files element must name one exact normalized repository-relative regular-file destination",
-        "Directory, ancestor/prefix, and wildcard-pattern authority is forbidden",
-        "enumerate every leaf file, including each vendored, fixture, generated-evidence, manifest, README, and suffix-free destination",
-        "never use an approved command to bootstrap, author, copy, vendor, regenerate, repair, or otherwise implement delivery files",
+        "Each `units[].files` value is one exact repository-relative regular-file destination",
+        "Never use a directory, ancestor/prefix, glob, or inferred expansion as file authority",
+        "Enumerate every future leaf explicitly",
+        "must never bootstrap, author, copy, vendor, regenerate, repair, or otherwise implement delivery files",
+        "For `planning.work-map.v2`, emit the required explicit `package_scope_files`, `package_proofs`, `vendor_bindings`, and nullable `provenance_manifest_destination` fields",
+        "A V2 closure scope, not a child `files` union, names the global owner leaves",
         "Do not use an `atoms:` prefix",
         "Do not use ranges",
         "Do not use comma groups",
         "task/source/scout/context/artifact references",
         "placeholders, empty artifact refs, or inferred expansion",
-        "External temporary paths are not generated_paths",
-        "use no-effect + [] + none even if they temporarily write outside the repo and clean up",
-        "Approved commands execute later inside a package-assigned delivery worktree/candidate root",
-        "the planning checkout absolute identity/path is not future execution authority",
-        "Command, expected, and scope_preservation text must use repository-relative facts plus typed base commit/tree/worktree authority",
-        "must not bake the planning checkout root as expected delivery identity",
-        "Exact command strings are transported unchanged; allocation and delivery must not rewrite them",
-        "If an approved command conflicts with the later assigned worktree, the implementer must submit the typed blocked outcome and stop rather than seeking another checkout",
+        "predictable generated paths must be isolated",
+        "Core verifies the version-selected package proof/check after delivery",
     ] {
         assert!(
             prompt.contains(required),
@@ -461,10 +465,13 @@ fn one_unit_work_map_reaches_ready_and_dispatches_one_lane() {
         &repo,
         Some(one_unit_work_map()),
     );
-    assert!(done_status(&ready).contains("ready-to-execute:workstream=main"));
+    assert!(
+        done_status(&ready).contains("ready-to-execute:workstream=main"),
+        "ready response: {ready:?}"
+    );
     let approved: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(repo.join(".pi/autopilot/main/approved-plan.json"))
-            .expect("approved plan"),
+        &fs::read_to_string(repo.join(".pi/autopilot/main/approved-plan.v2.json"))
+            .expect("approved V2 plan"),
     )
     .expect("approved json");
     assert_eq!(
@@ -513,8 +520,8 @@ fn approved_plan_promotion_uses_digest_bound_subject_not_mutable_projection() {
         done_status(&promoted)
     );
     let approved: serde_json::Value = serde_json::from_slice(
-        &fs::read(repo.join(".pi/autopilot/main/approved-plan.json"))
-            .expect("approved plan from bound subject"),
+        &fs::read(repo.join(".pi/autopilot/main/approved-plan.v2.json"))
+            .expect("approved V2 image from bound actual carrier"),
     )
     .expect("approved plan json");
     assert!(
@@ -530,8 +537,245 @@ fn approved_plan_promotion_uses_digest_bound_subject_not_mutable_projection() {
         "{\"units\":[]}"
     );
     let events = fs::read_to_string(&event_log).expect("event log");
-    assert!(events.contains("review-subject-carrier:"), "{events}");
-    assert!(events.contains("review-subject-sha256:"), "{events}");
+    assert!(events.contains("approved-plan-v2-ready-root:{"), "{events}");
+    assert!(
+        !events.contains("approved-plan-v2-binding:"),
+        "V2 binding authority must be one canonical ready-root ref: {events}"
+    );
+    let rows = events
+        .lines()
+        .map(|line| serde_json::from_str::<EventRow>(line).expect("event row"))
+        .collect::<Vec<_>>();
+    let terminal_ref = format!(
+        "terminal-consumed:{}:{}:{}",
+        spawn_payload.action_id.0, spawn_payload.assignment_id.0, spawn_payload.run_revision
+    );
+    let planning_result_ref = format!(
+        "planning-result-consumed:{}:{}:{}",
+        spawn_payload.action_id.0, spawn_payload.assignment_id.0, spawn_payload.run_revision
+    );
+    let rooted = rows
+        .iter()
+        .filter(|row| row.kind.0 == "planning:ready-to-execute")
+        .find(|row| {
+            row.artifact_refs
+                .iter()
+                .any(|reference| reference.0 == terminal_ref)
+        })
+        .expect("V2 root atomically consumes the review terminal");
+    for required in [
+        terminal_ref.as_str(),
+        "completion-control:rooted",
+        "module-wired:watchdog",
+        planning_result_ref.as_str(),
+    ] {
+        assert!(
+            rooted
+                .artifact_refs
+                .iter()
+                .any(|reference| reference.0 == required),
+            "root missing {required}: {rooted:?}"
+        );
+    }
+    let root_ref = rooted
+        .artifact_refs
+        .iter()
+        .find(|reference| reference.0.starts_with("approved-plan-v2-ready-root:"))
+        .expect("one canonical V2 ready root");
+    let ready_root: serde_json::Value = serde_json::from_str(
+        root_ref
+            .0
+            .strip_prefix("approved-plan-v2-ready-root:")
+            .expect("V2 root prefix"),
+    )
+    .expect("canonical V2 root JSON");
+    assert_eq!(
+        ready_root["schema"],
+        "autopilot.approved_plan_v2_ready_root.v1"
+    );
+    assert_eq!(ready_root["workstream"], "main");
+    assert_eq!(
+        ready_root["final_review_action_id"],
+        spawn_payload.action_id.0
+    );
+    assert_eq!(
+        ready_root["final_review_assignment_id"],
+        spawn_payload.assignment_id.0
+    );
+    assert_eq!(
+        ready_root["final_review_run_revision"],
+        spawn_payload.run_revision
+    );
+    assert!(
+        !rows.iter().any(|row| {
+            matches!(
+                row.kind.0.as_str(),
+                "background:terminal" | "control:task-completed"
+            ) && row
+                .artifact_refs
+                .iter()
+                .any(|reference| reference.0 == spawn_payload.action_id.0)
+        }),
+        "V2 final approval must not consume terminal/control in a prior event"
+    );
+
+    let image_path = repo.join(".pi/autopilot/main/approved-plan.v2.json");
+    let binding_path = repo.join(".pi/autopilot/main/approved-plan.v2-binding.json");
+    let image_bytes = fs::read(&image_path).expect("rooted V2 image");
+    let binding_bytes = fs::read(&binding_path).expect("rooted V2 binding");
+    assert_eq!(
+        ready_root["binding_path"],
+        binding_path.display().to_string()
+    );
+    assert_eq!(ready_root["binding_sha256"], sha256_hex(&binding_bytes));
+    assert_eq!(ready_root["approved_plan_sha256"], sha256_hex(&image_bytes));
+
+    // A restart must select the one event-scoped root before allocation; no
+    // aggregate State.refs join can supply this authority.
+    let restarted = send_with_log("autopilot main", &event_log, Some(&repo));
+    assert_ne!(
+        restarted.kind, "done",
+        "restart lost rooted V2 authority: {restarted:?}"
+    );
+
+    let canonical_root = root_ref.0.clone();
+    let ready_index = rows
+        .iter()
+        .position(|row| row.kind.0 == "planning:ready-to-execute")
+        .expect("ready root row");
+    let reject_variant = |label: &str, variant: Vec<EventRow>, expected: &str| {
+        let path = root.join(format!("{label}-events.jsonl"));
+        fs::write(
+            &path,
+            variant
+                .iter()
+                .map(serde_json::to_string)
+                .collect::<Result<Vec<_>, _>>()
+                .expect("serialize root variant")
+                .join("\n"),
+        )
+        .expect("write root variant");
+        let result = send_with_log("autopilot main", &path, Some(&repo));
+        assert!(
+            done_status(&result).contains(expected),
+            "{label} unexpectedly selected V2 authority: {result:?}"
+        );
+    };
+    let mut missing = rows.clone();
+    missing[ready_index]
+        .artifact_refs
+        .retain(|reference| reference.0 != canonical_root);
+    reject_variant(
+        "missing-root",
+        missing,
+        "image/binding orphan has no ready-event authority",
+    );
+    let mut malformed = rows.clone();
+    let malformed_root = Ref("approved-plan-v2-ready-root:{".to_owned());
+    let root_slot = malformed[ready_index]
+        .artifact_refs
+        .iter_mut()
+        .find(|reference| reference.0 == canonical_root)
+        .expect("root slot");
+    *root_slot = malformed_root;
+    reject_variant(
+        "malformed-root",
+        malformed,
+        "approved-plan-v2 ready root JSON",
+    );
+    let mut duplicate = rows.clone();
+    duplicate[ready_index]
+        .artifact_refs
+        .push(Ref(canonical_root.clone()));
+    reject_variant(
+        "duplicate-root",
+        duplicate,
+        "ready root event is incomplete or split",
+    );
+    let mut split = rows.clone();
+    split[ready_index]
+        .artifact_refs
+        .retain(|reference| reference.0 != planning_result_ref);
+    split[0]
+        .artifact_refs
+        .push(Ref(planning_result_ref.clone()));
+    reject_variant(
+        "split-root",
+        split,
+        "ready root event is incomplete or split",
+    );
+    let mut non_ready = rows.clone();
+    non_ready[0].artifact_refs.push(Ref(canonical_root.clone()));
+    reject_variant(
+        "non-ready-root",
+        non_ready,
+        "ready root appears outside ready event",
+    );
+    let mut wrong_workstream = rows.clone();
+    let wrong_root = canonical_root.replace("\"workstream\":\"main\"", "\"workstream\":\"other\"");
+    let root_slot = wrong_workstream[ready_index]
+        .artifact_refs
+        .iter_mut()
+        .find(|reference| reference.0 == canonical_root)
+        .expect("root slot");
+    *root_slot = Ref(wrong_root);
+    reject_variant(
+        "wrong-workstream-root",
+        wrong_workstream,
+        "image/binding orphan has no ready-event authority",
+    );
+
+    let orphan_log = root.join("orphan-events.jsonl");
+    let binding_backup = binding_path.with_extension("json.backup");
+    fs::rename(&binding_path, &binding_backup).expect("hide binding for image orphan");
+    let image_orphan = send_with_log("autopilot main", &orphan_log, Some(&repo));
+    assert!(
+        done_status(&image_orphan).contains("image/binding orphan has no ready-event authority"),
+        "image-only orphan unexpectedly gained authority: {image_orphan:?}"
+    );
+    fs::rename(&binding_backup, &binding_path).expect("restore binding");
+    let binding_orphan = send_with_log("autopilot main", &orphan_log, Some(&repo));
+    assert!(
+        done_status(&binding_orphan).contains("image/binding orphan has no ready-event authority"),
+        "image+binding orphan unexpectedly gained authority: {binding_orphan:?}"
+    );
+
+    let retry_log = root.join("retry-events.jsonl");
+    assert!(
+        !rows
+            .iter()
+            .filter(|row| row.kind.0 != "planning:ready-to-execute")
+            .any(|row| row
+                .artifact_refs
+                .iter()
+                .any(|reference| reference.0 == terminal_ref)),
+        "no terminal-consumed fact may survive without the canonical V2 root"
+    );
+    let pre_root = rows
+        .iter()
+        .filter(|row| row.kind.0 != "planning:ready-to-execute")
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()
+        .expect("serialize pre-root events")
+        .join("\n");
+    fs::write(&retry_log, format!("{pre_root}\n")).expect("write pre-root event log");
+    let retried = send_planning_completion(&spawn_payload, &retry_log, &repo, 950);
+    assert!(done_status(&retried).contains("ready-to-execute:workstream=main"));
+    assert_eq!(fs::read(&image_path).unwrap(), image_bytes);
+    assert_eq!(fs::read(&binding_path).unwrap(), binding_bytes);
+    let retry_rows = fs::read_to_string(&retry_log)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<EventRow>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        retry_rows
+            .iter()
+            .filter(|row| row.kind.0 == "planning:ready-to-execute")
+            .count(),
+        1,
+        "retry must append exactly one root"
+    );
 }
 
 #[test]
@@ -575,14 +819,8 @@ fn blocked_first_plan_review_gets_one_recovery_then_same_gate_reapproves() {
     );
     let mut next_id = 920;
     acknowledge_spawn_wave(&recovery_wave, &event_log, &repo, &mut next_id);
-    let original_work_map =
-        fs::read(repo.join(".pi/autopilot/main/work-map.md")).expect("original work map");
+    let original_work_map = v2_carrier_raw(&repo, "planning-main-plan-synthesizer-02");
     let recovered_work_map = no_defect_recovery_work_map(&repo);
-    fs::write(
-        repo.join(".pi/autopilot/main/recovery-work-map.md"),
-        &recovered_work_map,
-    )
-    .expect("simulate recovery artifact written before its event");
     let rereview_wave = planning_wave_payload(send_planning_completion_with_raw(
         recovery,
         &event_log,
@@ -595,13 +833,14 @@ fn blocked_first_plan_review_gets_one_recovery_then_same_gate_reapproves() {
     let rereviewer = &rereview_wave.actions[0];
     assert_eq!(rereviewer.assignment_id.0, "planning-main-plan-reviewer-02");
     assert_eq!(
-        fs::read(repo.join(".pi/autopilot/main/work-map.md")).expect("immutable original"),
+        v2_carrier_raw(&repo, "planning-main-plan-synthesizer-02"),
         original_work_map
     );
-    assert_eq!(
-        fs::read(repo.join(".pi/autopilot/main/recovery-work-map.md"))
-            .expect("immutable recovery output"),
-        recovered_work_map.as_bytes()
+    assert!(
+        !repo
+            .join(".pi/autopilot/main/recovery-work-map.md")
+            .exists(),
+        "V2 recovery authority remains in its exact carrier"
     );
     let rereviewer_prompt = fs::read_to_string(
         runner::planning_paths(&repo, "main", &rereviewer.assignment_id).prompt_path,
@@ -618,7 +857,14 @@ fn blocked_first_plan_review_gets_one_recovery_then_same_gate_reapproves() {
     acknowledge_spawn_wave(&rereview_wave, &event_log, &repo, &mut next_id);
     let ready = send_planning_completion(rereviewer, &event_log, &repo, next_id);
     assert!(done_status(&ready).contains("ready-to-execute:workstream=main"));
-    assert!(repo.join(".pi/autopilot/main/approved-plan.json").exists());
+    assert!(
+        repo.join(".pi/autopilot/main/approved-plan.v2.json")
+            .exists()
+    );
+    assert!(
+        repo.join(".pi/autopilot/main/approved-plan.v2-binding.json")
+            .exists()
+    );
     let events = fs::read_to_string(&event_log).expect("events");
     assert!(events.contains("planning:recovery-required"));
     assert!(events.contains("planning:recovery-completed"));
@@ -674,7 +920,7 @@ fn planning_recovery_rejects_drifted_bound_original_carrier() {
         &recovered_work_map(&repo),
     );
     assert!(
-        done_status(&rejected).contains("planning subject digest drift"),
+        done_status(&rejected).contains("V2 recovery typed subject binding is absent or drifted"),
         "response: {rejected:?}"
     );
     assert!(
@@ -736,7 +982,11 @@ fn blocked_second_plan_review_exhausts_semantic_recovery_without_looping() {
     );
     let status = done_status(&blocked);
     assert!(status.contains("planning:blocked:"), "{status}");
-    assert!(!repo.join(".pi/autopilot/main/approved-plan.json").exists());
+    assert!(
+        !repo
+            .join(".pi/autopilot/main/approved-plan.v2.json")
+            .exists()
+    );
     let replayed = send_with_log(
         &format!("autopilot-plan main {}", task_paths.join(" ")),
         &event_log,
@@ -802,7 +1052,11 @@ fn planning_recovery_requiring_new_authority_fails_closed_without_rereview() {
         !events.contains("planning-main-plan-reviewer-02"),
         "{events}"
     );
-    assert!(!repo.join(".pi/autopilot/main/approved-plan.json").exists());
+    assert!(
+        !repo
+            .join(".pi/autopilot/main/approved-plan.v2.json")
+            .exists()
+    );
     let replayed = send_with_log(
         &format!("autopilot-plan main {}", task_paths.join(" ")),
         &event_log,
@@ -844,11 +1098,14 @@ fn planning_recovery_cannot_omit_evidence_or_expand_original_unit_scope() {
     let mut next_id = 920;
     acknowledge_spawn_wave(&recovery_wave, &event_log, &repo, &mut next_id);
     let recovery = &recovery_wave.actions[0];
-    let missing_evidence = fs::read_to_string(repo.join(".pi/autopilot/main/work-map.md"))
-        .expect("canonical work map");
+    let missing_evidence = v2_carrier_raw(&repo, "planning-main-plan-synthesizer-02");
     let rejected =
         send_planning_completion_with_raw(recovery, &event_log, &repo, next_id, &missing_evidence);
-    assert!(done_status(&rejected).contains("recovery work map missing recovery evidence"));
+    assert!(
+        done_status(&rejected)
+            .contains("recovery subject was supplied but candidate has no recovery evidence"),
+        "response: {rejected:?}"
+    );
     next_id += 2;
     let rejected = send_planning_completion_with_raw(
         recovery,
@@ -858,10 +1115,14 @@ fn planning_recovery_cannot_omit_evidence_or_expand_original_unit_scope() {
         &recovered_work_map_with_scope_expansion(&repo),
     );
     assert!(
-        done_status(&rejected).contains("recovery work map expanded authority"),
+        done_status(&rejected).contains("recovery changed non-objective V2 authority"),
         "response: {rejected:?}"
     );
-    assert!(!repo.join(".pi/autopilot/main/approved-plan.json").exists());
+    assert!(
+        !repo
+            .join(".pi/autopilot/main/approved-plan.v2.json")
+            .exists()
+    );
 }
 
 #[test]
@@ -1370,29 +1631,71 @@ fn send_planning_completion_inner(
     let carrier_path = cwd
         .join(".pi/autopilot/main/planning/carriers")
         .join(format!("{assignment_id}.json"));
-    let carrier = serde_json::json!({
-        "schema":"autopilot.planning_carrier.v1",
-        "action_id":action.action_id.0,
-        "assignment_id":assignment_id,
-        "run_revision":action.run_revision,
-        "workstream":"main",
-        "role_id":spec["role_id"],
-        "mode":spec["mode"],
-        "boundary_id":boundary_id,
-        "result_contract":spec["result_contract"],
-        "prompt_path":spec["prompt_path"],
-        "prompt_digest":spec["prompt_digest"],
-        "boundary_digest":spec["boundary_digest"],
-        "result_contract_digest":spec["result_contract_digest"],
-        "settings_digest":spec["settings_digest"],
-        "context_digest":spec["context_digest"],
-        "skills_digest":spec["skills_digest"],
-        "subscription_digest":spec["subscription_digest"],
-        "spec_digest":sha256_hex(spec_text.as_bytes()),
-        "spec_path":spec_path,
-        "carrier_path":carrier_path,
-        "raw_output":raw_output
-    });
+    let carrier = if boundary_id == "planning.work-map.v2" {
+        let typed_spec: kernel::generated::AgentRunSpec =
+            serde_json::from_value(spec.clone()).expect("typed V2 planning spec");
+        let route = spec["terminal_route"].clone();
+        serde_json::json!({
+            "schema":"autopilot.planning_carrier.v2",
+            "action_id":action.action_id.0,
+            "assignment_id":assignment_id,
+            "run_revision":action.run_revision,
+            "workstream":"main",
+            "role_id":spec["role_id"],
+            "mode":spec["mode"],
+            "boundary_id":boundary_id,
+            "result_contract":spec["result_contract"],
+            "prompt_path":spec["prompt_path"],
+            "prompt_digest":spec["prompt_digest"],
+            "boundary_digest":spec["boundary_digest"],
+            "result_contract_digest":spec["result_contract_digest"],
+            "settings_digest":spec["settings_digest"],
+            "context_digest":spec["context_digest"],
+            "skills_digest":spec["skills_digest"],
+            "subscription_digest":spec["subscription_digest"],
+            "runtime_extension_digest":spec["runtime_extension_digest"],
+            "spec_digest":sha256_hex(spec_text.as_bytes()),
+            "spec_path":spec_path,
+            "carrier_path":carrier_path,
+            "carrier_channel":"tool",
+            "tool_name":route["tool_name"],
+            "tool_schema_digest":route["schema_digest"],
+            "carrier_binding":runner::child::carrier_binding(&typed_spec),
+            "pi_version":"pi 0.84.1",
+            "terminal_route":route,
+            "atom_registry_path":spec["atom_registry_path"],
+            "atom_registry_digest":spec["atom_registry_digest"],
+            "repository_manifest_path":spec["repository_manifest_path"],
+            "repository_manifest_digest":spec["repository_manifest_digest"],
+            "repository_head_commit":spec["repository_head_commit"],
+            "repository_head_tree":spec["repository_head_tree"],
+            "raw_output":raw_output
+        })
+    } else {
+        serde_json::json!({
+            "schema":"autopilot.planning_carrier.v1",
+            "action_id":action.action_id.0,
+            "assignment_id":assignment_id,
+            "run_revision":action.run_revision,
+            "workstream":"main",
+            "role_id":spec["role_id"],
+            "mode":spec["mode"],
+            "boundary_id":boundary_id,
+            "result_contract":spec["result_contract"],
+            "prompt_path":spec["prompt_path"],
+            "prompt_digest":spec["prompt_digest"],
+            "boundary_digest":spec["boundary_digest"],
+            "result_contract_digest":spec["result_contract_digest"],
+            "settings_digest":spec["settings_digest"],
+            "context_digest":spec["context_digest"],
+            "skills_digest":spec["skills_digest"],
+            "subscription_digest":spec["subscription_digest"],
+            "spec_digest":sha256_hex(spec_text.as_bytes()),
+            "spec_path":spec_path,
+            "carrier_path":carrier_path,
+            "raw_output":raw_output
+        })
+    };
     fs::create_dir_all(carrier_path.parent().expect("planning carrier directory"))
         .expect("planning carrier fixture directory");
     fs::write(
@@ -1432,11 +1735,22 @@ fn one_unit_work_map() -> String {
     serde_json::json!({"units":[{"id":"U1","kind":"implementation","objective":"Deliver the one accepted work unit.","criteria":["The focused acceptance path passes."],"depends_on":[],"files":["src/lib.rs"],"commands":[{"command":"cargo test -q","expected":"pass","effect":"no-effect","generated_paths":[],"handling":"none","scope_preservation":"Final Git-visible state remains limited to the approved unit files."}],"package_checks":[],"links":["W1"]}]}).to_string()
 }
 
+fn v2_carrier_raw(repo: &Path, assignment_id: &str) -> String {
+    let path = runner::planning_paths(repo, "main", &Id(assignment_id.to_owned())).carrier_path;
+    let carrier: serde_json::Value =
+        serde_json::from_slice(&fs::read(path).expect("exact V2 source carrier"))
+            .expect("exact V2 source carrier JSON");
+    assert_eq!(carrier["schema"], "autopilot.planning_carrier.v2");
+    carrier["raw_output"]
+        .as_str()
+        .expect("exact V2 source raw_output")
+        .to_owned()
+}
+
 fn recovered_work_map(repo: &Path) -> String {
-    let path = repo.join(".pi/autopilot/main/work-map.md");
     let mut value: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(path).expect("canonical work map"))
-            .expect("canonical work map json");
+        serde_json::from_str(&v2_carrier_raw(repo, "planning-main-plan-synthesizer-02"))
+            .expect("canonical V2 work map json");
     let unit = value["units"]
         .as_array_mut()
         .and_then(|units| units.first_mut())
@@ -1459,10 +1773,9 @@ fn recovered_work_map(repo: &Path) -> String {
 }
 
 fn no_defect_recovery_work_map(repo: &Path) -> String {
-    let path = repo.join(".pi/autopilot/main/work-map.md");
     let mut value: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(path).expect("canonical work map"))
-            .expect("canonical work map json");
+        serde_json::from_str(&v2_carrier_raw(repo, "planning-main-plan-synthesizer-02"))
+            .expect("canonical V2 work map json");
     value["recovery"] = serde_json::json!({
         "disposition":"no-defect",
         "diagnosis_refs":["review:planning-main-plan-reviewer-01"],
@@ -1707,6 +2020,7 @@ fn append_active_binding(event_log: &Path, repo: &Path, workstream: &str) {
         context_digest: "digest".to_owned(),
         skills_digest: "digest".to_owned(),
         subscription_digest: "digest".to_owned(),
+        terminal_route: None,
         assignment_path: None,
         assignment_digest: None,
         repository_manifest_path: None,
