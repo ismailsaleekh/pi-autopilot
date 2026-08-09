@@ -53,7 +53,7 @@ test("registered Pi slash handlers reach the real compiled autopilot-core over s
 
       if (command === "autopilot-plan") {
         assertPlanningSpawn(effects, "autopilot-plan");
-        assertPlanningManifestGrounded(root);
+        assertPlanningManifestTaskGrounded(root);
         assertAgentSpawnRecorded(eventLog, "planning-main-task-extractor-01");
       }
     }
@@ -283,9 +283,8 @@ function assertPlanningSpawn(effects, label) {
   assert.doesNotMatch(action.bg_run.command, /autopilot-agent-run --assignment/u);
 }
 
-function assertPlanningManifestGrounded(root) {
+function assertPlanningManifestTaskGrounded(root) {
   const manifest = JSON.parse(readFileSync(join(root, ".pi", "autopilot", "main", "planning-manifest.json"), "utf8"));
-  const head = gitHead(root);
   assert.equal(manifest.workstream, "main");
   assert.equal(manifest.atoms, 3);
   assert.equal(
@@ -293,9 +292,10 @@ function assertPlanningManifestGrounded(root) {
     expectedPlanningAssignmentCount(),
     "D72 P1-P6 assignment plan should match data/planning.kdl assignment_role counts, not be stubbed",
   );
-  assert.ok(
-    manifest.verified_facts.some((fact) => fact === `repo-file:src/fixture.ts:head=${head}:line=export function autopilotFixture() { return 'real repository evidence'; }`),
-    `manifest did not include source evidence from git HEAD: ${JSON.stringify(manifest.verified_facts)}`,
+  assert.deepEqual(
+    manifest.verified_facts,
+    ["task-authority:A1", "task-authority:A2", "task-authority:A3"],
+    "planning manifest facts must come only from accepted task authority, never repository enumeration",
   );
 }
 
@@ -315,10 +315,6 @@ function expectedPlanningAssignmentCount() {
   }
   assert.notEqual(roles, 0, "data/planning.kdl must declare assignment_role rows");
   return total;
-}
-
-function gitHead(cwd) {
-  return execFileSync("git", ["rev-parse", "--verify", "HEAD"], { cwd, encoding: "utf8" }).trim();
 }
 
 function sha256(data) {
