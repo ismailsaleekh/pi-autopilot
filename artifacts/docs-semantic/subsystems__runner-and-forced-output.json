@@ -1,8 +1,8 @@
 {
   "schema_version": "autopilot.docs_semantic_attestation.v2",
   "doc_id": "subsystems/runner-and-forced-output",
-  "reviewed_body_hash": "sha256:9d614f9020ee575fdadad2e82011b56cf1a6f88691a65c2b4e13dbac3dc35d55",
-  "reviewed_doc_sha256": "sha256:85eb3fccdbf873a2c9bbf783a88bf9f852abed41c81da07d4eeabd84fba06db1",
+  "reviewed_body_hash": "sha256:1e9a10dd85e638b7a7f7e6c33cc090c7684056146703ddc6dae198b2ffc37ef9",
+  "reviewed_doc_sha256": "sha256:0d6a0ff1eca48a37c88138d2400a5c97aebf39a916788139a0dca97364ad152c",
   "covers_sources": [
     "data/control.kdl",
     "data/seam_real_producers.rs",
@@ -14,7 +14,7 @@
     "src/resolve-core.ts"
   ],
   "verdict": "PASS",
-  "reviewer": "anthropic/claude-opus-5 via Pi subscription delegates ddfc078bdbdba0f070c6c5855846b0bf4 and d69559a60b20ee1c897e1a5fd5273bbf7; verified answer sha256 8a80152045b41baab9a60b48a7e5a1accad6ab78d836206da6c4646b46231685 and 7bf7b838f137aa8b9ecea796492a046e1a166c4cb2969f930e0ff9fe269cef3e",
-  "reviewed_at": "2026-08-06T14:20:01.000Z",
-  "notes": "PASS: independent reviews verified the final approved-command id-only boundary, hidden Pi 0.84 shell isolation, UTF-8 final-snapshot receipts, exact generated digest admission, unchanged Validator evidence authority, and the exact pi-background-tasks 2.1.1 api_version-1 EventBus pair."
+  "reviewer": "pi-autopilot sole writable source worker",
+  "reviewed_at": "2026-08-09T12:42:35.000Z",
+  "notes": "PASS: offline semantic review confirmed that the exact 2.1.4 EventBus run payload preserves api_version-1 channels, run fields, durable notification, and machine-only completion behavior; only the certified paired-package identity changed."
 }

@@ -7,15 +7,15 @@ covers_sources:
   - scripts/certify-runtime-repair.mjs
   - scripts/check-payload.mjs
   - scripts/security-scan.mjs
-signature_hash: 'sha256:7789372c3c79970ba87e872865eb05aecf103a2bdc1dae7bd2bb9e406c4e92d9'
-body_hash: 'sha256:7789372c3c79970ba87e872865eb05aecf103a2bdc1dae7bd2bb9e406c4e92d9'
-semantic_attestation: 'sha256:7789372c3c79970ba87e872865eb05aecf103a2bdc1dae7bd2bb9e406c4e92d9'
+signature_hash: 'sha256:a7a55328362da80f1daea7fdb5cb0f686eafad2cd973ab39bf7ba92d0953057d'
+body_hash: 'sha256:a7a55328362da80f1daea7fdb5cb0f686eafad2cd973ab39bf7ba92d0953057d'
+semantic_attestation: 'sha256:a7a55328362da80f1daea7fdb5cb0f686eafad2cd973ab39bf7ba92d0953057d'
 stability: evolving
 ---
 
 # Operations: runtime-repair release certification
 
-The runtime-repair certificate is scoped to one clean `pi-autopilot@1.3.1` candidate and one clean `pi-background-tasks@2.1.2` candidate. It proves the pair can run the real Pi SDK background integration with no network, no paid/metered API, deterministic tarballs, and installed-consumer parity.
+The runtime-repair certificate is scoped to one clean `pi-autopilot@1.3.1` candidate and one clean `pi-background-tasks@2.1.4` candidate. It proves the pair can run the real Pi SDK background integration with no network, no paid/metered API, deterministic tarballs, and installed-consumer parity.
 
 ## Driver
 
@@ -60,7 +60,7 @@ Git output with leader-exit descendant cleanup, explicit unchanged
 no-defect recovery, child/parent authority replay, and all shipped child profiles in the installed
 packed consumer. The packed zero-network claim requires an active OS network-denial sandbox plus
 an in-process canary; an unset marker alone is insufficient. Run the dedicated mutation matrix
-against that exact source state. Keep source/docs and the five rebuilt platform binaries in separate commits; binary
+against that exact source state. Keep source/docs and the rebuild of all four supported Unix binaries in separate commits; do not build or test Windows; binary
 parity is expected to remain red only between those two commits.
 
 ## What the certificate does not do

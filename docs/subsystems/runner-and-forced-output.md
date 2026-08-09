@@ -13,9 +13,9 @@ covers_sources:
   - drivers/src/watchdog/mod.rs
   - src/extension.ts
   - src/resolve-core.ts
-signature_hash: 'sha256:9c80d67b502707b53c210ecb45cc4d2aa0dfae3f8b89c0a28d3fdb23e8c1fd40'
-body_hash: 'sha256:9d614f9020ee575fdadad2e82011b56cf1a6f88691a65c2b4e13dbac3dc35d55'
-semantic_attestation: 'sha256:9d614f9020ee575fdadad2e82011b56cf1a6f88691a65c2b4e13dbac3dc35d55'
+signature_hash: 'sha256:15bc3c704ac15b343a059d096d19f861ff55bece7ed0b0ce90822f101c772037'
+body_hash: 'sha256:1e9a10dd85e638b7a7f7e6c33cc090c7684056146703ddc6dae198b2ffc37ef9'
+semantic_attestation: 'sha256:1e9a10dd85e638b7a7f7e6c33cc090c7684056146703ddc6dae198b2ffc37ef9'
 stability: stable
 ---
 
@@ -37,7 +37,7 @@ Autopilot's child runner is split between a tiny npm wrapper and Rust Core-owned
 
 1. `CoreTransport` resolves `process.execPath` and `bin/autopilot-agent-run.mjs` from the installed package and passes them to Core as transport facts.
 2. Core writes a strict `autopilot.agent_run_spec.v4`, rendered prompt, and a parent-selected generated terminal profile under deterministic `.pi/autopilot/<workstream>/...` paths.
-3. Core emits a `background_action` whose nested `bg_run` object is byte-exactly the public `pi-background-tasks@2.1.2` `run` payload. Every Autopilot-owned descriptor keeps `notifyOnCompletion: true` for durable operator notification and sets `triggerOnCompletion: false`, so completion is machine-consumed without waking the unrestricted parent model.
+3. Core emits a `background_action` whose nested `bg_run` object is byte-exactly the public `pi-background-tasks@2.1.4` `run` payload. Every Autopilot-owned descriptor keeps `notifyOnCompletion: true` for durable operator notification and sets `triggerOnCompletion: false`, so completion is machine-consumed without waking the unrestricted parent model.
 4. The central `control.bg-run-exact.v1` boundary rejects any package-issued descriptor that disables notification or enables parent-turn triggering, then requires the Host call to match every descriptor byte.
 5. The Host forwards that object over `pi.events`; it does not rewrite fields, synthesize defaults, or call a Pi context method named `bg_run`. Generic background tasks outside Autopilot retain the background service's normal trigger behavior.
 6. The background service durably publishes one terminal event. The Host correlates it to the exact action and sends `task-completed` directly to Core; replay/re-emission and watchdog actions use the same machine-only completion profile.

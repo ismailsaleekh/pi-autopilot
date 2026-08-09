@@ -150,10 +150,11 @@ for (const candidate of packageSets) {
  * BUG-184 T2. Autopilot is installed globally, so its extension factory runs in
  * every Pi session. Through Pi's REAL loader and a REAL AgentSession, an
  * unactivated session must expose the background tools and ZERO `autopilot_*`
- * tools, and none of the 7 planning-tool prompt literals may reach the model's
- * tool metadata. After /autopilot-plan they must all appear.
+ * tools, and none of the 7 child-terminal-tool prompt literals may reach the
+ * parent model's tool metadata. Those descriptors remain child-only after
+ * /autopilot-plan; parent activation must not register them.
  */
-test("BUG-184: autopilot tools and prompt text are absent until an activating command runs", { timeout: 90000 }, async () => {
+test("BUG-184: child-only Autopilot tools and prompt text stay absent from the parent after activation", { timeout: 90000 }, async () => {
   const candidate = packageSets[0];
   assertBackgroundCandidate(candidate.backgroundRoot);
   assertCoreBinaryPresent(candidate.packageRoot);
@@ -199,15 +200,11 @@ test("BUG-184: autopilot tools and prompt text are absent until an activating co
       await session.prompt(`/autopilot-plan ${FOUR_PATH_ARGS}`);
 
       const afterNames = session.getAllTools().map((tool) => tool.name);
-      assert.deepEqual(afterNames.filter((name) => name.startsWith("autopilot_")).sort(), [
-        "autopilot_submit_atoms",
-        "autopilot_submit_context",
-        "autopilot_submit_plan_cluster",
-        "autopilot_submit_resolution",
-        "autopilot_submit_review",
-        "autopilot_submit_scout_report",
-        "autopilot_submit_synthesis",
-      ]);
+      assert.deepEqual(
+        afterNames.filter((name) => name.startsWith("autopilot_")).sort(),
+        [],
+        "parent activation must not register child-only terminal descriptors",
+      );
       for (const name of backgroundTools) {
         assert.ok(afterNames.includes(name), `activation must not disturb ${name}`);
       }
@@ -684,8 +681,8 @@ function assertPackageCandidate(root, name) {
 function assertBackgroundCandidate(root) {
   const metadata = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   assert.equal(metadata.name, "pi-background-tasks");
-  assert.equal(metadata.version, "2.1.2");
-  assert.ok(existsSync(join(root, "src", "core", "extension-api.ts")), "background candidate must expose the 2.1.2 extension API source");
+  assert.equal(metadata.version, "2.1.4");
+  assert.ok(existsSync(join(root, "src", "core", "extension-api.ts")), "background candidate must expose the 2.1.4 extension API source");
 }
 
 function assertCoreBinaryPresent(packageRoot) {
@@ -715,8 +712,12 @@ function readEventsIfPresent(eventLog) {
 
 function readJsonlIfPresent(path) {
   if (!existsSync(path)) return [];
-  const text = readFileSync(path, "utf8").trim();
-  return text ? text.split("\n").map((line) => JSON.parse(line)) : [];
+  const text = readFileSync(path, "utf8");
+  const lines = text.split("\n");
+  // The Core can be appending while this runtime probe observes its event log.
+  // JSONL records are complete only once their newline has been written.
+  if (!text.endsWith("\n")) lines.pop();
+  return lines.filter((line) => line.length > 0).map((line) => JSON.parse(line));
 }
 
 function sha256(data) {
