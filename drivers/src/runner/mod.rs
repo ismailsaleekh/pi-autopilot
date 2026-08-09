@@ -96,6 +96,9 @@ type AnyError = Box<dyn std::error::Error>;
 pub struct RunnerTransportFacts {
     pub node_executable: PathBuf,
     pub runner_wrapper: PathBuf,
+    /// Exact Host-supplied AF_UNIX child-control endpoint. It is transport
+    /// routing only; it is never repository or package authority.
+    pub child_control_socket_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -449,6 +452,7 @@ pub struct BlockedDeliverySnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IssuedRunnerBinding {
     pub action_id: Id,
     pub assignment_id: Id,
@@ -519,11 +523,33 @@ pub struct ReceiptV1RunnerBinding {
     pub profile_id: String,
     pub tool_name: ToolName,
     pub schema_digest: String,
+    pub prompt_path: String,
+    pub prompt_digest: String,
     pub spec_path: String,
     pub spec_digest: String,
     pub carrier_path: String,
+    pub session_id: Id,
+    pub boundary_digest: String,
+    pub result_contract_digest: String,
+    pub settings_digest: String,
+    pub context_digest: String,
+    pub skills_digest: String,
+    pub subscription_digest: String,
+    pub terminal_route: Option<TerminalRoute>,
+    pub assignment_path: Option<String>,
+    pub assignment_digest: Option<String>,
+    pub mode_parameter: Option<String>,
+    pub planning_subject_assignment_id: Option<Id>,
+    pub planning_subject_path: Option<String>,
+    pub planning_subject_digest: Option<String>,
+    pub lane_id: Option<Id>,
+    pub base_commit: Option<Sha>,
+    pub worktree: Option<String>,
+    pub required_focused_evidence: u32,
     pub carrier_binding_digest: String,
     pub authority_digest: String,
+    /// SHA-256 only. The per-issued plaintext capability lives exclusively in
+    /// the V5 spec supplied to the child.
     pub run_capability_digest: String,
 }
 
@@ -537,17 +563,27 @@ impl ReceiptV1RunnerBinding {
             || self.workstream.0.trim().is_empty()
             || self.role_id.0.trim().is_empty()
             || self.mode.0.trim().is_empty()
+            || (!self.result_contract.0.starts_with("planning.") && self.attempt == 0)
             || self.boundary_id.0.trim().is_empty()
             || self.result_contract.0.trim().is_empty()
             || self.profile_id.trim().is_empty()
             || self.tool_name.0.trim().is_empty()
             || !is_sha256_hex(&self.schema_digest)
+            || !is_sha256_hex(&self.prompt_digest)
             || !is_sha256_hex(&self.spec_digest)
+            || !is_sha256_hex(&self.boundary_digest)
+            || !is_sha256_hex(&self.result_contract_digest)
+            || !is_sha256_hex(&self.settings_digest)
+            || !is_sha256_hex(&self.context_digest)
+            || !is_sha256_hex(&self.skills_digest)
+            || !is_sha256_hex(&self.subscription_digest)
             || !is_sha256_hex(&self.carrier_binding_digest)
             || !is_sha256_hex(&self.authority_digest)
             || !is_sha256_hex(&self.run_capability_digest)
+            || self.prompt_path.is_empty()
             || self.spec_path.is_empty()
             || self.carrier_path.is_empty()
+            || self.session_id.0.trim().is_empty()
         {
             return Err(RunnerError::InvalidSpec(
                 "receipt_v1 runner binding has malformed required authority".to_owned(),
@@ -569,7 +605,10 @@ pub enum VersionedRunnerBinding {
 #[derive(Debug, Clone, PartialEq)]
 pub struct IssuedRunnerAction {
     pub action: BackgroundAction,
+    /// In-memory V4-shaped facade for unchanged shared validators only. Fresh
+    /// issuers never serialize this binding into Core state.
     pub binding: IssuedRunnerBinding,
+    pub receipt_binding: ReceiptV1RunnerBinding,
 }
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ResolvedRoleTools {
@@ -609,11 +648,21 @@ impl RunnerTransportFacts {
         let wrapper = env::var_os("AUTOPILOT_AGENT_RUNNER_WRAPPER").ok_or_else(|| {
             RunnerError::MissingTransport("AUTOPILOT_AGENT_RUNNER_WRAPPER".to_owned())
         })?;
-        Self::new(PathBuf::from(node), PathBuf::from(wrapper))
+        let socket = env::var_os("AUTOPILOT_CHILD_CONTROL_SOCKET_PATH").ok_or_else(|| {
+            RunnerError::MissingTransport("AUTOPILOT_CHILD_CONTROL_SOCKET_PATH".to_owned())
+        })?;
+        Self::new(PathBuf::from(node), PathBuf::from(wrapper), PathBuf::from(socket))
     }
 
-    pub fn new(node_executable: PathBuf, runner_wrapper: PathBuf) -> Result<Self, RunnerError> {
-        if !node_executable.is_absolute() || !runner_wrapper.is_absolute() {
+    pub fn new(
+        node_executable: PathBuf,
+        runner_wrapper: PathBuf,
+        child_control_socket_path: PathBuf,
+    ) -> Result<Self, RunnerError> {
+        if !node_executable.is_absolute()
+            || !runner_wrapper.is_absolute()
+            || !child_control_socket_path.is_absolute()
+        {
             return Err(RunnerError::InvalidTransport(
                 "runner transport is not absolute".to_owned(),
             ));
@@ -622,9 +671,22 @@ impl RunnerTransportFacts {
         reject_link_components_for_path(&runner_wrapper)?;
         require_regular_file(&node_executable)?;
         require_regular_file(&runner_wrapper)?;
+        let socket_text = child_control_socket_path.to_str().ok_or_else(|| {
+            RunnerError::InvalidTransport("child-control socket path is not UTF-8".to_owned())
+        })?;
+        // Unix-domain socket paths are platform bounded. Keep a conservative
+        // short absolute cap rather than truncating, hashing, or discovering a
+        // fallback endpoint.
+        if socket_text.is_empty() || socket_text.len() > 107 {
+            return Err(RunnerError::InvalidTransport(
+                "child-control socket path is empty or exceeds the short absolute cap".to_owned(),
+            ));
+        }
+        reject_link_components_for_path(&child_control_socket_path)?;
         Ok(Self {
             node_executable,
             runner_wrapper,
+            child_control_socket_path,
         })
     }
 }
@@ -805,7 +867,8 @@ pub fn planning_issue(request: &PlanningRunnerRequest) -> Result<IssuedRunnerAct
         planning_inputs_path: None,
         planning_inputs_digest: None,
     };
-    let spec_digest = write_spec_document(&paths.spec_path, &spec)?;
+    let (fresh_spec, spec_digest) =
+        write_receipt_v1_spec_document(&paths.spec_path, &spec, &facts)?;
     let binding = IssuedRunnerBinding {
         action_id: request.action_id.clone(),
         assignment_id: request.assignment_id.clone(),
@@ -847,7 +910,12 @@ pub fn planning_issue(request: &PlanningRunnerRequest) -> Result<IssuedRunnerAct
         &spec,
         Some(DEFAULT_BG_TIMEOUT_SECONDS),
     )?;
-    Ok(IssuedRunnerAction { action, binding })
+    let receipt_binding = receipt_v1_binding_from_fresh_issue(&binding, &fresh_spec)?;
+    Ok(IssuedRunnerAction {
+        action,
+        binding,
+        receipt_binding,
+    })
 }
 
 pub fn bg_action(assignment: &RunnerAssignment) -> Result<BackgroundAction, RunnerError> {
@@ -1009,7 +1077,7 @@ pub fn delivery_issue_with_facts(
         planning_inputs_path: None,
         planning_inputs_digest: None,
     };
-    let spec_digest = write_spec_document(&paths.spec_path, &spec)?;
+    let (fresh_spec, spec_digest) = write_receipt_v1_spec_document(&paths.spec_path, &spec, facts)?;
     let binding = IssuedRunnerBinding {
         action_id: assignment.action_id.clone(),
         assignment_id: assignment.assignment_id.clone(),
@@ -1050,7 +1118,12 @@ pub fn delivery_issue_with_facts(
         &spec,
         Some(DEFAULT_BG_TIMEOUT_SECONDS),
     )?;
-    Ok(IssuedRunnerAction { action, binding })
+    let receipt_binding = receipt_v1_binding_from_fresh_issue(&binding, &fresh_spec)?;
+    Ok(IssuedRunnerAction {
+        action,
+        binding,
+        receipt_binding,
+    })
 }
 
 #[cfg(unix)]
@@ -1223,7 +1296,7 @@ pub fn delivery_issue_v4_with_facts(
         planning_inputs_path: None,
         planning_inputs_digest: None,
     };
-    let spec_digest = write_spec_document(&paths.spec_path, &spec)?;
+    let (fresh_spec, spec_digest) = write_receipt_v1_spec_document(&paths.spec_path, &spec, facts)?;
     let binding = IssuedRunnerBinding {
         action_id: assignment.action_id.clone(),
         assignment_id: assignment.assignment_id.clone(),
@@ -1264,7 +1337,12 @@ pub fn delivery_issue_v4_with_facts(
         &spec,
         Some(DEFAULT_BG_TIMEOUT_SECONDS),
     )?;
-    Ok(IssuedRunnerAction { action, binding })
+    let receipt_binding = receipt_v1_binding_from_fresh_issue(&binding, &fresh_spec)?;
+    Ok(IssuedRunnerAction {
+        action,
+        binding,
+        receipt_binding,
+    })
 }
 
 fn verify_validation_package_checks(request: &ValidationRunnerRequest) -> Result<(), RunnerError> {
@@ -1718,7 +1796,7 @@ pub fn validation_issue(
         planning_inputs_path: None,
         planning_inputs_digest: None,
     };
-    let spec_digest = write_spec_document(&paths.spec_path, &spec)?;
+    let (fresh_spec, spec_digest) = write_receipt_v1_spec_document(&paths.spec_path, &spec, facts)?;
     let binding = IssuedRunnerBinding {
         action_id: request.action_id.clone(),
         assignment_id: request.assignment_id.clone(),
@@ -1759,7 +1837,12 @@ pub fn validation_issue(
         &spec,
         Some(DEFAULT_BG_TIMEOUT_SECONDS),
     )?;
-    Ok(IssuedRunnerAction { action, binding })
+    let receipt_binding = receipt_v1_binding_from_fresh_issue(&binding, &fresh_spec)?;
+    Ok(IssuedRunnerAction {
+        action,
+        binding,
+        receipt_binding,
+    })
 }
 
 /// Issue the closed v3 Validator boundary for new production work.  The v2
@@ -2427,7 +2510,7 @@ pub fn validation_issue_v3(
         planning_inputs_path: None,
         planning_inputs_digest: None,
     };
-    let spec_digest = write_spec_document(&paths.spec_path, &spec)?;
+    let (fresh_spec, spec_digest) = write_receipt_v1_spec_document(&paths.spec_path, &spec, facts)?;
     let binding = IssuedRunnerBinding {
         action_id: request.action_id.clone(),
         assignment_id: request.assignment_id.clone(),
@@ -2469,15 +2552,21 @@ pub fn validation_issue_v3(
             &spec,
             Some(DEFAULT_BG_TIMEOUT_SECONDS),
         )?,
+        receipt_binding: receipt_v1_binding_from_fresh_issue(&binding, &fresh_spec)?,
         binding,
     })
 }
 
 fn admission_failure_text(failure: &validation_authority::AdmissionFailure) -> String {
-    failure
+    match failure
         .canonical_bytes()
         .and_then(|bytes| String::from_utf8(bytes).map_err(|error| error.to_string()))
-        .unwrap_or_else(|error| format!("validation authority diagnostic failure: {error}"))
+    {
+        Ok(text) => text,
+        // This is a distinct authority failure, not a substituted model
+        // diagnostic or synthetic accepted value.
+        Err(error) => format!("validation authority canonical diagnostic failure: {error}"),
+    }
 }
 pub fn command_for_spec(facts: &RunnerTransportFacts, spec_path: &Path) -> String {
     try_command_for_spec(facts, spec_path).expect("runner command paths must have been validated")
@@ -2929,11 +3018,25 @@ pub fn decode_versioned_binding_ref(value: &str) -> Result<VersionedRunnerBindin
         .as_object()
         .ok_or_else(|| RunnerError::InvalidSpec("binding ref must be a JSON object".to_owned()))?;
     match object.get("admission_mode") {
-        None => serde_json::from_value::<IssuedRunnerBinding>(raw)
-            .map(VersionedRunnerBinding::ReplayV0)
-            .map_err(|error| {
+        None => {
+            // Historical bytes get no shape inference. Decode the exact closed
+            // V4 form, then prove that its canonical field set is precisely
+            // the one decoded; a defaulted/missing mandatory field or an
+            // unknown field cannot silently select replay_v0.
+            let binding: IssuedRunnerBinding = serde_json::from_value(raw.clone()).map_err(|error| {
                 RunnerError::InvalidSpec(format!("legacy replay_v0 binding: {error}"))
-            }),
+            })?;
+            let supplied = crate::evidence::canonical_json(&raw)
+                .map_err(|error| RunnerError::InvalidSpec(format!("legacy replay_v0 canonical JSON: {error}")))?;
+            let decoded = crate::evidence::canonical_json(&binding)
+                .map_err(|error| RunnerError::InvalidSpec(format!("legacy replay_v0 canonical binding: {error}")))?;
+            if supplied != decoded {
+                return Err(RunnerError::InvalidSpec(
+                    "legacy replay_v0 binding field-set/default drift".to_owned(),
+                ));
+            }
+            Ok(VersionedRunnerBinding::ReplayV0(binding))
+        },
         Some(serde_json::Value::String(mode)) if mode == "receipt_v1" => {
             let binding: ReceiptV1RunnerBinding = serde_json::from_value(raw).map_err(|error| {
                 RunnerError::InvalidSpec(format!("receipt_v1 binding: {error}"))
@@ -3065,7 +3168,8 @@ pub fn validate_receipt_v1_spec(
     if profile.0 != binding.profile_id
         || profile.1 != binding.tool_name.0
         || profile.4 != binding.schema_digest
-        || spec.child_control_socket_path.0.is_empty()
+        || !Path::new(&spec.child_control_socket_path.0).is_absolute()
+        || spec.child_control_socket_path.0.len() > 107
         || !is_sha256_hex(&spec.child_control_token_digest.0)
         || !constant_time_hex_digest_matches(
             &spec.child_control_token,
@@ -3101,6 +3205,46 @@ pub fn constant_time_hex_digest_matches(value: &str, expected: &str) -> bool {
         diff |= left ^ right;
     }
     diff == 0
+}
+
+/// Convert a receipt binding to the explicit V4 facade only for unchanged
+/// validators. This never parses a persisted V4 spec and never changes the
+/// binding's admission classification.
+pub fn receipt_v1_validator_facade(binding: &ReceiptV1RunnerBinding) -> IssuedRunnerBinding {
+    IssuedRunnerBinding {
+        action_id: binding.action_id.clone(),
+        assignment_id: binding.assignment_id.clone(),
+        run_revision: binding.run_revision,
+        workstream: binding.workstream.clone(),
+        role_id: binding.role_id.clone(),
+        mode: binding.mode.clone(),
+        boundary_id: binding.boundary_id.clone(),
+        result_contract: binding.result_contract.clone(),
+        prompt_path: binding.prompt_path.clone(),
+        prompt_digest: binding.prompt_digest.clone(),
+        spec_path: binding.spec_path.clone(),
+        spec_digest: binding.spec_digest.clone(),
+        carrier_path: binding.carrier_path.clone(),
+        session_id: binding.session_id.clone(),
+        boundary_digest: binding.boundary_digest.clone(),
+        result_contract_digest: binding.result_contract_digest.clone(),
+        settings_digest: binding.settings_digest.clone(),
+        context_digest: binding.context_digest.clone(),
+        skills_digest: binding.skills_digest.clone(),
+        subscription_digest: binding.subscription_digest.clone(),
+        terminal_route: binding.terminal_route.clone(),
+        assignment_path: binding.assignment_path.clone(),
+        assignment_digest: binding.assignment_digest.clone(),
+        mode_parameter: binding.mode_parameter.clone(),
+        planning_subject_assignment_id: binding.planning_subject_assignment_id.clone(),
+        planning_subject_path: binding.planning_subject_path.clone(),
+        planning_subject_digest: binding.planning_subject_digest.clone(),
+        lane_id: binding.lane_id.clone(),
+        attempt: Some(binding.attempt),
+        base_commit: binding.base_commit.clone(),
+        worktree: binding.worktree.clone(),
+        required_focused_evidence: binding.required_focused_evidence,
+    }
 }
 
 fn is_sha256_hex(value: &str) -> bool {
@@ -4687,12 +4831,181 @@ pub fn render_delivery_submission_authority(
     ))
 }
 
-fn write_spec_document(path: &Path, spec: &AgentRunSpec) -> Result<String, RunnerError> {
-    let data =
-        serde_json::to_vec_pretty(spec).map_err(|error| RunnerError::Io(error.to_string()))?;
+/// Build and publish a fresh V5 spec. The capability is minted exactly here,
+/// from the OS CSPRNG, and is never copied into the durable binding.
+fn write_receipt_v1_spec_document(
+    path: &Path,
+    facade: &AgentRunSpec,
+    facts: &RunnerTransportFacts,
+) -> Result<(AgentRunSpecV5, String), RunnerError> {
+    let random = crate::state_root::os_csprng_32()
+        .map_err(|error| RunnerError::Io(format!("child-control capability CSPRNG: {error}")))?;
+    let token = random.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    let token_digest = sha256_hex(token.as_bytes());
+    let spec = AgentRunSpecV5 {
+        schema: kernel::generated::SchemaId("autopilot.agent_run_spec.v5".to_owned()),
+        admission_mode: AdmissionMode::ReceiptV1,
+        child_control_socket_path: to_contract_path(&facts.child_control_socket_path)?,
+        child_control_token: token,
+        child_control_token_digest: Digest(token_digest),
+        assignment_kind: facade.assignment_kind.clone(),
+        action_id: facade.action_id.clone(),
+        assignment_id: facade.assignment_id.clone(),
+        run_id: facade.run_id.clone(),
+        run_revision: facade.run_revision,
+        workstream: facade.workstream.clone(),
+        role_id: facade.role_id.clone(),
+        mode: facade.mode.clone(),
+        provider: facade.provider.clone(),
+        model: facade.model.clone(),
+        thinking: facade.thinking.clone(),
+        route: facade.route.clone(),
+        cwd: facade.cwd.clone(),
+        allowed_tools: facade.allowed_tools.clone(),
+        spec_path: facade.spec_path.clone(),
+        prompt_path: facade.prompt_path.clone(),
+        prompt_digest: facade.prompt_digest.clone(),
+        boundary_id: facade.boundary_id.clone(),
+        boundary_digest: facade.boundary_digest.clone(),
+        result_contract: facade.result_contract.clone(),
+        result_contract_digest: facade.result_contract_digest.clone(),
+        carrier_path: facade.carrier_path.clone(),
+        session_id: facade.session_id.clone(),
+        session_dir: facade.session_dir.clone(),
+        session_continuity: facade.session_continuity.clone(),
+        settings_digest: facade.settings_digest.clone(),
+        context_digest: facade.context_digest.clone(),
+        skills_digest: facade.skills_digest.clone(),
+        subscription_digest: facade.subscription_digest.clone(),
+        lane_id: facade.lane_id.clone(),
+        attempt: facade.attempt,
+        base_commit: facade.base_commit.clone(),
+        worktree: facade.worktree.clone(),
+        required_focused_evidence: facade.required_focused_evidence,
+        authority_set_id: facade.authority_set_id.clone(),
+        authority_documents: facade.authority_documents.clone(),
+        context_document: facade.context_document.clone(),
+        context_documents: facade.context_documents.clone(),
+        assignment_path: facade.assignment_path.clone(),
+        assignment_digest: facade.assignment_digest.clone(),
+        context_manifest_path: facade.context_manifest_path.clone(),
+        context_manifest_digest: facade.context_manifest_digest.clone(),
+        runtime_extension_path: facade.runtime_extension_path.clone(),
+        runtime_extension_digest: facade.runtime_extension_digest.clone(),
+        terminal_profile_id: facade.terminal_profile_id.clone(),
+        terminal_route: facade.terminal_route.clone(),
+        unavailable_tools: facade.unavailable_tools.clone(),
+        producer_assignment_ids: facade.producer_assignment_ids.clone(),
+        validation_id: facade.validation_id.clone(),
+        validation_attempt: facade.validation_attempt,
+        semantic_round: facade.semantic_round,
+        model_submission_path: facade.model_submission_path.clone(),
+        atom_id_prefix: facade.atom_id_prefix.clone(),
+        atom_registry_path: facade.atom_registry_path.clone(),
+        atom_registry_digest: facade.atom_registry_digest.clone(),
+        planning_inputs_path: facade.planning_inputs_path.clone(),
+        planning_inputs_digest: facade.planning_inputs_digest.clone(),
+    };
+    let data = serde_json::to_vec_pretty(&spec).map_err(|error| RunnerError::Io(error.to_string()))?;
     let digest = sha256_hex(&data);
-    write_parent_file(path, &data)?;
-    Ok(digest)
+    write_bounded_file_create_once(path, &data, child::MAX_AGENT_RUN_SPEC_BYTES)?;
+    Ok((spec, digest))
+}
+
+fn receipt_v1_binding_from_fresh_issue(
+    legacy: &IssuedRunnerBinding,
+    spec: &AgentRunSpecV5,
+) -> Result<ReceiptV1RunnerBinding, RunnerError> {
+    let profile = terminal_profile_for(
+        &legacy.role_id.0,
+        &legacy.boundary_id.0,
+        &legacy.result_contract.0,
+    )?;
+    // Planning has no retry-attempt identity in its V4 facade. Receipt V1
+    // represents that closed fact as explicit zero; delivery/Validator must
+    // carry their issued nonzero attempt and never receive a default.
+    let attempt = match legacy.attempt {
+        Some(attempt) => attempt,
+        None if legacy.result_contract.0.starts_with("planning.") => 0,
+        None => return Err(RunnerError::InvalidSpec("fresh non-planning issue lacks attempt".to_owned())),
+    };
+    let mut binding = ReceiptV1RunnerBinding {
+        schema: RECEIPT_BINDING_SCHEMA.to_owned(),
+        admission_mode: AdmissionMode::ReceiptV1,
+        run_id: spec.run_id.clone(),
+        action_id: legacy.action_id.clone(),
+        assignment_id: legacy.assignment_id.clone(),
+        attempt,
+        run_revision: legacy.run_revision,
+        workstream: legacy.workstream.clone(),
+        role_id: legacy.role_id.clone(),
+        mode: legacy.mode.clone(),
+        boundary_id: legacy.boundary_id.clone(),
+        result_contract: legacy.result_contract.clone(),
+        profile_id: profile.0.to_owned(),
+        tool_name: ToolName(profile.1.to_owned()),
+        schema_digest: profile.4.to_owned(),
+        prompt_path: legacy.prompt_path.clone(),
+        prompt_digest: legacy.prompt_digest.clone(),
+        spec_path: legacy.spec_path.clone(),
+        spec_digest: legacy.spec_digest.clone(),
+        carrier_path: legacy.carrier_path.clone(),
+        session_id: legacy.session_id.clone(),
+        boundary_digest: legacy.boundary_digest.clone(),
+        result_contract_digest: legacy.result_contract_digest.clone(),
+        settings_digest: legacy.settings_digest.clone(),
+        context_digest: legacy.context_digest.clone(),
+        skills_digest: legacy.skills_digest.clone(),
+        subscription_digest: legacy.subscription_digest.clone(),
+        terminal_route: legacy.terminal_route.clone(),
+        assignment_path: legacy.assignment_path.clone(),
+        assignment_digest: legacy.assignment_digest.clone(),
+        mode_parameter: legacy.mode_parameter.clone(),
+        planning_subject_assignment_id: legacy.planning_subject_assignment_id.clone(),
+        planning_subject_path: legacy.planning_subject_path.clone(),
+        planning_subject_digest: legacy.planning_subject_digest.clone(),
+        lane_id: legacy.lane_id.clone(),
+        base_commit: legacy.base_commit.clone(),
+        worktree: legacy.worktree.clone(),
+        required_focused_evidence: legacy.required_focused_evidence,
+        carrier_binding_digest: child::carrier_binding(&project_v5_spec_for_shared_admission(spec)),
+        authority_digest: String::new(),
+        run_capability_digest: spec.child_control_token_digest.0.clone(),
+    };
+    binding.authority_digest = receipt_authority_digest_for_binding(&binding, spec)?;
+    binding.validate_shape()?;
+    Ok(binding)
+}
+
+pub fn receipt_authority_digest_for_binding(
+    binding: &ReceiptV1RunnerBinding,
+    spec: &AgentRunSpecV5,
+) -> Result<String, RunnerError> {
+    let bytes = crate::evidence::canonical_json(&serde_json::json!({
+        "schema": "autopilot.submit_authority.v1",
+        "run_id": binding.run_id,
+        "action_id": binding.action_id,
+        "assignment_id": binding.assignment_id,
+        "attempt": binding.attempt,
+        "run_revision": binding.run_revision,
+        "workstream": binding.workstream,
+        "role_id": binding.role_id,
+        "mode": binding.mode,
+        "boundary_id": binding.boundary_id,
+        "result_contract": binding.result_contract,
+        "profile_id": binding.profile_id,
+        "tool_name": binding.tool_name,
+        "schema_digest": binding.schema_digest,
+        "spec_digest": binding.spec_digest,
+        "carrier_binding_digest": binding.carrier_binding_digest,
+        "run_capability_digest": binding.run_capability_digest,
+        "spec_token_digest": spec.child_control_token_digest,
+        "spec_context_digest": spec.context_digest,
+        "spec_boundary_digest": spec.boundary_digest,
+        "spec_result_contract_digest": spec.result_contract_digest,
+    }))
+    .map_err(|error| RunnerError::InvalidSpec(format!("receipt authority canonical JSON: {error}")))?;
+    Ok(sha256_hex(&bytes))
 }
 
 fn write_parent_file(path: &Path, data: &[u8]) -> Result<(), RunnerError> {

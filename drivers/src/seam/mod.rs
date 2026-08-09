@@ -8,14 +8,17 @@ use std::time::Duration;
 
 use kernel::boundary::Rejection;
 use kernel::generated::{
-    AllocationLaneProposal, BackgroundAction, CONTRACT_VERSION, ChildControlRequest,
-    ChildControlRequestKind, ChildControlResponse, CoreToHostChildControlPayload,
-    CoreToHostDonePayload, CoreToHostSpawnPayload, CoreToHostSpawnWavePayload, CoreToHostUiPayload,
-    DeliveryBoundary, DeliveryResult, Digest, EventKind, EventRow, HostToCoreAgentResultPayload,
+    AllocationLaneProposal, AutopilotEventRef, BackgroundAction, ChildControlAcceptReceipt,
+    CONTRACT_VERSION, ChildControlRequest, ChildControlRequestKind, ChildControlResponse,
+    CoreToHostChildControlPayload, CoreToHostDonePayload, CoreToHostSpawnPayload,
+    CoreToHostSpawnWavePayload, CoreToHostUiPayload, DeferredHostEffectV1, DeliveryBoundary,
+    DeliveryResult, Digest, EventKind, EventRow, HostToCoreAgentResultPayload,
     HostToCoreBlockedResultObservedPayload, HostToCoreChildControlPayload,
     HostToCoreCommandPayload, HostToCoreSpawnResultPayload, HostToCoreTaskCompletedPayload, Id,
-    ModeId, Nullable, Ref, SchemaId, SeamEnvelope, Sha, SubmitDiagnostic, SubmitDiagnosticActual,
-    SubmitDiagnosticError, TestId, UiKind,
+    ModeId, Nullable, PreparedSubmitArtifactRef, PreparedSubmitIssuedAction,
+    PreparedSubmitTransitionV1, Ref, SchemaId, SeamEnvelope, Sha, SubmitDiagnostic,
+    SubmitDiagnosticActual, SubmitDiagnosticError, SubmitReceipt, SubmitReceiptEventRef,
+    SubmitReceiptValidatorVersion, TestId, UiKind,
 };
 use kernel::schedule::ResourceFacts;
 use kernel::state::{State, apply};
@@ -213,33 +216,55 @@ fn route_child_control(
     state: &mut CoreState,
 ) -> Result<SeamEnvelope, AnyError> {
     let request_id = request.request_id.clone();
-    let response = match admit_child_control_request(&request, state) {
-        Ok(ChildControlAdmission::BlockedPreflight) => child_control_diagnostic(
-            "submit.blocked_wave6_pending",
-            "/kind",
-            "authenticated blocked report held for the Wave 6 latch consumer",
-            &serde_json::json!("blocked"),
-            "Continue only after the Wave 6 blocked-latch consumer is available.",
+    match admit_child_control_request(&request, state) {
+        Ok(ChildControlAdmission::BlockedPreflight) => child_control_retry(
+            id,
+            request_id,
+            child_control_diagnostic(
+                "submit.blocked_wave6_pending",
+                "/kind",
+                "authenticated blocked report held for the Wave 6 latch consumer",
+                &serde_json::json!("blocked"),
+                "Continue only after the Wave 6 blocked-latch consumer is available.",
+            ),
         ),
-        Ok(ChildControlAdmission::Staged) => child_control_diagnostic(
-            "submit.transition_staging_unavailable",
-            "",
-            "a fully staged typed parent transition before ACCEPT",
-            &serde_json::json!("not implemented"),
-            "Retry after Core receipt transition staging is available.",
-        ),
-        Err(failure) => failure,
-    };
-    child_control_retry(id, request_id, response)
+        Ok(ChildControlAdmission::Replay(receipt)) => {
+            root_or_verify_submit_receipt(state, &receipt).map_err(|detail| {
+                format!("submit-receipt replay root failure: {detail}")
+            })?;
+            child_control_accept(id, request_id, receipt)
+        }
+        Ok(ChildControlAdmission::Staged {
+            binding,
+            facade,
+            raw_payload,
+            prepared,
+        }) => match commit_staged_planning_submit(
+            state,
+            &request,
+            &binding,
+            &facade,
+            &raw_payload,
+            prepared,
+        ) {
+            Ok(receipt) => child_control_accept(id, request_id, receipt),
+            Err(diagnostic) => child_control_retry(id, request_id, diagnostic),
+        },
+        Err(failure) => child_control_retry(id, request_id, failure),
+    }
 }
 
 enum ChildControlAdmission {
     BlockedPreflight,
-    /// Shared child validation has completed but this branch has not yet
-    /// factored every mutating parent continuation into a typed transition.
-    /// Returning RETRY here is deliberate: no carrier/receipt/event can be
-    /// published before the complete parent chain is staged.
-    Staged,
+    Replay(SubmitReceipt),
+    /// Child admission completed in memory. The Core-only planning transition
+    /// is staged and committed by the serialized seam turn below.
+    Staged {
+        binding: runner::ReceiptV1RunnerBinding,
+        facade: kernel::generated::AgentRunSpec,
+        raw_payload: Vec<u8>,
+        prepared: runner::child::PreparedCarrier,
+    },
 }
 
 fn admit_child_control_request(
@@ -293,7 +318,7 @@ fn admit_child_control_request(
             "submit.capability",
             "/token",
             "the issued per-run capability",
-            &serde_json::json!("redacted"),
+            &serde_json::json!(request.token),
             "Retry through the issued child runner without changing its capability.",
         ));
     }
@@ -377,7 +402,36 @@ fn admit_child_control_request(
                     "Retry with the current issued runner spec.",
                 )
             })?;
-            runner::child::admit_submission(
+            if let Some(receipt) = read_submit_receipt_at(&submit_receipt_path(&binding)).map_err(|detail| {
+                child_control_diagnostic(
+                    "submit.receipt_read",
+                    "",
+                    "a bounded canonical submit receipt",
+                    &serde_json::json!(detail),
+                    "Retry with the issued child-control capability.",
+                )
+            })? {
+                if receipt_matches_request(&receipt, &binding, request, &raw) {
+                    return Ok(ChildControlAdmission::Replay(receipt));
+                }
+                return Err(child_control_diagnostic(
+                    "submit.receipt_conflict",
+                    "/raw_payload",
+                    "the canonical payload already accepted for this action/assignment/revision",
+                    &request.raw_payload,
+                    "Do not change a payload after this assignment has an accepted receipt.",
+                ));
+            }
+            if !binding.result_contract.0.starts_with("planning.") {
+                return Err(child_control_diagnostic(
+                    "submit.transition_staging_unavailable",
+                    "",
+                    "Wave 2C delivery/Validator parent transition staging",
+                    &serde_json::json!(binding.result_contract.0),
+                    "Retry after Wave 2C parent transition staging is available.",
+                ));
+            }
+            let prepared = runner::child::admit_submission(
                 Path::new(&binding.spec_path),
                 spec_text,
                 &binding.spec_digest,
@@ -412,12 +466,12 @@ fn admit_child_control_request(
                     "Correct the reported value and resubmit.",
                 ),
             })?;
-            // Bind canonical bytes now so no future transition stage can use a
-            // serialization that differs from the child request. The value is
-            // intentionally not persisted until every parent predicate is
-            // factored into the staged transition.
-            let _raw_digest = sha256_hex_local(&raw);
-            Ok(ChildControlAdmission::Staged)
+            Ok(ChildControlAdmission::Staged {
+                binding,
+                facade,
+                raw_payload: raw,
+                prepared,
+            })
         }
     }
 }
@@ -449,31 +503,485 @@ fn receipt_authority_digest(
     binding: &runner::ReceiptV1RunnerBinding,
     spec: &kernel::generated::AgentRunSpecV5,
 ) -> Result<String, String> {
-    let bytes = crate::evidence::canonical_json(&serde_json::json!({
-        "schema": "autopilot.submit_authority.v1",
-        "run_id": binding.run_id,
-        "action_id": binding.action_id,
-        "assignment_id": binding.assignment_id,
-        "attempt": binding.attempt,
-        "run_revision": binding.run_revision,
-        "workstream": binding.workstream,
-        "role_id": binding.role_id,
-        "mode": binding.mode,
-        "boundary_id": binding.boundary_id,
-        "result_contract": binding.result_contract,
-        "profile_id": binding.profile_id,
-        "tool_name": binding.tool_name,
-        "schema_digest": binding.schema_digest,
-        "spec_digest": binding.spec_digest,
-        "carrier_binding_digest": binding.carrier_binding_digest,
-        "run_capability_digest": binding.run_capability_digest,
-        "spec_token_digest": spec.child_control_token_digest,
-        "spec_context_digest": spec.context_digest,
-        "spec_boundary_digest": spec.boundary_digest,
-        "spec_result_contract_digest": spec.result_contract_digest,
+    runner::receipt_authority_digest_for_binding(binding, spec)
+        .map_err(|error| error.to_string())
+}
+
+const SUBMIT_RECEIPT_EVENT_REF_PREFIX: &str = "submit-receipt-event:";
+const SUBMIT_RECEIPT_CONSUMED_PREFIX: &str = "submit-receipt-consumed:";
+const SUBMIT_RECEIPT_MAX_BYTES: usize = 2 << 20;
+
+fn submit_receipt_path(binding: &runner::ReceiptV1RunnerBinding) -> PathBuf {
+    let root = Path::new(&binding.carrier_path)
+        .parent()
+        .and_then(Path::parent)
+        .unwrap_or_else(|| Path::new(&binding.carrier_path));
+    let key = sha256_hex_local(
+        format!(
+            "submit-receipt.v1\\0{}\\0{}\\0{}\\0{}",
+            binding.run_id.0, binding.action_id.0, binding.assignment_id.0, binding.run_revision
+        )
+        .as_bytes(),
+    );
+    root.join("submit-receipts").join(format!("{key}.json"))
+}
+
+fn submit_transition_path(binding: &runner::ReceiptV1RunnerBinding) -> PathBuf {
+    let mut path = submit_receipt_path(binding);
+    path.set_extension("transition.json");
+    path
+}
+
+fn read_submit_receipt_at(path: &Path) -> Result<Option<SubmitReceipt>, String> {
+    match runner::read_bounded_authority_file(path, SUBMIT_RECEIPT_MAX_BYTES) {
+        Ok(bytes) => {
+            let receipt: SubmitReceipt = serde_json::from_slice(&bytes)
+                .map_err(|error| format!("receipt JSON: {error}"))?;
+            let canonical = crate::evidence::canonical_json(&receipt)
+                .map_err(|error| format!("receipt canonical JSON: {error}"))?;
+            if canonical != bytes {
+                return Err("receipt bytes are not canonical".to_owned());
+            }
+            Ok(Some(receipt))
+        }
+        Err(runner::RunnerError::Io(detail)) if detail.contains("No such file") => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn receipt_matches_request(
+    receipt: &SubmitReceipt,
+    binding: &runner::ReceiptV1RunnerBinding,
+    request: &ChildControlRequest,
+    raw: &[u8],
+) -> bool {
+    receipt.schema.0 == "autopilot.submit_receipt.v1"
+        && receipt.run_id == binding.run_id
+        && receipt.run_revision == binding.run_revision
+        && receipt.workstream == binding.workstream
+        && receipt.action_id == binding.action_id
+        && receipt.assignment_id == binding.assignment_id
+        && receipt.attempt == binding.attempt
+        && receipt.profile_id == binding.profile_id
+        && receipt.tool_name == binding.tool_name
+        && receipt.boundary_id == binding.boundary_id
+        && receipt.result_contract == binding.result_contract
+        && receipt.schema_digest.0 == binding.schema_digest
+        && receipt.spec_digest.0 == binding.spec_digest
+        && receipt.carrier_binding_digest.0 == binding.carrier_binding_digest
+        && receipt.authority_digest.0 == binding.authority_digest
+        && receipt.raw_payload_digest.0 == sha256_hex_local(raw)
+        && receipt.raw_payload_byte_count == raw.len() as u64
+        && receipt.tool_call_id == request.tool_call_id
+}
+
+fn artifact_ref(path: &Path, schema: &str, bytes: &[u8]) -> PreparedSubmitArtifactRef {
+    PreparedSubmitArtifactRef {
+        artifact_ref: Ref(path.display().to_string()),
+        artifact_schema: SchemaId(schema.to_owned()),
+        sha256: Digest(sha256_hex_local(bytes)),
+        byte_count: bytes.len() as u64,
+    }
+}
+
+fn staging_retry(code: &str, pointer: &str, detail: impl Into<String>) -> SubmitDiagnostic {
+    child_control_diagnostic(
+        code,
+        pointer,
+        "a complete receipt-backed planning transition",
+        &serde_json::json!(detail.into()),
+        "Correct the payload or retry after the issued planning authority is available.",
+    )
+}
+
+fn commit_staged_planning_submit(
+    state: &mut CoreState,
+    request: &ChildControlRequest,
+    binding: &runner::ReceiptV1RunnerBinding,
+    _facade: &kernel::generated::AgentRunSpec,
+    raw: &[u8],
+    prepared: runner::child::PreparedCarrier,
+) -> Result<SubmitReceipt, SubmitDiagnostic> {
+    // Delivery and Validator parent transitions still require their separate
+    // package/Git/recovery staging wave. Their child values remain unsealed
+    // and therefore cannot create a carrier, receipt, event, or effect here.
+    if !binding.result_contract.0.starts_with("planning.") {
+        return Err(staging_retry(
+            "submit.transition_staging_unavailable",
+            "",
+            "delivery/Validator parent transition staging is owned by Wave 2C",
+        ));
+    }
+    let legacy = runner::receipt_v1_validator_facade(binding);
+    let carrier: AgentCarrier = serde_json::from_value(prepared.carrier.clone()).map_err(|error| {
+        staging_retry("submit.carrier", "/raw_payload", format!("staged planning carrier: {error}"))
+    })?;
+    if let Err(error) = validate_planning_binding(&carrier, &legacy) {
+        return Err(staging_retry("submit.planning_binding", "", error));
+    }
+    if planning_result_consumed(state, &legacy) || terminal_consumed(state, &legacy) {
+        return Err(staging_retry(
+            "submit.already_consumed",
+            "",
+            "the planning binding is already terminal or consumed",
+        ));
+    }
+    // An ordinary initial plan may never smuggle recovery evidence. The
+    // pointer is the original JSON member, not a reconstructed dotted path.
+    if binding.role_id.0 != "recovery-engineer"
+        && binding.boundary_id.0 == "planning.work-map.v2"
+        && serde_json::from_slice::<serde_json::Value>(raw)
+            .ok()
+            .and_then(|value| value.get("recovery").cloned())
+            .is_some()
+    {
+        return Err(staging_retry(
+            "submit.ordinary_recovery_forbidden",
+            "/recovery",
+            "ordinary planning work-map has recovery evidence",
+        ));
+    }
+    if binding.boundary_id.0 == "planning.work-map.v2" {
+        // The child has already applied the strict model-value admission using
+        // the issued atom registry. Do not persist the staged carrier merely
+        // to run a second disk reader; the V2 disk verifier has an explicit
+        // legacy wrapper and fresh receipt V1 does not fall through to it.
+        return Err(staging_retry(
+            "submit.transition_staging_unavailable",
+            "",
+            "V2 parent transition staging is not yet available without a disk carrier",
+        ));
+    }
+    let recovery = validate_recovery_work_map(&carrier, &legacy)
+        .map_err(|error| staging_retry("submit.planning_recovery", "/recovery", error))?;
+    if !matches!(recovery, PlanningRecoveryAdmission::Continue) {
+        return Err(staging_retry(
+            "submit.planning_recovery",
+            "/recovery",
+            "fail-closed recovery disposition cannot be accepted",
+        ));
+    }
+    if binding.boundary_id.0 == "planning.plan-review.v1" {
+        review_approves_execution(&carrier.raw_output)
+            .map_err(|error| staging_retry("submit.plan_review", "/verdicts", error))?;
+        // Promotion requires the separately staged V2 image or V1 plan
+        // artifact. Keeping it unavailable is safer than moving its old
+        // mutating writes before the receipt root.
+        return Err(staging_retry(
+            "submit.transition_staging_unavailable",
+            "",
+            "review promotion staging is not yet available",
+        ));
+    }
+
+    let carrier_bytes = crate::evidence::canonical_json(&prepared.carrier).map_err(|error| {
+        staging_retry("submit.canonical_json", "/raw_payload", error.to_string())
+    })?;
+    let carrier_path = PathBuf::from(&binding.carrier_path);
+    let mut staged_artifacts = Vec::<(PathBuf, String, Vec<u8>)>::new();
+    for artifact in prepared.artifacts {
+        match artifact {
+            runner::child::PreparedArtifact::JsonNew { path, value } => {
+                let bytes = crate::evidence::canonical_json(&value).map_err(|error| {
+                    staging_retry("submit.canonical_json", "", error.to_string())
+                })?;
+                staged_artifacts.push((PathBuf::from(path), "autopilot.staged_submit_artifact.v1".to_owned(), bytes));
+            }
+            runner::child::PreparedArtifact::ExactBytes { path, bytes } => {
+                staged_artifacts.push((path, "autopilot.staged_submit_artifact.v1".to_owned(), bytes));
+            }
+        }
+    }
+
+    let (effect, issues) = staged_planning_effect(state, &legacy).map_err(|detail| {
+        staging_retry("submit.planning_transition", "", detail)
+    })?;
+    let issued_actions = issues
+        .iter()
+        .map(|issue| {
+            let binding_ref = runner::receipt_binding_ref(&issue.receipt_binding)
+                .map_err(|error| staging_retry("submit.issued_binding", "", error.to_string()))?;
+            let binding_bytes = crate::evidence::canonical_json(&issue.receipt_binding)
+                .map_err(|error| staging_retry("submit.canonical_json", "", error.to_string()))?;
+            Ok(PreparedSubmitIssuedAction {
+                action_ref: Ref(format!("issued-action:{}", issue.action.action_id.0)),
+                action: issue.action.clone(),
+                binding_ref,
+                binding_digest: Digest(sha256_hex_local(&binding_bytes)),
+            })
+        })
+        .collect::<Result<Vec<_>, SubmitDiagnostic>>()?;
+    let carrier_schema = prepared.carrier["schema"].as_str().ok_or_else(|| {
+        staging_retry("submit.carrier", "/schema", "staged carrier schema is missing")
+    })?;
+    let carrier_artifact = artifact_ref(&carrier_path, carrier_schema, &carrier_bytes);
+    let artifact_refs = staged_artifacts
+        .iter()
+        .map(|(path, schema, bytes)| artifact_ref(path, schema, bytes))
+        .collect::<Vec<_>>();
+    let transition_path = submit_transition_path(binding);
+    let transition_ref = Ref(transition_path.display().to_string());
+    let transition_body = serde_json::json!({
+        "schema": "autopilot.prepared_submit_transition_body.v1",
+        "carrier": carrier_artifact,
+        "artifact_refs": artifact_refs,
+        "issued_actions": issued_actions,
+        "deferred_host_effect": effect,
+    });
+    let transition_bytes = crate::evidence::canonical_json(&transition_body).map_err(|error| {
+        staging_retry("submit.canonical_json", "", error.to_string())
+    })?;
+    let transition = PreparedSubmitTransitionV1 {
+        schema: SchemaId("autopilot.prepared_submit_transition.v1".to_owned()),
+        transition_ref,
+        transition_digest: Digest(sha256_hex_local(&transition_bytes)),
+        carrier: carrier_artifact,
+        artifact_refs,
+        issued_actions,
+        deferred_host_effect: effect,
+    };
+    let receipt = SubmitReceipt {
+        schema: SchemaId("autopilot.submit_receipt.v1".to_owned()),
+        receipt_id: crate::state_root::fresh_uuid_v7()
+            .map_err(|error| staging_retry("submit.receipt_id", "", error.to_string()))?,
+        run_id: binding.run_id.clone(),
+        run_revision: binding.run_revision,
+        workstream: binding.workstream.clone(),
+        action_id: binding.action_id.clone(),
+        assignment_id: binding.assignment_id.clone(),
+        attempt: binding.attempt,
+        profile_id: binding.profile_id.clone(),
+        tool_name: binding.tool_name.clone(),
+        boundary_id: binding.boundary_id.clone(),
+        result_contract: binding.result_contract.clone(),
+        schema_digest: Digest(binding.schema_digest.clone()),
+        spec_digest: Digest(binding.spec_digest.clone()),
+        carrier_binding_digest: Digest(binding.carrier_binding_digest.clone()),
+        authority_digest: Digest(binding.authority_digest.clone()),
+        frozen_validator_versions: vec![SubmitReceiptValidatorVersion {
+            validator_id: Id("planning-parent-stage".to_owned()),
+            version: "v1".to_owned(),
+            digest: Digest(sha256_hex_local(b"planning-parent-stage:v1")),
+        }],
+        raw_payload_digest: Digest(sha256_hex_local(raw)),
+        raw_payload_byte_count: raw.len() as u64,
+        request_id: request.request_id.clone(),
+        tool_call_id: request.tool_call_id.clone(),
+        prepared_transition: transition,
+    };
+    let receipt_bytes = crate::evidence::canonical_json(&receipt).map_err(|error| {
+        staging_retry("submit.canonical_json", "", error.to_string())
+    })?;
+
+    // All predicates above succeeded. Publish immutable artifacts, then the
+    // receipt, then the sole event root. A crash before the event leaves only
+    // exact create-once orphans, which an exact replay roots idempotently.
+    runner::write_bounded_file_create_once(&carrier_path, &carrier_bytes, MAX_TERMINAL_CARRIER_BYTES)
+        .map_err(|error| staging_retry("submit.carrier_write", "", error.to_string()))?;
+    for (path, _, bytes) in &staged_artifacts {
+        runner::write_bounded_file_create_once(path, bytes, SUBMIT_RECEIPT_MAX_BYTES)
+            .map_err(|error| staging_retry("submit.artifact_write", "", error.to_string()))?;
+    }
+    runner::write_bounded_file_create_once(&transition_path, &transition_bytes, SUBMIT_RECEIPT_MAX_BYTES)
+        .map_err(|error| staging_retry("submit.transition_write", "", error.to_string()))?;
+    runner::write_bounded_file_create_once(
+        &submit_receipt_path(binding),
+        &receipt_bytes,
+        SUBMIT_RECEIPT_MAX_BYTES,
+    )
+    .map_err(|error| staging_retry("submit.receipt_write", "", error.to_string()))?;
+    root_or_verify_submit_receipt(state, &receipt)
+        .map_err(|detail| staging_retry("submit.receipt_root", "", detail))?;
+    Ok(receipt)
+}
+
+fn staged_planning_effect(
+    state: &CoreState,
+    binding: &runner::IssuedRunnerBinding,
+) -> Result<(DeferredHostEffectV1, Vec<runner::IssuedRunnerAction>), String> {
+    let mut projected = CoreState {
+        event_path: None,
+        state: state.state.clone(),
+        events: state.events.clone(),
+    };
+    projected
+        .append(
+            EventKind("submit:receipt-projected".to_owned()),
+            vec![planning_result_consumed_ref(binding)],
+        )
+        .map_err(|error| error.to_string())?;
+    match next_planning_outcome(&binding.workstream.0, &projected)
+        .map_err(|error| format!("{error:?}"))?
+    {
+        planning::PlanningWaveOutcome::Launch { assignments, .. } => {
+            let input_set = read_planning_input_set(&binding.workstream.0)?;
+            let accepted = accepted_planning_artifacts_for_issue(&binding.workstream.0, state)
+                .map_err(|error| error.to_string())?;
+            let mut issues = Vec::new();
+            for assignment in &assignments {
+                if matches!(assignment.boundary_id.as_deref(), Some("planning.work-map.v1" | "planning.work-map.v2")) {
+                    return Err("next planning wave needs atom-registry staging".to_owned());
+                }
+                issues.push(planning_bg_action(
+                    &binding.workstream.0,
+                    assignment,
+                    projected.state.revision,
+                    &input_set,
+                    None,
+                    accepted.clone(),
+                )
+                .map_err(|error| error.to_string())?);
+            }
+            let actions = issues.iter().map(|issue| issue.action.clone()).collect();
+            Ok((
+                DeferredHostEffectV1::SpawnWave {
+                    payload: CoreToHostSpawnWavePayload { actions },
+                },
+                issues,
+            ))
+        }
+        planning::PlanningWaveOutcome::WaitingOnInFlight { wave_id, active } => Ok((
+            DeferredHostEffectV1::Done {
+                payload: CoreToHostDonePayload {
+                    status: planning_waiting_status(&wave_id, &active, state),
+                },
+            },
+            Vec::new(),
+        )),
+        planning::PlanningWaveOutcome::Complete => Ok((
+            DeferredHostEffectV1::Done {
+                payload: CoreToHostDonePayload {
+                    status: format!("submit:planning-accepted;{}", state.summary()),
+                },
+            },
+            Vec::new(),
+        )),
+        planning::PlanningWaveOutcome::Blocked(blocked) => Err(format!("planning wave blocked: {}", blocked.wave_id)),
+        planning::PlanningWaveOutcome::CapacityUnknown(detail) => Err(format!("planning capacity unknown: {detail}")),
+    }
+}
+
+fn submit_receipt_event_ref(receipt: &SubmitReceipt, sequence: u64) -> Result<SubmitReceiptEventRef, String> {
+    let receipt_path = submit_receipt_path_from_receipt(receipt);
+    let receipt_bytes = crate::evidence::canonical_json(receipt)
+        .map_err(|error| format!("receipt canonical JSON: {error}"))?;
+    let row_bytes = crate::evidence::canonical_json(&serde_json::json!({
+        "sequence": sequence,
+        "kind": "submit:accepted",
+        "receipt_ref": receipt_path.display().to_string(),
+        "receipt_sha256": sha256_hex_local(&receipt_bytes),
     }))
-    .map_err(|error| error.to_string())?;
-    Ok(sha256_hex_local(&bytes))
+    .map_err(|error| format!("accepted event canonical JSON: {error}"))?;
+    Ok(SubmitReceiptEventRef {
+        schema: SchemaId("autopilot.submit_receipt_event_ref.v1".to_owned()),
+        receipt_ref: Ref(receipt_path.display().to_string()),
+        receipt_sha256: Digest(sha256_hex_local(&receipt_bytes)),
+        accepted_event: AutopilotEventRef {
+            schema_version: SchemaId("autopilot.event.v1".to_owned()),
+            sequence,
+            kind: EventKind("submit:accepted".to_owned()),
+            row_sha256: Digest(sha256_hex_local(&row_bytes)),
+        },
+    })
+}
+
+fn submit_receipt_path_from_receipt(receipt: &SubmitReceipt) -> PathBuf {
+    // The receipt records no mutable path. Its binding-derived layout is
+    // recomputed from the immutable carrier ref in the transition.
+    let carrier = Path::new(&receipt.prepared_transition.carrier.artifact_ref.0);
+    let root = carrier.parent().and_then(Path::parent).unwrap_or(carrier);
+    let key = sha256_hex_local(
+        format!(
+            "submit-receipt.v1\\0{}\\0{}\\0{}\\0{}",
+            receipt.run_id.0, receipt.action_id.0, receipt.assignment_id.0, receipt.run_revision
+        )
+        .as_bytes(),
+    );
+    root.join("submit-receipts").join(format!("{key}.json"))
+}
+
+fn encode_submit_receipt_event_ref(reference: &SubmitReceiptEventRef) -> Result<Ref, String> {
+    let bytes = crate::evidence::canonical_json(reference)
+        .map_err(|error| format!("receipt event ref canonical JSON: {error}"))?;
+    let text = String::from_utf8(bytes).map_err(|error| format!("receipt event ref UTF-8: {error}"))?;
+    Ok(Ref(format!("{SUBMIT_RECEIPT_EVENT_REF_PREFIX}{text}")))
+}
+
+fn decode_submit_receipt_event_ref(reference: &Ref) -> Result<Option<SubmitReceiptEventRef>, String> {
+    let Some(value) = reference.0.strip_prefix(SUBMIT_RECEIPT_EVENT_REF_PREFIX) else {
+        return Ok(None);
+    };
+    serde_json::from_str(value)
+        .map(Some)
+        .map_err(|error| format!("submit receipt event ref JSON: {error}"))
+}
+
+fn root_or_verify_submit_receipt(state: &mut CoreState, receipt: &SubmitReceipt) -> Result<(), String> {
+    let path = submit_receipt_path_from_receipt(receipt);
+    let receipt_bytes = crate::evidence::canonical_json(receipt)
+        .map_err(|error| format!("receipt canonical JSON: {error}"))?;
+    let digest = sha256_hex_local(&receipt_bytes);
+    let mut roots = Vec::new();
+    for event in &state.events {
+        for reference in &event.artifact_refs {
+            if let Some(root) = decode_submit_receipt_event_ref(reference)?
+                && root.receipt_ref.0 == path.display().to_string()
+            {
+                roots.push((event, root));
+            }
+        }
+    }
+    match roots.len() {
+        0 => {
+            let root = submit_receipt_event_ref(receipt, state.state.sequence + 1)?;
+            let root_ref = encode_submit_receipt_event_ref(&root)?;
+            state
+                .append(
+                    EventKind("submit:accepted".to_owned()),
+                    vec![
+                        root_ref,
+                        Ref(path.display().to_string()),
+                        receipt.prepared_transition.transition_ref.clone(),
+                    ],
+                )
+                .map_err(|error| error.to_string())
+        }
+        1 => {
+            let (event, root) = roots.remove(0);
+            if root.receipt_sha256.0 != digest
+                || root.accepted_event.sequence != event.sequence
+                || root.accepted_event.kind.0 != "submit:accepted"
+                || root.receipt_ref.0 != path.display().to_string()
+            {
+                return Err("accepted receipt event root drift".to_owned());
+            }
+            Ok(())
+        }
+        _ => Err("ambiguous accepted receipt event roots".to_owned()),
+    }
+}
+
+fn child_control_accept(
+    id: u64,
+    request_id: Id,
+    receipt: SubmitReceipt,
+) -> Result<SeamEnvelope, AnyError> {
+    Ok(SeamEnvelope {
+        v: CONTRACT_VERSION as u32,
+        id,
+        kind: "child-control".to_owned(),
+        payload: serde_json::to_value(CoreToHostChildControlPayload {
+            response: ChildControlResponse::Accept {
+                schema: SchemaId("autopilot.child_control_response.v1".to_owned()),
+                request_id,
+                receipt: ChildControlAcceptReceipt::Submit {
+                    schema: SchemaId("autopilot.child_control_accept_receipt.v1".to_owned()),
+                    receipt,
+                },
+            },
+            blocked_gate: Nullable(None),
+        })?,
+    })
 }
 
 fn route_blocked_result_observed(
@@ -508,9 +1016,13 @@ fn route_blocked_result_observed(
             id,
             rejection("blocked-result-observed", "wave6-pending-idempotent"),
         ),
-        Ok(ChildControlAdmission::Staged) => done(
+        Ok(ChildControlAdmission::Staged { .. }) => done(
             id,
             rejection("blocked-result-observed", "unexpected-submit-stage"),
+        ),
+        Ok(ChildControlAdmission::Replay(_)) => done(
+            id,
+            rejection("blocked-result-observed", "unexpected-submit-replay"),
         ),
         Err(_) => done(
             id,
@@ -546,15 +1058,65 @@ fn child_control_diagnostic(
     actual: &serde_json::Value,
     fix: &str,
 ) -> SubmitDiagnostic {
-    let bytes = crate::evidence::canonical_json(actual).unwrap_or_else(|_| b"null".to_vec());
-    let preview_source = String::from_utf8_lossy(&bytes);
-    let preview = preview_source.chars().take(256).collect::<String>();
-    let truncated = preview.len() < preview_source.len();
-    let item_count = match actual {
+    match crate::evidence::canonical_json(actual) {
+        Ok(bytes) => submit_diagnostic_from_canonical_actual(
+            code,
+            pointer,
+            expected,
+            &bytes,
+            diagnostic_item_count(actual),
+            code == "submit.capability",
+            fix,
+        ),
+        // Never substitute `null` (or a partial serialization) for an actual
+        // value. Canonicalization is itself the precise retry cause; its
+        // diagnostic binds only that trusted cause, not fabricated bytes for
+        // the rejected model value.
+        Err(_) => submit_diagnostic_from_canonical_actual(
+            "submit.diagnostic_canonical_json",
+            pointer,
+            "canonical JSON actual bytes",
+            b"\"canonicalization failed\"",
+            1,
+            false,
+            "Resubmit a JSON-compatible terminal payload.",
+        ),
+    }
+}
+
+fn diagnostic_item_count(actual: &serde_json::Value) -> u64 {
+    match actual {
         serde_json::Value::Array(items) => items.len() as u64,
         serde_json::Value::Object(items) => items.len() as u64,
-        _ => 1,
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) | serde_json::Value::String(_) => 1,
+    }
+}
+
+fn submit_diagnostic_from_canonical_actual(
+    code: &str,
+    pointer: &str,
+    expected: &str,
+    bytes: &[u8],
+    item_count: u64,
+    redacted: bool,
+    fix: &str,
+) -> SubmitDiagnostic {
+    const PREVIEW_MAX_BYTES: usize = 256;
+    let preview = if redacted {
+        String::new()
+    } else {
+        let mut end = bytes.len().min(PREVIEW_MAX_BYTES);
+        while end > 0 && !std::str::from_utf8(&bytes[..end]).is_ok() {
+            end -= 1;
+        }
+        // Canonical JSON bytes are UTF-8. If the bounded cut falls inside a
+        // code point, walk back to its boundary; failure here is impossible
+        // without changing the exact bytes that were already hashed.
+        std::str::from_utf8(&bytes[..end])
+            .expect("canonical JSON byte prefix is UTF-8")
+            .to_owned()
     };
+    let truncated = redacted || preview.as_bytes().len() < bytes.len();
     let mut errors = vec![SubmitDiagnosticError {
         index: 0,
         code: code.to_owned(),
@@ -562,9 +1124,9 @@ fn child_control_diagnostic(
         expected: expected.to_owned(),
         actual: SubmitDiagnosticActual {
             preview,
-            redacted: code == "submit.capability",
+            redacted,
             truncated,
-            sha256: Digest(sha256_hex_local(&bytes)),
+            sha256: Digest(sha256_hex_local(bytes)),
             byte_count: bytes.len() as u64,
             item_count,
         },
@@ -595,18 +1157,58 @@ fn child_control_diagnostic(
     }
 }
 
+/// Preserve RFC6901 input pointers and translate only genuine dotted/indexed
+/// validator paths. In particular `units[0]` becomes `/units/0`, never the
+/// incorrect escaped property `/units[0]`.
 fn diagnostic_pointer(field: &str) -> String {
     if field.is_empty() {
         return String::new();
     }
-    field
-        .split('.')
-        .map(|segment| segment.replace('~', "~0").replace('/', "~1"))
-        .fold(String::new(), |mut pointer, segment| {
-            pointer.push('/');
-            pointer.push_str(&segment);
-            pointer
-        })
+    if field.starts_with('/') {
+        return field.to_owned();
+    }
+    let mut segments = Vec::new();
+    for dotted in field.split('.') {
+        let mut rest = dotted;
+        loop {
+            match rest.find('[') {
+                Some(open) => {
+                    if open > 0 {
+                        segments.push(&rest[..open]);
+                    }
+                    let Some(close) = rest[open + 1..].find(']') else {
+                        segments.push(rest);
+                        break;
+                    };
+                    let close = open + 1 + close;
+                    let index = &rest[open + 1..close];
+                    if index.is_empty() || !index.bytes().all(|byte| byte.is_ascii_digit()) {
+                        segments.push(rest);
+                        break;
+                    }
+                    segments.push(index);
+                    rest = &rest[close + 1..];
+                    if rest.is_empty() {
+                        break;
+                    }
+                }
+                None => {
+                    if !rest.is_empty() {
+                        segments.push(rest);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    if segments.is_empty() {
+        return String::new();
+    }
+    segments.into_iter().fold(String::new(), |mut pointer, segment| {
+        pointer.push('/');
+        pointer.push_str(&segment.replace('~', "~0").replace('/', "~1"));
+        pointer
+    })
 }
 
 fn command(
@@ -832,7 +1434,7 @@ fn advance_run(
                 runner::delivery_issue_v4_with_facts(&assignment, &facts)?
             }
         };
-        append_runner_invocation(state, &issue.binding)?;
+        append_runner_invocation(state, &issue)?;
         let envelope = controlled_spawn(id, issue.action, state, "delivery")?;
         return Ok(AdvanceRunOutcome::Dispatched(envelope));
     }
@@ -1554,8 +2156,9 @@ fn route_spawn_result(
     payload: HostToCoreSpawnResultPayload,
     state: &mut CoreState,
 ) -> Result<SeamEnvelope, AnyError> {
-    let binding = match binding_for(state, &payload.action_id.0, &payload.assignment_id.0) {
-        Ok(value) => value,
+    let binding = match versioned_binding_for(state, &payload.action_id.0, &payload.assignment_id.0) {
+        Ok(VersionedRunnerBinding::ReplayV0(binding)) => binding,
+        Ok(VersionedRunnerBinding::ReceiptV1(binding)) => runner::receipt_v1_validator_facade(&binding),
         Err(error) => return done(id, rejection("spawn-result-binding", &error)),
     };
     match payload.status.as_str() {
@@ -1617,6 +2220,13 @@ fn route_task_completed(
     payload: HostToCoreTaskCompletedPayload,
     state: &mut CoreState,
 ) -> Result<SeamEnvelope, AnyError> {
+    match versioned_binding_for(state, &payload.action_id.0, &payload.assignment_id.0) {
+        Ok(VersionedRunnerBinding::ReceiptV1(binding)) => {
+            return route_receipt_v1_task_completed(id, payload, binding, state);
+        }
+        Ok(VersionedRunnerBinding::ReplayV0(_)) => {}
+        Err(error) => return done(id, rejection("terminal-binding", &error)),
+    }
     let binding = match binding_for(state, &payload.action_id.0, &payload.assignment_id.0) {
         Ok(value) => value,
         Err(error) => return done(id, rejection("terminal-binding", &error)),
@@ -1926,6 +2536,143 @@ fn verify_v2_observed_carrier(
         return Err("V2 observed carrier raw output differs from sealed carrier".to_owned());
     }
     Ok(())
+}
+
+fn versioned_binding_for(
+    state: &CoreState,
+    action_id: &str,
+    assignment_id: &str,
+) -> Result<VersionedRunnerBinding, String> {
+    let mut matches = state
+        .state
+        .refs
+        .keys()
+        .filter_map(|reference| runner::decode_versioned_binding_ref(&reference.0).ok())
+        .filter(|binding| match binding {
+            VersionedRunnerBinding::ReplayV0(binding) => {
+                binding.action_id.0 == action_id && binding.assignment_id.0 == assignment_id
+            }
+            VersionedRunnerBinding::ReceiptV1(binding) => {
+                binding.action_id.0 == action_id && binding.assignment_id.0 == assignment_id
+            }
+        })
+        .collect::<Vec<_>>();
+    match matches.len() {
+        1 => Ok(matches.remove(0)),
+        0 => Err(format!("unknown action/assignment: {action_id}/{assignment_id}")),
+        count => Err(format!("ambiguous action/assignment: {action_id}/{assignment_id}:{count}")),
+    }
+}
+
+fn route_receipt_v1_task_completed(
+    id: u64,
+    payload: HostToCoreTaskCompletedPayload,
+    binding: runner::ReceiptV1RunnerBinding,
+    state: &mut CoreState,
+) -> Result<SeamEnvelope, AnyError> {
+    if payload.status != "completed" {
+        return done(
+            id,
+            rejection("submit-receipt", "receipt_v1 completion requires completed status"),
+        );
+    }
+    let receipt = match read_submit_receipt_at(&submit_receipt_path(&binding)) {
+        Ok(Some(receipt)) => receipt,
+        Ok(None) => return done(id, rejection("submit-receipt", "missing receipt")),
+        Err(error) => return done(id, rejection("submit-receipt", &error)),
+    };
+    // Receipt V1 never falls back to the V4 carrier route. Verify only the
+    // durable identity/digest tuple before looking at any carrier/spec/path.
+    if receipt.schema.0 != "autopilot.submit_receipt.v1"
+        || receipt.run_id != binding.run_id
+        || receipt.run_revision != binding.run_revision
+        || receipt.action_id != binding.action_id
+        || receipt.assignment_id != binding.assignment_id
+        || receipt.attempt != binding.attempt
+        || receipt.profile_id != binding.profile_id
+        || receipt.tool_name != binding.tool_name
+        || receipt.boundary_id != binding.boundary_id
+        || receipt.result_contract != binding.result_contract
+        || receipt.schema_digest.0 != binding.schema_digest
+        || receipt.spec_digest.0 != binding.spec_digest
+        || receipt.carrier_binding_digest.0 != binding.carrier_binding_digest
+        || receipt.authority_digest.0 != binding.authority_digest
+        || receipt.raw_payload_byte_count > MAX_TERMINAL_CARRIER_BYTES as u64
+    {
+        return done(id, rejection("submit-receipt", "receipt identity/digest mismatch"));
+    }
+    // `root_or_verify` is deliberately not used here: an orphan receipt is
+    // not acceptance authority at task completion.
+    let receipt_path = submit_receipt_path_from_receipt(&receipt);
+    let receipt_bytes = crate::evidence::canonical_json(&receipt)?;
+    let receipt_digest = sha256_hex_local(&receipt_bytes);
+    let rooted = state.events.iter().any(|event| {
+        event.kind.0 == "submit:accepted"
+            && event.artifact_refs.iter().any(|reference| {
+                decode_submit_receipt_event_ref(reference).ok().flatten().is_some_and(|root| {
+                    root.receipt_ref.0 == receipt_path.display().to_string()
+                        && root.receipt_sha256.0 == receipt_digest
+                        && root.accepted_event.sequence == event.sequence
+                })
+            })
+    });
+    if !rooted {
+        return done(id, rejection("submit-receipt", "receipt lacks accepted event root"));
+    }
+    let consumed_ref = Ref(format!("{SUBMIT_RECEIPT_CONSUMED_PREFIX}{}", receipt.receipt_id.0));
+    if state.state.refs.contains_key(&consumed_ref) {
+        return deferred_effect_envelope(id, &receipt.prepared_transition.deferred_host_effect);
+    }
+    let facade = runner::receipt_v1_validator_facade(&binding);
+    let mut refs = vec![
+        consumed_ref,
+        Ref(format!("terminal-consumed:{}:{}:{}", binding.action_id.0, binding.assignment_id.0, binding.run_revision)),
+        receipt.prepared_transition.transition_ref.clone(),
+        receipt.prepared_transition.carrier.artifact_ref.clone(),
+        runner::receipt_binding_ref(&binding)?,
+    ];
+    if binding.result_contract.0.starts_with("planning.") {
+        refs.push(planning_result_consumed_ref(&facade));
+    }
+    refs.extend(
+        receipt
+            .prepared_transition
+            .artifact_refs
+            .iter()
+            .map(|artifact| artifact.artifact_ref.clone()),
+    );
+    for issued in &receipt.prepared_transition.issued_actions {
+        refs.push(issued.action_ref.clone());
+        refs.push(issued.binding_ref.clone());
+    }
+    state.append(EventKind("submit:receipt-consumed".to_owned()), refs)?;
+    deferred_effect_envelope(id, &receipt.prepared_transition.deferred_host_effect)
+}
+
+fn deferred_effect_envelope(
+    id: u64,
+    effect: &DeferredHostEffectV1,
+) -> Result<SeamEnvelope, AnyError> {
+    match effect {
+        DeferredHostEffectV1::Done { payload } => Ok(SeamEnvelope {
+            v: CONTRACT_VERSION as u32,
+            id,
+            kind: "done".to_owned(),
+            payload: serde_json::to_value(payload)?,
+        }),
+        DeferredHostEffectV1::Spawn { payload } => Ok(SeamEnvelope {
+            v: CONTRACT_VERSION as u32,
+            id,
+            kind: "spawn".to_owned(),
+            payload: serde_json::to_value(payload)?,
+        }),
+        DeferredHostEffectV1::SpawnWave { payload } => Ok(SeamEnvelope {
+            v: CONTRACT_VERSION as u32,
+            id,
+            kind: "spawn-wave".to_owned(),
+            payload: serde_json::to_value(payload)?,
+        }),
+    }
 }
 
 fn binding_for(
@@ -3218,7 +3965,7 @@ fn delivery_accepted(
     issue: runner::IssuedRunnerAction,
     state: &mut CoreState,
 ) -> Result<SeamEnvelope, AnyError> {
-    append_runner_invocation(state, &issue.binding)?;
+    append_runner_invocation(state, &issue)?;
     state.append(
         EventKind("validation:required".to_owned()),
         vec![
@@ -4756,7 +5503,7 @@ fn spawn_recovery_assignment_v4(
         &assignment,
         &runner::RunnerTransportFacts::from_env().map_err(|error| error.to_string())?,
     )?;
-    append_runner_invocation(state, &issue.binding)?;
+    append_runner_invocation(state, &issue)?;
     state.append(
         EventKind(event_kind.to_owned()),
         vec![
@@ -4811,7 +5558,7 @@ fn spawn_recovery_assignment(
         &assignment,
         &runner::RunnerTransportFacts::from_env().map_err(|error| error.to_string())?,
     )?;
-    append_runner_invocation(state, &issue.binding)?;
+    append_runner_invocation(state, &issue)?;
     state.append(
         EventKind(event_kind.to_owned()),
         vec![

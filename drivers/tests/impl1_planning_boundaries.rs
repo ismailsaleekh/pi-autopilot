@@ -737,6 +737,7 @@ impl Fixture {
                     "ension.ts"
                 )),
             );
+            std::env::set_var("AUTOPILOT_CHILD_CONTROL_SOCKET_PATH", self.root.join("cc.sock"));
             let mut path_entries = vec![bin.clone()];
             if let Some(existing) = std::env::var_os("PATH") {
                 path_entries.extend(std::env::split_paths(&existing));
@@ -1496,7 +1497,12 @@ fn carrier_value_from_spec(spec_path: &Path, raw: &str) -> serde_json::Value {
         return carrier;
     }
 
-    let typed_spec: kernel::generated::AgentRunSpec = serde_json::from_value(spec.clone()).unwrap();
+    let typed_spec = if spec.get("admission_mode").is_some() {
+        let fresh: kernel::generated::AgentRunSpecV5 = serde_json::from_value(spec.clone()).unwrap();
+        runner::project_v5_spec_for_shared_admission(&fresh)
+    } else {
+        serde_json::from_value::<kernel::generated::AgentRunSpec>(spec.clone()).unwrap()
+    };
     let route = work_map_v2_terminal_route(&typed_spec.role_id.0, &typed_spec.mode.0);
     assert_eq!(typed_spec.terminal_route.as_ref(), Some(&route));
     assert_eq!(typed_spec.boundary_id.0, "planning.work-map.v2");

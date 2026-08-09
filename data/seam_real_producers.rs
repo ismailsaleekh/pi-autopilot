@@ -125,16 +125,19 @@ fn planning_bg_action(workstream: &str, assignment: &AgentAssignment, run_revisi
     })
 }
 
-fn planning_wave_actions(
+/// Pure issue preparation for receipt staging. It may create the immutable
+/// issued spec/prompt files selected by Core, but it does not append a binding,
+/// event, control frame, or spawn effect.
+fn planning_wave_issues(
     workstream: &str,
     assignments: &[AgentAssignment],
-    state: &mut CoreState,
+    state: &CoreState,
     input_set: &planning::TaskInputSet,
     atom_registry: Option<(String, String)>,
-) -> Result<Vec<BackgroundAction>, AnyError> {
+) -> Result<Vec<runner::IssuedRunnerAction>, AnyError> {
     let run_revision = state.state.revision;
     let accepted_artifacts = accepted_planning_artifacts_for_issue(workstream, state)?;
-    let mut actions = Vec::new();
+    let mut issues = Vec::new();
     for assignment in assignments {
         let registry = matches!(
             assignment.boundary_id.as_deref(),
@@ -142,20 +145,38 @@ fn planning_wave_actions(
         )
         .then(|| atom_registry.clone())
         .flatten();
-        let issue = planning_bg_action(
+        issues.push(planning_bg_action(
             workstream,
             assignment,
             run_revision,
             input_set,
             registry,
             accepted_artifacts.clone(),
-        )?;
-        append_runner_invocation(state, &issue.binding)?;
+        )?);
+    }
+    Ok(issues)
+}
+
+fn planning_wave_actions(
+    workstream: &str,
+    assignments: &[AgentAssignment],
+    state: &mut CoreState,
+    input_set: &planning::TaskInputSet,
+    atom_registry: Option<(String, String)>,
+) -> Result<Vec<BackgroundAction>, AnyError> {
+    let issues = planning_wave_issues(workstream, assignments, state, input_set, atom_registry)?;
+    let mut actions = Vec::with_capacity(issues.len());
+    for issue in issues {
+        append_runner_invocation(state, &issue)?;
         actions.push(issue.action);
     }
     Ok(actions)
 }
-fn append_runner_invocation(state: &mut CoreState, binding: &runner::IssuedRunnerBinding) -> Result<(), AnyError> {
+fn append_runner_invocation(
+    state: &mut CoreState,
+    issue: &runner::IssuedRunnerAction,
+) -> Result<(), AnyError> {
+    let binding = &issue.receipt_binding;
     let mut refs = vec![
         Ref(binding.workstream.0.clone()),
         Ref(binding.assignment_id.0.clone()),
@@ -164,7 +185,7 @@ fn append_runner_invocation(state: &mut CoreState, binding: &runner::IssuedRunne
         Ref(binding.mode.0.clone()),
         Ref(binding.boundary_id.0.clone()),
         Ref(format!("action-assignment:{}:{}:{}", binding.action_id.0, binding.assignment_id.0, binding.run_revision)),
-        runner::binding_ref(binding)?,
+        runner::receipt_binding_ref(binding)?,
     ];
     if let Some(lane_id) = &binding.lane_id { refs.push(Ref(format!("lane:{}", lane_id.0))); }
     state.append(EventKind("agent:spawn".to_owned()), refs)
@@ -231,7 +252,18 @@ fn planning_action_from_binding(binding: &runner::IssuedRunnerBinding) -> Result
     let spec_bytes = fs::read(&spec_path).map_err(|error| format!("CONTEXT_GAP:planning-reemit:spec-read:{}:{error}", binding.spec_path))?;
     let digest = sha256_hex_local(&spec_bytes);
     if digest != binding.spec_digest { return Err(format!("CONTEXT_GAP:planning-reemit:spec-digest:{}", binding.assignment_id.0).into()); }
-    let spec: kernel::generated::AgentRunSpec = serde_json::from_slice(&spec_bytes).map_err(|error| format!("CONTEXT_GAP:planning-reemit:spec-json:{}:{error}", binding.spec_path))?;
+    let value: serde_json::Value = serde_json::from_slice(&spec_bytes)
+        .map_err(|error| format!("CONTEXT_GAP:planning-reemit:spec-json:{}:{error}", binding.spec_path))?;
+    let spec = match value.get("admission_mode") {
+        None => serde_json::from_value::<kernel::generated::AgentRunSpec>(value)
+            .map_err(|error| format!("CONTEXT_GAP:planning-reemit:legacy-spec:{}:{error}", binding.spec_path))?,
+        Some(serde_json::Value::String(mode)) if mode == "receipt_v1" => {
+            let fresh: kernel::generated::AgentRunSpecV5 = serde_json::from_value(value)
+                .map_err(|error| format!("CONTEXT_GAP:planning-reemit:V5-spec:{}:{error}", binding.spec_path))?;
+            runner::project_v5_spec_for_shared_admission(&fresh)
+        }
+        Some(_) => return Err(format!("CONTEXT_GAP:planning-reemit:unsupported-admission-mode:{}", binding.spec_path).into()),
+    };
     validate_reemit_spec_binding(&spec, binding)?;
     let facts = runner::RunnerTransportFacts::from_env().map_err(|error| format!("CONTEXT_GAP:planning-reemit:transport:{error:?}"))?;
     Ok(BackgroundAction {
@@ -379,7 +411,7 @@ fn read_planning_schedule_manifest(workstream: &str) -> Result<planning::Plannin
 
 fn planning_refs_from_state(workstream: &str, state: &CoreState) -> planning::PlanningRefs {
     let mut refs = planning::PlanningRefs::default();
-    for binding in state.state.refs.keys().filter_map(|reference| runner::decode_binding_ref(&reference.0)) {
+    for binding in state.state.refs.keys().filter_map(versioned_binding_facade) {
         if binding.workstream.0 != workstream || !binding.result_contract.0.starts_with("planning.") { continue; }
         let issued = planning::PlanningIssuedRef { assignment_id: binding.assignment_id.0.clone(), action_id: binding.action_id.0.clone(), run_revision: binding.run_revision };
         refs.issued.push(issued.clone());
@@ -408,6 +440,15 @@ fn planning_refs_from_state(workstream: &str, state: &CoreState) -> planning::Pl
     refs
 }
 
+fn versioned_binding_facade(reference: &Ref) -> Option<runner::IssuedRunnerBinding> {
+    match runner::decode_versioned_binding_ref(&reference.0).ok()? {
+        runner::VersionedRunnerBinding::ReplayV0(binding) => Some(binding),
+        runner::VersionedRunnerBinding::ReceiptV1(binding) => {
+            Some(runner::receipt_v1_validator_facade(&binding))
+        }
+    }
+}
+
 fn launch_ack_task_id(state: &CoreState, binding: &runner::IssuedRunnerBinding) -> Option<String> {
     if !launch_ack_consumed(state, binding) {
         return None;
@@ -425,7 +466,16 @@ fn launch_ack_task_id(state: &CoreState, binding: &runner::IssuedRunnerBinding) 
 
 fn read_runner_spec_for_binding(binding: &runner::IssuedRunnerBinding) -> Result<kernel::generated::AgentRunSpec, String> {
     let text = fs::read_to_string(&binding.spec_path).map_err(|error| format!("{}:{error}", binding.spec_path))?;
-    serde_json::from_str(&text).map_err(|error| error.to_string())
+    let value: serde_json::Value = serde_json::from_str(&text).map_err(|error| error.to_string())?;
+    match value.get("admission_mode") {
+        None => serde_json::from_value(value).map_err(|error| error.to_string()),
+        Some(serde_json::Value::String(mode)) if mode == "receipt_v1" => {
+            let fresh: kernel::generated::AgentRunSpecV5 =
+                serde_json::from_value(value).map_err(|error| error.to_string())?;
+            Ok(runner::project_v5_spec_for_shared_admission(&fresh))
+        }
+        Some(_) => Err("runner spec has unsupported persisted admission mode".to_owned()),
+    }
 }
 
 fn task_doc_from_manifest(value: &serde_json::Value, class: planning::TaskDocumentClass, authority_set_id: &str, index: usize) -> Result<planning::TaskDocument, String> {
@@ -487,7 +537,7 @@ fn ensure_atom_registry(workstream: &str, state: &CoreState) -> Result<(String, 
 }
 
 fn accepted_binding_for_assignment(state: &CoreState, assignment_id: &str) -> Option<runner::IssuedRunnerBinding> {
-    state.state.refs.keys().filter_map(|reference| runner::decode_binding_ref(&reference.0)).find(|binding| binding.assignment_id.0 == assignment_id && planning_result_consumed(state, binding))
+    state.state.refs.keys().filter_map(versioned_binding_facade).find(|binding| binding.assignment_id.0 == assignment_id && planning_result_consumed(state, binding))
 }
 
 fn accepted_planning_artifacts_for_issue(workstream: &str, state: &CoreState) -> Result<Vec<runner::AcceptedPlanningArtifactBinding>, AnyError> {
@@ -497,7 +547,7 @@ fn accepted_planning_artifacts_for_issue(workstream: &str, state: &CoreState) ->
         assignments.insert(assignment.assignment_id.as_str(), (order, assignment));
     }
     let mut rows: Vec<(String, usize, runner::AcceptedPlanningArtifactBinding)> = Vec::new();
-    for binding in state.state.refs.keys().filter_map(|reference| runner::decode_binding_ref(&reference.0)) {
+    for binding in state.state.refs.keys().filter_map(versioned_binding_facade) {
         if binding.workstream.0 != workstream || !planning_result_consumed(state, &binding) { continue; }
         let Some((order, assignment)) = assignments.get(binding.assignment_id.0.as_str()) else {
             return Err(format!("CONTEXT_GAP:accepted-artifact:unknown assignment {}", binding.assignment_id.0).into());

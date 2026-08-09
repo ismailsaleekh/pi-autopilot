@@ -143,6 +143,18 @@ pub(crate) fn read_work_map_v2_actual_carrier_authority(
     reject_artifact_path(path, "actual carrier")?;
     let bytes = runner::read_bounded_authority_file(path, WORK_MAP_V2_SOURCE_CARRIER_MAX_BYTES)
         .map_err(|error| format!("work-map-v2 actual carrier read: {error}"))?;
+    parse_work_map_v2_actual_carrier_bytes(path, bytes)
+}
+
+/// The fresh receipt entry point receives the exact in-memory carrier bytes
+/// that Core will later create-once publish. This shares the complete closed
+/// carrier predicate with the legacy disk wrapper without using the final
+/// path as an admission input.
+fn parse_work_map_v2_actual_carrier_bytes(
+    path: &Path,
+    bytes: Vec<u8>,
+) -> Result<(WorkMapV2SourceCarrier, WorkMapV2ActualCarrierAuthority), String> {
+    reject_artifact_path(path, "actual carrier")?;
     let wire: WorkMapV2ActualCarrierWire = serde_json::from_slice(&bytes)
         .map_err(|error| format!("work-map-v2 actual carrier JSON: {error}"))?;
     let expected_route = exact_v2_terminal_route(
@@ -486,6 +498,63 @@ pub(crate) fn admit_work_map_v2_verified_carrier(
     approved.source_actual_authority = Some(authority);
     Ok(approved)
 }
+
+/// Fresh receipt admission counterpart to the legacy disk verifier. The
+/// carrier and V4 facade are already exact fields of the V5 binding/spec; no
+/// final carrier/spec file is opened here.
+#[allow(dead_code)]
+pub(crate) fn admit_work_map_v2_staged_carrier(
+    carrier_path: &Path,
+    carrier_bytes: &[u8],
+    spec: &kernel::generated::AgentRunSpec,
+    expected_spec_digest: &str,
+    context: WorkMapV2AdmissionContext<'_>,
+) -> Result<ApprovedWorkMapV2, String> {
+    let (source, authority) = parse_work_map_v2_actual_carrier_bytes(carrier_path, carrier_bytes.to_vec())?;
+    if !is_lower_sha256(expected_spec_digest)
+        || authority.carrier_path != path_string(carrier_path)?
+        || authority.spec_path != spec.spec_path.0
+        || authority.spec_digest != expected_spec_digest
+        || spec.schema.0 != "autopilot.agent_run_spec.v4"
+        || spec.assignment_kind != kernel::generated::ValidationAssignmentKind::PlanningReview
+        || spec.action_id.0 != authority.action_id
+        || spec.assignment_id.0 != authority.assignment_id
+        || spec.run_revision != authority.run_revision
+        || spec.workstream.0 != authority.workstream
+        || spec.role_id.0 != authority.role_id
+        || spec.mode.0 != authority.mode
+        || spec.boundary_id.0 != authority.boundary_id
+        || spec.result_contract.0 != authority.result_contract
+        || spec.prompt_path.0 != authority.prompt_path
+        || spec.prompt_digest.0 != authority.prompt_digest
+        || spec.boundary_digest.0 != authority.boundary_digest
+        || spec.result_contract_digest.0 != authority.result_contract_digest
+        || spec.settings_digest.0 != authority.settings_digest
+        || spec.context_digest.0 != authority.context_digest
+        || spec.skills_digest.0 != authority.skills_digest
+        || spec.subscription_digest.0 != authority.subscription_digest
+        || spec.runtime_extension_digest.as_ref().map(|value| value.0.as_str())
+            != Some(authority.runtime_extension_digest.as_str())
+        || spec.runtime_extension_digest.as_ref().map(|value| value.0.as_str())
+            != Some(kernel::generated::CHILD_ADDON_DIGEST)
+        || spec.carrier_path.0 != authority.carrier_path
+        || spec.terminal_route.as_ref() != Some(&authority.terminal_route)
+        || spec.terminal_profile_id.as_deref() != Some(authority.terminal_route.profile_id.as_str())
+        || spec.atom_registry_path.as_ref().map(|value| value.0.as_str())
+            != Some(authority.atom_registry_path.as_str())
+        || spec.atom_registry_digest.as_ref().map(|value| value.0.as_str())
+            != Some(authority.atom_registry_digest.as_str())
+        || spec.session_continuity != kernel::generated::SessionContinuity::Fresh
+        || authority.carrier_binding != runner::child::carrier_binding(spec)
+    {
+        return Err("work-map-v2 staged carrier/spec authority drift".to_owned());
+    }
+    let raw = source.raw_work_map_payload().to_vec();
+    let mut approved = admit_work_map_v2(&raw, &source, context)?;
+    approved.source_actual_authority = Some(authority);
+    Ok(approved)
+}
+
 
 pub fn admit_work_map_v2(
     raw: &[u8],

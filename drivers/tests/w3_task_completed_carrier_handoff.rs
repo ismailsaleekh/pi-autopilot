@@ -15,37 +15,50 @@ static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static FIXTURE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[test]
-fn task_completed_alone_consumes_planning_carrier_and_launches_follow_up() {
+fn receipt_v1_planning_accepts_then_consumes_without_carrier_or_spec_rereads() {
     let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
-    let fixture = Fixture::new("handoff");
+    let fixture = Fixture::new("receipt-handoff");
     fixture.install_transport_with_nonexistent_command_names();
     fixture.write_manifest();
-    let mut from_task_completed = CoreState::open(None).unwrap();
-    let binding = fixture.seed_planning_binding(
-        &mut from_task_completed,
+    let mut state = CoreState::open(None).unwrap();
+    let issue = fixture.seed_receipt_planning_binding(
+        &mut state,
         "planning-ws-task-extractor-01",
         "TE01-",
-        task_atoms("TE01-A"),
     );
+    let spec: kernel::generated::AgentRunSpecV5 =
+        serde_json::from_slice(&fs::read(&issue.binding.spec_path).unwrap()).unwrap();
+    let raw: serde_json::Value = serde_json::from_str(&task_atoms("TE01-A")).unwrap();
+    let submit = json!({"v":1,"id":6,"kind":"child-control","payload":{"request":{
+        "schema":"autopilot.child_control_request.v1","request_id":"request-1",
+        "token":spec.child_control_token,"run_id":issue.receipt_binding.run_id,
+        "assignment_id":issue.receipt_binding.assignment_id,"attempt":issue.receipt_binding.attempt,
+        "tool_call_id":"tool-call-1","kind":"submit",
+        "tool_name":issue.receipt_binding.tool_name,"profile_id":issue.receipt_binding.profile_id,
+        "raw_payload":raw
+    }}});
+    let accepted = seam::handle_line(&submit.to_string(), &mut state).unwrap();
+    assert_eq!(accepted.kind, "child-control", "{accepted:?}");
+    assert_eq!(accepted.payload["response"]["outcome"], "ACCEPT");
+    let receipt = accepted.payload["response"]["receipt"]["receipt"].clone();
 
-    let frame = json!({"v":1,"id":7,"kind":"task-completed","payload":{"task_id":"task-terminal","action_id":binding.action_id,"assignment_id":binding.assignment_id,"status":"completed"}});
-    let completed = seam::handle_line(&frame.to_string(), &mut from_task_completed).unwrap();
+    // Exact replay returns the original receipt and appends no second accepted
+    // root. A changed raw payload is rejected before it can create artifacts.
+    let replay = seam::handle_line(&submit.to_string(), &mut state).unwrap();
+    assert_eq!(replay.payload["response"]["outcome"], "ACCEPT");
+    assert_eq!(replay.payload["response"]["receipt"]["receipt"], receipt);
+    let mut conflict = submit.clone();
+    conflict["payload"]["request"]["raw_payload"] = serde_json::from_str(&task_atoms("TE01-B")).unwrap();
+    let retry = seam::handle_line(&conflict.to_string(), &mut state).unwrap();
+    assert_eq!(retry.payload["response"]["outcome"], "RETRY");
+
+    fs::remove_file(&issue.binding.carrier_path).unwrap();
+    fs::remove_file(&issue.binding.spec_path).unwrap();
+    let frame = json!({"v":1,"id":7,"kind":"task-completed","payload":{"task_id":"task-terminal","action_id":issue.receipt_binding.action_id,"assignment_id":issue.receipt_binding.assignment_id,"status":"completed"}});
+    let completed = seam::handle_line(&frame.to_string(), &mut state).unwrap();
     assert_spawn_assignment(&completed, "planning-ws-task-extractor-02");
-
-    let mut from_agent_result = CoreState::open(None).unwrap();
-    let same = fixture.seed_planning_binding(
-        &mut from_agent_result,
-        "planning-ws-task-extractor-01",
-        "TE01-",
-        task_atoms("TE01-A"),
-    );
-    let carrier = carrier_value(&same, &task_atoms("TE01-A"));
-    let legacy = json!({"v":1,"id":8,"kind":"agent-result","payload":{"assignment_id":same.assignment_id,"carrier":carrier}});
-    let agent_result = seam::handle_line(&legacy.to_string(), &mut from_agent_result).unwrap();
-    assert_eq!(
-        spawned_assignment_ids(&completed),
-        spawned_assignment_ids(&agent_result)
-    );
+    let again = seam::handle_line(&frame.to_string(), &mut state).unwrap();
+    assert_eq!(spawned_assignment_ids(&again), spawned_assignment_ids(&completed));
 }
 
 struct Fixture {
@@ -96,6 +109,7 @@ impl Fixture {
                 "AUTOPILOT_CHILD_ADDON_PATH",
                 Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/generated/child-extension.ts"),
             );
+            std::env::set_var("AUTOPILOT_CHILD_CONTROL_SOCKET_PATH", self.root.join("cc.sock"));
         }
     }
 
@@ -119,23 +133,16 @@ impl Fixture {
         })).unwrap()).unwrap();
     }
 
-    fn seed_planning_binding(
+    fn seed_receipt_planning_binding(
         &self,
         state: &mut CoreState,
         assignment_id: &str,
         prefix: &str,
-        raw: String,
-    ) -> runner::IssuedRunnerBinding {
+    ) -> runner::IssuedRunnerAction {
         let issue = self.issue_planning(assignment_id, prefix);
-        fs::create_dir_all(Path::new(&issue.binding.carrier_path).parent().unwrap()).unwrap();
-        fs::write(
-            &issue.binding.carrier_path,
-            serde_json::to_vec_pretty(&carrier_value(&issue.binding, &raw)).unwrap(),
-        )
-        .unwrap();
-        append_ref(state, &runner::binding_ref(&issue.binding).unwrap());
+        append_ref(state, &runner::receipt_binding_ref(&issue.receipt_binding).unwrap());
         append_ref(state, &Ref(assignment_id.to_owned()));
-        issue.binding
+        issue
     }
 
     fn issue_planning(&self, assignment_id: &str, prefix: &str) -> runner::IssuedRunnerAction {
@@ -226,10 +233,6 @@ fn spawned_assignment_ids(response: &SeamEnvelope) -> Vec<String> {
         .and_then(read)
         .into_iter()
         .collect()
-}
-
-fn carrier_value(binding: &runner::IssuedRunnerBinding, raw: &str) -> serde_json::Value {
-    json!({"schema":"autopilot.planning_carrier.v1","action_id":binding.action_id.0,"assignment_id":binding.assignment_id.0,"run_revision":binding.run_revision,"workstream":binding.workstream.0,"role_id":binding.role_id.0,"mode":binding.mode.0,"boundary_id":binding.boundary_id.0,"result_contract":binding.result_contract.0,"prompt_path":binding.prompt_path,"prompt_digest":binding.prompt_digest,"boundary_digest":binding.boundary_digest,"result_contract_digest":binding.result_contract_digest,"settings_digest":binding.settings_digest,"context_digest":binding.context_digest,"skills_digest":binding.skills_digest,"subscription_digest":binding.subscription_digest,"spec_digest":binding.spec_digest,"spec_path":binding.spec_path,"carrier_path":binding.carrier_path,"raw_output":raw})
 }
 
 fn task_atoms(id: &str) -> String {

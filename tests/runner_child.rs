@@ -261,6 +261,7 @@ fn validation_v3_shape_and_value_repairs_are_three_attempt_bounded_and_receipt_r
     let facts = RunnerTransportFacts::new(
         std::env::current_exe().expect("current exe"),
         std::env::current_exe().expect("current exe"),
+        PathBuf::from("/tmp/autopilot-test-control.sock"),
     )
     .expect("transport facts");
     let _cwd_guard = CWD_LOCK.lock().expect("cwd lock");
@@ -816,6 +817,7 @@ fn bug_187_unknown_delivery_role_is_rejected_by_identity_authority() {
     let facts = RunnerTransportFacts::new(
         std::env::current_exe().expect("current executable"),
         std::env::current_exe().expect("current executable"),
+        PathBuf::from("/tmp/autopilot-test-control.sock"),
     )
     .expect("transport facts");
     let error = delivery_issue_with_facts(&assignment, &facts)
@@ -3073,6 +3075,7 @@ fn write_delivery_spec(root: &Path, worktree: &Path, mutate: impl Fn(Value) -> V
     let facts = RunnerTransportFacts::new(
         std::env::current_exe().expect("current exe"),
         std::env::current_exe().expect("current exe"),
+        PathBuf::from("/tmp/autopilot-test-control.sock"),
     )
     .expect("transport facts");
     let _guard = CWD_LOCK.lock().expect("cwd lock");
@@ -3314,6 +3317,7 @@ fn write_recovery_delivery_spec(root: &Path, worktree: &Path) -> PathBuf {
     let facts = RunnerTransportFacts::new(
         std::env::current_exe().expect("current exe"),
         std::env::current_exe().expect("current exe"),
+        PathBuf::from("/tmp/autopilot-test-control.sock"),
     )
     .expect("transport facts");
     let _guard = CWD_LOCK.lock().expect("cwd lock");

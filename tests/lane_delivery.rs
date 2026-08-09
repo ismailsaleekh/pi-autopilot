@@ -385,7 +385,12 @@ fn lane_delivery_agent_git_mutation_and_incomplete_delivery_are_refused_without_
     fs::write(&node, "node\n").expect("fake node");
     fs::create_dir_all(wrapper.parent().expect("wrapper parent")).expect("wrapper dir");
     fs::write(&wrapper, "runner\n").expect("fake wrapper");
-    let facts = RunnerTransportFacts::new(node, wrapper).expect("facts");
+    let facts = RunnerTransportFacts::new(
+        node,
+        wrapper,
+        PathBuf::from("/tmp/autopilot-test-control.sock"),
+    )
+    .expect("facts");
     unsafe {
         std::env::set_var(
             "AUTOPILOT_CHILD_ADDON_PATH",

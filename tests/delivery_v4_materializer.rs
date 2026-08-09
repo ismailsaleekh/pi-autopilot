@@ -1126,7 +1126,12 @@ fn transport(root: &Path) -> RunnerTransportFacts {
     let wrapper = transport.join("runner.mjs");
     fs::write(&node, b"node\n").unwrap();
     fs::write(&wrapper, b"runner\n").unwrap();
-    RunnerTransportFacts::new(node, wrapper).unwrap()
+    RunnerTransportFacts::new(
+        node,
+        wrapper,
+        PathBuf::from("/tmp/autopilot-test-control.sock"),
+    )
+    .unwrap()
 }
 
 fn assignment_v4(

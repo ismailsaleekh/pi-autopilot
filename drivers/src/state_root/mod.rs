@@ -178,18 +178,33 @@ pub fn run_id_from_parts(millis: u64, random: [u8; 10]) -> Uuidv7 {
     Uuidv7(hex_uuid(b))
 }
 
-fn new_run_id() -> Result<Uuidv7, StateRootError> {
+/// Read exactly 32 bytes from the operating-system CSPRNG. Capability callers
+/// receive no deterministic fallback: inability to read the OS source is an
+/// authority failure, not a weaker token source.
+pub(crate) fn os_csprng_32() -> Result<[u8; 32], StateRootError> {
+    let mut random = [0_u8; 32];
+    File::open("/dev/urandom")
+        .map_err(map_io)?
+        .read_exact(&mut random)
+        .map_err(map_io)?;
+    Ok(random)
+}
+
+/// Fresh UUIDv7 material uses the same OS CSPRNG primitive as run identities.
+pub(crate) fn fresh_uuid_v7() -> Result<Uuidv7, StateRootError> {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| StateRootError::Io)?
         .as_millis();
     let millis = u64::try_from(millis).map_err(|_| StateRootError::Io)?;
-    let mut random = [0_u8; 10];
-    File::open("/dev/urandom")
-        .map_err(map_io)?
-        .read_exact(&mut random)
-        .map_err(map_io)?;
-    Ok(run_id_from_parts(millis, random))
+    let random = os_csprng_32()?;
+    let mut uuid_random = [0_u8; 10];
+    uuid_random.copy_from_slice(&random[..10]);
+    Ok(run_id_from_parts(millis, uuid_random))
+}
+
+fn new_run_id() -> Result<Uuidv7, StateRootError> {
+    fresh_uuid_v7()
 }
 
 fn hex_uuid(bytes: [u8; 16]) -> String {

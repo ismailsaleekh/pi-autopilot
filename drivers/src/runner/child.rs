@@ -17,7 +17,7 @@ use crate::runner::rpc::{
 };
 
 use kernel::failure::{Failure, OperatorDecision, RetryPolicy};
-use kernel::generated::{AgentRunSpec, SessionContinuity, TaskDocument};
+use kernel::generated::{AdmissionMode, AgentRunSpec, AgentRunSpecV5, SessionContinuity, TaskDocument};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest as ShaDigest, Sha256};
@@ -613,7 +613,31 @@ fn read_bounded_utf8(path: &Path, max_bytes: usize, label: &str) -> Result<Strin
 pub fn main(args: &[String]) -> Result<(), String> {
     let spec_path = parse_args(args)?;
     let raw = read_bounded_utf8(&spec_path, MAX_AGENT_RUN_SPEC_BYTES, "agent-run spec read")?;
-    let spec: AgentRunSpec = serde_json::from_str(&raw).map_err(|error| {
+    let spec_value: Value = serde_json::from_str(&raw).map_err(|error| {
+        format!("agent-run spec is malformed, incomplete, or has unknown fields: {error}")
+    })?;
+    if spec_value.get("admission_mode").is_some() {
+        let fresh: AgentRunSpecV5 = serde_json::from_value(spec_value).map_err(|error| {
+            format!("agent-run V5 spec is malformed, incomplete, or has unknown fields: {error}")
+        })?;
+        if fresh.schema.0 != "autopilot.agent_run_spec.v5"
+            || fresh.admission_mode != AdmissionMode::ReceiptV1
+            || fresh.child_control_socket_path.0.is_empty()
+            || !super::constant_time_hex_digest_matches(
+                &fresh.child_control_token,
+                &fresh.child_control_token_digest.0,
+            )
+        {
+            return Err("agent-run V5 child-control authority drift".to_owned());
+        }
+        let facade = super::project_v5_spec_for_shared_admission(&fresh);
+        validate_spec(&facade, &spec_path)?;
+        // Fresh V5 has no child-owned carrier/audit persistence path. The
+        // Host broker (added separately) transports its terminal payload to
+        // Core's `child-control` route, which stages and roots the receipt.
+        return Err("agent-run receipt_v1 requires the Host child-control broker".to_owned());
+    }
+    let spec: AgentRunSpec = serde_json::from_value(spec_value).map_err(|error| {
         format!("agent-run spec is malformed, incomplete, or has unknown fields: {error}")
     })?;
     let spec_digest = sha256_hex(raw.as_bytes());
@@ -4959,12 +4983,15 @@ fn prepare_carrier(
             "terminal profile identity drift: expected {profile:?}/{expected_binding}, got {terminal:?}"
         )));
     }
-    let raw_output = serde_json::to_string(&terminal.details.payload).map_err(|error| {
+    let raw_bytes = crate::evidence::canonical_json(&terminal.details.payload).map_err(|error| {
         CarrierRejection::Value(value_rejection(
             "payload",
-            "serializable tool payload",
+            "canonical JSON tool payload",
             error.to_string(),
         ))
+    })?;
+    let raw_output = String::from_utf8(raw_bytes).map_err(|error| {
+        CarrierRejection::Identity(format!("canonical JSON payload UTF-8: {error}"))
     })?;
     if matches!(
         spec.assignment_kind,
