@@ -48,6 +48,7 @@ env_deny "AWS_ACCESS_KEY_ID"
 env_deny "AWS_SECRET_ACCESS_KEY"
 env_deny "AWS_SESSION_TOKEN"
 
+effect "child-control" operator_level_default="info" fail_closed=#true acknowledge=#false
 effect "ui" operator_level_default="info" fail_closed=#false acknowledge=#false
 effect "spawn" operator_level_default="info" fail_closed=#false acknowledge=#false
 effect "spawn-wave" operator_level_default="info" fail_closed=#false acknowledge=#true max_items=64

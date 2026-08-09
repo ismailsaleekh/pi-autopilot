@@ -83,6 +83,11 @@ env_deny "OPENAI_BASE_URL"
 env_deny "ANTHROPIC_API_KEY"
 env_deny "ANTHROPIC_BASE_URL"
 env_deny "PI_API_KEY"
+env_deny "AUTOPILOT_CONTROL_SOCK"
+env_deny "AUTOPILOT_CONTROL_TOKEN"
+env_deny "AUTOPILOT_CONTROL_RUN_ID"
+env_deny "AUTOPILOT_CONTROL_ASSIGNMENT"
+env_deny "AUTOPILOT_CONTROL_ATTEMPT"
 size_limit "terminal" bytes=4194304
 size_limit "entry_appended" bytes=16384
 state "idle" terminal_ok=#true

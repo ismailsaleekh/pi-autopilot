@@ -107,14 +107,6 @@ const FRAME_VALIDATION_DESCRIPTORS = {
       "FAIL",
       "BLOCKED"
     ],
-    "deferred-host-effect-kind": [
-      "ui",
-      "spawn",
-      "spawn-wave",
-      "session",
-      "log",
-      "done"
-    ],
     "delivery-blocker-class": [
       "semantic-repairable",
       "requires-new-authority",
@@ -259,9 +251,6 @@ const FRAME_VALIDATION_DESCRIPTORS = {
       "blocked",
       "needs-fix"
     ],
-    "prepared-transition-kind": [
-      "receipt-consumption"
-    ],
     "producer": [
       "Model",
       "Git",
@@ -371,6 +360,11 @@ const FRAME_VALIDATION_DESCRIPTORS = {
     }
   ],
   "routes": {
+    "child-control": {
+      "effect": "child-control",
+      "payload": "CoreToHostChildControlPayload",
+      "posture": "supported"
+    },
     "done": {
       "effect": "done",
       "payload": "CoreToHostDonePayload",
@@ -512,6 +506,24 @@ const FRAME_VALIDATION_DESCRIPTORS = {
         }
       ]
     },
+    "CoreToHostChildControlPayload": {
+      "fields": [
+        {
+          "kind": "value",
+          "name": "response",
+          "nullable": false,
+          "required": true,
+          "type": "object"
+        },
+        {
+          "kind": "value",
+          "name": "blocked_gate",
+          "nullable": true,
+          "required": true,
+          "type": "object"
+        }
+      ]
+    },
     "CoreToHostDonePayload": {
       "fields": [
         {
@@ -541,7 +553,7 @@ const FRAME_VALIDATION_DESCRIPTORS = {
           "name": "action",
           "nullable": false,
           "required": true,
-          "type": "autopilot_attested_action"
+          "type": "object"
         }
       ]
     },
@@ -570,7 +582,7 @@ const FRAME_VALIDATION_DESCRIPTORS = {
           "name": "action",
           "nullable": false,
           "required": true,
-          "type": "autopilot_attested_action"
+          "type": "object"
         }
       ]
     },

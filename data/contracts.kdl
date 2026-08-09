@@ -1357,6 +1357,18 @@ artifact "validation_result_v3" schema="autopilot.validation_result.v3" producer
     field "verdict" type="validation_verdict_v3" required=#true
 }
 
+artifact "child_control_blocked_gate" schema="autopilot.child_control_blocked_gate.v1" producer="Package" model_produced=#false {
+    doc "Host-only directive carried beside an accepted blocked response. The broker closes this run's launch gate before returning the child-visible response and kills only the listed owned tasks, with the reporter last."
+    field "schema" type="schema-id" required=#true constant="autopilot.child_control_blocked_gate.v1"
+    field "latch_id" type="uuidv7" required=#true
+    field "run_id" type="id" required=#true
+    list "cancellations" item="child_control_blocked_cancellation" required=#true min_items=1
+    record "child_control_blocked_cancellation" {
+        field "task_id" type="id" required=#true
+        field "reporter" type="bool" required=#true
+    }
+}
+
 artifact "child_control_request" schema="autopilot.child_control_request.v1" producer="Host" model_produced=#false {
     doc "Closed child-to-Core control request. Raw payload is transported as the pre-schema JSON tree without TypeScript coercion, defaults, or semantic admission."
     field "schema" type="schema-id" required=#true constant="autopilot.child_control_request.v1"
@@ -1422,8 +1434,44 @@ artifact "submit_diagnostic" schema="autopilot.submit_diagnostic.v1" producer="P
     }
 }
 
+artifact "deferred_host_effect_v1" schema="autopilot.deferred_host_effect.v1" producer="Package" model_produced=#false union_tag="kind" {
+    doc "Closed actual Host continuation stored in a submit receipt. Receipt consumption relays this exact existing Core-to-Host payload without inferring an action or rerunning admission."
+    record "done" variant="done" {
+        field "payload" type="core-to-host-done-payload" required=#true
+    }
+    record "spawn" variant="spawn" {
+        field "payload" type="core-to-host-spawn-payload" required=#true
+    }
+    record "spawn_wave" variant="spawn-wave" {
+        field "payload" type="core-to-host-spawn-wave-payload" required=#true
+    }
+}
+
+artifact "prepared_submit_transition_v1" schema="autopilot.prepared_submit_transition.v1" producer="Package" model_produced=#false {
+    doc "Self-contained accepted transition for receipt-only parent consumption. It records exact immutable refs, issued action and binding refs, and the actual closed deferred Host payload."
+    field "schema" type="schema-id" required=#true constant="autopilot.prepared_submit_transition.v1"
+    field "transition_ref" type="ref" required=#true
+    field "transition_digest" type="digest" required=#true
+    field "carrier" type="prepared_submit_artifact_ref" required=#true
+    list "artifact_refs" item="prepared_submit_artifact_ref" required=#true
+    list "issued_actions" item="prepared_submit_issued_action" required=#true
+    field "deferred_host_effect" type="deferred_host_effect_v1" required=#true
+    record "prepared_submit_artifact_ref" {
+        field "artifact_ref" type="ref" required=#true
+        field "artifact_schema" type="schema-id" required=#true
+        field "sha256" type="digest" required=#true
+        field "byte_count" type="u64" required=#true
+    }
+    record "prepared_submit_issued_action" {
+        field "action_ref" type="ref" required=#true
+        field "action" type="background_action" required=#true
+        field "binding_ref" type="ref" required=#true
+        field "binding_digest" type="digest" required=#true
+    }
+}
+
 artifact "submit_receipt" schema="autopilot.submit_receipt.v1" producer="Package" model_produced=#false {
-    doc "Create-once accepted submit receipt. It binds authenticated child identity, canonical raw payload, validators, carrier artifacts, and a typed deferred continuation without granting repository authority."
+    doc "Create-once accepted submit receipt. It binds authenticated child identity, canonical raw payload, validators, carrier artifacts, and a typed deferred continuation without granting repository authority. Its canonical-byte SHA-256 is carried only by the outer accepted-event reference."
     field "schema" type="schema-id" required=#true constant="autopilot.submit_receipt.v1"
     field "receipt_id" type="uuidv7" required=#true
     field "run_id" type="id" required=#true
@@ -1445,29 +1493,11 @@ artifact "submit_receipt" schema="autopilot.submit_receipt.v1" producer="Package
     field "raw_payload_byte_count" type="u64" required=#true
     field "request_id" type="id" required=#true
     field "tool_call_id" type="string" required=#true
-    field "carrier_digest" type="digest" required=#true
-    list "artifact_digests" item="submit_receipt_artifact" required=#true
-    field "prepared_transition" type="submit_prepared_transition" required=#true
-    field "receipt_sha256" type="digest" required=#true
+    field "prepared_transition" type="prepared_submit_transition_v1" required=#true
     record "submit_receipt_validator_version" {
         field "validator_id" type="id" required=#true
         field "version" type="string" required=#true
         field "digest" type="digest" required=#true
-    }
-    record "submit_receipt_artifact" {
-        field "artifact_id" type="id" required=#true
-        field "sha256" type="digest" required=#true
-        field "byte_count" type="u64" required=#true
-    }
-    record "submit_prepared_transition" {
-        field "transition_id" type="id" required=#true
-        field "kind" type="prepared-transition-kind" required=#true
-        field "transition_digest" type="digest" required=#true
-        field "deferred_host_effect" type="submit_deferred_host_effect" required=#true
-    }
-    record "submit_deferred_host_effect" {
-        field "kind" type="deferred-host-effect-kind" required=#true
-        field "effect_digest" type="digest" required=#true
     }
 }
 
@@ -1503,7 +1533,6 @@ artifact "blocked_receipt" schema="autopilot.blocked_receipt.v1" producer="Packa
     field "report_digest" type="digest" required=#true
     field "reason_code" type="blocked-reason-code" required=#true
     field "cancellation_set_digest" type="digest" required=#true
-    field "receipt_sha256" type="digest" required=#true
 }
 
 artifact "blocked_latch" schema="autopilot.blocked_latch.v1" producer="Package" model_produced=#false {
@@ -1517,7 +1546,6 @@ artifact "blocked_latch" schema="autopilot.blocked_latch.v1" producer="Package" 
     field "reporter_assignment_id" type="id" required=#true
     field "cancellation_set_digest" type="digest" required=#true
     list "cancellations" item="blocked_cancellation_record" required=#true min_items=1
-    field "latch_sha256" type="digest" required=#true
     record "blocked_cancellation_record" {
         field "task_id" type="id" required=#true
         field "action_id" type="id" required=#true
@@ -1525,6 +1553,24 @@ artifact "blocked_latch" schema="autopilot.blocked_latch.v1" producer="Package" 
         field "cancellation_index" type="u32" required=#true
         field "reporter" type="bool" required=#true
     }
+}
+
+artifact "submit_receipt_event_ref" schema="autopilot.submit_receipt_event_ref.v1" producer="Package" model_produced=#false {
+    doc "Outer accepted-event reference carrying the SHA-256 of canonical submit-receipt bytes; the receipt never hashes bytes containing itself."
+    field "schema" type="schema-id" required=#true constant="autopilot.submit_receipt_event_ref.v1"
+    field "receipt_ref" type="ref" required=#true
+    field "receipt_sha256" type="digest" required=#true
+    field "accepted_event" type="autopilot_event_ref" required=#true
+}
+
+artifact "blocked_latch_event_ref" schema="autopilot.blocked_latch_event_ref.v1" producer="Package" model_produced=#false {
+    doc "Outer blocked-event reference carrying canonical blocked receipt and latch SHA-256 values; neither serialized value contains its own hash field."
+    field "schema" type="schema-id" required=#true constant="autopilot.blocked_latch_event_ref.v1"
+    field "blocked_receipt_ref" type="ref" required=#true
+    field "blocked_receipt_sha256" type="digest" required=#true
+    field "latch_ref" type="ref" required=#true
+    field "latch_sha256" type="digest" required=#true
+    field "blocked_event" type="autopilot_event_ref" required=#true
 }
 
 artifact "seam_envelope" schema="autopilot.seam_envelope.v1" producer="Host" model_produced=#false {
@@ -2180,17 +2226,27 @@ enum "blocked-evidence-kind" {
     value "reference"
 }
 
-enum "prepared-transition-kind" {
-    value "receipt-consumption"
+
+frame direction="host-to-core" kind="child-control" {
+    doc "Authenticated Host-broker child-control request. Core derives all authority from the bound capability; the model supplies only the raw tool payload in ChildControlRequest."
+    field "request" type="child_control_request" required=#true
 }
 
-enum "deferred-host-effect-kind" {
-    value "ui"
-    value "spawn"
-    value "spawn-wave"
-    value "session"
-    value "log"
-    value "done"
+frame direction="host-to-core" kind="blocked-result-observed" {
+    doc "Authenticated outer-runner observation that the reporter's accepted blocked tool result was correlated through ToolExecutionEnd and message_end. It is separate from child-control request kind and carries no model authority."
+    field "schema" type="schema-id" required=#true constant="autopilot.blocked_result_observed.v1"
+    field "token" type="string" required=#true
+    field "run_id" type="id" required=#true
+    field "assignment_id" type="id" required=#true
+    field "attempt" type="u32" required=#true
+    field "receipt_id" type="uuidv7" required=#true
+    field "tool_call_id" type="string" required=#true
+}
+
+frame direction="core-to-host" kind="child-control" {
+    doc "Broker-only child-control result. Host applies the optional blocked gate directive before returning exactly response to the nested child and rejects every other Core effect kind on this socket path."
+    field "response" type="child_control_response" required=#true
+    field "blocked_gate" type="child_control_blocked_gate" required=#true nullable=#true require_explicit_null=#true
 }
 
 frame direction="core-to-host" kind="spawn-attested" {

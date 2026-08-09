@@ -152,31 +152,100 @@ fn emit_pi_rpc(pi: &TableDoc) -> Result<String> {
 }
 
 macro_rules! pi_rpc_emitter {($($t:tt)*)=>{$($t)*};}
-pi_rpc_emitter! { #[derive(Clone)] struct FieldSpec { wire: String, rust: String, ty: String, mode: String, } fn rows<'a>(doc: &'a TableDoc, table: &str) -> Vec<&'a TableRow> { doc.rows.iter().filter(|row| row.table == table).collect() } fn validate_pi_rpc(pi: &TableDoc) -> Result<()> { for (table, count) in [ ("command", 8), ("wire_enum", 4), ("wire_variant", 14), ("wire_record", 14), ("event", 23), ("launch_flag", 13), ("env_deny", 7), ("size_limit", 2), ("state", 9), ("order_event", 16), ("transition", 24), ("forbidden", 2), ] { require( rows(pi, table).len() == count, format!("pi-rpc {table} row drift"), )?; } let commands = keyset(pi, "command"); let enums = keyset(pi, "wire_enum"); let records = keyset(pi, "wire_record"); let events = keyset(pi, "order_event"); let states = keyset(pi, "state"); let serde = rows(pi, "command") .iter() .map(|row| row.string("serde")) .collect::<Result<Vec<_>>>()?; unique(serde.into_iter(), "pi-rpc command serde")?; for row in rows(pi, "command") { require( row.string("constructor")? == row.key, format!("pi-rpc command constructor drift at line {}", row.line), )?; require( row.bool("request_id")?, format!("pi-rpc command without request id at line {}", row.line), )?; require( row.string("variant")? == variant_name(&row.key), format!("pi-rpc command variant drift at line {}", row.line), )?; let _ = field(row.string("payload")?)?; } for row in rows(pi, "wire_variant") { require( contains_key(&enums, row.string("enum")?), format!("pi-rpc wire_variant FK drift at line {}", row.line), )?; } for row in rows(pi, "event") { let record = row.string("record")?; require( record.is_empty() || contains_key(&records, record), format!("pi-rpc event record FK drift at line {}", row.line), )?; require( contains_key(&events, row.string("order")?), format!("pi-rpc event order FK drift at line {}", row.line), )?; } let mut previous = 0; for row in rows(pi, "launch_flag") { let order = integer(row, "order")?; require( order > previous, format!("pi-rpc launch_flag order drift at line {}", row.line), )?; previous = order; require( matches!(row.string("kind")?, "bare" | "value" | "optional-addon"), format!("pi-rpc launch_flag kind drift at line {}", row.line), )?; } for row in rows(pi, "env_deny") { require( row.key.bytes().all(|b| b.is_ascii_uppercase() || b == b'_'), format!("pi-rpc malformed env deny at line {}", row.line), )?; } for need in [ "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "PI_API_KEY", ] { require( contains_key(&keyset(pi, "env_deny"), need), format!("pi-rpc missing env deny {need}"), )?; } require( limit(pi, "terminal")? == 4_194_304 && limit(pi, "entry_appended")? == 16_384, "pi-rpc size_limit drift", )?; let mut pairs = Vec::new(); for row in rows(pi, "transition") { require( contains_key(&states, row.string("from")?) && contains_key(&states, row.string("to")?) && contains_key(&events, row.string("event")?), format!("pi-rpc transition FK drift at line {}", row.line), )?; pairs.push(format!("{}:{}", row.string("from")?, row.string("event")?)); } unique(pairs.iter().map(String::as_str), "pi-rpc transition")?; for row in rows(pi, "forbidden") { if let Some(from) = row.opt_string("from")? { require( contains_key(&states, from), format!("pi-rpc forbidden state FK drift at line {}", row.line), )?; } let event = row.string("event")?; require( event == "*" || contains_key(&events, event), format!("pi-rpc forbidden event FK drift at line {}", row.line), )?; } require( commands == keyset(pi, "wire_variant") .into_iter() .filter_map(|key| key.strip_prefix("RpcCommandKind:").map(str::to_owned)) .collect::<Vec<_>>(), "pi-rpc command/wire coverage drift", )?; Ok(()) } fn keyset(doc: &TableDoc, table: &str) -> Vec<String> { rows(doc, table).iter().map(|row| row.key.clone()).collect() } fn field(text: &str) -> Result<Vec<FieldSpec>> { if text.is_empty() { return Ok(Vec::new()); } text.split('|') .map(|part| { let pieces = part.split(':').collect::<Vec<_>>(); require( (2..=4).contains(&pieces.len()), format!("bad pi-rpc field spec `{part}`"), )?; let (wire, rust, ty, mode) = if pieces.len() == 4 { (pieces[0], pieces[1], pieces[2], pieces[3]) } else { ( pieces.get(2).copied().unwrap_or(pieces[0]), pieces[0], pieces[1], "required", ) }; Ok(FieldSpec { wire: wire.to_owned(), rust: rust.to_owned(), ty: ty.to_owned(), mode: mode.to_owned(), }) }) .collect() } fn emit_limits(out: &mut String, pi: &TableDoc) -> Result<()> { out.push_str(&format!("pub const DEFAULT_MAX_TERMINAL_BYTES: usize = {};\npub const MAX_ENTRY_APPENDED_BYTES: usize = {};\n", rust_usize(limit(pi, "terminal")?), rust_usize(limit(pi, "entry_appended")?))); Ok(()) } fn emit_env(out: &mut String, pi: &TableDoc) { out.push_str("pub const ENV_DENY: &[&str] = &[\n"); for row in rows(pi, "env_deny") { out.push_str(&format!("    \"{}\",\n", escape_rust_string(&row.key))); } out.push_str("];\n\n"); } fn emit_command_rows(out: &mut String, commands: &[&TableRow]) -> Result<()> { out.push_str("pub struct CommandRow {\n    pub name: &'static str,\n    pub serde: &'static str,\n    pub variant: &'static str,\n    pub payload: &'static str,\n}\npub const COMMANDS: &[CommandRow] = &[\n"); for row in commands { out.push_str(&format!("    CommandRow {{\n        name: \"{}\",\n        serde: \"{}\",\n        variant: \"{}\",\n        payload: \"{}\",\n    }},\n", escape_rust_string(&row.key), escape_rust_string(row.string("serde")?), escape_rust_string(row.string("variant")?), escape_rust_string(row.string("payload")?))); } out.push_str("];\n\n"); Ok(()) } fn emit_launch(out: &mut String, pi: &TableDoc) -> Result<()> { out.push_str("#[derive(Debug, Clone, Copy, Eq, PartialEq)]\npub enum LaunchFlagKind {\n    Bare,\n    Value,\n    OptionalAddon,\n}\npub struct LaunchFlagRow {\n    pub id: &'static str,\n    pub kind: LaunchFlagKind,\n    pub name: &'static str,\n    pub value: Option<&'static str>,\n    pub identity_token: &'static str,\n}\npub const LAUNCH_FLAGS: &[LaunchFlagRow] = &[\n"); for row in rows(pi, "launch_flag") { out.push_str(&format!("    LaunchFlagRow {{\n        id: \"{}\",\n        kind: LaunchFlagKind::{},\n        name: \"{}\",\n        value: {},\n        identity_token: \"{}\",\n    }},\n", escape_rust_string(&row.key), type_name(row.string("kind")?), escape_rust_string(row.string("name")?), opt(row.opt_string("value")?), escape_rust_string(row.string("identity_token")?))); } out.push_str("];\n\n"); Ok(()) } fn emit_order_rows(out: &mut String, pi: &TableDoc) -> Result<()> { out.push_str("pub struct OrderStateRow {\n    pub name: &'static str,\n    pub terminal_ok: bool,\n}\npub const ORDER_STATES: &[OrderStateRow] = &[\n"); for row in rows(pi, "state") { out.push_str(&format!( "    OrderStateRow {{\n        name: \"{}\",\n        terminal_ok: {},\n    }},\n", escape_rust_string(&row.key), row.opt_bool("terminal_ok")?.unwrap_or(false) )); } out.push_str("];\npub struct OrderTransitionRow {\n    pub from: &'static str,\n    pub event: &'static str,\n    pub to: &'static str,\n}\npub const ORDER_TRANSITIONS: &[OrderTransitionRow] = &[\n"); for row in rows(pi, "transition") { out.push_str(&format!("    OrderTransitionRow {{\n        from: \"{}\",\n        event: \"{}\",\n        to: \"{}\",\n    }},\n", row.string("from")?, row.string("event")?, row.string("to")?)); } out.push_str("];\npub struct ForbiddenOrderRow {\n    pub from: Option<&'static str>,\n    pub event: &'static str,\n    pub reason: &'static str,\n}\npub const FORBIDDEN_ORDERS: &[ForbiddenOrderRow] = &[\n"); for row in rows(pi, "forbidden") { out.push_str(&format!("    ForbiddenOrderRow {{\n        from: {},\n        event: \"{}\",\n        reason: \"{}\",\n    }},\n", opt(row.opt_string("from")?), row.string("event")?, row.string("reason")?)); } out.push_str("];\n\n"); Ok(()) } fn emit_rpc_command( out: &mut String, commands: &[&TableRow], payloads: &[FieldSpec], ) -> Result<()> { out.push_str("#[derive(Debug, Clone, Eq, PartialEq, Serialize)]\npub struct RpcCommand {\n    pub id: String,\n    #[serde(rename = \"type\")]\n    pub command: RpcCommandKind,\n"); for field in payloads { out.push_str(&format!( "{}    pub {}: Option<{}>,\n", serde_attrs(field, true), field.rust, field.ty )); } out.push_str("}\nimpl RpcCommand {\n"); for row in commands { let fields = field(row.string("payload")?)?; let args = fields .iter() .map(|f| format!(", {}: impl Into<{}>", f.rust, f.ty)) .collect::<String>(); out.push_str(&format!("    #[must_use]\n    pub fn {}(id: impl Into<String>{args}) -> Self {{\n        Self {{\n            id: id.into(),\n            command: RpcCommandKind::{},\n", row.string("constructor")?, row.string("variant")?)); for field in payloads { let value = fields .iter() .find(|f| f.rust == field.rust) .map_or_else(|| "None".to_owned(), |f| format!("Some({}.into())", f.rust)); out.push_str(&format!("            {}: {value},\n", field.rust)); } out.push_str("        }\n    }\n"); } out.push_str("}\n\n"); Ok(()) } fn emit_wire_enum( out: &mut String, pi: &TableDoc, name: &str, vis: &str, as_str: bool, ) -> Result<()> { let row = rows(pi, "wire_enum") .into_iter() .find(|row| row.key == name) .ok_or_else(|| Error::input(format!("missing wire_enum {name}")))?; let tag = row.string("serde_tag")?; out.push_str(&format!( "#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]\n{} enum {name} {{\n", vis )); for v in rows(pi, "wire_variant") .into_iter() .filter(|v| v.string("enum").is_ok_and(|e| e == name)) { if v.string("serde")? == "other" { out.push_str("    #[serde(other)]\n"); } else { out.push_str(&format!( "    #[serde(rename = \"{}\")]\n", escape_rust_string(v.string("serde")?) )); } out.push_str(&format!("    {},\n", v.string("variant")?)); } out.push_str("}\n"); if as_str { out.push_str(&format!("impl {name} {{\n    #[must_use]\n    pub fn as_str(self) -> &'static str {{\n        match self {{\n")); for v in rows(pi, "wire_variant") .into_iter() .filter(|v| v.string("enum").is_ok_and(|e| e == name)) { out.push_str(&format!( "            Self::{} => \"{}\",\n", v.string("variant")?, escape_rust_string(v.string("serde")?) )); } out.push_str("        }\n    }\n}\n"); }
+pi_rpc_emitter! { #[derive(Clone)] struct FieldSpec { wire: String, rust: String, ty: String, mode: String, } fn rows<'a>(doc: &'a TableDoc, table: &str) -> Vec<&'a TableRow> { doc.rows.iter().filter(|row| row.table == table).collect() } fn validate_pi_rpc(pi: &TableDoc) -> Result<()> { for (table, count) in [ ("command", 8), ("wire_enum", 4), ("wire_variant", 14), ("wire_record", 14), ("event", 23), ("launch_flag", 13), ("env_deny", 12), ("size_limit", 2), ("state", 9), ("order_event", 16), ("transition", 24), ("forbidden", 2), ] { require( rows(pi, table).len() == count, format!("pi-rpc {table} row drift"), )?; } let commands = keyset(pi, "command"); let enums = keyset(pi, "wire_enum"); let records = keyset(pi, "wire_record"); let events = keyset(pi, "order_event"); let states = keyset(pi, "state"); let serde = rows(pi, "command") .iter() .map(|row| row.string("serde")) .collect::<Result<Vec<_>>>()?; unique(serde.into_iter(), "pi-rpc command serde")?; for row in rows(pi, "command") { require( row.string("constructor")? == row.key, format!("pi-rpc command constructor drift at line {}", row.line), )?; require( row.bool("request_id")?, format!("pi-rpc command without request id at line {}", row.line), )?; require( row.string("variant")? == variant_name(&row.key), format!("pi-rpc command variant drift at line {}", row.line), )?; let _ = field(row.string("payload")?)?; } for row in rows(pi, "wire_variant") { require( contains_key(&enums, row.string("enum")?), format!("pi-rpc wire_variant FK drift at line {}", row.line), )?; } for row in rows(pi, "event") { let record = row.string("record")?; require( record.is_empty() || contains_key(&records, record), format!("pi-rpc event record FK drift at line {}", row.line), )?; require( contains_key(&events, row.string("order")?), format!("pi-rpc event order FK drift at line {}", row.line), )?; } let mut previous = 0; for row in rows(pi, "launch_flag") { let order = integer(row, "order")?; require( order > previous, format!("pi-rpc launch_flag order drift at line {}", row.line), )?; previous = order; require( matches!(row.string("kind")?, "bare" | "value" | "optional-addon"), format!("pi-rpc launch_flag kind drift at line {}", row.line), )?; } for row in rows(pi, "env_deny") { require( row.key.bytes().all(|b| b.is_ascii_uppercase() || b == b'_'), format!("pi-rpc malformed env deny at line {}", row.line), )?; } for need in [ "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "PI_API_KEY", "AUTOPILOT_CONTROL_SOCK", "AUTOPILOT_CONTROL_TOKEN", "AUTOPILOT_CONTROL_RUN_ID", "AUTOPILOT_CONTROL_ASSIGNMENT", "AUTOPILOT_CONTROL_ATTEMPT", ] { require( contains_key(&keyset(pi, "env_deny"), need), format!("pi-rpc missing env deny {need}"), )?; } require( limit(pi, "terminal")? == 4_194_304 && limit(pi, "entry_appended")? == 16_384, "pi-rpc size_limit drift", )?; let mut pairs = Vec::new(); for row in rows(pi, "transition") { require( contains_key(&states, row.string("from")?) && contains_key(&states, row.string("to")?) && contains_key(&events, row.string("event")?), format!("pi-rpc transition FK drift at line {}", row.line), )?; pairs.push(format!("{}:{}", row.string("from")?, row.string("event")?)); } unique(pairs.iter().map(String::as_str), "pi-rpc transition")?; for row in rows(pi, "forbidden") { if let Some(from) = row.opt_string("from")? { require( contains_key(&states, from), format!("pi-rpc forbidden state FK drift at line {}", row.line), )?; } let event = row.string("event")?; require( event == "*" || contains_key(&events, event), format!("pi-rpc forbidden event FK drift at line {}", row.line), )?; } require( commands == keyset(pi, "wire_variant") .into_iter() .filter_map(|key| key.strip_prefix("RpcCommandKind:").map(str::to_owned)) .collect::<Vec<_>>(), "pi-rpc command/wire coverage drift", )?; Ok(()) } fn keyset(doc: &TableDoc, table: &str) -> Vec<String> { rows(doc, table).iter().map(|row| row.key.clone()).collect() } fn field(text: &str) -> Result<Vec<FieldSpec>> { if text.is_empty() { return Ok(Vec::new()); } text.split('|') .map(|part| { let pieces = part.split(':').collect::<Vec<_>>(); require( (2..=4).contains(&pieces.len()), format!("bad pi-rpc field spec `{part}`"), )?; let (wire, rust, ty, mode) = if pieces.len() == 4 { (pieces[0], pieces[1], pieces[2], pieces[3]) } else { ( pieces.get(2).copied().unwrap_or(pieces[0]), pieces[0], pieces[1], "required", ) }; Ok(FieldSpec { wire: wire.to_owned(), rust: rust.to_owned(), ty: ty.to_owned(), mode: mode.to_owned(), }) }) .collect() } fn emit_limits(out: &mut String, pi: &TableDoc) -> Result<()> { out.push_str(&format!("pub const DEFAULT_MAX_TERMINAL_BYTES: usize = {};\npub const MAX_ENTRY_APPENDED_BYTES: usize = {};\n", rust_usize(limit(pi, "terminal")?), rust_usize(limit(pi, "entry_appended")?))); Ok(()) } fn emit_env(out: &mut String, pi: &TableDoc) { out.push_str("pub const ENV_DENY: &[&str] = &[\n"); for row in rows(pi, "env_deny") { out.push_str(&format!("    \"{}\",\n", escape_rust_string(&row.key))); } out.push_str("];\n\n"); } fn emit_command_rows(out: &mut String, commands: &[&TableRow]) -> Result<()> { out.push_str("pub struct CommandRow {\n    pub name: &'static str,\n    pub serde: &'static str,\n    pub variant: &'static str,\n    pub payload: &'static str,\n}\npub const COMMANDS: &[CommandRow] = &[\n"); for row in commands { out.push_str(&format!("    CommandRow {{\n        name: \"{}\",\n        serde: \"{}\",\n        variant: \"{}\",\n        payload: \"{}\",\n    }},\n", escape_rust_string(&row.key), escape_rust_string(row.string("serde")?), escape_rust_string(row.string("variant")?), escape_rust_string(row.string("payload")?))); } out.push_str("];\n\n"); Ok(()) } fn emit_launch(out: &mut String, pi: &TableDoc) -> Result<()> { out.push_str("#[derive(Debug, Clone, Copy, Eq, PartialEq)]\npub enum LaunchFlagKind {\n    Bare,\n    Value,\n    OptionalAddon,\n}\npub struct LaunchFlagRow {\n    pub id: &'static str,\n    pub kind: LaunchFlagKind,\n    pub name: &'static str,\n    pub value: Option<&'static str>,\n    pub identity_token: &'static str,\n}\npub const LAUNCH_FLAGS: &[LaunchFlagRow] = &[\n"); for row in rows(pi, "launch_flag") { out.push_str(&format!("    LaunchFlagRow {{\n        id: \"{}\",\n        kind: LaunchFlagKind::{},\n        name: \"{}\",\n        value: {},\n        identity_token: \"{}\",\n    }},\n", escape_rust_string(&row.key), type_name(row.string("kind")?), escape_rust_string(row.string("name")?), opt(row.opt_string("value")?), escape_rust_string(row.string("identity_token")?))); } out.push_str("];\n\n"); Ok(()) } fn emit_order_rows(out: &mut String, pi: &TableDoc) -> Result<()> { out.push_str("pub struct OrderStateRow {\n    pub name: &'static str,\n    pub terminal_ok: bool,\n}\npub const ORDER_STATES: &[OrderStateRow] = &[\n"); for row in rows(pi, "state") { out.push_str(&format!( "    OrderStateRow {{\n        name: \"{}\",\n        terminal_ok: {},\n    }},\n", escape_rust_string(&row.key), row.opt_bool("terminal_ok")?.unwrap_or(false) )); } out.push_str("];\npub struct OrderTransitionRow {\n    pub from: &'static str,\n    pub event: &'static str,\n    pub to: &'static str,\n}\npub const ORDER_TRANSITIONS: &[OrderTransitionRow] = &[\n"); for row in rows(pi, "transition") { out.push_str(&format!("    OrderTransitionRow {{\n        from: \"{}\",\n        event: \"{}\",\n        to: \"{}\",\n    }},\n", row.string("from")?, row.string("event")?, row.string("to")?)); } out.push_str("];\npub struct ForbiddenOrderRow {\n    pub from: Option<&'static str>,\n    pub event: &'static str,\n    pub reason: &'static str,\n}\npub const FORBIDDEN_ORDERS: &[ForbiddenOrderRow] = &[\n"); for row in rows(pi, "forbidden") { out.push_str(&format!("    ForbiddenOrderRow {{\n        from: {},\n        event: \"{}\",\n        reason: \"{}\",\n    }},\n", opt(row.opt_string("from")?), row.string("event")?, row.string("reason")?)); } out.push_str("];\n\n"); Ok(()) } fn emit_rpc_command( out: &mut String, commands: &[&TableRow], payloads: &[FieldSpec], ) -> Result<()> { out.push_str("#[derive(Debug, Clone, Eq, PartialEq, Serialize)]\npub struct RpcCommand {\n    pub id: String,\n    #[serde(rename = \"type\")]\n    pub command: RpcCommandKind,\n"); for field in payloads { out.push_str(&format!( "{}    pub {}: Option<{}>,\n", serde_attrs(field, true), field.rust, field.ty )); } out.push_str("}\nimpl RpcCommand {\n"); for row in commands { let fields = field(row.string("payload")?)?; let args = fields .iter() .map(|f| format!(", {}: impl Into<{}>", f.rust, f.ty)) .collect::<String>(); out.push_str(&format!("    #[must_use]\n    pub fn {}(id: impl Into<String>{args}) -> Self {{\n        Self {{\n            id: id.into(),\n            command: RpcCommandKind::{},\n", row.string("constructor")?, row.string("variant")?)); for field in payloads { let value = fields .iter() .find(|f| f.rust == field.rust) .map_or_else(|| "None".to_owned(), |f| format!("Some({}.into())", f.rust)); out.push_str(&format!("            {}: {value},\n", field.rust)); } out.push_str("        }\n    }\n"); } out.push_str("}\n\n"); Ok(()) } fn emit_wire_enum( out: &mut String, pi: &TableDoc, name: &str, vis: &str, as_str: bool, ) -> Result<()> { let row = rows(pi, "wire_enum") .into_iter() .find(|row| row.key == name) .ok_or_else(|| Error::input(format!("missing wire_enum {name}")))?; let tag = row.string("serde_tag")?; out.push_str(&format!( "#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]\n{} enum {name} {{\n", vis )); for v in rows(pi, "wire_variant") .into_iter() .filter(|v| v.string("enum").is_ok_and(|e| e == name)) { if v.string("serde")? == "other" { out.push_str("    #[serde(other)]\n"); } else { out.push_str(&format!( "    #[serde(rename = \"{}\")]\n", escape_rust_string(v.string("serde")?) )); } out.push_str(&format!("    {},\n", v.string("variant")?)); } out.push_str("}\n"); if as_str { out.push_str(&format!("impl {name} {{\n    #[must_use]\n    pub fn as_str(self) -> &'static str {{\n        match self {{\n")); for v in rows(pi, "wire_variant") .into_iter() .filter(|v| v.string("enum").is_ok_and(|e| e == name)) { out.push_str(&format!( "            Self::{} => \"{}\",\n", v.string("variant")?, escape_rust_string(v.string("serde")?) )); } out.push_str("        }\n    }\n}\n"); }
 if !tag.is_empty() { out.push('\n'); } Ok(()) } fn emit_domain_types(out: &mut String, pi: &TableDoc) -> Result<()> { out.push_str("#[derive(Debug, Clone, Eq, PartialEq)]\npub enum RpcFrame {\n    Response(RpcResponse),\n    Event(RpcEvent),\n}\n#[derive(Debug, Clone, Eq, PartialEq)]\npub struct RpcResponse {\n    pub id: String,\n    pub command: RpcCommandKind,\n    pub success: bool,\n    pub queued_not_delivered: bool,\n    pub data: Option<String>,\n    pub error: Option<String>,\n}\n#[derive(Debug, Clone, Eq, PartialEq)]\npub struct AppendedEntry {\n    pub id: String,\n    pub custom_type: String,\n    pub data: Value,\n}\n#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]\n#[serde(deny_unknown_fields)]\npub struct ToolCarrierDetails {\n    pub profile_id: String,\n    pub tool_name: String,\n    pub boundary_id: String,\n    pub result_contract: String,\n    pub schema_digest: String,\n    pub binding: String,\n    pub payload: Value,\n    #[serde(default, skip_serializing_if = \"Option::is_none\")]\n    pub delivery_policy_denials: Option<Value>,\n    #[serde(default, skip_serializing_if = \"Option::is_none\")]\n    pub approved_command_executions: Option<Value>,\n}\n#[derive(Debug, Clone, Eq, PartialEq)]\npub struct TerminalMessage {\n    pub role: String,\n    pub tool_call_id: Option<String>,\n    pub tool_name: Option<String>,\n    pub provider: Option<String>,\n    pub model: Option<String>,\n    pub stop_reason: Option<String>,\n    pub text: Option<String>,\n    pub error_message: Option<String>,\n    pub details: Option<Value>,\n}\n"); emit_wire_enum(out, pi, "CompactionReason", "pub", false)?; out.push_str("#[derive(Debug, Clone, Eq, PartialEq)]\npub enum RpcEvent {\n"); for row in rows(pi, "event") { emit_event_variant(out, row)?; } out.push_str("}\n\n"); Ok(()) } fn emit_event_variant(out: &mut String, row: &TableRow) -> Result<()> { let variant = row.string("variant")?; match row.string("record")? { "" => out.push_str(&format!("    {variant},\n")), "AgentEnd" => out.push_str(&format!("    {variant} {{\n        will_retry: bool,\n    }},\n")), "MessageEnd" => out.push_str(&format!("    {variant} {{\n        message: TerminalMessage,\n    }},\n")), "ToolExecutionEnd" => out.push_str(&format!("    {variant} {{\n        tool_call_id: String,\n        tool_name: String,\n        details: Option<Value>,\n        is_error: bool,\n        terminate: bool,\n    }},\n")), "EntryAppendedRecord" => out.push_str(&format!("    {variant} {{\n        entry: AppendedEntry,\n    }},\n")), "QueueUpdate" => out.push_str(&format!("    {variant} {{\n        steering: usize,\n        follow_up: usize,\n    }},\n")), "CompactionStart" => out.push_str(&format!("    {variant} {{\n        reason: CompactionReason,\n    }},\n")), "CompactionEnd" => out.push_str(&format!("    {variant} {{\n        reason: CompactionReason,\n        aborted: bool,\n        will_retry: bool,\n    }},\n")), "AutoRetryEnd" => out.push_str(&format!("    {variant} {{\n        success: bool,\n    }},\n")), other => return Err(Error::input(format!("pi-rpc event conversion missing for {other}"))), } Ok(()) } fn emit_wire_records(out: &mut String, pi: &TableDoc) -> Result<()> { emit_wire_enum(out, pi, "CustomEntryKind", "pub(crate)", false)?; let skip = ["MessageContentText"]; for row in rows(pi, "wire_record") { if skip.contains(&row.key.as_str()) { continue; } emit_record(out, row)?; if row.key == "AgentMessage" { out.push_str("impl AgentMessage {\n    pub(crate) fn into_terminal(self) -> TerminalMessage {\n        TerminalMessage {\n            role: self.role,\n            tool_call_id: self.tool_call_id,\n            tool_name: self.tool_name,\n            provider: self.provider,\n            model: self.model,\n            stop_reason: self.stop_reason,\n            text: self.content.map(extract_text),\n            error_message: self.error_message,\n            details: self.details,\n        }\n    }\n}\n"); emit_message_content(out, pi)?; out.push_str("fn extract_text(content: Vec<MessageContent>) -> String {\n    content\n        .into_iter()\n        .filter_map(|item| match item {\n            MessageContent::Text { text } => Some(text),\n            MessageContent::Other => None,\n        })\n        .collect()\n}\n"); } } Ok(()) } fn emit_record(out: &mut String, row: &TableRow) -> Result<()> { out.push_str(&format!( "#[derive(Deserialize)]\npub(crate) struct {} {{\n", row.key )); for field in field(row.string("fields")?)? { out.push_str(&format!( "{}    pub {}: {},\n", serde_attrs(&field, false), field.rust, rust_field_ty(&field) )); } out.push_str("}\n"); Ok(()) } fn emit_message_content(out: &mut String, pi: &TableDoc) -> Result<()> { let tag = rows(pi, "wire_enum") .into_iter() .find(|row| row.key == "MessageContent") .ok_or_else(|| Error::input("missing MessageContent"))? .string("serde_tag")?; out.push_str(&format!( "#[derive(Deserialize)]\n#[serde(tag = \"{}\")]\npub(crate) enum MessageContent {{\n", escape_rust_string(tag) )); for row in rows(pi, "wire_variant") .into_iter() .filter(|row| row.string("enum").is_ok_and(|e| e == "MessageContent")) { if row.string("serde")? == "other" { out.push_str("    #[serde(other)]\n    Other,\n"); } else { out.push_str(&format!( "    #[serde(rename = \"{}\")]\n    {} {{ text: String }},\n", escape_rust_string(row.string("serde")?), row.string("variant")? )); } } out.push_str("}\n"); Ok(()) } fn serde_attrs(field: &FieldSpec, command_payload: bool) -> String { let mut attrs = String::new(); if field.wire != field.rust { attrs.push_str(&format!( "    #[serde(rename = \"{}\"", escape_rust_string(&field.wire) )); } else if matches!(field.mode.as_str(), "default" | "default_optional") || command_payload { attrs.push_str("    #[serde("); }
 if !attrs.is_empty() { if matches!(field.mode.as_str(), "default" | "default_optional") { attrs.push_str(if attrs.ends_with('(') { "default" } else { ", default" }); }
 if command_payload { attrs.push_str(if attrs.ends_with('(') { "skip_serializing_if = \"Option::is_none\"" } else { ", skip_serializing_if = \"Option::is_none\"" }); } attrs.push_str(")]\n"); } attrs } fn rust_field_ty(field: &FieldSpec) -> String { if matches!(field.mode.as_str(), "optional" | "default_optional") { format!("Option<{}>", field.ty) } else { field.ty.clone() } } fn opt(value: Option<&str>) -> String { value.map_or_else( || "None".to_owned(), |v| format!("Some(\"{}\")", escape_rust_string(v)), ) } fn limit(pi: &TableDoc, key: &str) -> Result<i64> { rows(pi, "size_limit") .into_iter() .find(|row| row.key == key) .ok_or_else(|| Error::input(format!("missing size_limit {key}"))) .and_then(|row| integer(row, "bytes")) } fn integer(row: &TableRow, key: &str) -> Result<i64> { row.props .iter() .find(|prop| prop.0 == key) .and_then(|prop| prop.1.as_integer()) .and_then(|value| i64::try_from(value).ok()) .ok_or_else(|| Error::input(format!("`{key}` must be integer at line {}", row.line))) } fn contains_key(keys: &[String], needle: &str) -> bool { keys.iter().any(|key| key == needle) } fn rust_usize(value: i64) -> String { value .to_string() .as_bytes() .rchunks(3) .rev() .map(std::str::from_utf8) .collect::<std::result::Result<Vec<_>, _>>() .unwrap() .join("_") } fn unique<'a>(values: impl Iterator<Item = &'a str>, label: &str) -> Result<()> { let mut seen = Vec::new(); for value in values { require( !seen.contains(&value), format!("duplicate {label} `{value}`"), )?; seen.push(value); } Ok(()) } fn require(ok: bool, message: impl Into<String>) -> Result<()> { if ok { Ok(()) } else { Err(Error::input(message.into())) } } }
-macro_rules! seam_emitter {($($t:tt)*)=>{$($t)*};}
-seam_emitter! { fn emit_seam_tables(seam:&TableDoc)->Result<String>{let(mut host,mut core,mut imports,mut arms)=(Vec::new(),Vec::new(),Vec::new(),Vec::new());for row in &seam.rows{let(kind,direction,posture,payload,adapter,effect)=seam_fields(row)?;let literal=row_literal(kind,direction,posture,payload,adapter,effect);if direction=="host-to-core"{host.push(literal);if posture=="supported"{imports.push(payload.to_owned());let(kind,variant)=(escape_rust_string(kind),type_name(kind));arms.push(if matches!(variant.as_str(),"Command"|"Shutdown"){format!("        \"{kind}\" => {{\n            decode::<{payload}>(\"{kind}\", payload).map(HostToCoreRoute::{variant})\n        }}")}else{format!("        \"{kind}\" => decode::<{payload}>(\"{kind}\", payload)\n            .map(HostToCoreRoute::{variant}),")});}}else{core.push(literal);}}imports.sort();imports.dedup();let imports=imports.chunks(3).map(|c|format!("    {},",c.join(", "))).collect::<Vec<_>>().join("\n");Ok(format!("// {GENERATED_MARKER}\n\nuse kernel::generated::{{\n{}\n}};\n\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum SeamDirection {{\n    HostToCore,\n    CoreToHost,\n}}\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum SeamPosture {{\n    Supported,\n    Unsupported,\n}}\npub struct SeamRouteRow {{\n    pub kind: &'static str,\n    pub direction: SeamDirection,\n    pub posture: SeamPosture,\n    pub payload: &'static str,\n    pub adapter: &'static str,\n    pub effect: &'static str,\n}}\npub enum HostToCoreRoute {{\n    Command(HostToCoreCommandPayload),\n    TaskCompleted(HostToCoreTaskCompletedPayload),\n    SpawnResult(HostToCoreSpawnResultPayload),\n    AgentResult(HostToCoreAgentResultPayload),\n    OperatorAnswer(HostToCoreOperatorAnswerPayload),\n    Shutdown(HostToCoreShutdownPayload),\n}}\npub enum SeamAdmissionError {{\n    Unknown(String),\n    Unsupported(&'static SeamRouteRow),\n    Payload {{ kind: &'static str, error: String }},\n}}\npub static HOST_TO_CORE_ROUTES: &[SeamRouteRow] = &[\n{}\n];\npub static CORE_TO_HOST_EFFECTS: &[SeamRouteRow] = &[\n{}\n];\npub fn host_to_core_route(kind: &str) -> Option<&'static SeamRouteRow> {{\n    HOST_TO_CORE_ROUTES.iter().find(|row| row.kind == kind)\n}}\npub fn core_to_host_effect(kind: &str) -> Option<&'static SeamRouteRow> {{\n    CORE_TO_HOST_EFFECTS.iter().find(|row| row.kind == kind)\n}}\npub fn admit_host_to_core(\n    kind: &str,\n    payload: serde_json::Value,\n) -> Result<HostToCoreRoute, SeamAdmissionError> {{\n    let row =\n        host_to_core_route(kind).ok_or_else(|| SeamAdmissionError::Unknown(kind.to_owned()))?;\n    if row.posture == SeamPosture::Unsupported {{\n        return Err(SeamAdmissionError::Unsupported(row));\n    }}\n    match row.kind {{\n{}\n        other => Err(SeamAdmissionError::Unknown(other.to_owned())),\n    }}\n}}\nfn decode<T: serde::de::DeserializeOwned>(\n    kind: &'static str,\n    payload: serde_json::Value,\n) -> Result<T, SeamAdmissionError> {{\n    serde_json::from_value::<T>(payload).map_err(|error| SeamAdmissionError::Payload {{\n        kind,\n        error: error.to_string(),\n    }})\n}}\n",imports,host.join("\n"),core.join("\n"),arms.join("\n")))} fn seam_fields(row:&TableRow)->Result<(&str,&str,&str,&str,&str,&str)>{Ok((row.string("kind")?,row.string("direction")?,row.string("posture")?,row.string("payload")?,row.string("adapter")?,row.string("effect")?))} fn row_literal(kind:&str,direction:&str,posture:&str,payload:&str,adapter:&str,effect:&str)->String{format!("    SeamRouteRow {{\n        kind: \"{}\",\n        direction: SeamDirection::{},\n        posture: SeamPosture::{},\n        payload: \"{}\",\n        adapter: \"{}\",\n        effect: \"{}\",\n    }},",escape_rust_string(kind),if direction=="host-to-core"{"HostToCore"}else{"CoreToHost"},if posture=="supported"{"Supported"}else{"Unsupported"},escape_rust_string(payload),escape_rust_string(adapter),escape_rust_string(effect))} }
+fn emit_seam_tables(seam: &TableDoc) -> Result<String> {
+    let (mut host, mut core, mut imports, mut variants, mut arms) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for row in &seam.rows {
+        let (kind, direction, posture, payload, adapter, effect) = seam_fields(row)?;
+        let literal = row_literal(kind, direction, posture, payload, adapter, effect);
+        if direction == "host-to-core" {
+            host.push(literal);
+            if posture == "supported" {
+                imports.push(payload.to_owned());
+                let escaped_kind = escape_rust_string(kind);
+                let variant = type_name(kind);
+                variants.push(format!("    {variant}({payload}),"));
+                arms.push(format!(
+                    "        \"{escaped_kind}\" => decode::<{payload}>(\"{escaped_kind}\", payload)\n            .map(HostToCoreRoute::{variant}),"
+                ));
+            }
+        } else {
+            core.push(literal);
+        }
+    }
+    imports.sort();
+    imports.dedup();
+    let imports = imports
+        .chunks(3)
+        .map(|chunk| format!("    {},", chunk.join(", ")))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(format!(
+        "// {GENERATED_MARKER}\n\nuse kernel::generated::{{\n{imports}\n}};\n\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum SeamDirection {{\n    HostToCore,\n    CoreToHost,\n}}\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum SeamPosture {{\n    Supported,\n    Unsupported,\n}}\npub struct SeamRouteRow {{\n    pub kind: &'static str,\n    pub direction: SeamDirection,\n    pub posture: SeamPosture,\n    pub payload: &'static str,\n    pub adapter: &'static str,\n    pub effect: &'static str,\n}}\npub enum HostToCoreRoute {{\n{}\n}}\npub enum SeamAdmissionError {{\n    Unknown(String),\n    Unsupported(&'static SeamRouteRow),\n    Payload {{ kind: &'static str, error: String }},\n}}\npub static HOST_TO_CORE_ROUTES: &[SeamRouteRow] = &[\n{}\n];\npub static CORE_TO_HOST_EFFECTS: &[SeamRouteRow] = &[\n{}\n];\npub fn host_to_core_route(kind: &str) -> Option<&'static SeamRouteRow> {{\n    HOST_TO_CORE_ROUTES.iter().find(|row| row.kind == kind)\n}}\npub fn core_to_host_effect(kind: &str) -> Option<&'static SeamRouteRow> {{\n    CORE_TO_HOST_EFFECTS.iter().find(|row| row.kind == kind)\n}}\npub fn admit_host_to_core(\n    kind: &str,\n    payload: serde_json::Value,\n) -> Result<HostToCoreRoute, SeamAdmissionError> {{\n    let row =\n        host_to_core_route(kind).ok_or_else(|| SeamAdmissionError::Unknown(kind.to_owned()))?;\n    if row.posture == SeamPosture::Unsupported {{\n        return Err(SeamAdmissionError::Unsupported(row));\n    }}\n    match row.kind {{\n{}\n        other => Err(SeamAdmissionError::Unknown(other.to_owned())),\n    }}\n}}\nfn decode<T: serde::de::DeserializeOwned>(\n    kind: &'static str,\n    payload: serde_json::Value,\n) -> Result<T, SeamAdmissionError> {{\n    serde_json::from_value::<T>(payload).map_err(|error| SeamAdmissionError::Payload {{\n        kind,\n        error: error.to_string(),\n    }})\n}}\n",
+        variants.join("\n"),
+        host.join("\n"),
+        core.join("\n"),
+        arms.join("\n"),
+    ))
+}
+
+fn seam_fields(row: &TableRow) -> Result<(&str, &str, &str, &str, &str, &str)> {
+    Ok((
+        row.string("kind")?,
+        row.string("direction")?,
+        row.string("posture")?,
+        row.string("payload")?,
+        row.string("adapter")?,
+        row.string("effect")?,
+    ))
+}
+
+fn row_literal(
+    kind: &str,
+    direction: &str,
+    posture: &str,
+    payload: &str,
+    adapter: &str,
+    effect: &str,
+) -> String {
+    format!(
+        "    SeamRouteRow {{\n        kind: \"{}\",\n        direction: SeamDirection::{},\n        posture: SeamPosture::{},\n        payload: \"{}\",\n        adapter: \"{}\",\n        effect: \"{}\",\n    }},",
+        escape_rust_string(kind),
+        if direction == "host-to-core" { "HostToCore" } else { "CoreToHost" },
+        if posture == "supported" { "Supported" } else { "Unsupported" },
+        escape_rust_string(payload),
+        escape_rust_string(adapter),
+        escape_rust_string(effect),
+    )
+}
 macro_rules! host_emitter {($($t:tt)*)=>{$($t)*};}
 host_emitter! { fn emit_host_runtime_tables(contracts:&Contracts,host:&TableDoc)->Result<String>{let rows=|t:&str|host.rows.iter().filter(move|r|r.table==t).collect::<Vec<_>>();let commands=rows("command").iter().map(|r|Ok(json!({"name":r.key,"activation":r.string("activation")?,"frame":r.string("frame")?,"description":r.string("description")?,"adapter":r.string("adapter")?,"payload":r.string("payload")?,"fields":payload_fields(contracts,r.string("payload")?)}))).collect::<Result<Vec<_>>>()?;let protocol=json!({"request":chan(&rows("background_channel"),"request")?,"response":chan(&rows("background_channel"),"response")?,"terminal":chan(&rows("background_channel"),"terminal")?});let statuses=rows("background_status").iter().map(|r|json!({"name":r.key,"terminal":r.bool("terminal").unwrap_or(false)})).collect::<Vec<_>>();let caps=rows("background_capability").iter().map(|r|Ok(format!("  {}: {},",quote_ts_key(&r.key),ts_default(r)?))).collect::<Result<Vec<_>>>()?.join("\n");let effects=rows("effect").iter().map(|r|json!({"kind":r.key,"operator_level_default":r.string("operator_level_default").unwrap_or("info"),"fail_closed":r.bool("fail_closed").unwrap_or(false),"acknowledge":r.bool("acknowledge").unwrap_or(false),"max_items":r.props.iter().find(|p|p.0=="max_items").and_then(|p|p.1.as_integer())})).collect::<Vec<_>>();let act=&rows("activation_record")[0];Ok(format!("// {GENERATED_MARKER}\n\nexport const HOST_COMMANDS = {} as const;\nexport const ACTIVATING_COMMANDS = HOST_COMMANDS.filter((row) => row.activation === \"activating\").map((row) => row.name);\nexport const OPERATING_COMMANDS = HOST_COMMANDS.filter((row) => row.activation === \"operating\").map((row) => row.name);\nexport const BACKGROUND_PROTOCOL = {} as const;\nexport const BACKGROUND_OPERATIONS = {} as const;\nexport const BACKGROUND_STATUSES = {} as const;\nexport const UNAVAILABLE_BACKGROUND_CAPABILITIES = {{\n{}\n}} as const;\nexport const HOST_ENV_DENY = {} as const;\nexport const HOST_EFFECTS = {} as const;\nexport const ACTIVATION_RECORD = {{ schema_version: \"{}\", fields: {} as const }} as const;\n",json_string(&json!(commands),"host commands")?,json_string(&protocol,"host protocol")?,json_string(&json!(rows("background_operation").iter().map(|r|r.key.as_str()).collect::<Vec<_>>()),"host ops")?,json_string(&json!(statuses),"host statuses")?,caps,json_string(&json!(rows("env_deny").iter().map(|r|r.key.as_str()).collect::<Vec<_>>()),"host env")?,json_string(&json!(effects),"host effects")?,escape_ts_string(&act.key),json_string(&json!(act.string("fields")?.split('|').collect::<Vec<_>>()),"activation fields")?))} fn payload_fields(contracts:&Contracts,payload:&str)->Vec<JsonValue>{contracts.frames.iter().find(|f|frame_type_name(f)==payload).map(|f|f.items.iter().filter(|i|i.kind==ItemKind::Field).map(|i|json!({"name":i.name,"type":i.type_id,"required":i.required,"nullable":i.nullable})).collect()).unwrap_or_default()} fn chan(rows:&[&TableRow],key:&str)->Result<JsonValue>{let r=rows.iter().find(|r|r.key==key).ok_or_else(||Error::input(format!("missing channel {key}")))?;Ok(json!({"channel":r.string("channel")?,"schema":r.string("schema")?}))} fn ts_default(row:&TableRow)->Result<String>{let v=row.props.iter().find(|p|p.0=="default").map(|p|&p.1).ok_or_else(||Error::input("missing capability default"))?;Ok(if let Some(b)=v.as_bool(){b.to_string()}else if let Some(n)=v.as_integer(){n.to_string()}else{return Err(Error::input(format!("bad capability default at line {}",row.line)));})} }
 
 fn emit_frame_validation(contracts: &Contracts, seam: &TableDoc) -> Result<String> {
     let mut shapes = BTreeMap::new();
     let records = record_items_by_name(contracts);
+    let artifacts = contracts
+        .artifacts
+        .iter()
+        .map(|artifact| artifact.name.clone())
+        .collect::<std::collections::BTreeSet<_>>();
     for artifact in &contracts.artifacts {
         if artifact.name != "background_action" {
             continue;
         }
         let name = type_name(&artifact.name);
-        collect_shape(&mut shapes, &name, &artifact.items, &name, &records)?;
+        collect_shape(&mut shapes, &name, &artifact.items, &name, &records, &artifacts)?;
     }
     for frame in &contracts.frames {
         if frame.direction != "core-to-host" {
             continue;
         }
         let name = frame_type_name(frame);
-        collect_shape(&mut shapes, &name, &frame.items, &name, &records)?;
+        collect_shape(&mut shapes, &name, &frame.items, &name, &records, &artifacts)?;
     }
     let enums = contracts
         .enums
@@ -266,6 +335,7 @@ fn collect_shape(
     items: &[Item],
     prefix: &str,
     records: &BTreeMap<String, Vec<Item>>,
+    artifacts: &std::collections::BTreeSet<String>,
 ) -> Result<()> {
     if shapes.contains_key(name) {
         return Ok(());
@@ -274,7 +344,7 @@ fn collect_shape(
     for item in items {
         match item.kind {
             ItemKind::Field => {
-                let (kind, ty) = value_ref(&item.type_id, records);
+                let (kind, ty) = value_ref(&item.type_id, records, artifacts);
                 fields.push(json!({
                     "name": item.name,
                     "kind": kind,
@@ -284,7 +354,7 @@ fn collect_shape(
                 }));
             }
             ItemKind::List => {
-                let (kind, ty) = value_ref(&item.type_id, records);
+                let (kind, ty) = value_ref(&item.type_id, records, artifacts);
                 fields.push(json!({
                     "name": item.name,
                     "kind": "list",
@@ -296,7 +366,7 @@ fn collect_shape(
             }
             ItemKind::Group => {
                 let nested = nested_name(prefix, item);
-                collect_shape(shapes, &nested, &item.items, &nested, records)?;
+                collect_shape(shapes, &nested, &item.items, &nested, records, artifacts)?;
                 fields.push(json!({
                     "name": item.name,
                     "kind": "shape",
@@ -312,9 +382,17 @@ fn collect_shape(
     Ok(())
 }
 
-fn value_ref(type_id: &str, records: &BTreeMap<String, Vec<Item>>) -> (&'static str, String) {
+fn value_ref(
+    type_id: &str,
+    records: &BTreeMap<String, Vec<Item>>,
+    artifacts: &std::collections::BTreeSet<String>,
+) -> (&'static str, String) {
     if records.contains_key(type_id) || type_id == "background_action" {
         ("shape", type_name(type_id))
+    } else if artifacts.contains(type_id) {
+        // The Host validator closes the outer frame. Nested artifact unions are
+        // already closed Rust/TypeScript protocol types and are broker-consumed.
+        ("value", "object".to_owned())
     } else {
         ("value", type_id.to_owned())
     }
@@ -792,6 +870,12 @@ fn emit_child_control_bridge(contracts: &Contracts) -> Result<String> {
             let schema_digest = sha256_hex(
                 json_string(&parameters, "child-control schema digest")?.as_bytes(),
             );
+            validate_child_control_placeholder(
+                &tool.profile,
+                &template.value,
+                &slot,
+                &parameters,
+            )?;
             if !tool.universal {
                 terminal_profiles += 1;
             }
@@ -812,6 +896,10 @@ fn emit_child_control_bridge(contracts: &Contracts) -> Result<String> {
         terminal_profiles == 14,
         "child-control terminal profile metadata count drift; expected 14",
     )?;
+    require(
+        rows.len() == 15,
+        "child-control placeholder metadata count drift; expected 15",
+    )?;
     let metadata = pretty_json(&JsonValue::Array(rows), "child-control bridge metadata")?;
     let mut out = r#"// @generated by codegen
 
@@ -821,6 +909,7 @@ import type { ChildControlRequest, ChildControlResponse } from "./index.ts";
 
 export const CHILD_CONTROL_PLACEHOLDER_SENTINEL = "__autopilot_child_control_placeholder__:";
 export const CHILD_CONTROL_TERMINAL_PROFILE_COUNT = 14;
+export const CHILD_CONTROL_PLACEHOLDER_SCHEMA_VALIDATED_COUNT = 15;
 
 export type ChildControlKind = "submit" | "blocked";
 type JsonTree = null | boolean | number | string | readonly JsonTree[] | { readonly [key: string]: JsonTree };
@@ -838,7 +927,8 @@ export interface ChildControlToolMetadata {
 
 export const CHILD_CONTROL_TOOL_METADATA = "#.to_owned();
     out.push_str(&metadata);
-    out.push_str(r#" as const satisfies readonly ChildControlToolMetadata[];
+    out.push_str(" as const satisfies readonly ChildControlToolMetadata[];");
+    out.push_str(r#"
 
 export interface ChildControlBridgeBinding {
   readonly token: string;
@@ -1017,6 +1107,211 @@ function sameJsonShape(left: unknown, right: unknown): boolean {
 }
 "#);
     Ok(out)
+}
+
+fn validate_child_control_placeholder(
+    profile: &str,
+    template: &JsonValue,
+    slot: &str,
+    schema: &JsonValue,
+) -> Result<()> {
+    let mut placeholder = template.clone();
+    let marker = format!("{CHILD_CONTROL_PLACEHOLDER_SENTINEL}{}", "0".repeat(64));
+    set_placeholder_marker(&mut placeholder, slot, &marker)?;
+    validate_placeholder_schema(schema, &placeholder, profile, "")
+}
+
+fn set_placeholder_marker(value: &mut JsonValue, pointer: &str, marker: &str) -> Result<()> {
+    let segments = pointer
+        .strip_prefix('/')
+        .ok_or_else(|| Error::input("child-control placeholder pointer must be absolute"))?
+        .split('/')
+        .map(|segment| segment.replace("~1", "/").replace("~0", "~"))
+        .collect::<Vec<_>>();
+    let mut current = value;
+    for (index, segment) in segments.iter().enumerate() {
+        let last = index + 1 == segments.len();
+        current = match current {
+            JsonValue::Object(object) => object.get_mut(segment).ok_or_else(|| {
+                Error::input("generated child-control placeholder pointer drift")
+            })?,
+            JsonValue::Array(items) => {
+                let offset = segment.parse::<usize>().map_err(|_| {
+                    Error::input("generated child-control placeholder pointer drift")
+                })?;
+                items.get_mut(offset).ok_or_else(|| {
+                    Error::input("generated child-control placeholder pointer drift")
+                })?
+            }
+            _ => return Err(Error::input("generated child-control placeholder pointer drift")),
+        };
+        if last {
+            *current = JsonValue::String(marker.to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn validate_placeholder_schema(
+    schema: &JsonValue,
+    value: &JsonValue,
+    profile: &str,
+    pointer: &str,
+) -> Result<()> {
+    if let Some(variants) = schema.get("anyOf").and_then(JsonValue::as_array) {
+        if variants
+            .iter()
+            .any(|variant| validate_placeholder_schema(variant, value, profile, pointer).is_ok())
+        {
+            return Ok(());
+        }
+        return Err(placeholder_schema_error(profile, pointer, "matches no anyOf branch"));
+    }
+    if let Some(constant) = schema.get("const") {
+        if constant != value {
+            return Err(placeholder_schema_error(profile, pointer, "does not match const"));
+        }
+    }
+    if let Some(values) = schema.get("enum").and_then(JsonValue::as_array) {
+        if !values.iter().any(|candidate| candidate == value) {
+            return Err(placeholder_schema_error(profile, pointer, "does not match enum"));
+        }
+    }
+    match schema.get("type").and_then(JsonValue::as_str) {
+        None => Ok(()),
+        Some("string") => {
+            let text = value.as_str().ok_or_else(|| {
+                placeholder_schema_error(profile, pointer, "is not a string")
+            })?;
+            validate_schema_length(schema, text.chars().count(), profile, pointer, "Length")
+        }
+        Some("integer") => {
+            if value.as_u64().is_some() {
+                Ok(())
+            } else {
+                Err(placeholder_schema_error(profile, pointer, "is not a non-negative integer"))
+            }
+        }
+        Some("boolean") if value.is_boolean() => Ok(()),
+        Some("boolean") => Err(placeholder_schema_error(profile, pointer, "is not boolean")),
+        Some("object") => validate_placeholder_object(schema, value, profile, pointer),
+        Some("array") => validate_placeholder_array(schema, value, profile, pointer),
+        Some(other) => Err(placeholder_schema_error(
+            profile,
+            pointer,
+            &format!("uses unsupported generator schema type {other}"),
+        )),
+    }
+}
+
+fn validate_schema_length(
+    schema: &JsonValue,
+    length: usize,
+    profile: &str,
+    pointer: &str,
+    label: &str,
+) -> Result<()> {
+    if schema
+        .get("minLength")
+        .and_then(JsonValue::as_u64)
+        .is_some_and(|min| length < min as usize)
+        || schema
+            .get("minItems")
+            .and_then(JsonValue::as_u64)
+            .is_some_and(|min| length < min as usize)
+    {
+        return Err(placeholder_schema_error(profile, pointer, &format!("{label} is below minimum")));
+    }
+    if schema
+        .get("maxLength")
+        .and_then(JsonValue::as_u64)
+        .is_some_and(|max| length > max as usize)
+        || schema
+            .get("maxItems")
+            .and_then(JsonValue::as_u64)
+            .is_some_and(|max| length > max as usize)
+    {
+        return Err(placeholder_schema_error(profile, pointer, &format!("{label} exceeds maximum")));
+    }
+    Ok(())
+}
+
+fn validate_placeholder_object(
+    schema: &JsonValue,
+    value: &JsonValue,
+    profile: &str,
+    pointer: &str,
+) -> Result<()> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| placeholder_schema_error(profile, pointer, "is not an object"))?;
+    let properties = schema
+        .get("properties")
+        .and_then(JsonValue::as_object)
+        .ok_or_else(|| placeholder_schema_error(profile, pointer, "has no properties"))?;
+    for required in schema
+        .get("required")
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let name = required
+            .as_str()
+            .ok_or_else(|| placeholder_schema_error(profile, pointer, "has non-string required key"))?;
+        if !object.contains_key(name) {
+            return Err(placeholder_schema_error(profile, pointer, "is missing required key"));
+        }
+    }
+    if schema.get("additionalProperties") == Some(&JsonValue::Bool(false))
+        && object.keys().any(|key| !properties.contains_key(key))
+    {
+        return Err(placeholder_schema_error(profile, pointer, "contains an unknown key"));
+    }
+    for (name, child) in object {
+        if let Some(child_schema) = properties.get(name) {
+            validate_placeholder_schema(
+                child_schema,
+                child,
+                profile,
+                &format!("{pointer}/{name}"),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_placeholder_array(
+    schema: &JsonValue,
+    value: &JsonValue,
+    profile: &str,
+    pointer: &str,
+) -> Result<()> {
+    let items = value
+        .as_array()
+        .ok_or_else(|| placeholder_schema_error(profile, pointer, "is not an array"))?;
+    validate_schema_length(schema, items.len(), profile, pointer, "item count")?;
+    let item_schema = schema
+        .get("items")
+        .ok_or_else(|| placeholder_schema_error(profile, pointer, "has no item schema"))?;
+    for (index, item) in items.iter().enumerate() {
+        validate_placeholder_schema(item_schema, item, profile, &format!("{pointer}/{index}"))?;
+    }
+    if schema.get("uniqueItems") == Some(&JsonValue::Bool(true)) {
+        let mut unique = std::collections::BTreeSet::new();
+        for item in items {
+            let canonical = json_string(item, "placeholder unique item")?;
+            if !unique.insert(canonical) {
+                return Err(placeholder_schema_error(profile, pointer, "has duplicate items"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn placeholder_schema_error(profile: &str, pointer: &str, reason: &str) -> Error {
+    Error::input(format!(
+        "child-control placeholder for profile `{profile}` fails generated TypeBox-equivalent schema at `{pointer}`: {reason}"
+    ))
 }
 
 fn placeholder_for_items(

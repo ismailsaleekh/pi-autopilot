@@ -6,6 +6,7 @@ import type { ChildControlRequest, ChildControlResponse } from "./index.ts";
 
 export const CHILD_CONTROL_PLACEHOLDER_SENTINEL = "__autopilot_child_control_placeholder__:";
 export const CHILD_CONTROL_TERMINAL_PROFILE_COUNT = 14;
+export const CHILD_CONTROL_PLACEHOLDER_SCHEMA_VALIDATED_COUNT = 15;
 
 export type ChildControlKind = "submit" | "blocked";
 type JsonTree = null | boolean | number | string | readonly JsonTree[] | { readonly [key: string]: JsonTree };

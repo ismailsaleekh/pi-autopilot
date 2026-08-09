@@ -62,14 +62,19 @@ Sources: `data/contracts.kdl`.
 | validation_verdict_v3 | autopilot.validation_verdict.v3 | Package | false | Core-normalized v3 validation verdict. It keeps model citations separate from automatically bound command/package receipts and derives coverage and outcome. |
 | validation_admission_diagnostic | autopilot.validation_admission_diagnostic.v1 | Package | false | Complete deterministic v3 validation admission diagnostic. Authority corruption is fatal; model shape and semantic-value mismatches are repaired together. Large value lists and excess rows are represented by deterministic count/digest summaries inside the generated repair-prompt byte ceiling without reclassifying model input as fatal; mismatch_count retains the complete pre-summary count. |
 | validation_result_v3 | autopilot.validation_result.v3 | Package | false | Package-bound v3 Validator result preserving canonical admitted model semantics, exact authority binding, and Core-normalized verdict bytes. Raw tool arguments remain in the Pi session and attempt evidence rather than influencing carrier bytes. |
+| child_control_blocked_gate | autopilot.child_control_blocked_gate.v1 | Package | false | Host-only directive carried beside an accepted blocked response. The broker closes this run's launch gate before returning the child-visible response and kills only the listed owned tasks, with the reporter last. |
 | child_control_request | autopilot.child_control_request.v1 | Host | false | Closed child-to-Core control request. Raw payload is transported as the pre-schema JSON tree without TypeScript coercion, defaults, or semantic admission. |
 | child_control_accept_receipt | autopilot.child_control_accept_receipt.v1 | Package | false | Typed receipt envelope returned only for an accepted child-control request. |
 | child_control_response | autopilot.child_control_response.v1 | Package | false | Closed child-control response. ACCEPT carries exactly one typed receipt; RETRY carries exactly one complete diagnostic. |
 | submit_diagnostic | autopilot.submit_diagnostic.v1 | Package | false | Complete canonical submit RETRY diagnostic. Rows are sorted by pointer UTF-8 bytes, code, expected, and actual.sha256; error_count is the complete pre-summary count. |
-| submit_receipt | autopilot.submit_receipt.v1 | Package | false | Create-once accepted submit receipt. It binds authenticated child identity, canonical raw payload, validators, carrier artifacts, and a typed deferred continuation without granting repository authority. |
+| deferred_host_effect_v1 | autopilot.deferred_host_effect.v1 | Package | false | Closed actual Host continuation stored in a submit receipt. Receipt consumption relays this exact existing Core-to-Host payload without inferring an action or rerunning admission. |
+| prepared_submit_transition_v1 | autopilot.prepared_submit_transition.v1 | Package | false | Self-contained accepted transition for receipt-only parent consumption. It records exact immutable refs, issued action and binding refs, and the actual closed deferred Host payload. |
+| submit_receipt | autopilot.submit_receipt.v1 | Package | false | Create-once accepted submit receipt. It binds authenticated child identity, canonical raw payload, validators, carrier artifacts, and a typed deferred continuation without granting repository authority. Its canonical-byte SHA-256 is carried only by the outer accepted-event reference. |
 | blocked_report | autopilot.blocked_report.v1 | Model | true | Closed universal blocked report. Core derives workstream, action, cancellation scope, and all durable effects from the authenticated lease. |
 | blocked_receipt | autopilot.blocked_receipt.v1 | Package | false | Create-once accepted blocked-report receipt. All workstream scope and cancellation identities are Core-derived from the authenticated lease. |
 | blocked_latch | autopilot.blocked_latch.v1 | Package | false | Durable workstream blocked latch and Core-derived cancellation records. The reporter is ordered last; only Autopilot-owned tasks are present. |
+| submit_receipt_event_ref | autopilot.submit_receipt_event_ref.v1 | Package | false | Outer accepted-event reference carrying the SHA-256 of canonical submit-receipt bytes; the receipt never hashes bytes containing itself. |
+| blocked_latch_event_ref | autopilot.blocked_latch_event_ref.v1 | Package | false | Outer blocked-event reference carrying canonical blocked receipt and latch SHA-256 values; neither serialized value contains its own hash field. |
 | seam_envelope | autopilot.seam_envelope.v1 | Host | false | D78 §3.1 newline-delimited JSON frame envelope over stdio. |
 | artifact_link | autopilot.artifact_link.v1 | Package | false | Digest-bound run-root artifact link used by finalization assemblies and archive manifests. |
 | accepted_evidence_envelope | autopilot.accepted_evidence_envelope.v1 | Package | false | Authoritative accepted evidence envelope. External-attested advisory origin is archived but cannot satisfy final conditions. |
@@ -1079,6 +1084,12 @@ Sources: `data/contracts.kdl`.
 | validation_result_v3 | field | submission | validation_submission_v3 | true |  |  |
 | validation_result_v3 | field | verdict_digest | digest | true |  |  |
 | validation_result_v3 | field | verdict | validation_verdict_v3 | true |  |  |
+| child_control_blocked_gate | field | schema | schema-id | true |  |  |
+| child_control_blocked_gate | field | latch_id | uuidv7 | true |  |  |
+| child_control_blocked_gate | field | run_id | id | true |  |  |
+| child_control_blocked_gate | list | cancellations | child_control_blocked_cancellation | true |  |  |
+| child_control_blocked_gate | field | child_control_blocked_cancellation.task_id | id | true |  |  |
+| child_control_blocked_gate | field | child_control_blocked_cancellation.reporter | bool | true |  |  |
 | child_control_request | field | schema | schema-id | true |  |  |
 | child_control_request | field | request_id | id | true |  |  |
 | child_control_request | field | token | string | true |  |  |
@@ -1116,6 +1127,24 @@ Sources: `data/contracts.kdl`.
 | submit_diagnostic | field | submit_diagnostic_actual.sha256 | digest | true |  | SHA-256 of the complete canonical actual value. |
 | submit_diagnostic | field | submit_diagnostic_actual.byte_count | u64 | true |  | Complete canonical actual-value byte count. |
 | submit_diagnostic | field | submit_diagnostic_actual.item_count | u64 | true |  | Complete actual-value item count. |
+| deferred_host_effect_v1 | field | done.payload | core-to-host-done-payload | true |  |  |
+| deferred_host_effect_v1 | field | spawn.payload | core-to-host-spawn-payload | true |  |  |
+| deferred_host_effect_v1 | field | spawn_wave.payload | core-to-host-spawn-wave-payload | true |  |  |
+| prepared_submit_transition_v1 | field | schema | schema-id | true |  |  |
+| prepared_submit_transition_v1 | field | transition_ref | ref | true |  |  |
+| prepared_submit_transition_v1 | field | transition_digest | digest | true |  |  |
+| prepared_submit_transition_v1 | field | carrier | prepared_submit_artifact_ref | true |  |  |
+| prepared_submit_transition_v1 | list | artifact_refs | prepared_submit_artifact_ref | true |  |  |
+| prepared_submit_transition_v1 | list | issued_actions | prepared_submit_issued_action | true |  |  |
+| prepared_submit_transition_v1 | field | deferred_host_effect | deferred_host_effect_v1 | true |  |  |
+| prepared_submit_transition_v1 | field | prepared_submit_artifact_ref.artifact_ref | ref | true |  |  |
+| prepared_submit_transition_v1 | field | prepared_submit_artifact_ref.artifact_schema | schema-id | true |  |  |
+| prepared_submit_transition_v1 | field | prepared_submit_artifact_ref.sha256 | digest | true |  |  |
+| prepared_submit_transition_v1 | field | prepared_submit_artifact_ref.byte_count | u64 | true |  |  |
+| prepared_submit_transition_v1 | field | prepared_submit_issued_action.action_ref | ref | true |  |  |
+| prepared_submit_transition_v1 | field | prepared_submit_issued_action.action | background_action | true |  |  |
+| prepared_submit_transition_v1 | field | prepared_submit_issued_action.binding_ref | ref | true |  |  |
+| prepared_submit_transition_v1 | field | prepared_submit_issued_action.binding_digest | digest | true |  |  |
 | submit_receipt | field | schema | schema-id | true |  |  |
 | submit_receipt | field | receipt_id | uuidv7 | true |  |  |
 | submit_receipt | field | run_id | id | true |  |  |
@@ -1137,22 +1166,10 @@ Sources: `data/contracts.kdl`.
 | submit_receipt | field | raw_payload_byte_count | u64 | true |  |  |
 | submit_receipt | field | request_id | id | true |  |  |
 | submit_receipt | field | tool_call_id | string | true |  |  |
-| submit_receipt | field | carrier_digest | digest | true |  |  |
-| submit_receipt | list | artifact_digests | submit_receipt_artifact | true |  |  |
-| submit_receipt | field | prepared_transition | submit_prepared_transition | true |  |  |
-| submit_receipt | field | receipt_sha256 | digest | true |  |  |
+| submit_receipt | field | prepared_transition | prepared_submit_transition_v1 | true |  |  |
 | submit_receipt | field | submit_receipt_validator_version.validator_id | id | true |  |  |
 | submit_receipt | field | submit_receipt_validator_version.version | string | true |  |  |
 | submit_receipt | field | submit_receipt_validator_version.digest | digest | true |  |  |
-| submit_receipt | field | submit_receipt_artifact.artifact_id | id | true |  |  |
-| submit_receipt | field | submit_receipt_artifact.sha256 | digest | true |  |  |
-| submit_receipt | field | submit_receipt_artifact.byte_count | u64 | true |  |  |
-| submit_receipt | field | submit_prepared_transition.transition_id | id | true |  |  |
-| submit_receipt | field | submit_prepared_transition.kind | prepared-transition-kind | true |  |  |
-| submit_receipt | field | submit_prepared_transition.transition_digest | digest | true |  |  |
-| submit_receipt | field | submit_prepared_transition.deferred_host_effect | submit_deferred_host_effect | true |  |  |
-| submit_receipt | field | submit_deferred_host_effect.kind | deferred-host-effect-kind | true |  |  |
-| submit_receipt | field | submit_deferred_host_effect.effect_digest | digest | true |  |  |
 | blocked_report | field | schema | schema-id | true |  |  |
 | blocked_report | field | reason_code | blocked-reason-code | true |  |  |
 | blocked_report | field | summary | string | true |  |  |
@@ -1175,7 +1192,6 @@ Sources: `data/contracts.kdl`.
 | blocked_receipt | field | report_digest | digest | true |  |  |
 | blocked_receipt | field | reason_code | blocked-reason-code | true |  |  |
 | blocked_receipt | field | cancellation_set_digest | digest | true |  |  |
-| blocked_receipt | field | receipt_sha256 | digest | true |  |  |
 | blocked_latch | field | schema | schema-id | true |  |  |
 | blocked_latch | field | latch_id | uuidv7 | true |  |  |
 | blocked_latch | field | blocked_receipt_id | uuidv7 | true |  |  |
@@ -1185,12 +1201,21 @@ Sources: `data/contracts.kdl`.
 | blocked_latch | field | reporter_assignment_id | id | true |  |  |
 | blocked_latch | field | cancellation_set_digest | digest | true |  |  |
 | blocked_latch | list | cancellations | blocked_cancellation_record | true |  |  |
-| blocked_latch | field | latch_sha256 | digest | true |  |  |
 | blocked_latch | field | blocked_cancellation_record.task_id | id | true |  |  |
 | blocked_latch | field | blocked_cancellation_record.action_id | id | true |  |  |
 | blocked_latch | field | blocked_cancellation_record.assignment_id | id | true |  |  |
 | blocked_latch | field | blocked_cancellation_record.cancellation_index | u32 | true |  |  |
 | blocked_latch | field | blocked_cancellation_record.reporter | bool | true |  |  |
+| submit_receipt_event_ref | field | schema | schema-id | true |  |  |
+| submit_receipt_event_ref | field | receipt_ref | ref | true |  |  |
+| submit_receipt_event_ref | field | receipt_sha256 | digest | true |  |  |
+| submit_receipt_event_ref | field | accepted_event | autopilot_event_ref | true |  |  |
+| blocked_latch_event_ref | field | schema | schema-id | true |  |  |
+| blocked_latch_event_ref | field | blocked_receipt_ref | ref | true |  |  |
+| blocked_latch_event_ref | field | blocked_receipt_sha256 | digest | true |  |  |
+| blocked_latch_event_ref | field | latch_ref | ref | true |  |  |
+| blocked_latch_event_ref | field | latch_sha256 | digest | true |  |  |
+| blocked_latch_event_ref | field | blocked_event | autopilot_event_ref | true |  |  |
 | seam_envelope | field | v | u32 | true |  |  |
 | seam_envelope | field | id | u64 | true |  |  |
 | seam_envelope | field | kind | string | true |  |  |
@@ -1426,13 +1451,14 @@ Sources: `data/contracts.kdl`.
 | child-control-outcome | ACCEPT, RETRY |
 | blocked-reason-code | missing-authority, external-dependency, infrastructure, unsafe-to-continue |
 | blocked-evidence-kind | observation, path, command, reference |
-| prepared-transition-kind | receipt-consumption |
-| deferred-host-effect-kind | ui, spawn, spawn-wave, session, log, done |
 
 ## Seam frames
 
 | Kind | Direction | Fields |
 | --- | --- | --- |
+| child-control | host-to-core |  |
+| blocked-result-observed | host-to-core |  |
+| child-control | core-to-host |  |
 | spawn-attested | core-to-host |  |
 | reconcile-attested | core-to-host |  |
 | attested-task-observation | host-to-core |  |

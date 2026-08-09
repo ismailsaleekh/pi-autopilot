@@ -343,22 +343,6 @@ pub enum CriterionVerdict {
     PASS,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DeferredHostEffectKind {
-    #[serde(rename = "done")]
-    Done,
-    #[serde(rename = "log")]
-    Log,
-    #[serde(rename = "session")]
-    Session,
-    #[serde(rename = "spawn")]
-    Spawn,
-    #[serde(rename = "spawn-wave")]
-    SpawnWave,
-    #[serde(rename = "ui")]
-    Ui,
-}
-
 /// Closed delivery blocker taxonomy separating semantic repair from authority, infrastructure, and unsafe failures.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeliveryBlockerClass {
@@ -654,12 +638,6 @@ pub enum PlanningReviewVerdict {
     NeedsFix,
     #[serde(rename = "pass")]
     Pass,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PreparedTransitionKind {
-    #[serde(rename = "receipt-consumption")]
-    ReceiptConsumption,
 }
 
 /// D77 §3.1 closed Producer enum plus Host from D78 §7.
@@ -1846,8 +1824,6 @@ pub struct BlockedLatch {
     pub cancellation_set_digest: Digest,
     #[serde(rename = "cancellations")]
     pub cancellations: Vec<BlockedCancellationRecord>,
-    #[serde(rename = "latch_sha256")]
-    pub latch_sha256: Digest,
 }
 
 /// Generated record item.
@@ -1864,6 +1840,24 @@ pub struct BlockedCancellationRecord {
     pub cancellation_index: u32,
     #[serde(rename = "reporter")]
     pub reporter: bool,
+}
+
+/// Outer blocked-event reference carrying canonical blocked receipt and latch SHA-256 values; neither serialized value contains its own hash field.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlockedLatchEventRef {
+    #[serde(rename = "schema")]
+    pub schema: SchemaId,
+    #[serde(rename = "blocked_receipt_ref")]
+    pub blocked_receipt_ref: Ref,
+    #[serde(rename = "blocked_receipt_sha256")]
+    pub blocked_receipt_sha256: Digest,
+    #[serde(rename = "latch_ref")]
+    pub latch_ref: Ref,
+    #[serde(rename = "latch_sha256")]
+    pub latch_sha256: Digest,
+    #[serde(rename = "blocked_event")]
+    pub blocked_event: AutopilotEventRef,
 }
 
 /// Create-once accepted blocked-report receipt. All workstream scope and cancellation identities are Core-derived from the authenticated lease.
@@ -1900,8 +1894,6 @@ pub struct BlockedReceipt {
     pub reason_code: BlockedReasonCode,
     #[serde(rename = "cancellation_set_digest")]
     pub cancellation_set_digest: Digest,
-    #[serde(rename = "receipt_sha256")]
-    pub receipt_sha256: Digest,
 }
 
 /// Closed universal blocked report. Core derives workstream, action, cancellation scope, and all durable effects from the authenticated lease.
@@ -1948,6 +1940,30 @@ pub enum ChildControlAcceptReceipt {
         #[serde(rename = "receipt")]
         pub receipt: BlockedReceipt,
     },
+}
+
+/// Host-only directive carried beside an accepted blocked response. The broker closes this run's launch gate before returning the child-visible response and kills only the listed owned tasks, with the reporter last.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChildControlBlockedGate {
+    #[serde(rename = "schema")]
+    pub schema: SchemaId,
+    #[serde(rename = "latch_id")]
+    pub latch_id: Uuidv7,
+    #[serde(rename = "run_id")]
+    pub run_id: Id,
+    #[serde(rename = "cancellations")]
+    pub cancellations: Vec<ChildControlBlockedCancellation>,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChildControlBlockedCancellation {
+    #[serde(rename = "task_id")]
+    pub task_id: Id,
+    #[serde(rename = "reporter")]
+    pub reporter: bool,
 }
 
 /// Closed child-to-Core control request. Raw payload is transported as the pre-schema JSON tree without TypeScript coercion, defaults, or semantic admission.
@@ -2356,6 +2372,27 @@ pub struct ControlFrameCounts {
     pub deterministic_jobs: u32,
     #[serde(rename = "queued_candidates")]
     pub queued_candidates: u32,
+}
+
+/// Closed actual Host continuation stored in a submit receipt. Receipt consumption relays this exact existing Core-to-Host payload without inferring an action or rerunning admission.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum DeferredHostEffectV1 {
+    #[serde(rename = "done")]
+    Done {
+        #[serde(rename = "payload")]
+        pub payload: CoreToHostDonePayload,
+    },
+    #[serde(rename = "spawn")]
+    Spawn {
+        #[serde(rename = "payload")]
+        pub payload: CoreToHostSpawnPayload,
+    },
+    #[serde(rename = "spawn-wave")]
+    SpawnWave {
+        #[serde(rename = "payload")]
+        pub payload: CoreToHostSpawnWavePayload,
+    },
 }
 
 /// Implementer/Fixer terminal delivery carrier pending package acceptance (D76 §8.2).
@@ -2878,6 +2915,54 @@ pub struct PlanningAtomRegistryAtom {
     pub sources: Vec<Ref>,
 }
 
+/// Self-contained accepted transition for receipt-only parent consumption. It records exact immutable refs, issued action and binding refs, and the actual closed deferred Host payload.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreparedSubmitTransitionV1 {
+    #[serde(rename = "schema")]
+    pub schema: SchemaId,
+    #[serde(rename = "transition_ref")]
+    pub transition_ref: Ref,
+    #[serde(rename = "transition_digest")]
+    pub transition_digest: Digest,
+    #[serde(rename = "carrier")]
+    pub carrier: PreparedSubmitArtifactRef,
+    #[serde(rename = "artifact_refs")]
+    pub artifact_refs: Vec<PreparedSubmitArtifactRef>,
+    #[serde(rename = "issued_actions")]
+    pub issued_actions: Vec<PreparedSubmitIssuedAction>,
+    #[serde(rename = "deferred_host_effect")]
+    pub deferred_host_effect: DeferredHostEffectV1,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreparedSubmitArtifactRef {
+    #[serde(rename = "artifact_ref")]
+    pub artifact_ref: Ref,
+    #[serde(rename = "artifact_schema")]
+    pub artifact_schema: SchemaId,
+    #[serde(rename = "sha256")]
+    pub sha256: Digest,
+    #[serde(rename = "byte_count")]
+    pub byte_count: u64,
+}
+
+/// Generated record item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreparedSubmitIssuedAction {
+    #[serde(rename = "action_ref")]
+    pub action_ref: Ref,
+    #[serde(rename = "action")]
+    pub action: BackgroundAction,
+    #[serde(rename = "binding_ref")]
+    pub binding_ref: Ref,
+    #[serde(rename = "binding_digest")]
+    pub binding_digest: Digest,
+}
+
 /// Model-facing contradiction/question nominations. Empty questions are valid when no material unresolved issue remains.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Questions {
@@ -3062,7 +3147,7 @@ pub struct SubmitDiagnosticActual {
     pub item_count: u64,
 }
 
-/// Create-once accepted submit receipt. It binds authenticated child identity, canonical raw payload, validators, carrier artifacts, and a typed deferred continuation without granting repository authority.
+/// Create-once accepted submit receipt. It binds authenticated child identity, canonical raw payload, validators, carrier artifacts, and a typed deferred continuation without granting repository authority. Its canonical-byte SHA-256 is carried only by the outer accepted-event reference.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SubmitReceipt {
@@ -3108,14 +3193,8 @@ pub struct SubmitReceipt {
     pub request_id: Id,
     #[serde(rename = "tool_call_id")]
     pub tool_call_id: String,
-    #[serde(rename = "carrier_digest")]
-    pub carrier_digest: Digest,
-    #[serde(rename = "artifact_digests")]
-    pub artifact_digests: Vec<SubmitReceiptArtifact>,
     #[serde(rename = "prepared_transition")]
-    pub prepared_transition: SubmitPreparedTransition,
-    #[serde(rename = "receipt_sha256")]
-    pub receipt_sha256: Digest,
+    pub prepared_transition: PreparedSubmitTransitionV1,
 }
 
 /// Generated record item.
@@ -3130,40 +3209,18 @@ pub struct SubmitReceiptValidatorVersion {
     pub digest: Digest,
 }
 
-/// Generated record item.
+/// Outer accepted-event reference carrying the SHA-256 of canonical submit-receipt bytes; the receipt never hashes bytes containing itself.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SubmitReceiptArtifact {
-    #[serde(rename = "artifact_id")]
-    pub artifact_id: Id,
-    #[serde(rename = "sha256")]
-    pub sha256: Digest,
-    #[serde(rename = "byte_count")]
-    pub byte_count: u64,
-}
-
-/// Generated record item.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SubmitPreparedTransition {
-    #[serde(rename = "transition_id")]
-    pub transition_id: Id,
-    #[serde(rename = "kind")]
-    pub kind: PreparedTransitionKind,
-    #[serde(rename = "transition_digest")]
-    pub transition_digest: Digest,
-    #[serde(rename = "deferred_host_effect")]
-    pub deferred_host_effect: SubmitDeferredHostEffect,
-}
-
-/// Generated record item.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SubmitDeferredHostEffect {
-    #[serde(rename = "kind")]
-    pub kind: DeferredHostEffectKind,
-    #[serde(rename = "effect_digest")]
-    pub effect_digest: Digest,
+pub struct SubmitReceiptEventRef {
+    #[serde(rename = "schema")]
+    pub schema: SchemaId,
+    #[serde(rename = "receipt_ref")]
+    pub receipt_ref: Ref,
+    #[serde(rename = "receipt_sha256")]
+    pub receipt_sha256: Digest,
+    #[serde(rename = "accepted_event")]
+    pub accepted_event: AutopilotEventRef,
 }
 
 /// Model-facing task atom submission. Shape is deliberately small: structure is enforced by the submit tool; source values are checked against runtime-supplied task source anchors by the planning driver.
@@ -4408,6 +4465,17 @@ pub struct WorkMapRecoveryV2 {
     pub repair_evidence_refs: Vec<Ref>,
 }
 
+/// Broker-only child-control result. Host applies the optional blocked gate directive before returning exactly response to the nested child and rejects every other Core effect kind on this socket path.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoreToHostChildControlPayload {
+    #[serde(rename = "response")]
+    pub response: ChildControlResponse,
+    #[serde(rename = "blocked_gate")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub blocked_gate: Nullable<ChildControlBlockedGate>,
+}
+
 /// D78 §3.2 — command complete; Host returns to idle.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -4508,6 +4576,34 @@ pub struct HostToCoreAttestedTaskObservationPayload {
     pub report_source_path: Path,
     #[serde(rename = "sidecar_source_path")]
     pub sidecar_source_path: Path,
+}
+
+/// Authenticated outer-runner observation that the reporter's accepted blocked tool result was correlated through ToolExecutionEnd and message_end. It is separate from child-control request kind and carries no model authority.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostToCoreBlockedResultObservedPayload {
+    #[serde(rename = "schema")]
+    pub schema: SchemaId,
+    #[serde(rename = "token")]
+    pub token: String,
+    #[serde(rename = "run_id")]
+    pub run_id: Id,
+    #[serde(rename = "assignment_id")]
+    pub assignment_id: Id,
+    #[serde(rename = "attempt")]
+    pub attempt: u32,
+    #[serde(rename = "receipt_id")]
+    pub receipt_id: Uuidv7,
+    #[serde(rename = "tool_call_id")]
+    pub tool_call_id: String,
+}
+
+/// Authenticated Host-broker child-control request. Core derives all authority from the bound capability; the model supplies only the raw tool payload in ChildControlRequest.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostToCoreChildControlPayload {
+    #[serde(rename = "request")]
+    pub request: ChildControlRequest,
 }
 
 /// D78 §3.2 — an operator slash command with its raw argument string and Host-observed background-task capability facts. Core alone decides whether those facts admit mutation.

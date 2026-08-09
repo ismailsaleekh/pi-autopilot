@@ -51,7 +51,6 @@ export type CommandEffectHandling = "none" | "run-isolated" | "exact-cleanup-bef
 export type CommandReceiptKind = "final-command" | "full-suite" | "focused";
 export type ContextAnchorForm = "task" | "plan" | "dossier" | "run" | "version-control-lines" | "version-control-whole-file" | "json";
 export type CriterionVerdict = "PASS" | "FAIL" | "BLOCKED";
-export type DeferredHostEffectKind = "ui" | "spawn" | "spawn-wave" | "session" | "log" | "done";
 export type DeliveryBlockerClass = "semantic-repairable" | "requires-new-authority" | "infrastructure" | "unsafe";
 export type DeliveryOutcome = "succeeded" | "blocked";
 export type EvidenceContentKind = "prompt" | "assignment" | "action" | "producer-binding" | "report" | "producer-sidecar" | "acceptance-receipt" | "failure-receipt" | "supersession-receipt" | "transcript" | "envelope-manifest";
@@ -68,7 +67,6 @@ export type PlanUnitKind = "implementation";
 export type PlanningAtomKind = "work" | "decision" | "constraint" | "acceptance" | "premise" | "question" | "reference";
 export type PlanningQuestionClass = "invalidated-decision" | "missing-material-decision" | "material-underdetermination" | "dod-hole" | "unsafe-irreversible";
 export type PlanningReviewVerdict = "pass" | "blocker" | "advisory" | "fail" | "blocked" | "needs-fix";
-export type PreparedTransitionKind = "receipt-consumption";
 export type Producer = "Model" | "Git" | "Operator" | "Filesystem" | "Provider" | "BackgroundTask" | "Package" | "Host";
 export type RecoveryDisposition = "repaired" | "no-defect" | "requires-new-authority" | "infrastructure-blocked" | "unsafe-blocked";
 export type RosterSlot = "control" | "reasoning" | "extraction" | "coding" | "review";
@@ -523,7 +521,6 @@ export interface BlockedLatch {
   reporter_assignment_id: Id;
   cancellation_set_digest: Digest;
   cancellations: BlockedCancellationRecord[];
-  latch_sha256: Digest;
 }
 
 export interface BlockedCancellationRecord {
@@ -532,6 +529,15 @@ export interface BlockedCancellationRecord {
   assignment_id: Id;
   cancellation_index: number;
   reporter: boolean;
+}
+
+export interface BlockedLatchEventRef {
+  schema: SchemaId;
+  blocked_receipt_ref: Ref;
+  blocked_receipt_sha256: Digest;
+  latch_ref: Ref;
+  latch_sha256: Digest;
+  blocked_event: AutopilotEventRef;
 }
 
 export interface BlockedReceipt {
@@ -550,7 +556,6 @@ export interface BlockedReceipt {
   report_digest: Digest;
   reason_code: BlockedReasonCode;
   cancellation_set_digest: Digest;
-  receipt_sha256: Digest;
 }
 
 export interface BlockedReport {
@@ -578,6 +583,18 @@ export type ChildControlAcceptReceipt =
       receipt: BlockedReceipt;
   }
 ;
+
+export interface ChildControlBlockedGate {
+  schema: SchemaId;
+  latch_id: Uuidv7;
+  run_id: Id;
+  cancellations: ChildControlBlockedCancellation[];
+}
+
+export interface ChildControlBlockedCancellation {
+  task_id: Id;
+  reporter: boolean;
+}
 
 export interface ChildControlRequest {
   schema: SchemaId;
@@ -776,6 +793,21 @@ export interface ControlFrameCounts {
   deterministic_jobs: number;
   queued_candidates: number;
 }
+
+export type DeferredHostEffectV1 =
+  | {
+    kind: "done";
+      payload: CoreToHostDonePayload;
+  }
+  | {
+    kind: "spawn";
+      payload: CoreToHostSpawnPayload;
+  }
+  | {
+    kind: "spawn-wave";
+      payload: CoreToHostSpawnWavePayload;
+  }
+;
 
 export interface DeliveryResult {
   assignment_id: Id;
@@ -1028,6 +1060,30 @@ export interface PlanningAtomRegistryAtom {
   sources: Ref[];
 }
 
+export interface PreparedSubmitTransitionV1 {
+  schema: SchemaId;
+  transition_ref: Ref;
+  transition_digest: Digest;
+  carrier: PreparedSubmitArtifactRef;
+  artifact_refs: PreparedSubmitArtifactRef[];
+  issued_actions: PreparedSubmitIssuedAction[];
+  deferred_host_effect: DeferredHostEffectV1;
+}
+
+export interface PreparedSubmitArtifactRef {
+  artifact_ref: Ref;
+  artifact_schema: SchemaId;
+  sha256: Digest;
+  byte_count: number;
+}
+
+export interface PreparedSubmitIssuedAction {
+  action_ref: Ref;
+  action: BackgroundAction;
+  binding_ref: Ref;
+  binding_digest: Digest;
+}
+
 export interface Questions {
   questions: PlanningQuestion[];
 }
@@ -1135,10 +1191,7 @@ export interface SubmitReceipt {
   raw_payload_byte_count: number;
   request_id: Id;
   tool_call_id: string;
-  carrier_digest: Digest;
-  artifact_digests: SubmitReceiptArtifact[];
-  prepared_transition: SubmitPreparedTransition;
-  receipt_sha256: Digest;
+  prepared_transition: PreparedSubmitTransitionV1;
 }
 
 export interface SubmitReceiptValidatorVersion {
@@ -1147,22 +1200,11 @@ export interface SubmitReceiptValidatorVersion {
   digest: Digest;
 }
 
-export interface SubmitReceiptArtifact {
-  artifact_id: Id;
-  sha256: Digest;
-  byte_count: number;
-}
-
-export interface SubmitPreparedTransition {
-  transition_id: Id;
-  kind: PreparedTransitionKind;
-  transition_digest: Digest;
-  deferred_host_effect: SubmitDeferredHostEffect;
-}
-
-export interface SubmitDeferredHostEffect {
-  kind: DeferredHostEffectKind;
-  effect_digest: Digest;
+export interface SubmitReceiptEventRef {
+  schema: SchemaId;
+  receipt_ref: Ref;
+  receipt_sha256: Digest;
+  accepted_event: AutopilotEventRef;
 }
 
 export interface TaskAtoms {
@@ -1753,6 +1795,11 @@ export interface WorkMapRecoveryV2 {
   repair_evidence_refs: Ref[];
 }
 
+export interface CoreToHostChildControlPayload {
+  response: ChildControlResponse;
+  blocked_gate: ChildControlBlockedGate | null;
+}
+
 export interface CoreToHostDonePayload {
   status: string;
 }
@@ -1804,6 +1851,20 @@ export interface HostToCoreAttestedTaskObservationPayload {
   sidecar_source_path: Path;
 }
 
+export interface HostToCoreBlockedResultObservedPayload {
+  schema: SchemaId;
+  token: string;
+  run_id: Id;
+  assignment_id: Id;
+  attempt: number;
+  receipt_id: Uuidv7;
+  tool_call_id: string;
+}
+
+export interface HostToCoreChildControlPayload {
+  request: ChildControlRequest;
+}
+
 export interface HostToCoreCommandPayload {
   raw: string;
   background_capabilities: BackgroundCapabilities;
@@ -1834,5 +1895,5 @@ export interface HostToCoreTaskCompletedPayload {
   status: string;
 }
 
-export type HostToCoreFrame = { v: 1; id: number; kind: "agent-result"; payload: HostToCoreAgentResultPayload } | { v: 1; id: number; kind: "attested-task-observation"; payload: HostToCoreAttestedTaskObservationPayload } | { v: 1; id: number; kind: "command"; payload: HostToCoreCommandPayload } | { v: 1; id: number; kind: "operator-answer"; payload: HostToCoreOperatorAnswerPayload } | { v: 1; id: number; kind: "shutdown"; payload: HostToCoreShutdownPayload } | { v: 1; id: number; kind: "spawn-result"; payload: HostToCoreSpawnResultPayload } | { v: 1; id: number; kind: "task-completed"; payload: HostToCoreTaskCompletedPayload };
-export type CoreToHostFrame = { v: 1; id: number; kind: "done"; payload: CoreToHostDonePayload } | { v: 1; id: number; kind: "log"; payload: CoreToHostLogPayload } | { v: 1; id: number; kind: "reconcile-attested"; payload: CoreToHostReconcileAttestedPayload } | { v: 1; id: number; kind: "session"; payload: CoreToHostSessionPayload } | { v: 1; id: number; kind: "spawn"; payload: CoreToHostSpawnPayload } | { v: 1; id: number; kind: "spawn-attested"; payload: CoreToHostSpawnAttestedPayload } | { v: 1; id: number; kind: "spawn-wave"; payload: CoreToHostSpawnWavePayload } | { v: 1; id: number; kind: "ui"; payload: CoreToHostUiPayload };
+export type HostToCoreFrame = { v: 1; id: number; kind: "agent-result"; payload: HostToCoreAgentResultPayload } | { v: 1; id: number; kind: "attested-task-observation"; payload: HostToCoreAttestedTaskObservationPayload } | { v: 1; id: number; kind: "blocked-result-observed"; payload: HostToCoreBlockedResultObservedPayload } | { v: 1; id: number; kind: "child-control"; payload: HostToCoreChildControlPayload } | { v: 1; id: number; kind: "command"; payload: HostToCoreCommandPayload } | { v: 1; id: number; kind: "operator-answer"; payload: HostToCoreOperatorAnswerPayload } | { v: 1; id: number; kind: "shutdown"; payload: HostToCoreShutdownPayload } | { v: 1; id: number; kind: "spawn-result"; payload: HostToCoreSpawnResultPayload } | { v: 1; id: number; kind: "task-completed"; payload: HostToCoreTaskCompletedPayload };
+export type CoreToHostFrame = { v: 1; id: number; kind: "child-control"; payload: CoreToHostChildControlPayload } | { v: 1; id: number; kind: "done"; payload: CoreToHostDonePayload } | { v: 1; id: number; kind: "log"; payload: CoreToHostLogPayload } | { v: 1; id: number; kind: "reconcile-attested"; payload: CoreToHostReconcileAttestedPayload } | { v: 1; id: number; kind: "session"; payload: CoreToHostSessionPayload } | { v: 1; id: number; kind: "spawn"; payload: CoreToHostSpawnPayload } | { v: 1; id: number; kind: "spawn-attested"; payload: CoreToHostSpawnAttestedPayload } | { v: 1; id: number; kind: "spawn-wave"; payload: CoreToHostSpawnWavePayload } | { v: 1; id: number; kind: "ui"; payload: CoreToHostUiPayload };
