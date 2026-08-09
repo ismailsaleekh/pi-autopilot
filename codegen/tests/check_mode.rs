@@ -592,9 +592,9 @@ fn unified_submit_routes_are_generated_row_driven_and_receipt_complete() {
         .split_once("pub struct DeliveryResult")
         .expect("next generated artifact")
         .0;
-    assert!(deferred.contains("Done {\n        #[serde(rename = \"payload\")]\n        pub payload: CoreToHostDonePayload"));
-    assert!(deferred.contains("Spawn {\n        #[serde(rename = \"payload\")]\n        pub payload: CoreToHostSpawnPayload"));
-    assert!(deferred.contains("SpawnWave {\n        #[serde(rename = \"payload\")]\n        pub payload: CoreToHostSpawnWavePayload"));
+    assert!(deferred.contains("Done {\n        #[serde(rename = \"payload\")]\n        payload: CoreToHostDonePayload"));
+    assert!(deferred.contains("Spawn {\n        #[serde(rename = \"payload\")]\n        payload: CoreToHostSpawnPayload"));
+    assert!(deferred.contains("SpawnWave {\n        #[serde(rename = \"payload\")]\n        payload: CoreToHostSpawnWavePayload"));
     assert!(!deferred.contains("CoreToHostUiPayload"));
     assert!(!deferred.contains("CoreToHostSessionPayload"));
 

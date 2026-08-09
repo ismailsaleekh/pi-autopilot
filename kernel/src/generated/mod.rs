@@ -1929,16 +1929,16 @@ pub enum ChildControlAcceptReceipt {
     #[serde(rename = "submit")]
     Submit {
         #[serde(rename = "schema")]
-        pub schema: SchemaId,
+        schema: SchemaId,
         #[serde(rename = "receipt")]
-        pub receipt: SubmitReceipt,
+        receipt: SubmitReceipt,
     },
     #[serde(rename = "blocked")]
     Blocked {
         #[serde(rename = "schema")]
-        pub schema: SchemaId,
+        schema: SchemaId,
         #[serde(rename = "receipt")]
-        pub receipt: BlockedReceipt,
+        receipt: BlockedReceipt,
     },
 }
 
@@ -2001,20 +2001,20 @@ pub enum ChildControlResponse {
     #[serde(rename = "ACCEPT")]
     Accept {
         #[serde(rename = "schema")]
-        pub schema: SchemaId,
+        schema: SchemaId,
         #[serde(rename = "request_id")]
-        pub request_id: Id,
+        request_id: Id,
         #[serde(rename = "receipt")]
-        pub receipt: ChildControlAcceptReceipt,
+        receipt: ChildControlAcceptReceipt,
     },
     #[serde(rename = "RETRY")]
     Retry {
         #[serde(rename = "schema")]
-        pub schema: SchemaId,
+        schema: SchemaId,
         #[serde(rename = "request_id")]
-        pub request_id: Id,
+        request_id: Id,
         #[serde(rename = "diagnostic")]
-        pub diagnostic: SubmitDiagnostic,
+        diagnostic: SubmitDiagnostic,
     },
 }
 
@@ -2381,17 +2381,17 @@ pub enum DeferredHostEffectV1 {
     #[serde(rename = "done")]
     Done {
         #[serde(rename = "payload")]
-        pub payload: CoreToHostDonePayload,
+        payload: CoreToHostDonePayload,
     },
     #[serde(rename = "spawn")]
     Spawn {
         #[serde(rename = "payload")]
-        pub payload: CoreToHostSpawnPayload,
+        payload: CoreToHostSpawnPayload,
     },
     #[serde(rename = "spawn-wave")]
     SpawnWave {
         #[serde(rename = "payload")]
-        pub payload: CoreToHostSpawnWavePayload,
+        payload: CoreToHostSpawnWavePayload,
     },
 }
 

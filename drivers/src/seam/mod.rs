@@ -8,11 +8,14 @@ use std::time::Duration;
 
 use kernel::boundary::Rejection;
 use kernel::generated::{
-    AllocationLaneProposal, BackgroundAction, CONTRACT_VERSION, CoreToHostDonePayload,
-    CoreToHostSpawnPayload, CoreToHostSpawnWavePayload, CoreToHostUiPayload, DeliveryBoundary,
-    DeliveryResult, EventKind, EventRow, HostToCoreAgentResultPayload, HostToCoreCommandPayload,
-    HostToCoreSpawnResultPayload, HostToCoreTaskCompletedPayload, Id, ModeId, Ref, SeamEnvelope,
-    Sha, TestId, UiKind,
+    AllocationLaneProposal, BackgroundAction, CONTRACT_VERSION, ChildControlRequest,
+    ChildControlRequestKind, ChildControlResponse, CoreToHostChildControlPayload,
+    CoreToHostDonePayload, CoreToHostSpawnPayload, CoreToHostSpawnWavePayload, CoreToHostUiPayload,
+    DeliveryBoundary, DeliveryResult, Digest, EventKind, EventRow, HostToCoreAgentResultPayload,
+    HostToCoreBlockedResultObservedPayload, HostToCoreChildControlPayload,
+    HostToCoreCommandPayload, HostToCoreSpawnResultPayload, HostToCoreTaskCompletedPayload, Id,
+    ModeId, Nullable, Ref, SchemaId, SeamEnvelope, Sha, SubmitDiagnostic, SubmitDiagnosticActual,
+    SubmitDiagnosticError, TestId, UiKind,
 };
 use kernel::schedule::ResourceFacts;
 use kernel::state::{State, apply};
@@ -28,7 +31,7 @@ use crate::lifecycle::{self, AbortRequest, LocalLifecycle};
 use crate::planning::{self, TaskAuthority};
 use crate::roles::kdl::boundary_runtime;
 use crate::roster;
-use crate::runner::{self, RunnerAssignment};
+use crate::runner::{self, RunnerAssignment, VersionedRunnerBinding};
 
 pub mod sim_host;
 
@@ -192,9 +195,418 @@ fn dispatch(
         HostToCoreRoute::TaskCompleted(payload) => route_task_completed(id, payload, state),
         HostToCoreRoute::SpawnResult(payload) => route_spawn_result(id, payload, state),
         HostToCoreRoute::AgentResult(payload) => route_agent_result(id, payload, state),
+        HostToCoreRoute::ChildControl(payload) => route_child_control(id, payload, state),
+        HostToCoreRoute::BlockedResultObserved(payload) => {
+            route_blocked_result_observed(id, payload, state)
+        }
         HostToCoreRoute::OperatorAnswer(_) => done(id, "ok:recorded".to_owned()),
         HostToCoreRoute::Shutdown(_) => done(id, "ok:shutdown".to_owned()),
     }
+}
+
+/// The ChildControl route is intentionally closed: even malformed authority,
+/// payload, disk, or shared-admission failures become the generated RETRY
+/// response and never escape `dispatch` to terminate Core.
+fn route_child_control(
+    id: u64,
+    HostToCoreChildControlPayload { request }: HostToCoreChildControlPayload,
+    state: &mut CoreState,
+) -> Result<SeamEnvelope, AnyError> {
+    let request_id = request.request_id.clone();
+    let response = match admit_child_control_request(&request, state) {
+        Ok(ChildControlAdmission::BlockedPreflight) => child_control_diagnostic(
+            "submit.blocked_wave6_pending",
+            "/kind",
+            "authenticated blocked report held for the Wave 6 latch consumer",
+            &serde_json::json!("blocked"),
+            "Continue only after the Wave 6 blocked-latch consumer is available.",
+        ),
+        Ok(ChildControlAdmission::Staged) => child_control_diagnostic(
+            "submit.transition_staging_unavailable",
+            "",
+            "a fully staged typed parent transition before ACCEPT",
+            &serde_json::json!("not implemented"),
+            "Retry after Core receipt transition staging is available.",
+        ),
+        Err(failure) => failure,
+    };
+    child_control_retry(id, request_id, response)
+}
+
+enum ChildControlAdmission {
+    BlockedPreflight,
+    /// Shared child validation has completed but this branch has not yet
+    /// factored every mutating parent continuation into a typed transition.
+    /// Returning RETRY here is deliberate: no carrier/receipt/event can be
+    /// published before the complete parent chain is staged.
+    Staged,
+}
+
+fn admit_child_control_request(
+    request: &ChildControlRequest,
+    state: &CoreState,
+) -> Result<ChildControlAdmission, SubmitDiagnostic> {
+    if request.schema.0 != "autopilot.child_control_request.v1" {
+        return Err(child_control_diagnostic(
+            "submit.request_schema",
+            "/schema",
+            "autopilot.child_control_request.v1",
+            &serde_json::json!(request.schema.0),
+            "Send the exact generated child-control request schema.",
+        ));
+    }
+    if request.tool_call_id.trim().is_empty() {
+        return Err(child_control_diagnostic(
+            "submit.tool_call_id",
+            "/tool_call_id",
+            "a nonempty opaque Pi tool-call id",
+            &serde_json::json!(request.tool_call_id),
+            "Resubmit through the generated terminal tool wrapper.",
+        ));
+    }
+    let binding = receipt_binding_for(state, request).map_err(|detail| {
+        child_control_diagnostic(
+            "submit.binding",
+            "/assignment_id",
+            "one authenticated receipt_v1 runner binding",
+            &serde_json::json!(detail),
+            "Retry with the issued child-control capability.",
+        )
+    })?;
+    let (spec_v5, facade, spec_bytes) =
+        runner::read_receipt_v1_spec(&binding).map_err(|error| {
+            child_control_diagnostic(
+                "submit.spec_authority",
+                "",
+                "the exact digest-bound receipt_v1 runner spec",
+                &serde_json::json!(error.to_string()),
+                "Retry with the current issued runner capability.",
+            )
+        })?;
+    if !runner::constant_time_hex_digest_matches(&request.token, &binding.run_capability_digest)
+        || !runner::constant_time_hex_digest_matches(
+            &request.token,
+            &spec_v5.child_control_token_digest.0,
+        )
+    {
+        return Err(child_control_diagnostic(
+            "submit.capability",
+            "/token",
+            "the issued per-run capability",
+            &serde_json::json!("redacted"),
+            "Retry through the issued child runner without changing its capability.",
+        ));
+    }
+    let expected_authority = receipt_authority_digest(&binding, &spec_v5).map_err(|error| {
+        child_control_diagnostic(
+            "submit.authority_digest",
+            "",
+            "a canonical V5 binding/spec authority digest",
+            &serde_json::json!(error),
+            "Retry with the current issued runner binding.",
+        )
+    })?;
+    if expected_authority != binding.authority_digest {
+        return Err(child_control_diagnostic(
+            "submit.authority_digest",
+            "",
+            "the binding's exact V5 authority identity",
+            &serde_json::json!(binding.authority_digest),
+            "Retry with the current issued runner binding.",
+        ));
+    }
+    if request.run_id != binding.run_id
+        || request.assignment_id != binding.assignment_id
+        || request.attempt != binding.attempt
+        || request.profile_id != binding.profile_id
+        || request.tool_name != binding.tool_name
+    {
+        return Err(child_control_diagnostic(
+            "submit.request_identity",
+            "",
+            "issued run, assignment, attempt, profile, and tool identity",
+            &serde_json::json!({
+                "run_id": request.run_id,
+                "assignment_id": request.assignment_id,
+                "attempt": request.attempt,
+                "profile_id": request.profile_id,
+                "tool_name": request.tool_name,
+            }),
+            "Resubmit through the exact issued terminal profile.",
+        ));
+    }
+    match request.kind {
+        ChildControlRequestKind::Blocked => {
+            let report: kernel::generated::BlockedReport =
+                serde_json::from_value(request.raw_payload.clone()).map_err(|error| {
+                    child_control_diagnostic(
+                        "submit.blocked_schema",
+                        "/raw_payload",
+                        "closed autopilot.blocked_report.v1 payload",
+                        &serde_json::json!(error.to_string()),
+                        "Correct the blocked report payload and resubmit.",
+                    )
+                })?;
+            if report.schema.0 != "autopilot.blocked_report.v1" {
+                return Err(child_control_diagnostic(
+                    "submit.blocked_schema",
+                    "/raw_payload/schema",
+                    "autopilot.blocked_report.v1",
+                    &serde_json::json!(report.schema.0),
+                    "Set the blocked report schema to autopilot.blocked_report.v1.",
+                ));
+            }
+            Ok(ChildControlAdmission::BlockedPreflight)
+        }
+        ChildControlRequestKind::Submit => {
+            let raw = crate::evidence::canonical_json(&request.raw_payload).map_err(|error| {
+                child_control_diagnostic(
+                    "submit.canonical_json",
+                    "/raw_payload",
+                    "canonical JSON payload bytes",
+                    &serde_json::json!(error.to_string()),
+                    "Resubmit a JSON-compatible terminal payload.",
+                )
+            })?;
+            let spec_text = std::str::from_utf8(&spec_bytes).map_err(|error| {
+                child_control_diagnostic(
+                    "submit.spec_utf8",
+                    "",
+                    "UTF-8 V5 spec bytes",
+                    &serde_json::json!(error.to_string()),
+                    "Retry with the current issued runner spec.",
+                )
+            })?;
+            runner::child::admit_submission(
+                Path::new(&binding.spec_path),
+                spec_text,
+                &binding.spec_digest,
+                &facade,
+                request.raw_payload.clone(),
+                request.tool_call_id.clone(),
+            )
+            .map_err(|failure| match failure {
+                runner::child::AdmissionFailure::PlaceholderLeaked => child_control_diagnostic(
+                    "submit.placeholder_leaked",
+                    "/raw_payload",
+                    "a real terminal payload, not a generated placeholder",
+                    &request.raw_payload,
+                    "Call the terminal tool through the generated bridge and resubmit.",
+                ),
+                runner::child::AdmissionFailure::Authority(detail) => child_control_diagnostic(
+                    "submit.authority",
+                    "",
+                    "issued child/profile/package authority",
+                    &serde_json::json!(detail),
+                    "Retry with the issued authority and correct the payload if needed.",
+                ),
+                runner::child::AdmissionFailure::Value {
+                    field,
+                    expected,
+                    actual,
+                } => child_control_diagnostic(
+                    "submit.value",
+                    &diagnostic_pointer(&field),
+                    &expected,
+                    &serde_json::json!(actual),
+                    "Correct the reported value and resubmit.",
+                ),
+            })?;
+            // Bind canonical bytes now so no future transition stage can use a
+            // serialization that differs from the child request. The value is
+            // intentionally not persisted until every parent predicate is
+            // factored into the staged transition.
+            let _raw_digest = sha256_hex_local(&raw);
+            Ok(ChildControlAdmission::Staged)
+        }
+    }
+}
+
+fn receipt_binding_for(
+    state: &CoreState,
+    request: &ChildControlRequest,
+) -> Result<runner::ReceiptV1RunnerBinding, String> {
+    let mut bindings = Vec::new();
+    for reference in state.state.refs.keys() {
+        let Ok(versioned) = runner::decode_versioned_binding_ref(&reference.0) else {
+            continue;
+        };
+        if let VersionedRunnerBinding::ReceiptV1(binding) = versioned
+            && binding.run_id == request.run_id
+            && binding.assignment_id == request.assignment_id
+        {
+            bindings.push(binding);
+        }
+    }
+    match bindings.len() {
+        1 => Ok(bindings.remove(0)),
+        0 => Err("missing exact receipt_v1 binding".to_owned()),
+        count => Err(format!("ambiguous receipt_v1 binding:{count}")),
+    }
+}
+
+fn receipt_authority_digest(
+    binding: &runner::ReceiptV1RunnerBinding,
+    spec: &kernel::generated::AgentRunSpecV5,
+) -> Result<String, String> {
+    let bytes = crate::evidence::canonical_json(&serde_json::json!({
+        "schema": "autopilot.submit_authority.v1",
+        "run_id": binding.run_id,
+        "action_id": binding.action_id,
+        "assignment_id": binding.assignment_id,
+        "attempt": binding.attempt,
+        "run_revision": binding.run_revision,
+        "workstream": binding.workstream,
+        "role_id": binding.role_id,
+        "mode": binding.mode,
+        "boundary_id": binding.boundary_id,
+        "result_contract": binding.result_contract,
+        "profile_id": binding.profile_id,
+        "tool_name": binding.tool_name,
+        "schema_digest": binding.schema_digest,
+        "spec_digest": binding.spec_digest,
+        "carrier_binding_digest": binding.carrier_binding_digest,
+        "run_capability_digest": binding.run_capability_digest,
+        "spec_token_digest": spec.child_control_token_digest,
+        "spec_context_digest": spec.context_digest,
+        "spec_boundary_digest": spec.boundary_digest,
+        "spec_result_contract_digest": spec.result_contract_digest,
+    }))
+    .map_err(|error| error.to_string())?;
+    Ok(sha256_hex_local(&bytes))
+}
+
+fn route_blocked_result_observed(
+    id: u64,
+    payload: HostToCoreBlockedResultObservedPayload,
+    state: &mut CoreState,
+) -> Result<SeamEnvelope, AnyError> {
+    let request = ChildControlRequest {
+        schema: SchemaId("autopilot.child_control_request.v1".to_owned()),
+        request_id: Id("blocked-result-observed".to_owned()),
+        token: payload.token,
+        run_id: payload.run_id,
+        assignment_id: payload.assignment_id,
+        attempt: payload.attempt,
+        tool_call_id: payload.tool_call_id,
+        kind: ChildControlRequestKind::Blocked,
+        tool_name: kernel::generated::ToolName("autopilot_report_blocked".to_owned()),
+        profile_id: "autopilot.blocked_report.v1:autopilot_report_blocked".to_owned(),
+        raw_payload: serde_json::json!({
+            "schema": "autopilot.blocked_report.v1",
+            "reason_code": "infrastructure",
+            "summary": "blocked result observed",
+            "evidence": [{"kind":"observation","value":"outer runner correlation"}],
+            "last_attempted_action": "blocked-result-observed",
+        }),
+    };
+    // Wave 6 owns latch lookup and reporter release. Until then an
+    // authenticated observation is idempotently recognized, while invalid
+    // observations fail closed without creating a latch or transition.
+    match admit_child_control_request(&request, state) {
+        Ok(ChildControlAdmission::BlockedPreflight) => done(
+            id,
+            rejection("blocked-result-observed", "wave6-pending-idempotent"),
+        ),
+        Ok(ChildControlAdmission::Staged) => done(
+            id,
+            rejection("blocked-result-observed", "unexpected-submit-stage"),
+        ),
+        Err(_) => done(
+            id,
+            rejection("blocked-result-observed", "unauthenticated-or-drift"),
+        ),
+    }
+}
+
+fn child_control_retry(
+    id: u64,
+    request_id: Id,
+    diagnostic: SubmitDiagnostic,
+) -> Result<SeamEnvelope, AnyError> {
+    Ok(SeamEnvelope {
+        v: CONTRACT_VERSION as u32,
+        id,
+        kind: "child-control".to_owned(),
+        payload: serde_json::to_value(CoreToHostChildControlPayload {
+            response: ChildControlResponse::Retry {
+                schema: SchemaId("autopilot.child_control_response.v1".to_owned()),
+                request_id,
+                diagnostic,
+            },
+            blocked_gate: Nullable(None),
+        })?,
+    })
+}
+
+fn child_control_diagnostic(
+    code: &str,
+    pointer: &str,
+    expected: &str,
+    actual: &serde_json::Value,
+    fix: &str,
+) -> SubmitDiagnostic {
+    let bytes = crate::evidence::canonical_json(actual).unwrap_or_else(|_| b"null".to_vec());
+    let preview_source = String::from_utf8_lossy(&bytes);
+    let preview = preview_source.chars().take(256).collect::<String>();
+    let truncated = preview.len() < preview_source.len();
+    let item_count = match actual {
+        serde_json::Value::Array(items) => items.len() as u64,
+        serde_json::Value::Object(items) => items.len() as u64,
+        _ => 1,
+    };
+    let mut errors = vec![SubmitDiagnosticError {
+        index: 0,
+        code: code.to_owned(),
+        pointer: pointer.to_owned(),
+        expected: expected.to_owned(),
+        actual: SubmitDiagnosticActual {
+            preview,
+            redacted: code == "submit.capability",
+            truncated,
+            sha256: Digest(sha256_hex_local(&bytes)),
+            byte_count: bytes.len() as u64,
+            item_count,
+        },
+        fix: fix.to_owned(),
+    }];
+    errors.sort_by(|left, right| {
+        (
+            left.pointer.as_bytes(),
+            left.code.as_str(),
+            left.expected.as_str(),
+            left.actual.sha256.0.as_str(),
+        )
+            .cmp(&(
+                right.pointer.as_bytes(),
+                right.code.as_str(),
+                right.expected.as_str(),
+                right.actual.sha256.0.as_str(),
+            ))
+    });
+    for (index, error) in errors.iter_mut().enumerate() {
+        error.index = index as u32;
+    }
+    SubmitDiagnostic {
+        schema: SchemaId("autopilot.submit_diagnostic.v1".to_owned()),
+        code: "AUTOPILOT_SUBMIT_RETRY".to_owned(),
+        error_count: errors.len() as u32,
+        errors,
+    }
+}
+
+fn diagnostic_pointer(field: &str) -> String {
+    if field.is_empty() {
+        return String::new();
+    }
+    field
+        .split('.')
+        .map(|segment| segment.replace('~', "~0").replace('/', "~1"))
+        .fold(String::new(), |mut pointer, segment| {
+            pointer.push('/');
+            pointer.push_str(&segment);
+            pointer
+        })
 }
 
 fn command(

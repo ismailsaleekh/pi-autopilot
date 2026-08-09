@@ -646,7 +646,14 @@ fn emit_tagged_union(
                 .expect("validated tagged-union member");
             let mut rust_member = String::new();
             let mut ts_member = String::new();
-            emit_member(&mut rust_member, &mut ts_member, item, rust_ty, ts_ty);
+            emit_member_with_visibility(
+                &mut rust_member,
+                &mut ts_member,
+                item,
+                rust_ty,
+                ts_ty,
+                false,
+            );
             rust.push_str(&indent(&rust_member, "    "));
             ts.push_str(&indent(&ts_member, "    "));
         }
@@ -735,6 +742,17 @@ fn member_types(item: &Item, prefix: &str) -> Option<(String, String)> {
 }
 
 fn emit_member(rust: &mut String, ts: &mut String, item: &Item, rust_ty: String, ts_ty: String) {
+    emit_member_with_visibility(rust, ts, item, rust_ty, ts_ty, true);
+}
+
+fn emit_member_with_visibility(
+    rust: &mut String,
+    ts: &mut String,
+    item: &Item,
+    rust_ty: String,
+    ts_ty: String,
+    public: bool,
+) {
     if let Some(doc) = &item.doc {
         rust.push_str(&indent(&rust_doc(doc), "    "));
     }
@@ -748,7 +766,11 @@ fn emit_member(rust: &mut String, ts: &mut String, item: &Item, rust_ty: String,
     if !item.required {
         rust.push_str("    #[serde(skip_serializing_if = \"Option::is_none\")]\n");
     }
-    rust.push_str(&format!("    pub {}: {rust_ty},\n", field_name(&item.name)));
+    rust.push_str(&format!(
+        "    {}{}: {rust_ty},\n",
+        if public { "pub " } else { "" },
+        field_name(&item.name)
+    ));
     ts.push_str(&format!(
         "  {}{}: {ts_ty};\n",
         quote_ts_key(&item.name),

@@ -254,15 +254,29 @@ enum CarrierRejection {
 }
 
 #[derive(Debug)]
-enum PreparedArtifact {
+pub(crate) enum PreparedArtifact {
     JsonNew { path: String, value: Value },
     ExactBytes { path: PathBuf, bytes: Vec<u8> },
 }
 
+/// Fully value-admitted, but not persisted, submission material. Only the
+/// Core seam may publish this material after it has staged the parent
+/// transition and receipt.
 #[derive(Debug)]
-struct PreparedCarrier {
-    carrier: Value,
-    artifacts: Vec<PreparedArtifact>,
+pub(crate) struct PreparedCarrier {
+    pub(crate) carrier: Value,
+    pub(crate) artifacts: Vec<PreparedArtifact>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) enum AdmissionFailure {
+    Authority(String),
+    Value {
+        field: String,
+        expected: String,
+        actual: String,
+    },
+    PlaceholderLeaked,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
@@ -4845,6 +4859,74 @@ fn ensure_carrier_absent(spec: &AgentRunSpec) -> Result<(), String> {
         )),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(format!("carrier inspection failed {:?}: {error}", path)),
+    }
+}
+
+/// Reusable Core-side child admission. The Host supplies only the raw pre-schema
+/// JSON tree and opaque tool-call id; all profile, boundary, schema, and
+/// carrier-binding facts are derived from the authenticated V5 spec facade.
+/// This function never writes a carrier, audit, model submission, or receipt.
+pub(crate) fn admit_submission(
+    spec_path: &Path,
+    spec_bytes: &str,
+    spec_digest: &str,
+    spec: &AgentRunSpec,
+    raw_payload: Value,
+    tool_call_id: String,
+) -> Result<PreparedCarrier, AdmissionFailure> {
+    if contains_placeholder_sentinel(&raw_payload) {
+        return Err(AdmissionFailure::PlaceholderLeaked);
+    }
+    let profile = super::terminal_profile_for(
+        &spec.role_id.0,
+        &spec.boundary_id.0,
+        &spec.result_contract.0,
+    )
+    .map_err(|error| AdmissionFailure::Authority(error.to_string()))?;
+    let terminal = ToolTerminal {
+        tool_name: profile.1.to_owned(),
+        tool_call_id,
+        details: ToolCarrierDetails {
+            profile_id: profile.0.to_owned(),
+            tool_name: profile.1.to_owned(),
+            boundary_id: profile.2.to_owned(),
+            result_contract: profile.3.to_owned(),
+            schema_digest: profile.4.to_owned(),
+            binding: carrier_binding(spec),
+            payload: raw_payload.clone(),
+            // Delivery execution ledgers are Host/runner observations. A
+            // raw child-control request cannot manufacture them; the existing
+            // validator consequently rejects their absence as a value retry.
+            delivery_policy_denials: None,
+            approved_command_executions: None,
+        },
+        details_value: raw_payload,
+    };
+    prepare_carrier(
+        spec_path,
+        spec_bytes,
+        spec_digest,
+        spec,
+        &CarrierSource::Tool(terminal),
+        1,
+    )
+    .map_err(|error| match error {
+        CarrierRejection::Identity(detail) => AdmissionFailure::Authority(detail),
+        CarrierRejection::Value(value) => AdmissionFailure::Value {
+            field: value.field,
+            expected: value.expected,
+            actual: value.got,
+        },
+    })
+}
+
+fn contains_placeholder_sentinel(value: &Value) -> bool {
+    const SENTINEL: &str = "__autopilot_child_control_placeholder__:";
+    match value {
+        Value::String(text) => text.starts_with(SENTINEL),
+        Value::Array(items) => items.iter().any(contains_placeholder_sentinel),
+        Value::Object(items) => items.values().any(contains_placeholder_sentinel),
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
     }
 }
 

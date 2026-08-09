@@ -8,11 +8,11 @@ use std::process::{Command, Stdio};
 use kdl::{KdlDocument, KdlEntry};
 use kernel::failure::{Failure, HardBoundary};
 use kernel::generated::{
-    ActionKind, AgentRunSpec, AuthorityClass, BackgroundAction, BackgroundActionBgRun, Bytes,
-    ContextAnchor, ContextAnchorForm, ContextGap, ContextItem, ContextManifest, ContractId,
-    DeliveryResult, Digest, Id, ModeId, Path as ContractPath, RedactionState, Ref, Sha,
-    SupersessionState, TaskDocument as ContractTaskDocument, TaskDocumentClass, TerminalRoute,
-    ToolName, Uri, ValidationAssignmentKind,
+    ActionKind, AdmissionMode, AgentRunSpec, AgentRunSpecV5, AuthorityClass, BackgroundAction,
+    BackgroundActionBgRun, Bytes, ContextAnchor, ContextAnchorForm, ContextGap, ContextItem,
+    ContextManifest, ContractId, DeliveryResult, Digest, Id, ModeId, Path as ContractPath,
+    RedactionState, Ref, Sha, SupersessionState, TaskDocument as ContractTaskDocument,
+    TaskDocumentClass, TerminalRoute, ToolName, Uri, ValidationAssignmentKind,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as ShaDigest, Sha256};
@@ -89,6 +89,7 @@ const AUTHORITY_GIT_ENVIRONMENT: &[(&str, &str)] = &[
 ];
 const SKILLS_IDENTITY: &str = "agent-run-skills:disabled:v1";
 pub const ISSUED_BINDING_REF_PREFIX: &str = "runner-binding:";
+const RECEIPT_BINDING_SCHEMA: &str = "autopilot.issued_runner_binding.v5";
 type AnyError = Box<dyn std::error::Error>;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -494,6 +495,75 @@ pub struct IssuedRunnerBinding {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
     pub required_focused_evidence: u32,
+}
+
+/// Strict fresh receipt authority stored under the same durable binding-ref
+/// namespace as historical bindings. It deliberately is not a defaulted
+/// extension of `IssuedRunnerBinding`: absent `admission_mode` is the only
+/// explicit V4/replay_v0 reader, while every V5 field below is required.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReceiptV1RunnerBinding {
+    pub schema: String,
+    pub admission_mode: AdmissionMode,
+    pub run_id: Id,
+    pub action_id: Id,
+    pub assignment_id: Id,
+    pub attempt: u32,
+    pub run_revision: u64,
+    pub workstream: Id,
+    pub role_id: Id,
+    pub mode: ModeId,
+    pub boundary_id: ContractId,
+    pub result_contract: ContractId,
+    pub profile_id: String,
+    pub tool_name: ToolName,
+    pub schema_digest: String,
+    pub spec_path: String,
+    pub spec_digest: String,
+    pub carrier_path: String,
+    pub carrier_binding_digest: String,
+    pub authority_digest: String,
+    pub run_capability_digest: String,
+}
+
+impl ReceiptV1RunnerBinding {
+    fn validate_shape(&self) -> Result<(), RunnerError> {
+        if self.schema != RECEIPT_BINDING_SCHEMA
+            || self.admission_mode != AdmissionMode::ReceiptV1
+            || self.run_id.0.trim().is_empty()
+            || self.action_id.0.trim().is_empty()
+            || self.assignment_id.0.trim().is_empty()
+            || self.workstream.0.trim().is_empty()
+            || self.role_id.0.trim().is_empty()
+            || self.mode.0.trim().is_empty()
+            || self.boundary_id.0.trim().is_empty()
+            || self.result_contract.0.trim().is_empty()
+            || self.profile_id.trim().is_empty()
+            || self.tool_name.0.trim().is_empty()
+            || !is_sha256_hex(&self.schema_digest)
+            || !is_sha256_hex(&self.spec_digest)
+            || !is_sha256_hex(&self.carrier_binding_digest)
+            || !is_sha256_hex(&self.authority_digest)
+            || !is_sha256_hex(&self.run_capability_digest)
+            || self.spec_path.is_empty()
+            || self.carrier_path.is_empty()
+        {
+            return Err(RunnerError::InvalidSpec(
+                "receipt_v1 runner binding has malformed required authority".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Versioned binding reader. The V4 parser is selected only by the absence of
+/// the `admission_mode` key; it is never a fallback after an attempted V5
+/// decode.
+#[derive(Debug, Clone, PartialEq)]
+pub enum VersionedRunnerBinding {
+    ReplayV0(IssuedRunnerBinding),
+    ReceiptV1(ReceiptV1RunnerBinding),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2836,7 +2906,208 @@ pub fn binding_ref(binding: &IssuedRunnerBinding) -> Result<Ref, RunnerError> {
 }
 
 pub fn decode_binding_ref(value: &str) -> Option<IssuedRunnerBinding> {
-    serde_json::from_str(value.strip_prefix(ISSUED_BINDING_REF_PREFIX)?).ok()
+    match decode_versioned_binding_ref(value).ok()? {
+        VersionedRunnerBinding::ReplayV0(binding) => Some(binding),
+        VersionedRunnerBinding::ReceiptV1(_) => None,
+    }
+}
+
+pub fn receipt_binding_ref(binding: &ReceiptV1RunnerBinding) -> Result<Ref, RunnerError> {
+    binding.validate_shape()?;
+    let json =
+        serde_json::to_string(binding).map_err(|error| RunnerError::Io(error.to_string()))?;
+    Ok(Ref(format!("{ISSUED_BINDING_REF_PREFIX}{json}")))
+}
+
+pub fn decode_versioned_binding_ref(value: &str) -> Result<VersionedRunnerBinding, RunnerError> {
+    let encoded = value
+        .strip_prefix(ISSUED_BINDING_REF_PREFIX)
+        .ok_or_else(|| RunnerError::InvalidSpec("binding ref prefix drift".to_owned()))?;
+    let raw: serde_json::Value = serde_json::from_str(encoded)
+        .map_err(|error| RunnerError::InvalidSpec(format!("binding ref JSON: {error}")))?;
+    let object = raw
+        .as_object()
+        .ok_or_else(|| RunnerError::InvalidSpec("binding ref must be a JSON object".to_owned()))?;
+    match object.get("admission_mode") {
+        None => serde_json::from_value::<IssuedRunnerBinding>(raw)
+            .map(VersionedRunnerBinding::ReplayV0)
+            .map_err(|error| {
+                RunnerError::InvalidSpec(format!("legacy replay_v0 binding: {error}"))
+            }),
+        Some(serde_json::Value::String(mode)) if mode == "receipt_v1" => {
+            let binding: ReceiptV1RunnerBinding = serde_json::from_value(raw).map_err(|error| {
+                RunnerError::InvalidSpec(format!("receipt_v1 binding: {error}"))
+            })?;
+            binding.validate_shape()?;
+            Ok(VersionedRunnerBinding::ReceiptV1(binding))
+        }
+        Some(_) => Err(RunnerError::InvalidSpec(
+            "binding admission_mode is not the strict receipt_v1 value".to_owned(),
+        )),
+    }
+}
+
+/// Strictly decode the V5 spec bound to an already-selected V5 binding. This
+/// reader does not inspect a worktree or discover a socket: all transport and
+/// authority values must be present in the persisted V5 spec and binding.
+pub fn read_receipt_v1_spec(
+    binding: &ReceiptV1RunnerBinding,
+) -> Result<(AgentRunSpecV5, AgentRunSpec, Vec<u8>), RunnerError> {
+    binding.validate_shape()?;
+    let path = Path::new(&binding.spec_path);
+    let bytes = read_bounded_authority_file(path, child::MAX_AGENT_RUN_SPEC_BYTES)?;
+    if sha256_hex(&bytes) != binding.spec_digest {
+        return Err(RunnerError::InvalidSpec(
+            "receipt_v1 spec digest drift".to_owned(),
+        ));
+    }
+    let spec: AgentRunSpecV5 = serde_json::from_slice(&bytes)
+        .map_err(|error| RunnerError::InvalidSpec(format!("receipt_v1 spec JSON: {error}")))?;
+    validate_receipt_v1_spec(binding, &spec)?;
+    let facade = project_v5_spec_for_shared_admission(&spec);
+    Ok((spec, facade, bytes))
+}
+
+/// An explicit field-for-field V5 projection used only by shared validators
+/// which predate the V5 transport fields. It cannot deserialize arbitrary JSON
+/// or select a version by shape.
+pub fn project_v5_spec_for_shared_admission(spec: &AgentRunSpecV5) -> AgentRunSpec {
+    AgentRunSpec {
+        schema: kernel::generated::SchemaId("autopilot.agent_run_spec.v4".to_owned()),
+        assignment_kind: spec.assignment_kind.clone(),
+        action_id: spec.action_id.clone(),
+        assignment_id: spec.assignment_id.clone(),
+        run_id: spec.run_id.clone(),
+        run_revision: spec.run_revision,
+        workstream: spec.workstream.clone(),
+        role_id: spec.role_id.clone(),
+        mode: spec.mode.clone(),
+        provider: spec.provider.clone(),
+        model: spec.model.clone(),
+        thinking: spec.thinking.clone(),
+        route: spec.route.clone(),
+        cwd: spec.cwd.clone(),
+        allowed_tools: spec.allowed_tools.clone(),
+        spec_path: spec.spec_path.clone(),
+        prompt_path: spec.prompt_path.clone(),
+        prompt_digest: spec.prompt_digest.clone(),
+        boundary_id: spec.boundary_id.clone(),
+        boundary_digest: spec.boundary_digest.clone(),
+        result_contract: spec.result_contract.clone(),
+        result_contract_digest: spec.result_contract_digest.clone(),
+        carrier_path: spec.carrier_path.clone(),
+        session_id: spec.session_id.clone(),
+        session_dir: spec.session_dir.clone(),
+        session_continuity: spec.session_continuity.clone(),
+        settings_digest: spec.settings_digest.clone(),
+        context_digest: spec.context_digest.clone(),
+        skills_digest: spec.skills_digest.clone(),
+        subscription_digest: spec.subscription_digest.clone(),
+        lane_id: spec.lane_id.clone(),
+        attempt: spec.attempt,
+        base_commit: spec.base_commit.clone(),
+        worktree: spec.worktree.clone(),
+        required_focused_evidence: spec.required_focused_evidence,
+        authority_set_id: spec.authority_set_id.clone(),
+        authority_documents: spec.authority_documents.clone(),
+        context_document: spec.context_document.clone(),
+        context_documents: spec.context_documents.clone(),
+        assignment_path: spec.assignment_path.clone(),
+        assignment_digest: spec.assignment_digest.clone(),
+        context_manifest_path: spec.context_manifest_path.clone(),
+        context_manifest_digest: spec.context_manifest_digest.clone(),
+        runtime_extension_path: spec.runtime_extension_path.clone(),
+        runtime_extension_digest: spec.runtime_extension_digest.clone(),
+        terminal_profile_id: spec.terminal_profile_id.clone(),
+        terminal_route: spec.terminal_route.clone(),
+        unavailable_tools: spec.unavailable_tools.clone(),
+        producer_assignment_ids: spec.producer_assignment_ids.clone(),
+        validation_id: spec.validation_id.clone(),
+        validation_attempt: spec.validation_attempt,
+        semantic_round: spec.semantic_round,
+        model_submission_path: spec.model_submission_path.clone(),
+        atom_id_prefix: spec.atom_id_prefix.clone(),
+        atom_registry_path: spec.atom_registry_path.clone(),
+        atom_registry_digest: spec.atom_registry_digest.clone(),
+        planning_inputs_path: spec.planning_inputs_path.clone(),
+        planning_inputs_digest: spec.planning_inputs_digest.clone(),
+    }
+}
+
+pub fn validate_receipt_v1_spec(
+    binding: &ReceiptV1RunnerBinding,
+    spec: &AgentRunSpecV5,
+) -> Result<(), RunnerError> {
+    if spec.schema.0 != "autopilot.agent_run_spec.v5"
+        || spec.admission_mode != AdmissionMode::ReceiptV1
+        || spec.action_id != binding.action_id
+        || spec.assignment_id != binding.assignment_id
+        || spec.run_id != binding.run_id
+        || spec.run_revision != binding.run_revision
+        || spec.workstream != binding.workstream
+        || spec.role_id != binding.role_id
+        || spec.mode != binding.mode
+        || spec.boundary_id != binding.boundary_id
+        || spec.result_contract != binding.result_contract
+        || spec.spec_path.0 != binding.spec_path
+        || spec.carrier_path.0 != binding.carrier_path
+        || spec.terminal_profile_id.as_deref() != Some(binding.profile_id.as_str())
+    {
+        return Err(RunnerError::InvalidSpec(
+            "receipt_v1 binding/spec identity drift".to_owned(),
+        ));
+    }
+    let profile = terminal_profile_for(
+        &binding.role_id.0,
+        &binding.boundary_id.0,
+        &binding.result_contract.0,
+    )?;
+    if profile.0 != binding.profile_id
+        || profile.1 != binding.tool_name.0
+        || profile.4 != binding.schema_digest
+        || spec.child_control_socket_path.0.is_empty()
+        || !is_sha256_hex(&spec.child_control_token_digest.0)
+        || !constant_time_hex_digest_matches(
+            &spec.child_control_token,
+            &spec.child_control_token_digest.0,
+        )
+    {
+        return Err(RunnerError::InvalidSpec(
+            "receipt_v1 profile or control authority drift".to_owned(),
+        ));
+    }
+    if spec.child_control_token_digest.0 != binding.run_capability_digest {
+        return Err(RunnerError::InvalidSpec(
+            "receipt_v1 capability digest binding drift".to_owned(),
+        ));
+    }
+    let facade = project_v5_spec_for_shared_admission(spec);
+    let binding_digest = child::carrier_binding(&facade);
+    if binding_digest != binding.carrier_binding_digest {
+        return Err(RunnerError::InvalidSpec(
+            "receipt_v1 carrier binding digest drift".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn constant_time_hex_digest_matches(value: &str, expected: &str) -> bool {
+    if !is_sha256_hex(expected) {
+        return false;
+    }
+    let actual = sha256_hex(value.as_bytes());
+    let mut diff = 0_u8;
+    for (left, right) in actual.bytes().zip(expected.bytes()) {
+        diff |= left ^ right;
+    }
+    diff == 0
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 fn action_from_doc(
