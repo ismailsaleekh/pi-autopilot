@@ -37,6 +37,7 @@ export type ValidationScope = string;
 
 export type ActionKind = "launch-background" | "reconcile-background" | "read-failure-log" | "stop-background" | "request-operator" | "return-idle";
 export type AdmissionMode = "receipt_v1" | "replay_v0";
+export type ApprovedCommandExecutionOutcome = "succeeded" | "failed";
 export type ArchiveEntryClass = "receipt" | "protected-evidence" | "background-reference" | "cleanup-receipt" | "watchdog-receipt" | "plan" | "finalization";
 export type AttemptAttribute = "interrupted" | "checkpointed" | "superseded";
 export type AttestedActionKind = "launch-attested-pi" | "reconcile-attested-pi";
@@ -54,6 +55,7 @@ export type ContextAnchorForm = "task" | "plan" | "dossier" | "run" | "version-c
 export type CriterionVerdict = "PASS" | "FAIL" | "BLOCKED";
 export type DeliveryBlockerClass = "semantic-repairable" | "requires-new-authority" | "infrastructure" | "unsafe";
 export type DeliveryOutcome = "succeeded" | "blocked";
+export type DeliveryPolicyDenialKind = "unapproved-command" | "cwd-mismatch" | "malformed-mutation" | "unapproved-mutation-path" | "unapproved-parent-directory" | "outside-worktree" | "reserved-path" | "topology-refusal";
 export type EvidenceContentKind = "prompt" | "assignment" | "action" | "producer-binding" | "report" | "producer-sidecar" | "acceptance-receipt" | "failure-receipt" | "supersession-receipt" | "transcript" | "envelope-manifest";
 export type EvidenceErrorCode = "EVIDENCE_PRODUCER_UNAVAILABLE" | "EVIDENCE_ASSIGNMENT_CONFLICT" | "EVIDENCE_ACTION_NOT_ISSUED" | "EVIDENCE_ACTION_EXPIRED" | "EVIDENCE_ACTION_SUPERSEDED" | "EVIDENCE_TASK_BINDING_CONFLICT" | "EVIDENCE_TERMINAL_NOT_COMPLETED" | "EVIDENCE_SOURCE_PATH_INVALID" | "EVIDENCE_SOURCE_MISSING" | "EVIDENCE_SOURCE_NOT_REGULAR" | "EVIDENCE_SOURCE_SYMLINK" | "EVIDENCE_SCHEMA_UNSUPPORTED" | "EVIDENCE_PROSE_NOT_CONTRACT" | "EVIDENCE_HASH_MISMATCH" | "EVIDENCE_PRODUCER_REQUEST_MISMATCH" | "EVIDENCE_PROVIDER_MISMATCH" | "EVIDENCE_MODEL_MISMATCH" | "EVIDENCE_CHANNEL_FORBIDDEN" | "EVIDENCE_METERED_USAGE_OBSERVED" | "EVIDENCE_SESSION_CONFLICT" | "EVIDENCE_IDEMPOTENCY_CONFLICT" | "EVIDENCE_SUBJECT_STALE" | "EVIDENCE_BOUNDARY_REJECTED" | "EVIDENCE_SUPERSESSION_INVALID" | "EVIDENCE_EVENT_LOG_CORRUPT" | "EVIDENCE_STORE_IO" | "EVIDENCE_ENVELOPE_OPEN" | "EVIDENCE_ENVELOPE_MEMBER_MISMATCH" | "EVIDENCE_UNDECLARED_INPUT";
 export type EvidenceOrigin = "package" | "ordinary-bg-run" | "external-attested-advisory";
@@ -259,6 +261,21 @@ export interface AllocationLaneProposal {
   focused_tests: TestId[];
   launch_wave: number;
   continue_existing_logical_lane?: boolean | null;
+}
+
+export interface ApprovedCommandExecution {
+  execution_id: string;
+  command_id: Id;
+  command_digest: Digest;
+  outcome: ApprovedCommandExecutionOutcome;
+  result_digest: Digest;
+  scope_snapshot_digest: Digest;
+}
+
+export interface ApprovedCommandExecutionLedger {
+  schema: SchemaId;
+  overflowed: boolean;
+  entries: ApprovedCommandExecution[];
 }
 
 export interface ArchivePublication {
@@ -610,6 +627,7 @@ export interface ChildControlRequest {
   tool_name: ToolName;
   profile_id: string;
   raw_payload: unknown;
+  runtime_evidence: ChildControlRuntimeEvidence;
 }
 
 export type ChildControlResponse =
@@ -626,6 +644,12 @@ export type ChildControlResponse =
       diagnostic: SubmitDiagnostic;
   }
 ;
+
+export interface ChildControlRuntimeEvidence {
+  schema: SchemaId;
+  delivery_policy_denials: DeliveryPolicyDenialLedger | null;
+  approved_command_executions: ApprovedCommandExecutionLedger | null;
+}
 
 export interface CloseArchiveManifest {
   schema_version: SchemaId;
@@ -810,6 +834,20 @@ export type DeferredHostEffectV1 =
       payload: CoreToHostSpawnWavePayload;
   }
 ;
+
+export interface DeliveryPolicyDenial {
+  denial_id: string;
+  kind: DeliveryPolicyDenialKind;
+  tool: string;
+  request_digest: Digest;
+  effected: boolean;
+}
+
+export interface DeliveryPolicyDenialLedger {
+  schema: SchemaId;
+  overflowed: boolean;
+  entries: DeliveryPolicyDenial[];
+}
 
 export interface DeliveryResult {
   assignment_id: Id;

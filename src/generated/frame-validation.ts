@@ -22,6 +22,10 @@ const FRAME_VALIDATION_DESCRIPTORS = {
       "receipt_v1",
       "replay_v0"
     ],
+    "approved-command-execution-outcome": [
+      "succeeded",
+      "failed"
+    ],
     "archive_entry_class": [
       "receipt",
       "protected-evidence",
@@ -119,6 +123,16 @@ const FRAME_VALIDATION_DESCRIPTORS = {
     "delivery-outcome": [
       "succeeded",
       "blocked"
+    ],
+    "delivery-policy-denial-kind": [
+      "unapproved-command",
+      "cwd-mismatch",
+      "malformed-mutation",
+      "unapproved-mutation-path",
+      "unapproved-parent-directory",
+      "outside-worktree",
+      "reserved-path",
+      "topology-refusal"
     ],
     "evidence_content_kind": [
       "prompt",

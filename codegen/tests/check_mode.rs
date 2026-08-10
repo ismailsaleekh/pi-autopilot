@@ -396,6 +396,80 @@ fn require_explicit_null_is_limited_to_required_nullable_fields() {
 }
 
 #[test]
+fn child_control_runtime_evidence_is_closed_and_separate_from_raw_payload() {
+    let temp = fixture();
+    codegen_command()
+        .current_dir(temp.path())
+        .assert()
+        .success();
+    let rust = fs::read_to_string(temp.path().join("kernel/src/generated/mod.rs"))
+        .expect("read generated Rust contracts");
+    for type_name in [
+        "ApprovedCommandExecution",
+        "ApprovedCommandExecutionLedger",
+        "ChildControlRuntimeEvidence",
+        "DeliveryPolicyDenial",
+        "DeliveryPolicyDenialLedger",
+    ] {
+        assert!(
+            rust.contains(&format!(
+                "#[serde(deny_unknown_fields)]\npub struct {type_name} {{"
+            )),
+            "{type_name} must remain closed"
+        );
+    }
+    assert!(rust.contains(
+        "pub enum DeliveryPolicyDenialKind {\n    #[serde(rename = \"cwd-mismatch\")]\n    CwdMismatch,"
+    ));
+    assert!(rust.contains(
+        "#[serde(rename = \"unapproved-command\")]\n    UnapprovedCommand,"
+    ));
+    assert!(rust.contains(
+        "pub enum ApprovedCommandExecutionOutcome {\n    #[serde(rename = \"failed\")]\n    Failed,\n    #[serde(rename = \"succeeded\")]\n    Succeeded,"
+    ));
+    assert!(rust.contains(
+        "pub struct DeliveryPolicyDenialLedger {\n    #[serde(rename = \"schema\")]\n    pub schema: SchemaId,\n    #[serde(rename = \"overflowed\")]\n    pub overflowed: bool,\n    #[serde(rename = \"entries\")]\n    pub entries: Vec<DeliveryPolicyDenial>,"
+    ));
+    assert!(rust.contains(
+        "pub struct ApprovedCommandExecutionLedger {\n    #[serde(rename = \"schema\")]\n    pub schema: SchemaId,\n    #[serde(rename = \"overflowed\")]\n    pub overflowed: bool,\n    #[serde(rename = \"entries\")]\n    pub entries: Vec<ApprovedCommandExecution>,"
+    ));
+    assert!(rust.contains(
+        "pub struct ChildControlRuntimeEvidence {\n    #[serde(rename = \"schema\")]\n    pub schema: SchemaId,\n    #[serde(rename = \"delivery_policy_denials\")]\n    #[serde(deserialize_with = \"deserialize_required_nullable\")]\n    pub delivery_policy_denials: Nullable<DeliveryPolicyDenialLedger>,\n    #[serde(rename = \"approved_command_executions\")]\n    #[serde(deserialize_with = \"deserialize_required_nullable\")]\n    pub approved_command_executions: Nullable<ApprovedCommandExecutionLedger>,"
+    ));
+    assert!(rust.contains(
+        "#[serde(rename = \"raw_payload\")]\n    pub raw_payload: serde_json::Value,\n    #[serde(rename = \"runtime_evidence\")]\n    pub runtime_evidence: ChildControlRuntimeEvidence,"
+    ));
+
+    let typescript = fs::read_to_string(temp.path().join("src/generated/index.ts"))
+        .expect("read generated TypeScript contracts");
+    assert!(typescript.contains(
+        "export type DeliveryPolicyDenialKind = \"unapproved-command\" | \"cwd-mismatch\" | \"malformed-mutation\" | \"unapproved-mutation-path\" | \"unapproved-parent-directory\" | \"outside-worktree\" | \"reserved-path\" | \"topology-refusal\";"
+    ));
+    assert!(typescript.contains(
+        "export type ApprovedCommandExecutionOutcome = \"succeeded\" | \"failed\";"
+    ));
+    assert!(typescript.contains(
+        "export interface ChildControlRuntimeEvidence {\n  schema: SchemaId;\n  delivery_policy_denials: DeliveryPolicyDenialLedger | null;\n  approved_command_executions: ApprovedCommandExecutionLedger | null;\n}"
+    ));
+    assert!(typescript.contains(
+        "  raw_payload: unknown;\n  runtime_evidence: ChildControlRuntimeEvidence;"
+    ));
+
+    let contracts = fs::read_to_string(temp.path().join("data/contracts.kdl"))
+        .expect("read contract authority");
+    for constant in [
+        "autopilot.delivery_policy_denials.v2",
+        "autopilot.approved_command_executions.v1",
+        "autopilot.child_control_runtime_evidence.v1",
+    ] {
+        assert!(
+            contracts.contains(&format!("constant=\"{constant}\"")),
+            "missing closed schema constant {constant}"
+        );
+    }
+}
+
+#[test]
 fn min_bytes_emits_closed_blocked_tool_bounds_and_rejects_inversion() {
     let temp = fixture();
     codegen_command()

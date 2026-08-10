@@ -168,6 +168,15 @@ pub enum AdmissionMode {
     ReplayV0,
 }
 
+/// Closed runtime-owned approved-command execution outcome.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ApprovedCommandExecutionOutcome {
+    #[serde(rename = "failed")]
+    Failed,
+    #[serde(rename = "succeeded")]
+    Succeeded,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ArchiveEntryClass {
     #[serde(rename = "background-reference")]
@@ -370,6 +379,27 @@ pub enum DeliveryOutcome {
     Blocked,
     #[serde(rename = "succeeded")]
     Succeeded,
+}
+
+/// Closed runtime-owned delivery-policy denial kind.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeliveryPolicyDenialKind {
+    #[serde(rename = "cwd-mismatch")]
+    CwdMismatch,
+    #[serde(rename = "malformed-mutation")]
+    MalformedMutation,
+    #[serde(rename = "outside-worktree")]
+    OutsideWorktree,
+    #[serde(rename = "reserved-path")]
+    ReservedPath,
+    #[serde(rename = "topology-refusal")]
+    TopologyRefusal,
+    #[serde(rename = "unapproved-command")]
+    UnapprovedCommand,
+    #[serde(rename = "unapproved-mutation-path")]
+    UnapprovedMutationPath,
+    #[serde(rename = "unapproved-parent-directory")]
+    UnapprovedParentDirectory,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1281,6 +1311,36 @@ pub struct AllocationLaneProposal {
     pub continue_existing_logical_lane: Option<bool>,
 }
 
+/// Closed runtime-owned approved-command execution observation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovedCommandExecution {
+    #[serde(rename = "execution_id")]
+    pub execution_id: String,
+    #[serde(rename = "command_id")]
+    pub command_id: Id,
+    #[serde(rename = "command_digest")]
+    pub command_digest: Digest,
+    #[serde(rename = "outcome")]
+    pub outcome: ApprovedCommandExecutionOutcome,
+    #[serde(rename = "result_digest")]
+    pub result_digest: Digest,
+    #[serde(rename = "scope_snapshot_digest")]
+    pub scope_snapshot_digest: Digest,
+}
+
+/// Closed runtime-owned approved-command execution ledger carried only through child-control runtime evidence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovedCommandExecutionLedger {
+    #[serde(rename = "schema")]
+    pub schema: SchemaId,
+    #[serde(rename = "overflowed")]
+    pub overflowed: bool,
+    #[serde(rename = "entries")]
+    pub entries: Vec<ApprovedCommandExecution>,
+}
+
 /// Create-once publication marker that makes a close archive visible.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1976,7 +2036,7 @@ pub struct ChildControlBlockedCancellation {
     pub reporter: bool,
 }
 
-/// Closed child-to-Core control request. Raw payload is transported as the pre-schema JSON tree without TypeScript coercion, defaults, or semantic admission.
+/// Closed child-to-Core control request. Raw payload is transported as the pre-schema JSON tree without TypeScript coercion, defaults, or semantic admission; runtime evidence is a separate closed runtime-owned carrier.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChildControlRequest {
@@ -2002,6 +2062,8 @@ pub struct ChildControlRequest {
     pub profile_id: String,
     #[serde(rename = "raw_payload")]
     pub raw_payload: serde_json::Value,
+    #[serde(rename = "runtime_evidence")]
+    pub runtime_evidence: ChildControlRuntimeEvidence,
 }
 
 /// Closed child-control response. ACCEPT carries exactly one typed receipt; RETRY carries exactly one complete diagnostic.
@@ -2026,6 +2088,20 @@ pub enum ChildControlResponse {
         #[serde(rename = "diagnostic")]
         diagnostic: SubmitDiagnostic,
     },
+}
+
+/// Closed runtime-owned pre-ACCEPT evidence carried beside raw_payload, never merged into it. Delivery supplies both ledgers; every other profile supplies this same object with both fields explicitly null.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChildControlRuntimeEvidence {
+    #[serde(rename = "schema")]
+    pub schema: SchemaId,
+    #[serde(rename = "delivery_policy_denials")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub delivery_policy_denials: Nullable<DeliveryPolicyDenialLedger>,
+    #[serde(rename = "approved_command_executions")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub approved_command_executions: Nullable<ApprovedCommandExecutionLedger>,
 }
 
 /// Create-once close archive manifest excluding close receipt/publication to avoid digest cycles.
@@ -2403,6 +2479,34 @@ pub enum DeferredHostEffectV1 {
         #[serde(rename = "payload")]
         payload: CoreToHostSpawnWavePayload,
     },
+}
+
+/// Closed runtime-owned pre-effect delivery-policy denial observation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeliveryPolicyDenial {
+    #[serde(rename = "denial_id")]
+    pub denial_id: String,
+    #[serde(rename = "kind")]
+    pub kind: DeliveryPolicyDenialKind,
+    #[serde(rename = "tool")]
+    pub tool: String,
+    #[serde(rename = "request_digest")]
+    pub request_digest: Digest,
+    #[serde(rename = "effected")]
+    pub effected: bool,
+}
+
+/// Closed runtime-owned delivery-policy denial ledger carried only through child-control runtime evidence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeliveryPolicyDenialLedger {
+    #[serde(rename = "schema")]
+    pub schema: SchemaId,
+    #[serde(rename = "overflowed")]
+    pub overflowed: bool,
+    #[serde(rename = "entries")]
+    pub entries: Vec<DeliveryPolicyDenial>,
 }
 
 /// Implementer/Fixer terminal delivery carrier pending package acceptance (D76 §8.2).

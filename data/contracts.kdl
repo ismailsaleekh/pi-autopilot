@@ -1370,8 +1370,48 @@ artifact "child_control_blocked_gate" schema="autopilot.child_control_blocked_ga
     }
 }
 
+artifact "approved_command_execution" schema="autopilot.approved_command_execution.v1" producer="Package" model_produced=#false {
+    doc "Closed runtime-owned approved-command execution observation."
+    field "execution_id" type="string" required=#true
+    field "command_id" type="id" required=#true
+    field "command_digest" type="digest" required=#true
+    field "outcome" type="approved-command-execution-outcome" required=#true
+    field "result_digest" type="digest" required=#true
+    field "scope_snapshot_digest" type="digest" required=#true
+}
+
+artifact "approved_command_execution_ledger" schema="autopilot.approved_command_executions.v1" producer="Package" model_produced=#false {
+    doc "Closed runtime-owned approved-command execution ledger carried only through child-control runtime evidence."
+    field "schema" type="schema-id" required=#true constant="autopilot.approved_command_executions.v1"
+    field "overflowed" type="bool" required=#true
+    list "entries" item="approved_command_execution" required=#true
+}
+
+artifact "delivery_policy_denial" schema="autopilot.delivery_policy_denial.v2" producer="Package" model_produced=#false {
+    doc "Closed runtime-owned pre-effect delivery-policy denial observation."
+    field "denial_id" type="string" required=#true
+    field "kind" type="delivery-policy-denial-kind" required=#true
+    field "tool" type="string" required=#true
+    field "request_digest" type="digest" required=#true
+    field "effected" type="bool" required=#true
+}
+
+artifact "delivery_policy_denial_ledger" schema="autopilot.delivery_policy_denials.v2" producer="Package" model_produced=#false {
+    doc "Closed runtime-owned delivery-policy denial ledger carried only through child-control runtime evidence."
+    field "schema" type="schema-id" required=#true constant="autopilot.delivery_policy_denials.v2"
+    field "overflowed" type="bool" required=#true
+    list "entries" item="delivery_policy_denial" required=#true
+}
+
+artifact "child_control_runtime_evidence" schema="autopilot.child_control_runtime_evidence.v1" producer="Package" model_produced=#false {
+    doc "Closed runtime-owned pre-ACCEPT evidence carried beside raw_payload, never merged into it. Delivery supplies both ledgers; every other profile supplies this same object with both fields explicitly null."
+    field "schema" type="schema-id" required=#true constant="autopilot.child_control_runtime_evidence.v1"
+    field "delivery_policy_denials" type="delivery_policy_denial_ledger" required=#true nullable=#true require_explicit_null=#true
+    field "approved_command_executions" type="approved_command_execution_ledger" required=#true nullable=#true require_explicit_null=#true
+}
+
 artifact "child_control_request" schema="autopilot.child_control_request.v1" producer="Host" model_produced=#false {
-    doc "Closed child-to-Core control request. Raw payload is transported as the pre-schema JSON tree without TypeScript coercion, defaults, or semantic admission."
+    doc "Closed child-to-Core control request. Raw payload is transported as the pre-schema JSON tree without TypeScript coercion, defaults, or semantic admission; runtime evidence is a separate closed runtime-owned carrier."
     field "schema" type="schema-id" required=#true constant="autopilot.child_control_request.v1"
     field "request_id" type="id" required=#true
     field "token" type="string" required=#true
@@ -1383,6 +1423,7 @@ artifact "child_control_request" schema="autopilot.child_control_request.v1" pro
     field "tool_name" type="tool-name" required=#true
     field "profile_id" type="string" required=#true
     field "raw_payload" type="json-value" required=#true
+    field "runtime_evidence" type="child_control_runtime_evidence" required=#true
 }
 
 artifact "child_control_accept_receipt" schema="autopilot.child_control_accept_receipt.v1" producer="Package" model_produced=#false union_tag="kind" {
@@ -2202,9 +2243,27 @@ enum "admission-mode" {
     value "replay_v0"
 }
 
+enum "approved-command-execution-outcome" {
+    doc "Closed runtime-owned approved-command execution outcome."
+    value "succeeded"
+    value "failed"
+}
+
 enum "child-control-request-kind" {
     value "submit"
     value "blocked"
+}
+
+enum "delivery-policy-denial-kind" {
+    doc "Closed runtime-owned delivery-policy denial kind."
+    value "unapproved-command"
+    value "cwd-mismatch"
+    value "malformed-mutation"
+    value "unapproved-mutation-path"
+    value "unapproved-parent-directory"
+    value "outside-worktree"
+    value "reserved-path"
+    value "topology-refusal"
 }
 
 enum "child-control-outcome" {

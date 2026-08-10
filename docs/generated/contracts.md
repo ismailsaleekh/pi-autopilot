@@ -63,7 +63,12 @@ Sources: `data/contracts.kdl`.
 | validation_admission_diagnostic | autopilot.validation_admission_diagnostic.v1 | Package | false | Complete deterministic v3 validation admission diagnostic. Authority corruption is fatal; model shape and semantic-value mismatches are repaired together. Large value lists and excess rows are represented by deterministic count/digest summaries inside the generated repair-prompt byte ceiling without reclassifying model input as fatal; mismatch_count retains the complete pre-summary count. |
 | validation_result_v3 | autopilot.validation_result.v3 | Package | false | Package-bound v3 Validator result preserving canonical admitted model semantics, exact authority binding, and Core-normalized verdict bytes. Raw tool arguments remain in the Pi session and attempt evidence rather than influencing carrier bytes. |
 | child_control_blocked_gate | autopilot.child_control_blocked_gate.v1 | Package | false | Host-only directive carried beside an accepted blocked response. The broker closes this run's launch gate before returning the child-visible response and kills only the listed owned tasks, with the reporter last. |
-| child_control_request | autopilot.child_control_request.v1 | Host | false | Closed child-to-Core control request. Raw payload is transported as the pre-schema JSON tree without TypeScript coercion, defaults, or semantic admission. |
+| approved_command_execution | autopilot.approved_command_execution.v1 | Package | false | Closed runtime-owned approved-command execution observation. |
+| approved_command_execution_ledger | autopilot.approved_command_executions.v1 | Package | false | Closed runtime-owned approved-command execution ledger carried only through child-control runtime evidence. |
+| delivery_policy_denial | autopilot.delivery_policy_denial.v2 | Package | false | Closed runtime-owned pre-effect delivery-policy denial observation. |
+| delivery_policy_denial_ledger | autopilot.delivery_policy_denials.v2 | Package | false | Closed runtime-owned delivery-policy denial ledger carried only through child-control runtime evidence. |
+| child_control_runtime_evidence | autopilot.child_control_runtime_evidence.v1 | Package | false | Closed runtime-owned pre-ACCEPT evidence carried beside raw_payload, never merged into it. Delivery supplies both ledgers; every other profile supplies this same object with both fields explicitly null. |
+| child_control_request | autopilot.child_control_request.v1 | Host | false | Closed child-to-Core control request. Raw payload is transported as the pre-schema JSON tree without TypeScript coercion, defaults, or semantic admission; runtime evidence is a separate closed runtime-owned carrier. |
 | child_control_accept_receipt | autopilot.child_control_accept_receipt.v1 | Package | false | Typed receipt envelope returned only for an accepted child-control request. |
 | child_control_response | autopilot.child_control_response.v1 | Package | false | Closed child-control response. ACCEPT carries exactly one typed receipt; RETRY carries exactly one complete diagnostic. |
 | submit_diagnostic | autopilot.submit_diagnostic.v1 | Package | false | Complete canonical submit RETRY diagnostic. Rows are sorted by pointer UTF-8 bytes, code, expected, and actual.sha256; error_count is the complete pre-summary count. |
@@ -1091,6 +1096,26 @@ Sources: `data/contracts.kdl`.
 | child_control_blocked_gate | list | cancellations | child_control_blocked_cancellation | true |  |  |
 | child_control_blocked_gate | field | child_control_blocked_cancellation.task_id | id | true |  |  |
 | child_control_blocked_gate | field | child_control_blocked_cancellation.reporter | bool | true |  |  |
+| approved_command_execution | field | execution_id | string | true |  |  |
+| approved_command_execution | field | command_id | id | true |  |  |
+| approved_command_execution | field | command_digest | digest | true |  |  |
+| approved_command_execution | field | outcome | approved-command-execution-outcome | true |  |  |
+| approved_command_execution | field | result_digest | digest | true |  |  |
+| approved_command_execution | field | scope_snapshot_digest | digest | true |  |  |
+| approved_command_execution_ledger | field | schema | schema-id | true |  |  |
+| approved_command_execution_ledger | field | overflowed | bool | true |  |  |
+| approved_command_execution_ledger | list | entries | approved_command_execution | true |  |  |
+| delivery_policy_denial | field | denial_id | string | true |  |  |
+| delivery_policy_denial | field | kind | delivery-policy-denial-kind | true |  |  |
+| delivery_policy_denial | field | tool | string | true |  |  |
+| delivery_policy_denial | field | request_digest | digest | true |  |  |
+| delivery_policy_denial | field | effected | bool | true |  |  |
+| delivery_policy_denial_ledger | field | schema | schema-id | true |  |  |
+| delivery_policy_denial_ledger | field | overflowed | bool | true |  |  |
+| delivery_policy_denial_ledger | list | entries | delivery_policy_denial | true |  |  |
+| child_control_runtime_evidence | field | schema | schema-id | true |  |  |
+| child_control_runtime_evidence | field | delivery_policy_denials | delivery_policy_denial_ledger | true | true |  |
+| child_control_runtime_evidence | field | approved_command_executions | approved_command_execution_ledger | true | true |  |
 | child_control_request | field | schema | schema-id | true |  |  |
 | child_control_request | field | request_id | id | true |  |  |
 | child_control_request | field | token | string | true |  |  |
@@ -1102,6 +1127,7 @@ Sources: `data/contracts.kdl`.
 | child_control_request | field | tool_name | tool-name | true |  |  |
 | child_control_request | field | profile_id | string | true |  |  |
 | child_control_request | field | raw_payload | json-value | true |  |  |
+| child_control_request | field | runtime_evidence | child_control_runtime_evidence | true |  |  |
 | child_control_accept_receipt | field | submit.schema | schema-id | true |  |  |
 | child_control_accept_receipt | field | submit.receipt | submit_receipt | true |  |  |
 | child_control_accept_receipt | field | blocked.schema | schema-id | true |  |  |
@@ -1448,7 +1474,9 @@ Sources: `data/contracts.kdl`.
 | roster_slot | control, reasoning, extraction, coding, review |
 | context_anchor_form | task, plan, dossier, run, version-control-lines, version-control-whole-file, json |
 | admission-mode | receipt_v1, replay_v0 |
+| approved-command-execution-outcome | succeeded, failed |
 | child-control-request-kind | submit, blocked |
+| delivery-policy-denial-kind | unapproved-command, cwd-mismatch, malformed-mutation, unapproved-mutation-path, unapproved-parent-directory, outside-worktree, reserved-path, topology-refusal |
 | child-control-outcome | ACCEPT, RETRY |
 | blocked-result-observed-ack-status | acknowledged |
 | blocked-reason-code | missing-authority, external-dependency, infrastructure, unsafe-to-continue |
