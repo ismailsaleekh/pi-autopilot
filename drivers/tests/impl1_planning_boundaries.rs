@@ -89,10 +89,11 @@ fn runner_child_rejects_atom_outside_runner_namespace() {
         !Path::new(&issue.binding.carrier_path).exists(),
         "rejected output must not create carrier"
     );
-    let attempts = fixture.read_attempt_events(&issue.binding);
+    // Receipt V1 has no child-owned repair loop or attempt ledger. The
+    // generated bridge returns RETRY to the same live Host session instead.
     assert!(
-        has_attempt_event(&attempts, "value-rejected"),
-        "attempt events must record value rejection: {attempts:?}"
+        !fixture.attempt_event_path(&issue.binding).exists(),
+        "fresh rejection must not create a child-owned attempt ledger"
     );
 }
 
@@ -110,20 +111,19 @@ fn runner_child_repairs_unknown_links_from_bound_atom_registry() {
     let issue = fixture.issue_legacy_work_map_v1(registry_path, registry_digest);
     assert_eq!(issue.binding.boundary_id.0, "planning.work-map.v1");
 
-    drivers::runner::child::main(&["--spec".to_owned(), issue.binding.spec_path.clone()]).unwrap();
-
-    let attempts = fixture.read_attempt_events(&issue.binding);
     assert!(
-        has_attempt_event(&attempts, "value-rejected"),
-        "unknown links must be rejected first: {attempts:?}"
+        drivers::runner::child::main(&["--spec".to_owned(), issue.binding.spec_path.clone()])
+            .is_err(),
+        "fresh V5 values are retried only through ChildControl, never a child-owned repair loop"
     );
     assert!(
-        has_attempt_event(&attempts, "accepted"),
-        "second model value must be accepted: {attempts:?}"
+        !Path::new(&issue.binding.carrier_path).exists(),
+        "a RETRY must not persist a carrier"
     );
-    let raw_output = carrier_raw_output(&issue.binding);
-    let accepted: serde_json::Value = serde_json::from_str(&raw_output).unwrap();
-    assert_eq!(accepted["units"][0]["links"], json!(["TE01-W-001"]));
+    assert!(
+        !fixture.attempt_event_path(&issue.binding).exists(),
+        "fresh V5 must not persist value-attempt state"
+    );
 }
 
 #[test]
@@ -671,21 +671,26 @@ fn real_initial_and_repair_prompts_reuse_identical_manifest_json_bytes() {
     let initial_rendered_prompt =
         fs::read_to_string(&issue.binding.prompt_path).expect("initial rendered prompt");
 
-    drivers::runner::child::main(&["--spec".to_owned(), issue.binding.spec_path.clone()])
-        .expect("repair recovers with canonical source");
+    assert!(
+        drivers::runner::child::main(&["--spec".to_owned(), issue.binding.spec_path.clone()])
+            .is_err(),
+        "the fixture has no Host bridge; a V5 RETRY must remain nonpersistent"
+    );
 
     let prompts = user_prompts_from_spec_session(&issue.binding.spec_path);
-    assert_eq!(prompts.len(), 2, "expected initial plus repair prompts");
+    assert_eq!(
+        prompts.len(),
+        1,
+        "fresh V5 sends one initial prompt per child launch"
+    );
     assert_eq!(
         prompts[0], initial_rendered_prompt,
-        "first child prompt must be the real initially rendered prompt"
+        "the child prompt must be the real initially rendered prompt"
     );
     let initial_json = extract_task_source_manifest_json(&prompts[0]);
-    let repair_json = extract_task_source_manifest_json(&prompts[1]);
-    assert_eq!(
-        initial_json.as_bytes(),
-        repair_json.as_bytes(),
-        "real initial rendered prompt and real repair prompt canonical manifest JSON bytes must be identical"
+    assert!(
+        !initial_json.is_empty(),
+        "the initial generated prompt retains its canonical task source manifest"
     );
 }
 
@@ -838,7 +843,7 @@ def emit(value):
 
 
 if "--version" in sys.argv:
-    print("pi 0.84.1")
+    print("0.84.1")
     sys.exit(0)
 
 
@@ -1345,25 +1350,59 @@ else:
         seam::handle_line(&frame.to_string(), state).unwrap()
     }
 
+    /// Fresh issuers are receipt V1 only: submit through generated
+    /// ChildControl, then consume the returned immutable transition.  There is
+    /// intentionally no `agent-result` compatibility adapter here.
     fn agent_response_from_spec(
         &self,
         state: &mut CoreState,
         spec_path: &Path,
         raw: String,
     ) -> SeamEnvelope {
-        let carrier = carrier_value_from_spec(spec_path, &raw);
-        let carrier_path = carrier
-            .get("carrier_path")
-            .and_then(serde_json::Value::as_str)
-            .unwrap();
-        fs::create_dir_all(Path::new(carrier_path).parent().unwrap()).unwrap();
-        fs::write(carrier_path, serde_json::to_vec_pretty(&carrier).unwrap()).unwrap();
-        let assignment_id = carrier
-            .get("assignment_id")
-            .and_then(serde_json::Value::as_str)
-            .unwrap();
-        let frame = json!({"v":1,"id":1,"kind":"agent-result","payload":{"assignment_id":assignment_id,"carrier":carrier}});
-        seam::handle_line(&frame.to_string(), state).unwrap()
+        let spec: kernel::generated::AgentRunSpecV5 =
+            serde_json::from_slice(&fs::read(spec_path).unwrap()).unwrap();
+        let profile_id = spec.terminal_profile_id.clone().unwrap();
+        let tool_name = match spec.boundary_id.0.as_str() {
+            "planning.task-atoms.v1" => "autopilot_submit_atoms",
+            "planning.scout-dossier.v1" => "autopilot_submit_scout_report",
+            "planning.questions.v1" => "autopilot_submit_questions",
+            "planning.work-map.v1" | "planning.work-map.v2"
+                if spec.role_id.0 == "plan-compiler" =>
+            {
+                "autopilot_submit_plan_cluster"
+            }
+            "planning.work-map.v1" | "planning.work-map.v2"
+                if spec.role_id.0 == "plan-synthesizer" =>
+            {
+                "autopilot_submit_synthesis"
+            }
+            "planning.work-map.v1" | "planning.work-map.v2" => "autopilot_emit_status",
+            "planning.plan-review.v1" => "autopilot_submit_review",
+            other => panic!("fixture has no terminal tool for {other}"),
+        };
+        let submit = json!({"v":1,"id":1,"kind":"child-control","payload":{
+            "broker_capability":TEST_BROKER_CAPABILITY,
+            "request":{
+                "schema":"autopilot.child_control_request.v1",
+                "request_id":format!("request-{}", spec.assignment_id.0),
+                "token":spec.child_control_token,
+                "run_id":spec.run_id,
+                "assignment_id":spec.assignment_id,
+                "attempt":spec.attempt.unwrap(),
+                "tool_call_id":format!("tool-{}", spec.assignment_id.0),
+                "kind":"submit",
+                "tool_name":tool_name,
+                "profile_id":profile_id,
+                "raw_payload":serde_json::from_str::<serde_json::Value>(&raw).unwrap(),
+                "runtime_evidence":{"schema":"autopilot.child_control_runtime_evidence.v1","delivery_policy_denials":null,"approved_command_executions":null}
+            }
+        }});
+        let accepted = seam::handle_line(&submit.to_string(), state).unwrap();
+        assert_eq!(
+            accepted.payload["response"]["outcome"], "ACCEPT",
+            "{accepted:?}"
+        );
+        self.task_completed_response_from_ids(state, &spec.action_id, &spec.assignment_id)
     }
 
     fn planning_spec_path(&self, assignment_id: &str) -> PathBuf {
@@ -1395,10 +1434,19 @@ else:
         state: &mut CoreState,
         binding: &runner::IssuedRunnerBinding,
     ) -> SeamEnvelope {
+        self.task_completed_response_from_ids(state, &binding.action_id, &binding.assignment_id)
+    }
+
+    fn task_completed_response_from_ids(
+        &self,
+        state: &mut CoreState,
+        action_id: &Id,
+        assignment_id: &Id,
+    ) -> SeamEnvelope {
         let frame = json!({"v":1,"id":1,"kind":"task-completed","payload":{
-            "task_id":format!("task-{}", binding.action_id.0),
-            "action_id":binding.action_id.0,
-            "assignment_id":binding.assignment_id.0,
+            "task_id":format!("task-{}", action_id.0),
+            "action_id":action_id.0,
+            "assignment_id":assignment_id.0,
             "status":"completed",
         }});
         seam::handle_line(&frame.to_string(), state).unwrap()
@@ -1429,15 +1477,6 @@ else:
         Path::new(cwd)
             .join(".pi/autopilot/runner/attempt-events")
             .join(format!("{assignment_id}.jsonl"))
-    }
-
-    fn read_attempt_events(&self, binding: &runner::IssuedRunnerBinding) -> Vec<serde_json::Value> {
-        let path = self.attempt_event_path(binding);
-        fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("attempt events missing at {}: {error}", path.display()))
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect()
     }
 }
 
@@ -1491,22 +1530,6 @@ fn spawned_assignment_ids(response: &SeamEnvelope) -> Vec<String> {
         .collect()
 }
 
-fn has_attempt_event(events: &[serde_json::Value], event: &str) -> bool {
-    events
-        .iter()
-        .any(|row| row.get("event").and_then(serde_json::Value::as_str) == Some(event))
-}
-
-fn carrier_raw_output(binding: &runner::IssuedRunnerBinding) -> String {
-    let carrier: serde_json::Value =
-        serde_json::from_slice(&fs::read(&binding.carrier_path).unwrap()).unwrap();
-    carrier
-        .get("raw_output")
-        .and_then(serde_json::Value::as_str)
-        .unwrap()
-        .to_owned()
-}
-
 fn carrier_value_from_spec(spec_path: &Path, raw: &str) -> serde_json::Value {
     let spec_bytes = fs::read(spec_path).unwrap();
     let spec: serde_json::Value = serde_json::from_slice(&spec_bytes).unwrap();
@@ -1554,7 +1577,7 @@ fn carrier_value_from_spec(spec_path: &Path, raw: &str) -> serde_json::Value {
     carrier["tool_name"] = json!(route.tool_name.0);
     carrier["tool_schema_digest"] = json!(route.schema_digest.0);
     carrier["carrier_binding"] = json!(runner::child::carrier_binding(&typed_spec));
-    carrier["pi_version"] = json!("pi 0.84.1");
+    carrier["pi_version"] = json!(runner::REQUIRED_PI_VERSION);
     carrier["terminal_route"] = serde_json::to_value(route).unwrap();
     carrier["atom_registry_path"] = spec["atom_registry_path"].clone();
     carrier["atom_registry_digest"] = spec["atom_registry_digest"].clone();

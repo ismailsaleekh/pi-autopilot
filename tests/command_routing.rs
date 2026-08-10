@@ -8,6 +8,7 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::OnceLock,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -431,17 +432,19 @@ fn approved_plan_promotion_uses_digest_bound_subject_not_mutable_projection() {
     );
     let rooted = rows
         .iter()
-        .filter(|row| row.kind.0 == "planning:ready-to-execute")
+        .filter(|row| row.kind.0 == "submit:receipt-consumed")
         .find(|row| {
             row.artifact_refs
                 .iter()
                 .any(|reference| reference.0 == terminal_ref)
+                && row.artifact_refs.iter().any(|reference| {
+                    reference.0 == "planning-transition-kind:planning:ready-to-execute"
+                })
         })
-        .expect("V2 root atomically consumes the review terminal");
+        .expect("V2 receipt projection atomically consumes the review terminal");
     for required in [
         terminal_ref.as_str(),
-        "completion-control:rooted",
-        "module-wired:watchdog",
+        "planning-transition-kind:planning:ready-to-execute",
         planning_result_ref.as_str(),
     ] {
         assert!(
@@ -516,8 +519,13 @@ fn approved_plan_promotion_uses_digest_bound_subject_not_mutable_projection() {
     let canonical_root = root_ref.0.clone();
     let ready_index = rows
         .iter()
-        .position(|row| row.kind.0 == "planning:ready-to-execute")
-        .expect("ready root row");
+        .position(|row| {
+            row.kind.0 == "submit:receipt-consumed"
+                && row.artifact_refs.iter().any(|reference| {
+                    reference.0 == "planning-transition-kind:planning:ready-to-execute"
+                })
+        })
+        .expect("receipt-projected ready root row");
     let reject_variant = |label: &str, variant: Vec<EventRow>, expected: &str| {
         let path = root.join(format!("{label}-events.jsonl"));
         fs::write(
@@ -616,22 +624,29 @@ fn approved_plan_promotion_uses_digest_bound_subject_not_mutable_projection() {
     );
 
     let retry_log = root.join("retry-events.jsonl");
+    let is_receipt_ready = |row: &EventRow| {
+        row.kind.0 == "submit:receipt-consumed"
+            && row.artifact_refs.iter().any(|reference| {
+                reference.0 == "planning-transition-kind:planning:ready-to-execute"
+            })
+    };
     assert!(
         !rows
             .iter()
-            .filter(|row| row.kind.0 != "planning:ready-to-execute")
+            .filter(|row| !is_receipt_ready(row))
             .any(|row| row
                 .artifact_refs
                 .iter()
                 .any(|reference| reference.0 == terminal_ref)),
-        "no terminal-consumed fact may survive without the canonical V2 root"
+        "no terminal-consumed fact may survive without the canonical V2 receipt root"
     );
-    let pre_root = rows
-        .iter()
-        .filter(|row| row.kind.0 != "planning:ready-to-execute")
-        .map(serde_json::to_string)
-        .collect::<Result<Vec<_>, _>>()
-        .expect("serialize pre-root events")
+    let pre_root = fs::read_to_string(&event_log)
+        .expect("event bytes")
+        .lines()
+        .zip(rows.iter())
+        .filter(|(_, row)| !is_receipt_ready(row))
+        .map(|(line, _)| line.to_owned())
+        .collect::<Vec<_>>()
         .join("\n");
     fs::write(&retry_log, format!("{pre_root}\n")).expect("write pre-root event log");
     let retried = send_planning_completion(&spawn_payload, &retry_log, &repo, 950);
@@ -646,10 +661,15 @@ fn approved_plan_promotion_uses_digest_bound_subject_not_mutable_projection() {
     assert_eq!(
         retry_rows
             .iter()
-            .filter(|row| row.kind.0 == "planning:ready-to-execute")
+            .filter(|row| {
+                row.kind.0 == "submit:receipt-consumed"
+                    && row.artifact_refs.iter().any(|reference| {
+                        reference.0 == "planning-transition-kind:planning:ready-to-execute"
+                    })
+            })
             .count(),
         1,
-        "retry must append exactly one root"
+        "retry must append exactly one receipt-projected root"
     );
 }
 
@@ -794,8 +814,17 @@ fn planning_recovery_rejects_drifted_bound_original_carrier() {
         next_id,
         &recovered_work_map(&repo),
     );
+    assert_eq!(rejected.kind, "child-control", "response: {rejected:?}");
+    assert_eq!(
+        rejected.payload["response"]["outcome"], "RETRY",
+        "response: {rejected:?}"
+    );
     assert!(
-        done_status(&rejected).contains("V2 recovery typed subject binding is absent or drifted"),
+        rejected.payload["response"]["diagnostic"]["errors"][0]["actual"]["preview"]
+            .as_str()
+            .is_some_and(
+                |value| value.contains("V2 recovery typed subject binding is absent or drifted")
+            ),
         "response: {rejected:?}"
     );
     assert!(
@@ -856,7 +885,7 @@ fn blocked_second_plan_review_exhausts_semantic_recovery_without_looping() {
         &blocked_raw,
     );
     let status = done_status(&blocked);
-    assert!(status.contains("planning:blocked:"), "{status}");
+    assert!(status.contains("submit:planning-accepted"), "{status}");
     assert!(
         !repo
             .join(".pi/autopilot/main/approved-plan.v2.json")
@@ -867,7 +896,10 @@ fn blocked_second_plan_review_exhausts_semantic_recovery_without_looping() {
         &event_log,
         Some(&repo),
     );
-    assert!(done_status(&replayed).contains("planning:blocked:"));
+    assert!(
+        !done_status(&replayed).contains("planning-main-plan-reviewer-03"),
+        "recovery exhaustion must not allocate a third review"
+    );
     let events = fs::read_to_string(&event_log).expect("events");
     assert!(events.contains("recovery:exhausted"), "{events}");
     assert!(events.contains("semantic-recovery-exhausted"), "{events}");
@@ -918,8 +950,8 @@ fn planning_recovery_requiring_new_authority_fails_closed_without_rereview() {
         &new_authority_recovery_work_map(&repo),
     );
     assert!(
-        done_status(&stopped).contains("planning-recovery-fail-closed:RequiresNewAuthority"),
-        "response: {stopped:?}"
+        done_status(&stopped).contains("submit:planning-accepted"),
+        "the semantically admitted fail-closed recovery is receipt-accepted: {stopped:?}"
     );
     let events = fs::read_to_string(&event_log).expect("events");
     assert!(events.contains("recovery:inadmissible"), "{events}");
@@ -937,7 +969,10 @@ fn planning_recovery_requiring_new_authority_fails_closed_without_rereview() {
         &event_log,
         Some(&repo),
     );
-    assert!(done_status(&replayed).contains("planning:blocked:"));
+    assert!(
+        !done_status(&replayed).contains("planning-main-plan-reviewer-02"),
+        "receipt-projected fail-closed recovery must not launch a rereview"
+    );
 }
 
 #[test]
@@ -976,9 +1011,16 @@ fn planning_recovery_cannot_omit_evidence_or_expand_original_unit_scope() {
     let missing_evidence = v2_carrier_raw(&repo, "planning-main-plan-synthesizer-02");
     let rejected =
         send_planning_completion_with_raw(recovery, &event_log, &repo, next_id, &missing_evidence);
+    assert_eq!(rejected.kind, "child-control", "response: {rejected:?}");
+    assert_eq!(
+        rejected.payload["response"]["outcome"], "RETRY",
+        "response: {rejected:?}"
+    );
     assert!(
-        done_status(&rejected)
-            .contains("recovery subject was supplied but candidate has no recovery evidence"),
+        rejected.payload["response"]["diagnostic"]["errors"][0]["actual"]["preview"]
+            .as_str()
+            .is_some_and(|value| value
+                .contains("recovery subject was supplied but candidate has no recovery evidence")),
         "response: {rejected:?}"
     );
     next_id += 2;
@@ -989,8 +1031,15 @@ fn planning_recovery_cannot_omit_evidence_or_expand_original_unit_scope() {
         next_id,
         &recovered_work_map_with_scope_expansion(&repo),
     );
+    assert_eq!(rejected.kind, "child-control", "response: {rejected:?}");
+    assert_eq!(
+        rejected.payload["response"]["outcome"], "RETRY",
+        "response: {rejected:?}"
+    );
     assert!(
-        done_status(&rejected).contains("recovery changed non-objective V2 authority"),
+        rejected.payload["response"]["diagnostic"]["errors"][0]["actual"]["preview"]
+            .as_str()
+            .is_some_and(|value| value.contains("recovery changed non-objective V2 authority")),
         "response: {rejected:?}"
     );
     assert!(
@@ -1499,85 +1548,54 @@ fn send_planning_completion_inner(
         .join(format!("{assignment_id}.json"));
     let spec_text = fs::read_to_string(&spec_path).expect("planning spec");
     let spec: serde_json::Value = serde_json::from_str(&spec_text).expect("planning spec json");
-    let boundary_id = spec["boundary_id"].as_str().expect("boundary");
+    let boundary_id = spec["boundary_id"].as_str().expect("boundary").to_owned();
     let raw_output = raw_override.unwrap_or_else(|| {
-        common::planning_replay_output(boundary_id, &spec, &spec_path, work_map_override)
+        common::planning_replay_output(&boundary_id, &spec, &spec_path, work_map_override)
     });
-    let carrier_path = cwd
-        .join(".pi/autopilot/main/planning/carriers")
-        .join(format!("{assignment_id}.json"));
-    let carrier = if boundary_id == "planning.work-map.v2" {
-        let typed_spec: kernel::generated::AgentRunSpec =
-            serde_json::from_value(spec.clone()).expect("typed V2 planning spec");
-        let route = spec["terminal_route"].clone();
-        serde_json::json!({
-            "schema":"autopilot.planning_carrier.v2",
-            "action_id":action.action_id.0,
-            "assignment_id":assignment_id,
-            "run_revision":action.run_revision,
-            "workstream":"main",
-            "role_id":spec["role_id"],
-            "mode":spec["mode"],
-            "boundary_id":boundary_id,
-            "result_contract":spec["result_contract"],
-            "prompt_path":spec["prompt_path"],
-            "prompt_digest":spec["prompt_digest"],
-            "boundary_digest":spec["boundary_digest"],
-            "result_contract_digest":spec["result_contract_digest"],
-            "settings_digest":spec["settings_digest"],
-            "context_digest":spec["context_digest"],
-            "skills_digest":spec["skills_digest"],
-            "subscription_digest":spec["subscription_digest"],
-            "runtime_extension_digest":spec["runtime_extension_digest"],
-            "spec_digest":sha256_hex(spec_text.as_bytes()),
-            "spec_path":spec_path,
-            "carrier_path":carrier_path,
-            "carrier_channel":"tool",
-            "tool_name":route["tool_name"],
-            "tool_schema_digest":route["schema_digest"],
-            "carrier_binding":runner::child::carrier_binding(&typed_spec),
-            "pi_version":"pi 0.84.1",
-            "terminal_route":route,
-            "atom_registry_path":spec["atom_registry_path"],
-            "atom_registry_digest":spec["atom_registry_digest"],
-            "raw_output":raw_output
-        })
-    } else {
-        serde_json::json!({
-            "schema":"autopilot.planning_carrier.v1",
-            "action_id":action.action_id.0,
-            "assignment_id":assignment_id,
-            "run_revision":action.run_revision,
-            "workstream":"main",
-            "role_id":spec["role_id"],
-            "mode":spec["mode"],
-            "boundary_id":boundary_id,
-            "result_contract":spec["result_contract"],
-            "prompt_path":spec["prompt_path"],
-            "prompt_digest":spec["prompt_digest"],
-            "boundary_digest":spec["boundary_digest"],
-            "result_contract_digest":spec["result_contract_digest"],
-            "settings_digest":spec["settings_digest"],
-            "context_digest":spec["context_digest"],
-            "skills_digest":spec["skills_digest"],
-            "subscription_digest":spec["subscription_digest"],
-            "spec_digest":sha256_hex(spec_text.as_bytes()),
-            "spec_path":spec_path,
-            "carrier_path":carrier_path,
-            "raw_output":raw_output
-        })
-    };
-    fs::create_dir_all(carrier_path.parent().expect("planning carrier directory"))
-        .expect("planning carrier fixture directory");
-    fs::write(
-        &carrier_path,
-        serde_json::to_vec(&carrier).expect("planning carrier serialize"),
-    )
-    .expect("planning carrier fixture file");
-    let completed = send_frame(
+    let fresh: kernel::generated::AgentRunSpecV5 =
+        serde_json::from_value(spec).expect("fresh V5 planning spec");
+    let tool_name = planning_tool_name(&fresh.role_id.0, &boundary_id);
+    let accepted = send_frame(
         serde_json::json!({
             "v":1,
             "id":id,
+            "kind":"child-control",
+            "payload":{
+                "broker_capability":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "request":{
+                    "schema":"autopilot.child_control_request.v1",
+                    "request_id":format!("request-{}", action.assignment_id.0),
+                    "token":fresh.child_control_token,
+                    "run_id":fresh.run_id,
+                    "assignment_id":fresh.assignment_id,
+                    "attempt":fresh.attempt.expect("V5 planning attempt"),
+                    "tool_call_id":format!("tool-{}", action.assignment_id.0),
+                    "kind":"submit",
+                    "tool_name":tool_name,
+                    "profile_id":fresh.terminal_profile_id.expect("V5 terminal profile"),
+                    "raw_payload":serde_json::from_str::<serde_json::Value>(&raw_output).expect("planning raw JSON"),
+                    "runtime_evidence":{"schema":"autopilot.child_control_runtime_evidence.v1","delivery_policy_denials":null,"approved_command_executions":null}
+                }
+            }
+        }),
+        event_log,
+        Some(&cwd),
+    );
+    assert_eq!(
+        accepted.kind, "child-control",
+        "planning submit response: {accepted:?}"
+    );
+    if accepted.payload["response"]["outcome"] == "RETRY" {
+        return accepted;
+    }
+    assert_eq!(
+        accepted.payload["response"]["outcome"], "ACCEPT",
+        "planning submit response: {accepted:?}"
+    );
+    send_frame(
+        serde_json::json!({
+            "v":1,
+            "id":id + 1,
             "kind":"task-completed",
             "payload":{
                 "task_id":format!("task-{}", action.action_id.0),
@@ -1588,18 +1606,21 @@ fn send_planning_completion_inner(
         }),
         event_log,
         Some(&cwd),
-    );
-    let agent_result = send_frame(
-        serde_json::json!({"v":1,"id":id + 1,"kind":"agent-result","payload":{"assignment_id":assignment_id,"carrier":carrier}}),
-        event_log,
-        Some(&cwd),
-    );
-    assert_eq!(
-        agent_result.kind, "done",
-        "agent-result follow-up response: {:?}",
-        agent_result
-    );
-    completed
+    )
+}
+
+fn planning_tool_name(role_id: &str, boundary_id: &str) -> &'static str {
+    match (role_id, boundary_id) {
+        ("task-extractor", "planning.task-atoms.v1") => "autopilot_submit_atoms",
+        ("repository-scout", "planning.scout-dossier.v1") => "autopilot_submit_scout_report",
+        ("context-curator", "planning.scout-dossier.v1") => "autopilot_submit_context",
+        ("contradiction-resolver", "planning.questions.v1") => "autopilot_submit_questions",
+        ("plan-compiler", "planning.work-map.v2") => "autopilot_submit_plan_cluster",
+        ("plan-synthesizer", "planning.work-map.v2") => "autopilot_submit_synthesis",
+        ("recovery-engineer", "planning.work-map.v2") => "autopilot_emit_status",
+        ("plan-reviewer", "planning.plan-review.v1") => "autopilot_submit_review",
+        _ => panic!("unknown issued planning terminal {role_id}/{boundary_id}"),
+    }
 }
 
 fn one_unit_work_map() -> String {
@@ -1727,6 +1748,7 @@ fn spawn_core(event_log: &Path, cwd: Option<&Path>) -> Child {
 fn spawn_core_env(event_log: &Path, cwd: Option<&Path>, envs: &[(&str, &str)]) -> Child {
     let mut command = Command::new(env!("CARGO_BIN_EXE_autopilot-core"));
     let exe = std::env::current_exe().expect("current exe");
+    let (socket, capability) = test_child_control_transport();
     command
         .env("AUTOPILOT_CORE_EVENT_LOG", event_log)
         .env("AUTOPILOT_NODE_EXECUTABLE", &exe)
@@ -1735,6 +1757,8 @@ fn spawn_core_env(event_log: &Path, cwd: Option<&Path>, envs: &[(&str, &str)]) -
             "AUTOPILOT_CHILD_ADDON_PATH",
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/generated/child-extension.ts"),
         )
+        .env("AUTOPILOT_CHILD_CONTROL_SOCKET_PATH", socket)
+        .env("AUTOPILOT_CHILD_CONTROL_BROKER_CAPABILITY", capability)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -1745,6 +1769,34 @@ fn spawn_core_env(event_log: &Path, cwd: Option<&Path>, envs: &[(&str, &str)]) -
         command.current_dir(path);
     }
     command.spawn().expect("spawn autopilot-core")
+}
+
+#[cfg(unix)]
+fn test_child_control_transport() -> (PathBuf, &'static str) {
+    use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+    static TRANSPORT: OnceLock<(PathBuf, UnixListener)> = OnceLock::new();
+    const CAPABILITY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let (path, _) = TRANSPORT.get_or_init(|| {
+        let root = PathBuf::from("/tmp/.pi-ap");
+        fs::create_dir_all(&root).expect("broker root");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).expect("broker root mode");
+        let dir = root.join("c0a801f00d");
+        if dir.exists() {
+            fs::remove_dir_all(&dir).expect("remove stale broker transport");
+        }
+        fs::create_dir(&dir).expect("broker dir");
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).expect("broker dir mode");
+        let path = dir.join("s");
+        let listener = UnixListener::bind(&path).expect("broker socket");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("broker socket mode");
+        (path, listener)
+    });
+    (path.clone(), CAPABILITY)
+}
+
+#[cfg(not(unix))]
+fn test_child_control_transport() -> (PathBuf, &'static str) {
+    panic!("child-control focused fixture requires Unix")
 }
 
 fn frame_json(id: u64, raw: &str) -> serde_json::Value {

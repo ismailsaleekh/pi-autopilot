@@ -702,6 +702,21 @@ struct IssuedActionReceiptRefV1 {
     binding_sha256: Digest,
 }
 
+/// The receipt transition carries the exact planning event projection as a
+/// separately hashed immutable artifact.  `PreparedSubmitTransitionV1` is a
+/// frozen generated contract, so this closed sidecar keeps the legacy event
+/// facts explicit without smuggling them through loose refs or recreating an
+/// event at completion.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PreparedPlanningTransitionV1 {
+    schema: String,
+    event_kind: String,
+    refs: Vec<Ref>,
+}
+
+const PREPARED_PLANNING_TRANSITION_SCHEMA: &str = "autopilot.prepared_planning_transition.v1";
+
 fn submit_root_for_carrier(carrier_path: &Path) -> Result<PathBuf, String> {
     let carriers = carrier_path
         .parent()
@@ -728,6 +743,67 @@ fn submit_transition_path(binding: &runner::ReceiptV1RunnerBinding) -> Result<Pa
     let mut path = submit_receipt_path(binding)?;
     path.set_extension("transition.json");
     Ok(path)
+}
+
+fn prepared_planning_transition_path(
+    binding: &runner::ReceiptV1RunnerBinding,
+) -> Result<PathBuf, String> {
+    let mut path = submit_receipt_path(binding)?;
+    path.set_extension("planning-transition.json");
+    Ok(path)
+}
+
+fn planning_transition_artifact(
+    binding: &runner::ReceiptV1RunnerBinding,
+    transition: &PreparedPlanningTransitionV1,
+) -> Result<(PathBuf, Vec<u8>), String> {
+    if transition.schema != PREPARED_PLANNING_TRANSITION_SCHEMA
+        || transition.event_kind.trim().is_empty()
+        || transition
+            .refs
+            .iter()
+            .any(|reference| reference.0.is_empty())
+    {
+        return Err("prepared planning transition has malformed semantic facts".to_owned());
+    }
+    let bytes = crate::evidence::canonical_json(transition).map_err(|error| error.to_string())?;
+    Ok((prepared_planning_transition_path(binding)?, bytes))
+}
+
+fn prepared_planning_transition_from_receipt(
+    receipt: &SubmitReceipt,
+) -> Result<PreparedPlanningTransitionV1, String> {
+    let mut matches = receipt
+        .prepared_transition
+        .artifact_refs
+        .iter()
+        .filter(|artifact| artifact.artifact_schema.0 == PREPARED_PLANNING_TRANSITION_SCHEMA)
+        .collect::<Vec<_>>();
+    if matches.len() != 1 {
+        return Err("receipt lacks exactly one prepared planning transition artifact".to_owned());
+    }
+    let artifact = matches.pop().expect("checked exactly one");
+    verify_prepared_artifact(artifact, SUBMIT_RECEIPT_MAX_BYTES)?;
+    let bytes = runner::read_bounded_authority_file(
+        Path::new(&artifact.artifact_ref.0),
+        SUBMIT_RECEIPT_MAX_BYTES,
+    )
+    .map_err(|error| format!("prepared planning transition read: {error}"))?;
+    let transition: PreparedPlanningTransitionV1 = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("prepared planning transition JSON: {error}"))?;
+    let canonical = crate::evidence::canonical_json(&transition)
+        .map_err(|error| format!("prepared planning transition canonical JSON: {error}"))?;
+    if canonical != bytes
+        || transition.schema != PREPARED_PLANNING_TRANSITION_SCHEMA
+        || transition.event_kind.trim().is_empty()
+        || transition
+            .refs
+            .iter()
+            .any(|reference| reference.0.is_empty())
+    {
+        return Err("prepared planning transition semantic authority drift".to_owned());
+    }
+    Ok(transition)
 }
 
 fn read_submit_receipt_at(path: &Path) -> Result<Option<SubmitReceipt>, String> {
@@ -800,7 +876,7 @@ fn commit_staged_planning_submit(
     state: &mut CoreState,
     request: &ChildControlRequest,
     binding: &runner::ReceiptV1RunnerBinding,
-    _facade: &kernel::generated::AgentRunSpec,
+    facade: &kernel::generated::AgentRunSpec,
     raw: &[u8],
     prepared: runner::child::PreparedCarrier,
 ) -> Result<SubmitReceipt, SubmitDiagnostic> {
@@ -826,10 +902,10 @@ fn commit_staged_planning_submit(
     if let Err(error) = validate_planning_binding(&carrier, &legacy) {
         return Err(staging_retry("submit.planning_binding", "", error));
     }
-    if carrier.required_pi_version.as_deref() != Some(runner::REQUIRED_PI_VERSION) {
+    if carrier.pi_version.as_deref() != Some(runner::REQUIRED_PI_VERSION) {
         return Err(staging_retry(
             "submit.pi_version_authority",
-            "/required_pi_version",
+            "/pi_version",
             "the V5 package-bound Pi version is absent or drifted",
         ));
     }
@@ -840,10 +916,14 @@ fn commit_staged_planning_submit(
             "the planning binding is already terminal or consumed",
         ));
     }
-    // An ordinary initial plan may never smuggle recovery evidence. The
-    // pointer is the original JSON member, not a reconstructed dotted path.
+    // This guard is deliberately independent of V1/V2 shape.  Ordinary
+    // compiler/synthesizer work never gains recovery authority merely because
+    // a payload happens to parse as one version of a work map.
     if binding.role_id.0 != "recovery-engineer"
-        && binding.boundary_id.0 == "planning.work-map.v2"
+        && matches!(
+            binding.boundary_id.0.as_str(),
+            "planning.work-map.v1" | "planning.work-map.v2"
+        )
         && serde_json::from_slice::<serde_json::Value>(raw)
             .ok()
             .and_then(|value| value.get("recovery").cloned())
@@ -855,42 +935,47 @@ fn commit_staged_planning_submit(
             "ordinary planning work-map has recovery evidence",
         ));
     }
-    if binding.boundary_id.0 == "planning.work-map.v2" {
-        // The child has already applied the strict model-value admission using
-        // the issued atom registry. Do not persist the staged carrier merely
-        // to run a second disk reader; the V2 disk verifier has an explicit
-        // legacy wrapper and fresh receipt V1 does not fall through to it.
-        return Err(staging_retry(
-            "submit.transition_staging_unavailable",
-            "",
-            "V2 parent transition staging is unavailable: Host-authenticated actual Pi --version observation is not represented until Wave 4",
-        ));
-    }
-    let recovery = validate_recovery_work_map(&carrier, &legacy)
-        .map_err(|error| staging_retry("submit.planning_recovery", "/recovery", error))?;
-    if !matches!(recovery, PlanningRecoveryAdmission::Continue) {
-        return Err(staging_retry(
-            "submit.planning_recovery",
-            "/recovery",
-            "fail-closed recovery disposition cannot be accepted",
-        ));
-    }
-    if binding.boundary_id.0 == "planning.plan-review.v1" {
-        review_approves_execution(&carrier.raw_output)
-            .map_err(|error| staging_retry("submit.plan_review", "/verdicts", error))?;
-        // Promotion requires the separately staged V2 image or V1 plan
-        // artifact. Keeping it unavailable is safer than moving its old
-        // mutating writes before the receipt root.
-        return Err(staging_retry(
-            "submit.transition_staging_unavailable",
-            "",
-            "review promotion staging is not yet available",
-        ));
-    }
 
     let carrier_bytes = crate::evidence::canonical_json(&prepared.carrier).map_err(|error| {
         staging_retry("submit.canonical_json", "/raw_payload", error.to_string())
     })?;
+    let v2_admission = if binding.boundary_id.0 == "planning.work-map.v2" {
+        Some(
+            stage_v2_work_map_admission(state, binding, facade, &carrier_bytes)
+                .map_err(|error| staging_retry("submit.v2_admission", "/raw_payload", error))?,
+        )
+    } else {
+        validate_agent_output(&legacy, &carrier.raw_output).map_err(|error| {
+            staging_retry(
+                "submit.planning_boundary",
+                "/raw_payload",
+                boundary_status(&error),
+            )
+        })?;
+        None
+    };
+    let recovery = match v2_admission.as_ref() {
+        Some(admitted) => match admitted.recovery_disposition() {
+            Some(
+                kernel::generated::RecoveryDisposition::RequiresNewAuthority
+                | kernel::generated::RecoveryDisposition::InfrastructureBlocked
+                | kernel::generated::RecoveryDisposition::UnsafeBlocked,
+            ) => PlanningRecoveryAdmission::FailClosed(
+                admitted
+                    .recovery_disposition()
+                    .expect("matched blocked V2 recovery")
+                    .clone(),
+            ),
+            _ => PlanningRecoveryAdmission::Continue,
+        },
+        None => validate_recovery_work_map(&carrier, &legacy)
+            .map_err(|error| staging_retry("submit.planning_recovery", "/recovery", error))?,
+    };
+    let semantic =
+        stage_planning_semantics(state, &legacy, &carrier, v2_admission.as_ref(), recovery)
+            .map_err(|(pointer, error)| {
+                staging_retry("submit.planning_transition", &pointer, error)
+            })?;
     let carrier_path = PathBuf::from(&binding.carrier_path);
     let mut staged_artifacts = Vec::<(PathBuf, String, Vec<u8>)>::new();
     for artifact in prepared.artifacts {
@@ -915,8 +1000,32 @@ fn commit_staged_planning_submit(
         }
     }
 
-    let (effect, issues) = staged_planning_effect(state, &legacy)
-        .map_err(|detail| staging_retry("submit.planning_transition", "", detail))?;
+    staged_artifacts.extend(semantic.artifacts.clone());
+    let planning_sidecar = PreparedPlanningTransitionV1 {
+        schema: PREPARED_PLANNING_TRANSITION_SCHEMA.to_owned(),
+        event_kind: semantic.event_kind.clone(),
+        refs: semantic.refs.clone(),
+    };
+    let (planning_sidecar_path, planning_sidecar_bytes) =
+        planning_transition_artifact(binding, &planning_sidecar)
+            .map_err(|detail| staging_retry("submit.planning_transition", "", detail))?;
+    staged_artifacts.push((
+        planning_sidecar_path,
+        PREPARED_PLANNING_TRANSITION_SCHEMA.to_owned(),
+        planning_sidecar_bytes,
+    ));
+    let staged_effect = staged_planning_effect(
+        state,
+        &legacy,
+        &carrier,
+        &carrier_bytes,
+        &semantic.event_kind,
+        &semantic.refs,
+    )
+    .map_err(|detail| staging_retry("submit.planning_transition", "", detail))?;
+    staged_artifacts.extend(staged_effect.artifacts.clone());
+    let effect = staged_effect.effect;
+    let issues = staged_effect.issues;
     let issued_actions = issues
         .iter()
         .map(|issue| {
@@ -1029,20 +1138,360 @@ fn commit_staged_planning_submit(
     Ok(receipt)
 }
 
+#[derive(Clone)]
+struct StagedPlanningSemantics {
+    event_kind: String,
+    refs: Vec<Ref>,
+    artifacts: Vec<(PathBuf, String, Vec<u8>)>,
+}
+
+#[derive(Clone)]
+struct StagedPlanningEffect {
+    effect: DeferredHostEffectV1,
+    issues: Vec<runner::IssuedRunnerAction>,
+    artifacts: Vec<(PathBuf, String, Vec<u8>)>,
+}
+
+/// Stage every legacy planning-only semantic branch before any receipt
+/// artifact is published.  This is intentionally a branch-by-boundary match:
+/// V1/V2 and ordinary/recovery are selected from the issued binding, never
+/// from the shape of model bytes.
+fn stage_planning_semantics(
+    state: &CoreState,
+    binding: &runner::IssuedRunnerBinding,
+    carrier: &AgentCarrier,
+    _v2_admission: Option<&planning::ApprovedWorkMapV2>,
+    recovery: PlanningRecoveryAdmission,
+) -> Result<StagedPlanningSemantics, (String, String)> {
+    let assignment = planning_assignment_for(&binding.workstream.0, &binding.assignment_id.0)
+        .map_err(|error| {
+            (
+                "".to_owned(),
+                format!("planning assignment authority: {error}"),
+            )
+        })?;
+    if assignment.role != binding.role_id.0
+        || assignment.mode != binding.mode.0
+        || assignment
+            .boundary_id
+            .as_deref()
+            .unwrap_or("planning.questions.v1")
+            != binding.boundary_id.0
+        || u32::from(assignment.ordinal) != binding.attempt.unwrap_or(0)
+    {
+        return Err((
+            "".to_owned(),
+            "planning manifest role/mode/boundary/ordinal authority drift".to_owned(),
+        ));
+    }
+    let mut refs = vec![
+        Ref(binding.assignment_id.0.clone()),
+        Ref(binding.action_id.0.clone()),
+        Ref(binding.boundary_id.0.clone()),
+        Ref(binding.workstream.0.clone()),
+        Ref(binding.spec_digest.clone()),
+    ];
+    let mut artifacts = Vec::new();
+
+    if let PlanningRecoveryAdmission::FailClosed(disposition) = recovery {
+        refs.extend([
+            Ref(carrier.carrier_path.clone()),
+            Ref(format!("recovery-disposition:{disposition:?}")),
+            recovery_disposition_failure_ref(&disposition),
+            Ref("semantic-recovery-fail-closed".to_owned()),
+        ]);
+        return Ok(StagedPlanningSemantics {
+            event_kind: "recovery:inadmissible".to_owned(),
+            refs,
+            artifacts,
+        });
+    }
+
+    if carrier.boundary_id == "planning.work-map.v1"
+        && is_canonical_output_assignment(
+            &carrier.workstream,
+            &carrier.assignment_id,
+            &carrier.boundary_id,
+        )
+        .map_err(|error| ("".to_owned(), error))?
+    {
+        let path = if carrier.role_id == "recovery-engineer" {
+            recovery_work_map_path(&carrier.workstream)
+        } else {
+            work_map_path(&carrier.workstream)
+        };
+        artifacts.push((
+            path,
+            "autopilot.planning_work_map.v1".to_owned(),
+            carrier.raw_output.as_bytes().to_vec(),
+        ));
+    }
+
+    if carrier.boundary_id != "planning.plan-review.v1" {
+        if carrier.role_id == "recovery-engineer"
+            && carrier.mode == "planning-repair"
+            && matches!(
+                carrier.boundary_id.as_str(),
+                "planning.work-map.v1" | "planning.work-map.v2"
+            )
+        {
+            let baseline_path = binding.planning_subject_path.as_ref().ok_or_else(|| {
+                (
+                    "/recovery".to_owned(),
+                    "planning recovery baseline path missing".to_owned(),
+                )
+            })?;
+            let baseline_digest = binding.planning_subject_digest.as_ref().ok_or_else(|| {
+                (
+                    "/recovery".to_owned(),
+                    "planning recovery baseline digest missing".to_owned(),
+                )
+            })?;
+            refs.extend([
+                Ref("planning-rereview-required".to_owned()),
+                Ref(format!("recovery-baseline-carrier:{baseline_path}")),
+                Ref(format!("recovery-baseline-sha256:{baseline_digest}")),
+                Ref(format!(
+                    "recovery-output-sha256:{}",
+                    sha256_hex_local(carrier.raw_output.as_bytes())
+                )),
+            ]);
+            return Ok(StagedPlanningSemantics {
+                event_kind: "planning:recovery-completed".to_owned(),
+                refs,
+                artifacts,
+            });
+        }
+        return Ok(StagedPlanningSemantics {
+            event_kind: "agent:result".to_owned(),
+            refs,
+            artifacts,
+        });
+    }
+
+    let review_error = review_approves_execution(&carrier.raw_output).err();
+    let is_first_review = assignment.role == "plan-reviewer" && assignment.ordinal == 1;
+    let is_final_review = assignment.role == "plan-reviewer" && assignment.ordinal == 2;
+    if let Some(error) = review_error {
+        if !error.starts_with("plan-review:blocked:") {
+            return Err(("/verdicts".to_owned(), error));
+        }
+        if is_first_review {
+            let baseline_path = binding.planning_subject_path.as_ref().ok_or_else(|| {
+                (
+                    "/verdicts".to_owned(),
+                    "planning recovery baseline path missing".to_owned(),
+                )
+            })?;
+            let baseline_digest = binding.planning_subject_digest.as_ref().ok_or_else(|| {
+                (
+                    "/verdicts".to_owned(),
+                    "planning recovery baseline digest missing".to_owned(),
+                )
+            })?;
+            refs.extend([
+                Ref("planning-recovery-required".to_owned()),
+                Ref(format!("recovery-baseline-carrier:{baseline_path}")),
+                Ref(format!("recovery-baseline-sha256:{baseline_digest}")),
+                Ref(format!("rejected-review-carrier:{}", carrier.carrier_path)),
+                Ref(format!("rejected-review-diagnosis:{error}")),
+            ]);
+            return Ok(StagedPlanningSemantics {
+                event_kind: "planning:recovery-required".to_owned(),
+                refs,
+                artifacts,
+            });
+        }
+        if is_final_review {
+            refs.extend([
+                Ref(carrier.carrier_path.clone()),
+                Ref("planning.plan-review.v1".to_owned()),
+                Ref("semantic-recovery-exhausted".to_owned()),
+            ]);
+            return Ok(StagedPlanningSemantics {
+                event_kind: "recovery:exhausted".to_owned(),
+                refs,
+                artifacts,
+            });
+        }
+        return Err((
+            "/verdicts".to_owned(),
+            "review ordinal authority drift".to_owned(),
+        ));
+    }
+
+    let subject_is_v2 = planning_subject_is_v2(binding)
+        .map_err(|error| ("".to_owned(), format!("planning review subject: {error}")))?;
+    if subject_is_v2 {
+        // The review subject is an earlier event-rooted receipt carrier. Re-
+        // admit its exact immutable bytes, then build (but do not publish) the
+        // V2 image/binding for the enclosing receipt transaction.
+        let subject = v2_subject_binding(state, binding)
+            .map_err(|error| ("".to_owned(), format!("approved-plan-v2 subject: {error}")))?;
+        let admitted = admit_v2_work_map(state, &subject, true).map_err(|error| {
+            (
+                "".to_owned(),
+                format!("approved-plan-v2 admission: {error}"),
+            )
+        })?;
+        let root = std::env::current_dir()
+            .map_err(|error| ("".to_owned(), error.to_string()))?
+            .join(".pi/autopilot")
+            .join(&binding.workstream.0);
+        let staged = approved_plan_v2::stage_approved_plan_v2(
+            &binding.workstream.0,
+            &root.join("approved-plan.v2.json"),
+            &root.join("approved-plan.v2-binding.json"),
+            &admitted,
+        )
+        .map_err(|error| ("".to_owned(), format!("approved-plan-v2: {error}")))?;
+        let promotion = staged.promotion.clone();
+        artifacts.extend([
+            (
+                staged.image_path,
+                approved_plan_v2::APPROVED_PLAN_V2_SCHEMA.to_owned(),
+                staged.image_bytes,
+            ),
+            (
+                staged.binding_path,
+                approved_plan_v2::APPROVED_PLAN_V2_BINDING_SCHEMA.to_owned(),
+                staged.binding_bytes,
+            ),
+        ]);
+        let ready_root = ApprovedPlanV2ReadyRootV1 {
+            schema: APPROVED_PLAN_V2_READY_ROOT_SCHEMA.to_owned(),
+            workstream: carrier.workstream.clone(),
+            binding_path: promotion.binding_path.display().to_string(),
+            binding_sha256: promotion.binding_sha256,
+            approved_plan_sha256: promotion.approved_plan_sha256,
+            final_review_action_id: binding.action_id.0.clone(),
+            final_review_assignment_id: binding.assignment_id.0.clone(),
+            final_review_run_revision: binding.run_revision,
+        };
+        refs.extend([
+            approved_plan_v2_ready_root_ref(&ready_root).map_err(|error| ("".to_owned(), error))?,
+            Ref(ready_root.binding_path),
+        ]);
+    } else {
+        let subject_path = binding.planning_subject_path.as_ref().ok_or_else(|| {
+            (
+                "".to_owned(),
+                "approved review missing bound subject path".to_owned(),
+            )
+        })?;
+        let subject_digest = binding.planning_subject_digest.as_ref().ok_or_else(|| {
+            (
+                "".to_owned(),
+                "approved review missing bound subject digest".to_owned(),
+            )
+        })?;
+        let work_map = planning_subject_raw(binding)
+            .map_err(|error| ("".to_owned(), format!("approved-plan subject: {error}")))?;
+        let units = parse_approved_units(&work_map)
+            .map_err(|error| ("".to_owned(), format!("approved-plan: {error}")))?;
+        let approved = ApprovedPlanArtifactV1 { units };
+        validate_approved_plan_v1(&approved)
+            .map_err(|error| ("".to_owned(), format!("approved-plan: {error}")))?;
+        let bytes = serde_json::to_vec_pretty(&approved)
+            .map_err(|error| ("".to_owned(), format!("approved-plan bytes: {error}")))?;
+        let path = plan_path(&carrier.workstream);
+        artifacts.push((path.clone(), "autopilot.approved_plan.v1".to_owned(), bytes));
+        refs.extend([
+            Ref(path.display().to_string()),
+            Ref(format!("review-subject-carrier:{subject_path}")),
+            Ref(format!("review-subject-sha256:{subject_digest}")),
+        ]);
+    }
+    Ok(StagedPlanningSemantics {
+        event_kind: "planning:ready-to-execute".to_owned(),
+        refs,
+        artifacts,
+    })
+}
+
+fn stage_v2_work_map_admission(
+    state: &CoreState,
+    binding: &runner::ReceiptV1RunnerBinding,
+    facade: &kernel::generated::AgentRunSpec,
+    carrier_bytes: &[u8],
+) -> Result<planning::ApprovedWorkMapV2, String> {
+    let atom_path = facade
+        .atom_registry_path
+        .as_ref()
+        .ok_or_else(|| "V2 staged spec lacks atom registry path".to_owned())?;
+    let atom_digest = facade
+        .atom_registry_digest
+        .as_ref()
+        .ok_or_else(|| "V2 staged spec lacks atom registry digest".to_owned())?;
+    let legacy = runner::receipt_v1_validator_facade(binding);
+    let recovery_subject = if binding.role_id.0 == "recovery-engineer" {
+        let subject = v2_subject_binding(state, &legacy)?;
+        Some(admit_v2_work_map(state, &subject, false)?)
+    } else {
+        None
+    };
+    let admitted = planning::work_map_v2::admit_work_map_v2_staged_carrier(
+        Path::new(&binding.carrier_path),
+        carrier_bytes,
+        facade,
+        &binding.spec_digest,
+        planning::WorkMapV2AdmissionContext {
+            atom_registry_path: Path::new(&atom_path.0),
+            atom_registry_digest: &atom_digest.0,
+            recovery_subject: recovery_subject.as_ref(),
+        },
+    )
+    .map_err(|error| format!("V2 strict Core admission: {error}"))?;
+    let authority = admitted
+        .source_actual_authority()
+        .ok_or_else(|| "V2 staged admission lost actual carrier authority".to_owned())?;
+    if authority.pi_version != runner::REQUIRED_PI_VERSION {
+        return Err("V2 staged Pi-version authority drift".to_owned());
+    }
+    Ok(admitted)
+}
+
 fn staged_planning_effect(
     state: &CoreState,
     binding: &runner::IssuedRunnerBinding,
-) -> Result<(DeferredHostEffectV1, Vec<runner::IssuedRunnerAction>), String> {
+    staged_carrier: &AgentCarrier,
+    staged_carrier_bytes: &[u8],
+    semantic_event_kind: &str,
+    semantic_refs: &[Ref],
+) -> Result<StagedPlanningEffect, String> {
+    if semantic_event_kind == "planning:ready-to-execute" {
+        return Ok(StagedPlanningEffect {
+            effect: DeferredHostEffectV1::Done {
+                payload: CoreToHostDonePayload {
+                    status: format!(
+                        "ready-to-execute:workstream={};{}",
+                        binding.workstream.0,
+                        state.summary()
+                    ),
+                },
+            },
+            issues: Vec::new(),
+            artifacts: Vec::new(),
+        });
+    }
     let mut projected = CoreState {
         event_path: None,
         state: state.state.clone(),
         events: state.events.clone(),
         event_bytes: state.event_bytes.clone(),
     };
+    let mut projection_refs = vec![
+        planning_result_consumed_ref(binding),
+        terminal_consumed_ref(binding),
+    ];
+    projection_refs.extend(semantic_refs.iter().cloned());
+    // This is an in-memory projection of precisely the one eventual receipt
+    // consumption row. It is never persisted and never substitutes a legacy
+    // planning event.
     projected
         .append(
-            EventKind("submit:receipt-projected".to_owned()),
-            vec![planning_result_consumed_ref(binding)],
+            EventKind("submit:receipt-consumed".to_owned()),
+            projection_refs,
         )
         .map_err(|error| error.to_string())?;
     match next_planning_outcome(&binding.workstream.0, &projected)
@@ -1050,52 +1499,92 @@ fn staged_planning_effect(
     {
         planning::PlanningWaveOutcome::Launch { assignments, .. } => {
             let input_set = read_planning_input_set(&binding.workstream.0)?;
-            let accepted = accepted_planning_artifacts_for_issue(&binding.workstream.0, state)
+            let mut accepted = accepted_planning_artifacts_for_issue(&binding.workstream.0, state)
                 .map_err(|error| error.to_string())?;
+            let staged_accepted =
+                staged_accepted_planning_artifacts(binding, staged_carrier_bytes)?;
+            // A newly accepted canonical synthesis/review is the sole current
+            // category authority for the next issuer. Never leave two
+            // shape-compatible synthesized subjects for recovery/review.
+            for artifact in staged_accepted {
+                if artifact.category_id == "synthesized-work-map" {
+                    accepted.retain(|existing| existing.category_id != "synthesized-work-map");
+                }
+                accepted.push(artifact);
+            }
+            let needs_atom_registry =
+                assignments.iter().any(|assignment| {
+                    matches!(
+                        assignment.boundary_id.as_deref(),
+                        Some("planning.work-map.v1" | "planning.work-map.v2")
+                    )
+                }) || planning_task_extractors_complete(&binding.workstream.0, &projected)?;
+            let (atom_registry, artifacts) = if needs_atom_registry {
+                let (path, digest, bytes) = stage_atom_registry(
+                    &binding.workstream.0,
+                    state,
+                    Some((binding, staged_carrier)),
+                )?;
+                (
+                    Some((path.clone(), digest)),
+                    vec![(
+                        PathBuf::from(path),
+                        "autopilot.planning_atom_registry.v1".to_owned(),
+                        bytes,
+                    )],
+                )
+            } else {
+                (None, Vec::new())
+            };
             let mut issues = Vec::new();
             for assignment in &assignments {
-                if matches!(
+                let registry = matches!(
                     assignment.boundary_id.as_deref(),
                     Some("planning.work-map.v1" | "planning.work-map.v2")
-                ) {
-                    return Err("next planning wave needs atom-registry staging".to_owned());
-                }
+                )
+                .then(|| atom_registry.clone())
+                .flatten();
                 issues.push(
                     planning_bg_action(
                         &binding.workstream.0,
                         assignment,
                         projected.state.revision,
                         &input_set,
-                        None,
+                        registry,
                         accepted.clone(),
                     )
                     .map_err(|error| error.to_string())?,
                 );
             }
             let actions = issues.iter().map(|issue| issue.action.clone()).collect();
-            Ok((
-                DeferredHostEffectV1::SpawnWave {
+            Ok(StagedPlanningEffect {
+                effect: DeferredHostEffectV1::SpawnWave {
                     payload: CoreToHostSpawnWavePayload { actions },
                 },
                 issues,
-            ))
+                artifacts,
+            })
         }
-        planning::PlanningWaveOutcome::WaitingOnInFlight { wave_id, active } => Ok((
-            DeferredHostEffectV1::Done {
-                payload: CoreToHostDonePayload {
-                    status: planning_waiting_status(&wave_id, &active, state),
+        planning::PlanningWaveOutcome::WaitingOnInFlight { wave_id, active } => {
+            Ok(StagedPlanningEffect {
+                effect: DeferredHostEffectV1::Done {
+                    payload: CoreToHostDonePayload {
+                        status: planning_waiting_status(&wave_id, &active, state),
+                    },
                 },
-            },
-            Vec::new(),
-        )),
-        planning::PlanningWaveOutcome::Complete => Ok((
-            DeferredHostEffectV1::Done {
+                issues: Vec::new(),
+                artifacts: Vec::new(),
+            })
+        }
+        planning::PlanningWaveOutcome::Complete => Ok(StagedPlanningEffect {
+            effect: DeferredHostEffectV1::Done {
                 payload: CoreToHostDonePayload {
                     status: format!("submit:planning-accepted;{}", state.summary()),
                 },
             },
-            Vec::new(),
-        )),
+            issues: Vec::new(),
+            artifacts: Vec::new(),
+        }),
         planning::PlanningWaveOutcome::Blocked(blocked) => {
             Err(format!("planning wave blocked: {}", blocked.wave_id))
         }
@@ -3241,6 +3730,17 @@ fn route_receipt_v1_task_completed(
             rejection("submit-receipt", "receipt identity/transition mismatch"),
         );
     }
+    // Completion consumes only receipt-rooted transition authority.  Planning
+    // semantics are the staged immutable sidecar, never a reread carrier,
+    // spec, repository, or a reconstructed legacy event.
+    let planning_transition = if binding.result_contract.0.starts_with("planning.") {
+        match prepared_planning_transition_from_receipt(&receipt) {
+            Ok(transition) => Some(transition),
+            Err(error) => return done(id, rejection("submit-receipt", &error)),
+        }
+    } else {
+        None
+    };
     // An orphan receipt is never completion authority. Verify the actual
     // persisted accepted EventRow hash; do not root it from task completion.
     let rooted = match verify_rooted_submit_receipt(state, &receipt) {
@@ -3272,6 +3772,14 @@ fn route_receipt_v1_task_completed(
     ];
     if binding.result_contract.0.starts_with("planning.") {
         refs.push(planning_result_consumed_ref(&facade));
+        let transition = planning_transition
+            .as_ref()
+            .expect("planning receipt must have staged planning transition");
+        refs.push(Ref(format!(
+            "planning-transition-kind:{}",
+            transition.event_kind
+        )));
+        refs.extend(transition.refs.iter().cloned());
     }
     refs.extend(
         receipt

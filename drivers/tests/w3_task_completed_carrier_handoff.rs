@@ -32,7 +32,8 @@ fn receipt_v1_planning_accepts_then_consumes_without_carrier_or_spec_rereads() {
         "assignment_id":issue.receipt_binding.assignment_id,"attempt":issue.receipt_binding.attempt,
         "tool_call_id":"tool-call-1","kind":"submit",
         "tool_name":issue.receipt_binding.tool_name,"profile_id":issue.receipt_binding.profile_id,
-        "raw_payload":raw
+        "raw_payload":raw,
+        "runtime_evidence":{"schema":"autopilot.child_control_runtime_evidence.v1","delivery_policy_denials":null,"approved_command_executions":null}
     }}});
     let accepted = seam::handle_line(&submit.to_string(), &mut state).unwrap();
     assert_eq!(accepted.kind, "child-control", "{accepted:?}");
@@ -140,7 +141,8 @@ fn receipt_root_uses_actual_event_bytes_and_refuses_duplicate_roots() {
         "assignment_id":issue.receipt_binding.assignment_id,"attempt":issue.receipt_binding.attempt,
         "tool_call_id":"tool-call-61","kind":"submit",
         "tool_name":issue.receipt_binding.tool_name,"profile_id":issue.receipt_binding.profile_id,
-        "raw_payload":serde_json::from_str::<serde_json::Value>(&task_atoms("TE01-A")).unwrap()
+        "raw_payload":serde_json::from_str::<serde_json::Value>(&task_atoms("TE01-A")).unwrap(),
+        "runtime_evidence":{"schema":"autopilot.child_control_runtime_evidence.v1","delivery_policy_denials":null,"approved_command_executions":null}
     }}});
     let accepted = seam::handle_line(&submit.to_string(), &mut state).unwrap();
     assert_eq!(accepted.payload["response"]["outcome"], "ACCEPT");

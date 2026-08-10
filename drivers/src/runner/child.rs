@@ -5409,8 +5409,11 @@ pub(crate) fn admit_submission(
     })?;
     // This is package-bound V5 authority supplied by Core, never a field from
     // the model payload and never an input to a child validator.
+    // The actual-carrier V2 authority names this as the observed Pi version.
+    // Receipt V1 binds it to the package-pinned V5 value; it is never model
+    // supplied or discovered after submit admission.
     carrier.insert(
-        "required_pi_version".to_owned(),
+        "pi_version".to_owned(),
         serde_json::Value::String(required_pi_version.to_owned()),
     );
     Ok(prepared)

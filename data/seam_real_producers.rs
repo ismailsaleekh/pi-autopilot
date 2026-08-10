@@ -42,10 +42,11 @@ struct AgentCarrier {
     spec_digest: String,
     spec_path: String,
     carrier_path: String,
-    /// V5 package authority inserted after child value admission. Historical
-    /// V4 carrier bytes intentionally predate it and remain explicit None.
+    /// V5 package-pinned Pi observation inserted after child value admission.
+    /// Historical V4 carrier bytes intentionally predate it and remain
+    /// explicit None.
     #[serde(default)]
-    required_pi_version: Option<String>,
+    pi_version: Option<String>,
     raw_output: String,
 }
 
@@ -489,6 +490,19 @@ fn task_doc_from_manifest(value: &serde_json::Value, class: planning::TaskDocume
     let body = value["body"].as_str().ok_or_else(|| format!("manifest doc {index} missing body"))?.to_owned();
     Ok(planning::TaskDocument { id: path.clone(), path, class, authority_set_id: authority_set_id.to_owned(), body, digest })
 }
+fn planning_task_extractors_complete(workstream: &str, state: &CoreState) -> Result<bool, String> {
+    let assignments = manifest_assignments(workstream)
+        .map_err(|error| format!("CONTEXT_GAP:planning-manifest:{error}"))?;
+    let extractors = assignments
+        .iter()
+        .filter(|assignment| assignment.role == "task-extractor")
+        .collect::<Vec<_>>();
+    Ok(!extractors.is_empty()
+        && extractors.iter().all(|assignment| {
+            accepted_binding_for_assignment(state, &assignment.assignment_id).is_some()
+        }))
+}
+
 fn ensure_atom_registry_after_task_atoms(workstream: &str, state: &CoreState) -> Result<(), AnyError> {
     let assignments = manifest_assignments(workstream).map_err(|error| format!("CONTEXT_GAP:planning-manifest:{error}"))?;
     let task_extractors = assignments.iter().filter(|assignment| assignment.role == "task-extractor").collect::<Vec<_>>();
@@ -502,31 +516,75 @@ fn ensure_atom_registry_after_task_atoms(workstream: &str, state: &CoreState) ->
     Ok(())
 }
 
-fn ensure_atom_registry(workstream: &str, state: &CoreState) -> Result<(String, String), AnyError> {
-    let manifest = read_planning_manifest_value(workstream).map_err(|error| format!("CONTEXT_GAP:planning-manifest:{error}"))?;
-    let authority_set_id = manifest["authority_set_id"].as_str().ok_or("CONTEXT_GAP:planning-manifest:missing authority_set_id")?.to_owned();
-    let assignments = manifest_assignments(workstream).map_err(|error| format!("CONTEXT_GAP:planning-manifest:{error}"))?;
-    let anchors = planning::TaskAnchorRegistry::from_input_set(&read_planning_input_set(workstream).map_err(|error| format!("CONTEXT_GAP:planning-manifest:{error}"))?)
-        .map_err(|error| format!("CONTEXT_GAP:planning-manifest:task-source-manifest:{error:?}"))?;
+/// Deterministically build, but do not publish, the atom registry. Receipt
+/// admission uses these bytes as a staged artifact so a failed later parent
+/// predicate cannot leave a registry authority behind.
+fn stage_atom_registry(
+    workstream: &str,
+    state: &CoreState,
+    staged_current: Option<(&runner::IssuedRunnerBinding, &AgentCarrier)>,
+) -> Result<(String, String, Vec<u8>), String> {
+    let manifest = read_planning_manifest_value(workstream)
+        .map_err(|error| format!("CONTEXT_GAP:planning-manifest:{error}"))?;
+    let authority_set_id = manifest["authority_set_id"].as_str()
+        .ok_or("CONTEXT_GAP:planning-manifest:missing authority_set_id")?.to_owned();
+    let assignments = manifest_assignments(workstream)
+        .map_err(|error| format!("CONTEXT_GAP:planning-manifest:{error}"))?;
+    let anchors = planning::TaskAnchorRegistry::from_input_set(
+        &read_planning_input_set(workstream)
+            .map_err(|error| format!("CONTEXT_GAP:planning-manifest:{error}"))?,
+    )
+    .map_err(|error| format!("CONTEXT_GAP:atom-registry:task-source-manifest:{error:?}"))?;
     let mut records = Vec::new();
     let mut producer_ids = Vec::new();
-    for (assignment_order, assignment) in assignments.iter().enumerate().filter(|(_, assignment)| assignment.role == "task-extractor") {
-        let binding = accepted_binding_for_assignment(state, &assignment.assignment_id)
-            .ok_or_else(|| format!("CONTEXT_GAP:atom-registry:unaccepted {}", assignment.assignment_id))?;
-        let carrier_text = fs::read_to_string(&binding.carrier_path).map_err(|error| format!("CONTEXT_GAP:atom-registry-carrier:{}:{error}", binding.carrier_path))?;
-        let carrier: AgentCarrier = serde_json::from_str(&carrier_text).map_err(|error| format!("CONTEXT_GAP:atom-registry-carrier-json:{}:{error}", binding.carrier_path))?;
-        let spec = read_runner_spec_for_binding(&binding).map_err(|error| format!("CONTEXT_GAP:atom-registry-spec:{error}"))?;
-        let prefix = spec.atom_id_prefix.as_deref().ok_or_else(|| format!("CONTEXT_GAP:atom-registry-prefix:{}", binding.assignment_id.0))?;
-        let atoms: kernel::generated::TaskAtoms = serde_json::from_str(&carrier.raw_output).map_err(|error| format!("CONTEXT_GAP:atom-registry-atoms:{}:{error}", binding.assignment_id.0))?;
-        planning::validate_task_atoms_for_assignment(&atoms, prefix, &anchors)
+    for (assignment_order, assignment) in assignments.iter().enumerate()
+        .filter(|(_, assignment)| assignment.role == "task-extractor")
+    {
+        let staged = staged_current.filter(|(binding, _)| {
+            binding.assignment_id.0 == assignment.assignment_id
+        });
+        let (binding, raw_output, prefix) = match staged {
+            Some((binding, carrier)) => {
+                let prefix = assignment.atom_id_prefix.as_deref().ok_or_else(|| {
+                    format!("CONTEXT_GAP:atom-registry-prefix:{}", binding.assignment_id.0)
+                })?;
+                (binding.clone(), carrier.raw_output.clone(), prefix.to_owned())
+            }
+            None => {
+                let binding = accepted_binding_for_assignment(state, &assignment.assignment_id)
+                    .ok_or_else(|| format!("CONTEXT_GAP:atom-registry:unaccepted {}", assignment.assignment_id))?;
+                let carrier_text = fs::read_to_string(&binding.carrier_path)
+                    .map_err(|error| format!("CONTEXT_GAP:atom-registry-carrier:{}:{error}", binding.carrier_path))?;
+                let carrier: AgentCarrier = serde_json::from_str(&carrier_text)
+                    .map_err(|error| format!("CONTEXT_GAP:atom-registry-carrier-json:{}:{error}", binding.carrier_path))?;
+                let spec = read_runner_spec_for_binding(&binding)
+                    .map_err(|error| format!("CONTEXT_GAP:atom-registry-spec:{error}"))?;
+                let prefix = spec.atom_id_prefix.as_deref()
+                    .ok_or_else(|| format!("CONTEXT_GAP:atom-registry-prefix:{}", binding.assignment_id.0))?
+                    .to_owned();
+                (binding, carrier.raw_output, prefix)
+            }
+        };
+        let atoms: kernel::generated::TaskAtoms = serde_json::from_str(&raw_output)
+            .map_err(|error| format!("CONTEXT_GAP:atom-registry-atoms:{}:{error}", binding.assignment_id.0))?;
+        planning::validate_task_atoms_for_assignment(&atoms, &prefix, &anchors)
             .map_err(|error| format!("CONTEXT_GAP:atom-registry-boundary:{}", boundary_status(&error)))?;
         producer_ids.push(binding.assignment_id.clone());
         records.push((assignment_order, 0usize, binding.assignment_id.clone(), atoms));
     }
-    let atoms = planning::sorted_registry_atoms(records).map_err(|error| context_status("atom-registry", error))?;
-    let bytes = planning::atom_registry_bytes(workstream, &authority_set_id, producer_ids, atoms).map_err(|error| context_status("atom-registry", error))?;
-    let digest = sha256_hex_local(&bytes);
-    let path = std::env::current_dir()?.join(atom_registry_path(workstream));
+    let atoms = planning::sorted_registry_atoms(records)
+        .map_err(|error| context_status("atom-registry", error))?;
+    let bytes = planning::atom_registry_bytes(workstream, &authority_set_id, producer_ids, atoms)
+        .map_err(|error| context_status("atom-registry", error))?;
+    let path = std::env::current_dir()
+        .map_err(|error| error.to_string())?
+        .join(atom_registry_path(workstream));
+    Ok((path.display().to_string(), sha256_hex_local(&bytes), bytes))
+}
+
+fn ensure_atom_registry(workstream: &str, state: &CoreState) -> Result<(String, String), AnyError> {
+    let (path, digest, bytes) = stage_atom_registry(workstream, state, None)?;
+    let path = PathBuf::from(path);
     if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
     match fs::read(&path) {
         Ok(existing) if existing == bytes => Ok((path.display().to_string(), digest)),
@@ -591,6 +649,26 @@ fn accepted_planning_artifacts_for_issue(workstream: &str, state: &CoreState) ->
         category != "synthesized-work-map" || Some(*order) == latest_synthesized
     });
     Ok(rows.into_iter().map(|(_, _, artifact)| artifact).collect())
+}
+
+/// Add the current in-memory accepted carrier to next-wave context before its
+/// receipt is consumed. The digest is over exact staged carrier bytes; no
+/// temporary carrier read or repository inference is involved.
+fn staged_accepted_planning_artifacts(
+    binding: &runner::IssuedRunnerBinding,
+    carrier_bytes: &[u8],
+) -> Result<Vec<runner::AcceptedPlanningArtifactBinding>, String> {
+    let categories = accepted_artifact_categories_for_role(&binding.role_id.0, &binding.result_contract.0)
+        .map_err(|error| error.to_string())?;
+    Ok(categories.iter().map(|category_id| runner::AcceptedPlanningArtifactBinding {
+        category_id: (*category_id).to_owned(),
+        assignment_id: binding.assignment_id.clone(),
+        role_id: binding.role_id.clone(),
+        boundary_id: binding.result_contract.clone(),
+        terminal_route: binding.terminal_route.clone(),
+        path: binding.carrier_path.clone(),
+        digest: sha256_hex_local(carrier_bytes),
+    }).collect())
 }
 
 fn accepted_artifact_categories_for_role(role: &str, boundary_id: &str) -> Result<&'static [&'static str], AnyError> {
@@ -760,6 +838,16 @@ fn event_has_one_ref(event: &EventRow, value: &str) -> bool {
         == 1
 }
 
+fn receipt_consumed_ready_event(event: &EventRow) -> bool {
+    event.kind.0 == "submit:receipt-consumed"
+        && event_has_one_ref(event, "planning-transition-kind:planning:ready-to-execute")
+        && event.artifact_refs.iter().filter(|reference| reference.0.starts_with(SUBMIT_RECEIPT_CONSUMED_PREFIX)).count() == 1
+}
+
+fn planning_ready_event(event: &EventRow) -> bool {
+    event.kind.0 == "planning:ready-to-execute" || receipt_consumed_ready_event(event)
+}
+
 fn v2_ready_event_is_complete(event: &EventRow, root: &ApprovedPlanV2ReadyRootV1) -> bool {
     let terminal = format!(
         "terminal-consumed:{}:{}:{}",
@@ -773,22 +861,15 @@ fn v2_ready_event_is_complete(event: &EventRow, root: &ApprovedPlanV2ReadyRootV1
         root.final_review_assignment_id,
         root.final_review_run_revision
     );
-    event_has_one_ref(event, &terminal)
-        && event_has_one_ref(event, &planning)
-        && event_has_one_ref(event, "completion-control:rooted")
-        && event_has_one_ref(event, "module-wired:watchdog")
-        && event
-            .artifact_refs
-            .iter()
-            .filter(|reference| reference.0.starts_with("watchdog-effects:"))
-            .count()
-            == 1
-        && event
-            .artifact_refs
-            .iter()
-            .filter(|reference| reference.0.starts_with("watchdog-semantic-authority:"))
-            .count()
-            == 1
+    let common = event_has_one_ref(event, &terminal) && event_has_one_ref(event, &planning);
+    if event.kind.0 == "planning:ready-to-execute" {
+        return common
+            && event_has_one_ref(event, "completion-control:rooted")
+            && event_has_one_ref(event, "module-wired:watchdog")
+            && event.artifact_refs.iter().filter(|reference| reference.0.starts_with("watchdog-effects:")).count() == 1
+            && event.artifact_refs.iter().filter(|reference| reference.0.starts_with("watchdog-semantic-authority:")).count() == 1;
+    }
+    common && receipt_consumed_ready_event(event)
 }
 
 fn v2_ready_root_for_workstream(
@@ -803,10 +884,10 @@ fn v2_ready_root_for_workstream(
             .filter(|reference| reference.0.starts_with(APPROVED_PLAN_V2_READY_ROOT_PREFIX))
             .map(parse_approved_plan_v2_ready_root)
             .collect::<Result<Vec<_>, _>>()?;
-        if event.kind.0 != "planning:ready-to-execute" && !roots.is_empty() {
+        if !planning_ready_event(event) && !roots.is_empty() {
             return Err("approved-plan-v2 ready root appears outside ready event".to_owned());
         }
-        if event.kind.0 != "planning:ready-to-execute" {
+        if !planning_ready_event(event) {
             continue;
         }
         for root in roots.iter().flatten() {
@@ -867,7 +948,7 @@ fn read_approved_plan_artifact(
     let ready_events = state
         .events
         .iter()
-        .filter(|event| event.kind.0 == "planning:ready-to-execute")
+        .filter(|event| planning_ready_event(event))
         .collect::<Vec<_>>();
     if !ready_events.is_empty()
         && ready_events
@@ -914,9 +995,19 @@ fn v2_subject_binding(
         .state
         .refs
         .keys()
-        .filter_map(|reference| runner::decode_binding_ref(&reference.0))
-        .filter(|candidate| {
-            if candidate.assignment_id != *assignment || candidate.carrier_path != *path {
+        .filter_map(|reference| match runner::decode_versioned_binding_ref(&reference.0).ok()? {
+            // Historical replay stays byte-for-byte on its legacy carrier
+            // path. Only fresh V5 subjects must be receipt-consumed roots.
+            runner::VersionedRunnerBinding::ReplayV0(binding) => Some((binding, false)),
+            runner::VersionedRunnerBinding::ReceiptV1(binding) => {
+                Some((runner::receipt_v1_validator_facade(&binding), true))
+            }
+        })
+        .filter(|(candidate, receipt_v1)| {
+            if candidate.assignment_id != *assignment
+                || candidate.carrier_path != *path
+                || (*receipt_v1 && !planning_result_consumed(state, candidate))
+            {
                 return false;
             }
             runner::read_bounded_authority_file(
@@ -926,6 +1017,7 @@ fn v2_subject_binding(
             .map(|bytes| sha256_hex_local(&bytes) == *digest)
             .unwrap_or(false)
         })
+        .map(|(binding, _)| binding)
         .collect::<Vec<_>>();
     match matches.len() {
         1 => Ok(matches.remove(0)),

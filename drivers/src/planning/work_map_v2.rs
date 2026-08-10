@@ -242,8 +242,18 @@ pub(crate) fn verify_work_map_v2_actual_carrier_authority(
     if sha256_hex(&spec_bytes) != authority.spec_digest {
         return Err("work-map-v2 actual carrier spec digest drift".to_owned());
     }
-    let spec: kernel::generated::AgentRunSpec = serde_json::from_slice(&spec_bytes)
+    let spec_value: serde_json::Value = serde_json::from_slice(&spec_bytes)
         .map_err(|error| format!("work-map-v2 actual carrier spec JSON: {error}"))?;
+    let spec = match spec_value.get("admission_mode") {
+        None => serde_json::from_value::<kernel::generated::AgentRunSpec>(spec_value)
+            .map_err(|error| format!("work-map-v2 legacy carrier spec JSON: {error}"))?,
+        Some(serde_json::Value::String(mode)) if mode == "receipt_v1" => {
+            let fresh: kernel::generated::AgentRunSpecV5 = serde_json::from_value(spec_value)
+                .map_err(|error| format!("work-map-v2 receipt carrier spec JSON: {error}"))?;
+            runner::project_v5_spec_for_shared_admission(&fresh)
+        }
+        Some(_) => return Err("work-map-v2 actual carrier spec admission mode drift".to_owned()),
+    };
     let expected_cwd = run_root
         .parent()
         .and_then(Path::parent)

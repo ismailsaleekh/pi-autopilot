@@ -88,6 +88,88 @@ pub struct ApprovedPlanV2Promotion {
     pub approved_plan_sha256: String,
 }
 
+/// Pure approved-plan promotion image. It is built only from an already
+/// strict-admitted V2 source and can be committed create-once after all parent
+/// transition predicates/next-wave issuance have succeeded.
+#[derive(Clone, Debug)]
+pub(crate) struct StagedApprovedPlanV2 {
+    pub(crate) promotion: ApprovedPlanV2Promotion,
+    pub(crate) image_path: PathBuf,
+    pub(crate) image_bytes: Vec<u8>,
+    pub(crate) binding_path: PathBuf,
+    pub(crate) binding_bytes: Vec<u8>,
+}
+
+pub(crate) fn stage_approved_plan_v2(
+    workstream: &str,
+    approved_plan_path: &Path,
+    binding_path: &Path,
+    admitted: &ApprovedWorkMapV2,
+) -> Result<StagedApprovedPlanV2, String> {
+    validate_workstream(workstream)?;
+    reject_artifact_path(approved_plan_path, "approved plan")?;
+    reject_artifact_path(binding_path, "approved-plan binding")?;
+    let run_root = lexical_run_root_from_binding_path(binding_path, workstream)?;
+    validate_run_artifact_path(approved_plan_path, &run_root, "approved plan")?;
+    validate_run_artifact_path(binding_path, &run_root, "approved-plan binding")?;
+    if matches!(
+        admitted.recovery_disposition(),
+        Some(
+            kernel::generated::RecoveryDisposition::RequiresNewAuthority
+                | kernel::generated::RecoveryDisposition::InfrastructureBlocked
+                | kernel::generated::RecoveryDisposition::UnsafeBlocked
+        )
+    ) {
+        return Err("approved-plan-v2 blocked recovery disposition is not promotable as an executable plan".to_owned());
+    }
+    let admitted_actual = admitted.source_actual_authority().ok_or_else(|| {
+        "approved-plan-v2 promotion requires an actual V2 planning carrier admission".to_owned()
+    })?;
+    let artifact = artifact_from_admitted(admitted);
+    validate_approved_plan_v2_image(&artifact)?;
+    let image = crate::evidence::canonical_json(&artifact).map_err(|error| error.to_string())?;
+    if image.len() > APPROVED_PLAN_V2_MAX_BYTES {
+        return Err("approved-plan-v2 image exceeds byte ceiling".to_owned());
+    }
+    let binding = ApprovedPlanV2BindingV1 {
+        schema: APPROVED_PLAN_V2_BINDING_SCHEMA.to_owned(),
+        workstream: workstream.to_owned(),
+        approved_plan_path: path_string(approved_plan_path)?,
+        approved_plan_sha256: sha256_hex(&image),
+        source_carrier_path: path_string(admitted.source_carrier_path())?,
+        source_carrier_sha256: admitted.source_carrier_sha256().to_owned(),
+        source_raw_work_map_sha256: admitted.source_raw_work_map_sha256().to_owned(),
+        source_spec_path: admitted_actual.spec_path.clone(),
+        source_spec_digest: admitted_actual.spec_digest.clone(),
+        source_role_id: admitted_actual.role_id.clone(),
+        source_mode: admitted_actual.mode.clone(),
+        source_terminal_route: admitted_actual.terminal_route.clone(),
+        source_carrier_binding: admitted_actual.carrier_binding.clone(),
+        source_pi_version: admitted_actual.pi_version.clone(),
+        source_boundary: APPROVED_PLAN_V2_BOUNDARY.to_owned(),
+        result_contract: APPROVED_PLAN_V2_BOUNDARY.to_owned(),
+        atom_registry_path: path_string(admitted.atom_registry_path())?,
+        atom_registry_digest: admitted.atom_registry_digest().to_owned(),
+        recovery_subject: Nullable(admitted.recovery_subject().map(recovery_subject_binding_from_admitted).transpose()?),
+    };
+    validate_binding_shape(&binding)?;
+    let binding_bytes = crate::evidence::canonical_json(&binding).map_err(|error| error.to_string())?;
+    if binding_bytes.len() > APPROVED_PLAN_V2_BINDING_MAX_BYTES {
+        return Err("approved-plan-v2 binding exceeds byte ceiling".to_owned());
+    }
+    Ok(StagedApprovedPlanV2 {
+        promotion: ApprovedPlanV2Promotion {
+            binding_path: binding_path.to_path_buf(),
+            binding_sha256: sha256_hex(&binding_bytes),
+            approved_plan_sha256: sha256_hex(&image),
+        },
+        image_path: approved_plan_path.to_path_buf(),
+        image_bytes: image,
+        binding_path: binding_path.to_path_buf(),
+        binding_bytes,
+    })
+}
+
 /// Persist the canonical image followed by a separate canonical binding file.
 /// The binding digest returned here is the only value a future Core event must
 /// root. An image orphan has no reader API and is therefore unusable.
