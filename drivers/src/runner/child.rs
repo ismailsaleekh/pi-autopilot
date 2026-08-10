@@ -5404,18 +5404,21 @@ pub(crate) fn admit_submission(
             actual: value.got,
         },
     })?;
-    let carrier = prepared.carrier.as_object_mut().ok_or_else(|| {
-        AdmissionFailure::Authority("prepared receipt carrier is not an object".to_owned())
-    })?;
-    // This is package-bound V5 authority supplied by Core, never a field from
-    // the model payload and never an input to a child validator.
-    // The actual-carrier V2 authority names this as the observed Pi version.
-    // Receipt V1 binds it to the package-pinned V5 value; it is never model
-    // supplied or discovered after submit admission.
-    carrier.insert(
-        "pi_version".to_owned(),
-        serde_json::Value::String(required_pi_version.to_owned()),
-    );
+    // Planning carriers retain their pre-existing package-observed Pi field.
+    // Delivery/Validator generated result contracts are closed and do not
+    // admit that field; their V5 spec is the exact receipt-bound Pi authority.
+    if matches!(
+        spec.assignment_kind,
+        kernel::generated::ValidationAssignmentKind::PlanningReview
+    ) {
+        let carrier = prepared.carrier.as_object_mut().ok_or_else(|| {
+            AdmissionFailure::Authority("prepared receipt carrier is not an object".to_owned())
+        })?;
+        carrier.insert(
+            "pi_version".to_owned(),
+            serde_json::Value::String(required_pi_version.to_owned()),
+        );
+    }
     Ok(prepared)
 }
 
@@ -6722,8 +6725,12 @@ fn package_tool_result(
     let audit_path_text = audit_path
         .to_str()
         .ok_or_else(|| value_rejection("tool_audit", "UTF-8 path", "non-UTF-8"))?;
-    ensure_carrier_clear(&audit_path)
-        .map_err(|error| value_rejection("tool_audit", "create-once audit", error))?;
+    // A crash after the parent has published this staged immutable audit but
+    // before the receipt root must be replayable.  Reuse only byte-identical
+    // create-once audit bytes; a different existing file remains a loud
+    // collision and cannot be adopted.
+    ensure_exact_artifact_admissible(&audit_path, &audit_bytes)
+        .map_err(|error| value_rejection("tool_audit", "create-once exact audit", error))?;
     artifacts.push(PreparedArtifact::JsonNew {
         path: audit_path_text.to_owned(),
         value: audit.clone(),

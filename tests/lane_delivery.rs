@@ -1860,6 +1860,422 @@ fn lane_delivery_core_rejects_captured_spec_bytes_digest_drift() {
     core.shutdown();
 }
 
+#[test]
+fn receipt_v1_delivery_child_control_stages_v4_package_and_consumes_without_carrier_or_spec() {
+    let (mut core, spawn, spec, carrier_path, worktree) =
+        launched_core_delivery("receipt-v1-delivery");
+    let fresh: kernel::generated::AgentRunSpecV5 =
+        serde_json::from_value(spec.clone()).expect("fresh delivery V5 spec");
+    let facade = runner::project_v5_spec_for_shared_admission(&fresh);
+    fs::write(
+        &worktree.join("README.md"),
+        "receipt child-control change\n",
+    )
+    .expect("delivery edit");
+    let execution_ledger = successful_command_execution_ledger(&facade);
+    let request = serde_json::json!({
+        "schema": "autopilot.child_control_request.v1",
+        "request_id": "receipt-v1-delivery-submit",
+        "token": fresh.child_control_token,
+        "run_id": fresh.run_id,
+        "assignment_id": fresh.assignment_id,
+        "attempt": fresh.attempt,
+        "tool_call_id": "receipt-v1-delivery-tool-call",
+        "kind": "submit",
+        "tool_name": "autopilot_emit_status",
+        "profile_id": "delivery-status.v2",
+        "raw_payload": {
+            "actual_changed_paths": ["README.md"],
+            "execution_audit_ref": "audit:receipt-v1-delivery",
+            "focused_evidence_refs": ["evidence:1", "evidence:2"],
+            "terminal_status": "succeeded",
+            "hard_boundary_violations": []
+        },
+        "runtime_evidence": {
+            "schema": "autopilot.child_control_runtime_evidence.v1",
+            "delivery_policy_denials": {
+                "schema": "autopilot.delivery_policy_denials.v2",
+                "overflowed": false,
+                "entries": []
+            },
+            "approved_command_executions": execution_ledger
+        }
+    });
+    let accepted = core.send_json(serde_json::json!({
+        "v": 1,
+        "id": 2,
+        "kind": "child-control",
+        "payload": {"broker_capability": TEST_BROKER_CAPABILITY, "request": request.clone()}
+    }));
+    assert_eq!(
+        accepted.kind, "child-control",
+        "submit response: {accepted:?}"
+    );
+    assert_eq!(
+        accepted.payload["response"]["outcome"], "ACCEPT",
+        "submit response: {accepted:?}"
+    );
+    let receipt = &accepted.payload["response"]["receipt"]["receipt"];
+    assert_eq!(
+        receipt["prepared_transition"]["deferred_host_effect"]["kind"],
+        "spawn"
+    );
+    assert!(
+        receipt["prepared_transition"]["artifact_refs"]
+            .as_array()
+            .expect("receipt artifacts")
+            .iter()
+            .any(|artifact| artifact["artifact_schema"]
+                == "autopilot.prepared_delivery_transition.v1")
+    );
+    assert_eq!(
+        receipt["prepared_transition"]["issued_actions"]
+            .as_array()
+            .expect("issued Validator action")
+            .len(),
+        1
+    );
+    assert_eq!(
+        receipt["prepared_transition"]["issued_actions"][0]["action"]["run_revision"],
+        fresh.run_revision.checked_add(1).expect("continuation revision")
+    );
+    let exact_submit_replay = core.send_json(serde_json::json!({
+        "v": 1,
+        "id": 21,
+        "kind": "child-control",
+        "payload": {"broker_capability": TEST_BROKER_CAPABILITY, "request": request.clone()}
+    }));
+    assert_eq!(exact_submit_replay.kind, "child-control");
+    assert_eq!(
+        exact_submit_replay.payload, accepted.payload,
+        "exact submit replay"
+    );
+    let mut changed_request = request;
+    changed_request["raw_payload"]["execution_audit_ref"] =
+        serde_json::json!("audit:changed-after-accept");
+    let changed = core.send_json(serde_json::json!({
+        "v": 1,
+        "id": 22,
+        "kind": "child-control",
+        "payload": {"broker_capability": TEST_BROKER_CAPABILITY, "request": changed_request}
+    }));
+    assert_eq!(changed.kind, "child-control");
+    assert_eq!(changed.payload["response"]["outcome"], "RETRY");
+    fs::write(&worktree.join("README.md"), "mutated after ACCEPT\n")
+        .expect("mutate worktree after ACCEPT");
+    fs::remove_file(&carrier_path).expect("remove sealed carrier after ACCEPT");
+    fs::remove_file(carrier_path.with_extension("tool-audit.json"))
+        .expect("remove staged audit after ACCEPT");
+    fs::remove_file(&fresh.spec_path.0).expect("remove mutable spec after ACCEPT");
+    let completion = core.send_json(serde_json::json!({
+        "v":1,"id":3,"kind":"task-completed","payload":{
+            "task_id":"receipt-v1-delivery-task",
+            "action_id":spawn.action.action_id,
+            "assignment_id":spawn.action.assignment_id,
+            "status":"completed"
+        }
+    }));
+    assert_eq!(
+        completion.kind, "spawn",
+        "receipt-only completion: {completion:?}"
+    );
+    let replay = core.send_json(serde_json::json!({
+        "v":1,"id":4,"kind":"task-completed","payload":{
+            "task_id":"receipt-v1-delivery-task",
+            "action_id":spawn.action.action_id,
+            "assignment_id":spawn.action.assignment_id,
+            "status":"completed"
+        }
+    }));
+    assert_eq!(replay.kind, "spawn", "receipt-only replay: {replay:?}");
+    assert_eq!(replay.payload, completion.payload);
+    core.shutdown();
+}
+
+#[test]
+fn receipt_v1_blocked_delivery_stages_one_recovery_effect() {
+    let (mut core, spawn, spec, _carrier_path, _worktree) =
+        launched_core_delivery("receipt-v1-blocked");
+    let fresh: kernel::generated::AgentRunSpecV5 =
+        serde_json::from_value(spec).expect("fresh delivery V5 spec");
+    let request = serde_json::json!({
+        "schema": "autopilot.child_control_request.v1",
+        "request_id": "receipt-v1-blocked-submit",
+        "token": fresh.child_control_token,
+        "run_id": fresh.run_id,
+        "assignment_id": fresh.assignment_id,
+        "attempt": fresh.attempt,
+        "tool_call_id": "receipt-v1-blocked-tool-call",
+        "kind": "submit",
+        "tool_name": "autopilot_emit_status",
+        "profile_id": "delivery-status.v2",
+        "raw_payload": {
+            "actual_changed_paths": [],
+            "execution_audit_ref": "audit:receipt-v1-blocked",
+            "focused_evidence_refs": ["evidence:1", "evidence:2"],
+            "terminal_status": "blocked",
+            "hard_boundary_violations": ["semantic blocker"],
+            "blocker_class": "semantic-repairable"
+        },
+        "runtime_evidence": {
+            "schema": "autopilot.child_control_runtime_evidence.v1",
+            "delivery_policy_denials": {
+                "schema": "autopilot.delivery_policy_denials.v2",
+                "overflowed": false,
+                "entries": []
+            },
+            "approved_command_executions": {
+                "schema": "autopilot.approved_command_executions.v1",
+                "overflowed": false,
+                "entries": []
+            }
+        }
+    });
+    let accepted = core.send_json(serde_json::json!({
+        "v": 1,
+        "id": 2,
+        "kind": "child-control",
+        "payload": {"broker_capability": TEST_BROKER_CAPABILITY, "request": request}
+    }));
+    assert_eq!(
+        accepted.payload["response"]["outcome"], "ACCEPT",
+        "blocked submit response: {accepted:?}"
+    );
+    let receipt = &accepted.payload["response"]["receipt"]["receipt"];
+    assert_eq!(
+        receipt["prepared_transition"]["deferred_host_effect"]["kind"],
+        "spawn"
+    );
+    let completion = core.send_json(serde_json::json!({
+        "v":1,"id":3,"kind":"task-completed","payload":{
+            "task_id":"receipt-v1-blocked-task",
+            "action_id":spawn.action.action_id,
+            "assignment_id":spawn.action.assignment_id,
+            "status":"completed"
+        }
+    }));
+    assert_eq!(
+        completion.kind, "spawn",
+        "blocked receipt completion: {completion:?}"
+    );
+    let event_kinds = fs::read_to_string(core.event_log())
+        .expect("receipt events")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("event JSON"))
+        .map(|event| event["kind"].as_str().expect("event kind").to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        event_kinds
+            .iter()
+            .filter(|kind| kind.as_str() == "submit:receipt-consumed")
+            .count(),
+        1
+    );
+    let consumed = fs::read_to_string(core.event_log())
+        .expect("receipt events")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("event JSON"))
+        .find(|event| event["kind"] == "submit:receipt-consumed")
+        .expect("receipt-consumed event");
+    assert!(
+        consumed["artifact_refs"]
+            .as_array()
+            .expect("receipt refs")
+            .iter()
+            .any(|reference| reference == "delivery-transition-kind:delivery:recovery-required")
+    );
+    core.shutdown();
+}
+
+#[test]
+fn receipt_v1_blocked_delivery_ineligible_is_stored_fail_closed() {
+    let (mut core, spawn, spec, _carrier_path, _worktree) =
+        launched_core_delivery("receipt-v1-blocked-ineligible");
+    let fresh: kernel::generated::AgentRunSpecV5 =
+        serde_json::from_value(spec).expect("fresh delivery V5 spec");
+    let request = serde_json::json!({
+        "schema": "autopilot.child_control_request.v1",
+        "request_id": "receipt-v1-blocked-ineligible-submit",
+        "token": fresh.child_control_token,
+        "run_id": fresh.run_id,
+        "assignment_id": fresh.assignment_id,
+        "attempt": fresh.attempt,
+        "tool_call_id": "receipt-v1-blocked-ineligible-tool-call",
+        "kind": "submit",
+        "tool_name": "autopilot_emit_status",
+        "profile_id": "delivery-status.v2",
+        "raw_payload": {
+            "actual_changed_paths": [],
+            "execution_audit_ref": "audit:receipt-v1-blocked-ineligible",
+            "focused_evidence_refs": ["evidence:1", "evidence:2"],
+            "terminal_status": "blocked",
+            "hard_boundary_violations": ["new authority required"],
+            "blocker_class": "requires-new-authority"
+        },
+        "runtime_evidence": {
+            "schema": "autopilot.child_control_runtime_evidence.v1",
+            "delivery_policy_denials": {
+                "schema": "autopilot.delivery_policy_denials.v2",
+                "overflowed": false,
+                "entries": []
+            },
+            "approved_command_executions": {
+                "schema": "autopilot.approved_command_executions.v1",
+                "overflowed": false,
+                "entries": []
+            }
+        }
+    });
+    let accepted = core.send_json(serde_json::json!({
+        "v": 1,
+        "id": 2,
+        "kind": "child-control",
+        "payload": {"broker_capability": TEST_BROKER_CAPABILITY, "request": request}
+    }));
+    assert_eq!(accepted.payload["response"]["outcome"], "ACCEPT");
+    let receipt = &accepted.payload["response"]["receipt"]["receipt"];
+    assert_eq!(
+        receipt["prepared_transition"]["deferred_host_effect"]["kind"],
+        "done"
+    );
+    assert_eq!(
+        receipt["prepared_transition"]["issued_actions"]
+            .as_array()
+            .expect("no recovery issue")
+            .len(),
+        0
+    );
+    let completion = core.send_json(serde_json::json!({
+        "v":1,"id":3,"kind":"task-completed","payload":{
+            "task_id":"receipt-v1-blocked-ineligible-task",
+            "action_id":spawn.action.action_id,
+            "assignment_id":spawn.action.assignment_id,
+            "status":"completed"
+        }
+    }));
+    assert_eq!(
+        completion.kind, "done",
+        "fail-closed completion: {completion:?}"
+    );
+    assert_eq!(
+        completion.payload["status"],
+        "delivery-recovery-inadmissible"
+    );
+    let consumed = fs::read_to_string(core.event_log())
+        .expect("receipt events")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("event JSON"))
+        .find(|event| event["kind"] == "submit:receipt-consumed")
+        .expect("receipt-consumed event");
+    assert!(
+        consumed["artifact_refs"]
+            .as_array()
+            .expect("receipt refs")
+            .iter()
+            .any(|reference| reference == "delivery-transition-kind:recovery:inadmissible")
+    );
+    assert!(
+        !consumed["artifact_refs"]
+            .as_array()
+            .expect("receipt refs")
+            .iter()
+            .any(|reference| reference == "delivery-transition-kind:delivery:recovery-required")
+    );
+    core.shutdown();
+}
+
+#[test]
+fn receipt_v1_delivery_missing_ledgers_or_preexisting_audit_retry_without_receipt_root() {
+    let (mut core, _spawn, spec, carrier_path, _worktree) =
+        launched_core_delivery("receipt-v1-delivery-retry-artifacts");
+    let fresh: kernel::generated::AgentRunSpecV5 =
+        serde_json::from_value(spec).expect("fresh delivery V5 spec");
+    let base_request = serde_json::json!({
+        "schema": "autopilot.child_control_request.v1",
+        "request_id": "receipt-v1-delivery-retry-ledger",
+        "token": fresh.child_control_token,
+        "run_id": fresh.run_id,
+        "assignment_id": fresh.assignment_id,
+        "attempt": fresh.attempt,
+        "tool_call_id": "receipt-v1-delivery-retry-tool-call",
+        "kind": "submit",
+        "tool_name": "autopilot_emit_status",
+        "profile_id": "delivery-status.v2",
+        "raw_payload": {
+            "actual_changed_paths": [],
+            "execution_audit_ref": "audit:receipt-v1-delivery-retry",
+            "focused_evidence_refs": ["evidence:1", "evidence:2"],
+            "terminal_status": "blocked",
+            "hard_boundary_violations": ["new authority required"],
+            "blocker_class": "requires-new-authority"
+        },
+        "runtime_evidence": {
+            "schema": "autopilot.child_control_runtime_evidence.v1",
+            "delivery_policy_denials": {
+                "schema": "autopilot.delivery_policy_denials.v2",
+                "overflowed": false,
+                "entries": []
+            },
+            "approved_command_executions": {
+                "schema": "autopilot.approved_command_executions.v1",
+                "overflowed": false,
+                "entries": []
+            }
+        }
+    });
+    let mut missing_ledger = base_request.clone();
+    missing_ledger["runtime_evidence"]["approved_command_executions"] = serde_json::Value::Null;
+    let missing = core.send_json(serde_json::json!({
+        "v": 1,
+        "id": 2,
+        "kind": "child-control",
+        "payload": {"broker_capability": TEST_BROKER_CAPABILITY, "request": missing_ledger}
+    }));
+    assert_eq!(missing.kind, "child-control");
+    assert_eq!(missing.payload["response"]["outcome"], "RETRY");
+    assert!(
+        !carrier_path.exists(),
+        "missing ledger must not publish carrier"
+    );
+
+    let audit_path = carrier_path.with_extension("tool-audit.json");
+    fs::create_dir_all(audit_path.parent().expect("audit parent")).expect("audit parent");
+    fs::write(&audit_path, b"malformed preexisting audit").expect("malformed audit");
+    let malformed = core.send_json(serde_json::json!({
+        "v": 1,
+        "id": 3,
+        "kind": "child-control",
+        "payload": {"broker_capability": TEST_BROKER_CAPABILITY, "request": base_request}
+    }));
+    assert_eq!(malformed.kind, "child-control");
+    assert_eq!(malformed.payload["response"]["outcome"], "RETRY");
+    assert!(
+        !carrier_path.exists(),
+        "malformed audit must not publish carrier"
+    );
+    let events = fs::read_to_string(core.event_log()).expect("event log");
+    assert!(
+        !events.lines().any(|line| {
+            serde_json::from_str::<serde_json::Value>(line).expect("event JSON")["kind"]
+                == "submit:accepted"
+        }),
+        "failed admission must not root a receipt"
+    );
+    let receipt_dir = carrier_path
+        .parent()
+        .expect("carrier parent")
+        .join("submit-receipts");
+    assert!(
+        !receipt_dir.exists()
+            || fs::read_dir(receipt_dir)
+                .expect("receipt dir")
+                .next()
+                .is_none(),
+        "failed admission must not publish a receipt"
+    );
+    core.shutdown();
+}
+
 fn autopilot_command(id: u64) -> serde_json::Value {
     serde_json::json!({"v":1,"id":id,"kind":"command","payload":{"raw":"autopilot main","background_capabilities":{"api_version":1,"run":true,"run_is_agent":true,"run_completion_trigger":true,"status":true,"logs":true,"logs_bounded":true,"kill":true}}})
 }
@@ -2514,6 +2930,7 @@ struct CoreProcess {
 impl CoreProcess {
     fn spawn(cwd: &Path) -> Self {
         let event_log = cwd.join(".pi/autopilot/main/events.jsonl");
+        let socket = broker_socket();
         let mut child = Command::new(env!("CARGO_BIN_EXE_autopilot-core"))
             .current_dir(cwd)
             .env("AUTOPILOT_CORE_EVENT_LOG", &event_log)
@@ -2532,6 +2949,11 @@ impl CoreProcess {
             .env(
                 "AUTOPILOT_VALIDATOR_COMMAND",
                 std::env::current_exe().expect("test exe"),
+            )
+            .env("AUTOPILOT_CHILD_CONTROL_SOCKET_PATH", socket)
+            .env(
+                "AUTOPILOT_CHILD_CONTROL_BROKER_CAPABILITY",
+                TEST_BROKER_CAPABILITY,
             )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

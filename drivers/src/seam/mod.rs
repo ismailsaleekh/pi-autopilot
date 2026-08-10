@@ -250,11 +250,14 @@ fn route_child_control(
         Ok(ChildControlAdmission::Replay { receipt, binding }) => {
             match root_or_verify_submit_receipt(state, &receipt, &binding) {
                 Ok(()) => child_control_accept(id, request_id, receipt),
-                Err(detail) => child_control_retry(
-                    id,
-                    request_id,
-                    staging_retry("submit.receipt_root", "", detail),
-                ),
+                Err(detail) => {
+                    let diagnostic = if binding.result_contract.0 == "autopilot.delivery_result.v2" {
+                        delivery_staging_retry("submit.receipt_root", "", detail)
+                    } else {
+                        staging_retry("submit.receipt_root", "", detail)
+                    };
+                    child_control_retry(id, request_id, diagnostic)
+                }
             }
         }
         Ok(ChildControlAdmission::Staged {
@@ -262,17 +265,12 @@ fn route_child_control(
             facade,
             raw_payload,
             prepared,
-        }) => match commit_staged_planning_submit(
-            state,
-            &request,
-            &binding,
-            &facade,
-            &raw_payload,
-            prepared,
-        ) {
-            Ok(receipt) => child_control_accept(id, request_id, receipt),
-            Err(diagnostic) => child_control_retry(id, request_id, diagnostic),
-        },
+        }) => {
+            match commit_staged_submit(state, &request, &binding, &facade, &raw_payload, prepared) {
+                Ok(receipt) => child_control_accept(id, request_id, receipt),
+                Err(diagnostic) => child_control_retry(id, request_id, diagnostic),
+            }
+        }
         Err(failure) => child_control_retry(id, request_id, failure),
     }
 }
@@ -531,15 +529,6 @@ fn admit_child_control_request(
                     "Do not change a payload after this assignment has an accepted receipt.",
                 ));
             }
-            if !binding.result_contract.0.starts_with("planning.") {
-                return Err(child_control_diagnostic(
-                    "submit.transition_staging_unavailable",
-                    "",
-                    "Wave 2C delivery/Validator parent transition staging",
-                    &serde_json::json!(binding.result_contract.0),
-                    "Retry after Wave 2C parent transition staging is available.",
-                ));
-            }
             let prepared = runner::child::admit_submission(
                 Path::new(&binding.spec_path),
                 spec_text,
@@ -777,9 +766,10 @@ fn receipt_projected_planning_kind(event: &EventRow) -> Result<Option<&'static s
         .collect::<Vec<_>>();
     if markers.is_empty() {
         if event.kind.0 == "submit:receipt-consumed"
-            && event.artifact_refs.iter().any(|reference| {
-                reference.0.starts_with("planning-result-consumed:")
-            })
+            && event
+                .artifact_refs
+                .iter()
+                .any(|reference| reference.0.starts_with("planning-result-consumed:"))
         {
             return Err("receipt planning consumption lacks its transition marker".to_owned());
         }
@@ -811,7 +801,9 @@ fn receipt_projected_planning_kind(event: &EventRow) -> Result<Option<&'static s
         .count()
         != 1
     {
-        return Err("receipt planning transition lacks one planning-result-consumed ref".to_owned());
+        return Err(
+            "receipt planning transition lacks one planning-result-consumed ref".to_owned(),
+        );
     }
     closed_planning_event_kind(kind).map(Some)
 }
@@ -986,6 +978,41 @@ fn staging_retry(code: &str, pointer: &str, detail: impl Into<String>) -> Submit
         &serde_json::json!(detail.into()),
         "Correct the payload or retry after the issued planning authority is available.",
     )
+}
+
+fn delivery_staging_retry(
+    code: &str,
+    pointer: &str,
+    detail: impl Into<String>,
+) -> SubmitDiagnostic {
+    child_control_diagnostic(
+        code,
+        pointer,
+        "a complete receipt-backed delivery/submit transition",
+        &serde_json::json!(detail.into()),
+        "Correct the delivery payload or retry with the issued delivery authority.",
+    )
+}
+
+fn commit_staged_submit(
+    state: &mut CoreState,
+    request: &ChildControlRequest,
+    binding: &runner::ReceiptV1RunnerBinding,
+    facade: &kernel::generated::AgentRunSpec,
+    raw: &[u8],
+    prepared: runner::child::PreparedCarrier,
+) -> Result<SubmitReceipt, SubmitDiagnostic> {
+    if binding.result_contract.0.starts_with("planning.") {
+        return commit_staged_planning_submit(state, request, binding, facade, raw, prepared);
+    }
+    if binding.result_contract.0 == "autopilot.delivery_result.v2" {
+        return commit_staged_delivery_submit(state, request, binding, facade, raw, prepared);
+    }
+    Err(staging_retry(
+        "submit.transition_staging_unavailable",
+        "",
+        "Validator parent transition staging is owned by Wave 2C2",
+    ))
 }
 
 fn commit_staged_planning_submit(
@@ -1264,6 +1291,931 @@ fn commit_staged_planning_submit(
     .map_err(|error| staging_retry("submit.receipt_write", "", error.to_string()))?;
     root_or_verify_submit_receipt(state, &receipt, binding)
         .map_err(|detail| staging_retry("submit.receipt_root", "", detail))?;
+    Ok(receipt)
+}
+
+const PREPARED_DELIVERY_TRANSITION_SCHEMA: &str = "autopilot.prepared_delivery_transition.v1";
+const DELIVERY_TRANSITION_KIND_REF_PREFIX: &str = "delivery-transition-kind:";
+const CLOSED_DELIVERY_TRANSITION_KINDS: &[&str] = &[
+    "agent:delivery-accepted",
+    "delivery:recovery-required",
+    "recovery:inadmissible",
+];
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PreparedDeliveryTransitionV1 {
+    schema: String,
+    event_kind: String,
+    refs: Vec<Ref>,
+}
+
+#[derive(Clone)]
+struct StagedDeliverySemantics {
+    event_kind: String,
+    refs: Vec<Ref>,
+    effect: DeferredHostEffectV1,
+    issues: Vec<runner::IssuedRunnerAction>,
+    artifacts: Vec<(PathBuf, String, Vec<u8>)>,
+}
+
+fn delivery_transition_kind_ref(event_kind: &str) -> Result<Ref, String> {
+    if !CLOSED_DELIVERY_TRANSITION_KINDS.contains(&event_kind) {
+        return Err(format!("unknown delivery transition kind: {event_kind}"));
+    }
+    Ok(Ref(format!(
+        "{DELIVERY_TRANSITION_KIND_REF_PREFIX}{event_kind}"
+    )))
+}
+
+fn validate_delivery_transition(transition: &PreparedDeliveryTransitionV1) -> Result<(), String> {
+    if transition.schema != PREPARED_DELIVERY_TRANSITION_SCHEMA
+        || !CLOSED_DELIVERY_TRANSITION_KINDS.contains(&transition.event_kind.as_str())
+        || transition.refs.is_empty()
+        || transition.refs.iter().any(|reference| {
+            reference.0.trim().is_empty()
+                || reference.0.starts_with(DELIVERY_TRANSITION_KIND_REF_PREFIX)
+        })
+    {
+        return Err("prepared delivery transition semantic authority drift".to_owned());
+    }
+    let unique = transition
+        .refs
+        .iter()
+        .map(|reference| reference.0.as_str())
+        .collect::<BTreeSet<_>>();
+    if unique.len() != transition.refs.len() {
+        return Err("prepared delivery transition has duplicate semantic refs".to_owned());
+    }
+    Ok(())
+}
+
+fn prepared_delivery_transition_path(
+    binding: &runner::ReceiptV1RunnerBinding,
+) -> Result<PathBuf, String> {
+    let mut path = submit_receipt_path(binding)?;
+    path.set_extension("delivery-transition.json");
+    Ok(path)
+}
+
+fn prepared_delivery_transition_from_receipt(
+    receipt: &SubmitReceipt,
+) -> Result<PreparedDeliveryTransitionV1, String> {
+    let artifacts = receipt
+        .prepared_transition
+        .artifact_refs
+        .iter()
+        .filter(|artifact| artifact.artifact_schema.0 == PREPARED_DELIVERY_TRANSITION_SCHEMA)
+        .collect::<Vec<_>>();
+    let [artifact] = artifacts.as_slice() else {
+        return Err("receipt lacks exactly one prepared delivery transition artifact".to_owned());
+    };
+    let bytes = runner::read_bounded_authority_file(
+        Path::new(&artifact.artifact_ref.0),
+        SUBMIT_RECEIPT_MAX_BYTES,
+    )
+    .map_err(|error| format!("prepared delivery transition read: {error}"))?;
+    if bytes.len() != artifact.byte_count as usize || sha256_hex_local(&bytes) != artifact.sha256.0
+    {
+        return Err("prepared delivery transition byte authority drift".to_owned());
+    }
+    let transition: PreparedDeliveryTransitionV1 = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("prepared delivery transition JSON: {error}"))?;
+    if crate::evidence::canonical_json(&transition).map_err(|error| error.to_string())? != bytes {
+        return Err("prepared delivery transition bytes are not canonical".to_owned());
+    }
+    validate_delivery_transition(&transition)?;
+    Ok(transition)
+}
+
+fn prepared_artifact_bytes(
+    artifact: &runner::child::PreparedArtifact,
+) -> Result<(PathBuf, Vec<u8>), String> {
+    match artifact {
+        runner::child::PreparedArtifact::JsonNew { path, value } => Ok((
+            PathBuf::from(path),
+            serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?,
+        )),
+        runner::child::PreparedArtifact::ExactBytes { path, bytes } => {
+            Ok((path.clone(), bytes.clone()))
+        }
+    }
+}
+
+fn staged_delivery_runtime_evidence(
+    runtime_evidence: &ChildControlRuntimeEvidence,
+    facts: &ValidatedDeliveryFacts,
+) -> Result<(), String> {
+    let denials = runtime_evidence
+        .delivery_policy_denials
+        .0
+        .as_ref()
+        .ok_or_else(|| "fresh delivery runtime denial ledger is absent".to_owned())?;
+    let executions = runtime_evidence
+        .approved_command_executions
+        .0
+        .as_ref()
+        .ok_or_else(|| "fresh delivery runtime execution ledger is absent".to_owned())?;
+    let denials: runner::child::DeliveryPolicyDenialLedger =
+        serde_json::from_value(serde_json::to_value(denials).map_err(|error| error.to_string())?)
+            .map_err(|error| format!("fresh delivery runtime denial ledger shape: {error}"))?;
+    let executions: runner::child::ApprovedCommandExecutionLedger = serde_json::from_value(
+        serde_json::to_value(executions).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| format!("fresh delivery runtime execution ledger shape: {error}"))?;
+    if denials != facts.denial_ledger || executions != facts.command_execution_ledger {
+        return Err("fresh delivery runtime ledgers do not exactly bind staged audit".to_owned());
+    }
+    Ok(())
+}
+
+fn staged_delivery_transcript(
+    binding: &runner::IssuedRunnerBinding,
+    carrier_bytes: &[u8],
+) -> Result<(PathBuf, String, Vec<u8>), String> {
+    let runtime = runner::role_runtime(&binding.role_id.0).map_err(|error| error.to_string())?;
+    let raw_output = String::from_utf8(carrier_bytes.to_vec())
+        .map_err(|error| format!("delivery transcript UTF-8: {error}"))?;
+    let record = crate::transcript::TranscriptRecord::real(
+        binding.result_contract.0.clone(),
+        raw_output,
+        crate::transcript::TranscriptProvenance {
+            provider: runtime.provider,
+            model: runtime.model,
+            thinking: runtime.thinking,
+            session_id: safe_ref_component(&binding.action_id.0),
+        },
+    );
+    record
+        .validate_real()
+        .map_err(|error| format!("delivery transcript: {error:?}"))?;
+    let key = sha256_hex_local(
+        format!(
+            "delivery-transcript.v1\\0{}\\0{}\\0{}",
+            binding.action_id.0, binding.assignment_id.0, binding.run_revision
+        )
+        .as_bytes(),
+    );
+    let path = std::env::current_dir()
+        .map_err(|error| error.to_string())?
+        .join(workstream_dir(&binding.workstream.0))
+        .join("transcripts")
+        .join(format!("receipt-delivery-{key}.json"));
+    let bytes = crate::evidence::canonical_json(&record).map_err(|error| error.to_string())?;
+    Ok((path, "autopilot.transcript.v1".to_owned(), bytes))
+}
+
+/// Read the exact immutable common issuance artifacts before a parent receipt
+/// can name them.  This is deliberately role-agnostic only for the shared
+/// V5 transport; package assignment interpretation remains the explicit
+/// role/profile branch below.
+fn staged_issue_common_artifacts(
+    issue: &runner::IssuedRunnerAction,
+) -> Result<
+    (
+        kernel::generated::AgentRunSpecV5,
+        Vec<(PathBuf, String, Vec<u8>)>,
+    ),
+    String,
+> {
+    let binding = &issue.receipt_binding;
+    runner::receipt_binding_ref(binding)
+        .map_err(|error| format!("fresh issued receipt binding shape: {error}"))?;
+    if issue.action.action_id != binding.action_id
+        || issue.action.assignment_id != binding.assignment_id
+        || issue.action.run_revision != binding.run_revision
+        || issue.binding != runner::receipt_v1_validator_facade(binding)
+    {
+        return Err("fresh issued action/receipt binding identity drift".to_owned());
+    }
+
+    let prompt_bytes = runner::read_bounded_authority_file(
+        Path::new(&binding.prompt_path),
+        runner::child::MAX_RENDERED_PROMPT_BYTES,
+    )
+    .map_err(|error| format!("fresh issued prompt read: {error}"))?;
+    if sha256_hex_local(&prompt_bytes) != binding.prompt_digest {
+        return Err("fresh issued prompt digest drift".to_owned());
+    }
+    let spec_bytes = runner::read_bounded_authority_file(
+        Path::new(&binding.spec_path),
+        runner::child::MAX_AGENT_RUN_SPEC_BYTES,
+    )
+    .map_err(|error| format!("fresh issued spec read: {error}"))?;
+    if sha256_hex_local(&spec_bytes) != binding.spec_digest {
+        return Err("fresh issued spec digest drift".to_owned());
+    }
+    let spec: kernel::generated::AgentRunSpecV5 = serde_json::from_slice(&spec_bytes)
+        .map_err(|error| format!("fresh issued V5 spec JSON: {error}"))?;
+    if serde_json::to_vec_pretty(&spec).map_err(|error| error.to_string())? != spec_bytes {
+        return Err("fresh issued V5 spec bytes are not canonical".to_owned());
+    }
+    runner::validate_receipt_v1_spec(binding, &spec)
+        .map_err(|error| format!("fresh issued V5 spec/binding authority: {error}"))?;
+    Ok((
+        spec,
+        vec![
+            (
+                PathBuf::from(&binding.prompt_path),
+                "autopilot.rendered_prompt.v1".to_owned(),
+                prompt_bytes,
+            ),
+            (
+                PathBuf::from(&binding.spec_path),
+                "autopilot.agent_run_spec.v5".to_owned(),
+                spec_bytes,
+            ),
+        ],
+    ))
+}
+
+fn staged_validator_issue_artifacts(
+    issue: &runner::IssuedRunnerAction,
+) -> Result<Vec<(PathBuf, String, Vec<u8>)>, String> {
+    let binding = &issue.receipt_binding;
+    if binding.role_id.0 != "validator"
+        || binding.profile_id != "validation-status.v3"
+        || binding.tool_name.0 != "autopilot_emit_status"
+        || binding.boundary_id.0 != "autopilot.validation_submission.v3"
+        || binding.result_contract.0 != "autopilot.validation_result.v3"
+    {
+        return Err("fresh Validator issue role/profile authority drift".to_owned());
+    }
+    let (spec, mut rows) = staged_issue_common_artifacts(issue)?;
+    if !matches!(
+        spec.assignment_kind,
+        kernel::generated::ValidationAssignmentKind::Validation
+    ) || spec.assignment_path.as_ref().map(|path| path.0.as_str())
+        != binding.assignment_path.as_deref()
+        || spec
+            .assignment_digest
+            .as_ref()
+            .map(|digest| digest.0.as_str())
+            != binding.assignment_digest.as_deref()
+    {
+        return Err("fresh Validator V5 package binding drift".to_owned());
+    }
+    let assignment_path = binding
+        .assignment_path
+        .as_ref()
+        .ok_or_else(|| "fresh Validator issue lacks assignment path".to_owned())?;
+    let assignment_digest = binding
+        .assignment_digest
+        .as_ref()
+        .ok_or_else(|| "fresh Validator issue lacks assignment digest".to_owned())?;
+    let assignment_bytes = runner::read_bounded_authority_file(
+        Path::new(assignment_path),
+        kernel::generated::VALIDATION_ASSIGNMENT_V4_MAX_BYTES,
+    )
+    .map_err(|error| format!("fresh Validator V4 assignment read: {error}"))?;
+    if sha256_hex_local(&assignment_bytes) != *assignment_digest {
+        return Err("fresh Validator V4 assignment digest drift".to_owned());
+    }
+    let assignment: kernel::generated::ValidationAssignmentV4 =
+        serde_json::from_slice(&assignment_bytes)
+            .map_err(|error| format!("fresh Validator V4 assignment JSON: {error}"))?;
+    if serde_json::to_vec_pretty(&assignment).map_err(|error| error.to_string())?
+        != assignment_bytes
+        || assignment.schema.0 != "autopilot.validation_assignment.v4"
+        || assignment.admission_mode != kernel::generated::AdmissionMode::ReceiptV1
+        || assignment.validation_id.0.trim().is_empty()
+        || assignment.workstream != binding.workstream
+        || assignment.role_id != binding.role_id
+        || assignment.mode != binding.mode
+        || assignment.assignment_id != binding.assignment_id
+        || assignment.action_id != binding.action_id
+        || assignment.run_revision != binding.run_revision
+        || assignment.candidate_root != spec.cwd
+    {
+        return Err("fresh Validator V4 assignment/binding identity drift".to_owned());
+    }
+    rows.push((
+        PathBuf::from(assignment_path),
+        "autopilot.validation_assignment.v4".to_owned(),
+        assignment_bytes,
+    ));
+
+    let context_bytes = runner::read_bounded_authority_file(
+        Path::new(&assignment.context_path.0),
+        MAX_VALIDATION_BOUND_ARTIFACT_BYTES,
+    )
+    .map_err(|error| format!("fresh Validator context read: {error}"))?;
+    if sha256_hex_local(&context_bytes) != assignment.context_digest.0 {
+        return Err("fresh Validator context digest drift".to_owned());
+    }
+    let context: kernel::generated::ValidationContextV3 = serde_json::from_slice(&context_bytes)
+        .map_err(|error| format!("fresh Validator V3 context JSON: {error}"))?;
+    if serde_json::to_vec_pretty(&context).map_err(|error| error.to_string())? != context_bytes
+        || context.schema.0 != "autopilot.validation_context.v3"
+        || context.validation_id != assignment.validation_id
+        || context.assignment_id != assignment.assignment_id
+        || context.authority_digest != assignment.authority_digest
+    {
+        return Err("fresh Validator V3 context identity/digest drift".to_owned());
+    }
+    rows.push((
+        PathBuf::from(&assignment.context_path.0),
+        "autopilot.validation_context.v3".to_owned(),
+        context_bytes,
+    ));
+
+    let authority_bytes = runner::read_bounded_authority_file(
+        Path::new(&assignment.authority_path.0),
+        MAX_VALIDATION_BOUND_ARTIFACT_BYTES,
+    )
+    .map_err(|error| format!("fresh Validator authority read: {error}"))?;
+    let authority_value: serde_json::Value = serde_json::from_slice(&authority_bytes)
+        .map_err(|error| format!("fresh Validator authority JSON: {error}"))?;
+    let authority: kernel::generated::ValidationEvidenceAuthority =
+        serde_json::from_value(authority_value.clone())
+            .map_err(|error| format!("fresh Validator authority shape: {error}"))?;
+    if serde_json::to_vec_pretty(&authority_value).map_err(|error| error.to_string())?
+        != authority_bytes
+        || authority.schema.0 != "autopilot.validation_evidence_authority.v1"
+        || authority.validation_id != assignment.validation_id
+        || authority.assignment_id != assignment.assignment_id
+        || authority.base_commit != assignment.base_commit
+        || authority.exact_commit != assignment.exact_commit
+        || authority.exact_tree != assignment.exact_tree
+        || authority.candidate_root != assignment.candidate_root
+        || authority.authority_digest != assignment.authority_digest
+        || runner::validation_authority::authority_digest(&authority_value)
+            .map_err(|error| format!("fresh Validator authority digest: {error}"))?
+            != assignment.authority_digest.0
+    {
+        return Err("fresh Validator authority identity/digest drift".to_owned());
+    }
+    rows.push((
+        PathBuf::from(&assignment.authority_path.0),
+        "autopilot.validation_evidence_authority.v1".to_owned(),
+        authority_bytes,
+    ));
+    Ok(rows)
+}
+
+fn staged_recovery_issue_artifacts(
+    issue: &runner::IssuedRunnerAction,
+) -> Result<Vec<(PathBuf, String, Vec<u8>)>, String> {
+    let binding = &issue.receipt_binding;
+    if binding.role_id.0 != "recovery-engineer"
+        || binding.profile_id != "delivery-status.v2"
+        || binding.tool_name.0 != "autopilot_emit_status"
+        || binding.boundary_id.0 != "autopilot.delivery_submission.v2"
+        || binding.result_contract.0 != "autopilot.delivery_result.v2"
+    {
+        return Err("fresh Recovery Engineer issue role/profile authority drift".to_owned());
+    }
+    let (spec, mut rows) = staged_issue_common_artifacts(issue)?;
+    if !matches!(
+        spec.assignment_kind,
+        kernel::generated::ValidationAssignmentKind::Delivery
+    ) || spec.assignment_path.as_ref().map(|path| path.0.as_str())
+        != binding.assignment_path.as_deref()
+        || spec
+            .assignment_digest
+            .as_ref()
+            .map(|digest| digest.0.as_str())
+            != binding.assignment_digest.as_deref()
+    {
+        return Err("fresh Recovery Engineer V5 package binding drift".to_owned());
+    }
+    let assignment_path = binding
+        .assignment_path
+        .as_ref()
+        .ok_or_else(|| "fresh Recovery Engineer issue lacks assignment path".to_owned())?;
+    let assignment_digest = binding
+        .assignment_digest
+        .as_ref()
+        .ok_or_else(|| "fresh Recovery Engineer issue lacks assignment digest".to_owned())?;
+    let assignment_bytes = runner::read_bounded_authority_file(
+        Path::new(assignment_path),
+        runner::DELIVERY_ASSIGNMENT_MAX_BYTES,
+    )
+    .map_err(|error| format!("fresh Recovery Engineer delivery assignment read: {error}"))?;
+    if sha256_hex_local(&assignment_bytes) != *assignment_digest {
+        return Err("fresh Recovery Engineer delivery assignment digest drift".to_owned());
+    }
+    let lane_id = binding
+        .lane_id
+        .as_ref()
+        .ok_or_else(|| "fresh Recovery Engineer binding lacks lane_id".to_owned())?;
+    let base_commit = binding
+        .base_commit
+        .as_ref()
+        .ok_or_else(|| "fresh Recovery Engineer binding lacks base_commit".to_owned())?;
+    let worktree = binding
+        .worktree
+        .as_deref()
+        .ok_or_else(|| "fresh Recovery Engineer binding lacks worktree".to_owned())?;
+    let schema = match runner::read_delivery_assignment_artifact(&assignment_bytes)? {
+        runner::DeliveryAssignmentArtifactReader::V3(assignment) => {
+            if assignment.schema != "autopilot.delivery_assignment.v3"
+                || assignment.workstream != binding.workstream
+                || assignment.assignment_id != binding.assignment_id
+                || assignment.lane_id != *lane_id
+                || assignment.attempt != binding.attempt
+                || assignment.base_commit != *base_commit
+                || assignment.worktree != worktree
+                || assignment.ordered_units.is_empty()
+            {
+                return Err(
+                    "fresh Recovery Engineer V3 delivery assignment identity drift".to_owned(),
+                );
+            }
+            runner::validate_approved_command_bindings(&assignment)
+                .map_err(|error| format!("fresh Recovery Engineer V3 command binding: {error}"))?;
+            runner::validate_delivery_recovery_binding(
+                &binding.role_id,
+                &binding.mode,
+                binding.attempt,
+                assignment.recovery.as_ref(),
+            )
+            .map_err(|error| format!("fresh Recovery Engineer V3 directive: {error}"))?;
+            "autopilot.delivery_assignment.v3"
+        }
+        runner::DeliveryAssignmentArtifactReader::V4(assignment) => {
+            runner::materializer_v4::replay_v4_materialization(&assignment)
+                .map_err(|error| format!("fresh Recovery Engineer V4 materialization: {error}"))?;
+            if assignment.schema != runner::materializer_v4::DELIVERY_ASSIGNMENT_V4_SCHEMA
+                || assignment.workstream != binding.workstream
+                || assignment.assignment_id != binding.assignment_id
+                || assignment.lane_id != *lane_id
+                || assignment.attempt != binding.attempt
+                || assignment.base_commit != *base_commit
+                || assignment.worktree != worktree
+                || assignment.ordered_units.is_empty()
+            {
+                return Err(
+                    "fresh Recovery Engineer V4 delivery assignment identity drift".to_owned(),
+                );
+            }
+            runner::validate_approved_command_bindings_v4(
+                &assignment.ordered_units,
+                &assignment.approved_commands,
+            )
+            .map_err(|error| format!("fresh Recovery Engineer V4 command binding: {error}"))?;
+            runner::validate_delivery_recovery_binding(
+                &binding.role_id,
+                &binding.mode,
+                binding.attempt,
+                assignment.recovery.as_ref(),
+            )
+            .map_err(|error| format!("fresh Recovery Engineer V4 directive: {error}"))?;
+            "autopilot.delivery_assignment.v4"
+        }
+    };
+    rows.push((
+        PathBuf::from(assignment_path),
+        schema.to_owned(),
+        assignment_bytes,
+    ));
+    Ok(rows)
+}
+
+/// Delivery can issue exactly the two closed continuations above.  Selection
+/// comes from the issued role/profile identity, never from assignment shape.
+fn staged_issue_artifacts(
+    issue: &runner::IssuedRunnerAction,
+) -> Result<Vec<(PathBuf, String, Vec<u8>)>, String> {
+    match issue.receipt_binding.role_id.0.as_str() {
+        "validator" => staged_validator_issue_artifacts(issue),
+        "recovery-engineer" => staged_recovery_issue_artifacts(issue),
+        role => Err(format!(
+            "fresh issued action has unsupported role/profile: {role}"
+        )),
+    }
+}
+
+fn stage_delivery_semantics(
+    _state: &CoreState,
+    binding: &runner::IssuedRunnerBinding,
+    result: &kernel::generated::DeliveryResultV2,
+    facts: &ValidatedDeliveryFacts,
+    carrier_bytes: &[u8],
+    continuation_run_revision: u64,
+) -> Result<StagedDeliverySemantics, String> {
+    let delivery = delivery_v1_projection(result);
+    let mut refs = vec![
+        Ref(binding.assignment_id.0.clone()),
+        Ref(binding.action_id.0.clone()),
+        result.submission.execution_audit_ref.clone(),
+        Ref(format!(
+            "policy-denials:{}",
+            facts.denial_ledger.entries.len()
+        )),
+    ];
+    let (transcript_path, transcript_schema, transcript_bytes) =
+        staged_delivery_transcript(binding, carrier_bytes)?;
+    refs.push(Ref(transcript_path.display().to_string()));
+    let mut artifacts = vec![(transcript_path, transcript_schema, transcript_bytes)];
+    if runner::delivery_submission_outcome(&result.submission)
+        == runner::DeliverySubmissionOutcome::Blocked
+    {
+        refs.push(Ref("agent:delivery-blocked".to_owned()));
+        if binding.role_id.0 == "recovery-engineer" {
+            let disposition = result
+                .submission
+                .recovery_disposition
+                .as_ref()
+                .ok_or_else(|| {
+                    "blocked Recovery Engineer result lacks recovery disposition".to_owned()
+                })?;
+            refs.extend([
+                Ref(format!("recovery-disposition:{disposition:?}")),
+                recovery_disposition_failure_ref(disposition),
+                lane_blocker_ref(binding)?,
+            ]);
+            return Ok(StagedDeliverySemantics {
+                event_kind: "recovery:inadmissible".to_owned(),
+                refs,
+                effect: DeferredHostEffectV1::Done {
+                    payload: CoreToHostDonePayload {
+                        status: format!("recovery-fail-closed:{disposition:?}"),
+                    },
+                },
+                issues: Vec::new(),
+                artifacts,
+            });
+        }
+        match assess_blocked_delivery_recovery(binding, result, facts)? {
+            DeliveryRecoveryDecision::Admit(assessment) => {
+                refs.extend(recovery_assessment_refs(binding, &assessment));
+                if assessment.admission == DeliveryRecoveryAdmission::PolicyDenialRepairable {
+                    refs.push(Ref("delivery-policy-denial-reconciliation".to_owned()));
+                }
+                refs.push(Ref(format!("recovery-pending:{}", binding.assignment_id.0)));
+                let issue = stage_delivery_recovery_issue(
+                    binding,
+                    result,
+                    &assessment,
+                    continuation_run_revision,
+                )?;
+                refs.push(Ref("delivery:recovery-required".to_owned()));
+                artifacts.extend(staged_issue_artifacts(&issue)?);
+                return Ok(StagedDeliverySemantics {
+                    event_kind: "delivery:recovery-required".to_owned(),
+                    refs,
+                    effect: DeferredHostEffectV1::Spawn {
+                        payload: CoreToHostSpawnPayload {
+                            action: issue.action.clone(),
+                        },
+                    },
+                    issues: vec![issue],
+                    artifacts,
+                });
+            }
+            DeliveryRecoveryDecision::Unsafe(error) => {
+                refs.extend([
+                    Ref(format!("delivery-recovery-unsafe:{error:?}")),
+                    Ref("semantic-recovery-unsafe".to_owned()),
+                    lane_blocker_ref(binding)?,
+                ]);
+            }
+            DeliveryRecoveryDecision::Inadmissible(reason) => {
+                refs.extend([
+                    Ref(format!("delivery-recovery-reason:{reason}")),
+                    delivery_blocker_failure_ref(result.submission.blocker_class.as_ref()),
+                    lane_blocker_ref(binding)?,
+                ]);
+            }
+        }
+        return Ok(StagedDeliverySemantics {
+            event_kind: "recovery:inadmissible".to_owned(),
+            refs,
+            effect: DeferredHostEffectV1::Done {
+                payload: CoreToHostDonePayload {
+                    status: "delivery-recovery-inadmissible".to_owned(),
+                },
+            },
+            issues: Vec::new(),
+            artifacts,
+        });
+    }
+    let expected = delivery_expectation_from_binding(binding)?;
+    let (package, accepted) = match facts.assignment.v4.as_ref() {
+        Some(artifact) => {
+            let package = runner::establish_delivery_package_v4(&delivery, &expected, artifact)
+                .map_err(|error| format!("delivery package: {error:?}"))?;
+            let accepted = runner::accept_delivery_v4_with_package_facts(
+                &delivery, &expected, artifact, &package,
+            )
+            .map_err(|error| format!("delivery package acceptance: {error:?}"))?;
+            (package, accepted)
+        }
+        None => {
+            let package = runner::establish_delivery_package(&delivery, &expected)
+                .map_err(|error| format!("delivery package: {error:?}"))?;
+            let accepted = runner::accept_delivery_with_package_facts(
+                std::slice::from_ref(&delivery),
+                &expected,
+                &package,
+            )
+            .map_err(|error| format!("delivery package acceptance: {error:?}"))?;
+            (package, accepted)
+        }
+    };
+    let package_authority = match facts.assignment.v4.as_ref() {
+        Some(artifact) => runner::ValidationPackageAuthority::RootedV4(Box::new(artifact.clone())),
+        None => runner::ValidationPackageAuthority::LegacyV3,
+    };
+    let issue = validation_issue_for_delivery(
+        binding,
+        &accepted,
+        &facts.command_executions,
+        package_authority,
+        continuation_run_revision,
+    )?;
+    refs.extend([
+        Ref(package.package_commit.0),
+        Ref(package.package_tree.0),
+        Ref("validation:required".to_owned()),
+        Ref(format!(
+            "validator-assignment:{}",
+            issue.binding.assignment_id.0
+        )),
+    ]);
+    artifacts.extend(staged_issue_artifacts(&issue)?);
+    Ok(StagedDeliverySemantics {
+        event_kind: "agent:delivery-accepted".to_owned(),
+        refs,
+        effect: DeferredHostEffectV1::Spawn {
+            payload: CoreToHostSpawnPayload {
+                action: issue.action.clone(),
+            },
+        },
+        issues: vec![issue],
+        artifacts,
+    })
+}
+
+fn stage_delivery_recovery_issue(
+    binding: &runner::IssuedRunnerBinding,
+    result: &kernel::generated::DeliveryResultV2,
+    assessment: &DeliveryRecoveryAssessment,
+    continuation_run_revision: u64,
+) -> Result<runner::IssuedRunnerAction, String> {
+    let approved_units = read_delivery_assignment_units(binding)?;
+    let base_commit = binding
+        .base_commit
+        .clone()
+        .ok_or_else(|| "delivery recovery missing base commit".to_owned())?;
+    let [admission_ref, assessment_ref] = recovery_assessment_refs(binding, assessment);
+    let mut diagnosis_refs = vec![
+        Ref(binding.carrier_path.clone()),
+        result.submission.execution_audit_ref.clone(),
+        admission_ref,
+        assessment_ref,
+    ];
+    if assessment.admission == DeliveryRecoveryAdmission::PolicyDenialRepairable {
+        diagnosis_refs.push(Ref("delivery-policy-denial-reconciliation".to_owned()));
+    }
+    let mut diagnosis_details = result.submission.hard_boundary_violations.clone();
+    diagnosis_details.extend([
+        format!(
+            "mechanical in-scope dirty paths: [{}]",
+            assessment.snapshot.in_scope_dirty_paths.join(",")
+        ),
+        format!(
+            "package recovery admission: {}; snapshot={}",
+            assessment.admission.as_str(),
+            assessment.snapshot.snapshot_digest
+        ),
+    ]);
+    let directive = runner::RecoveryDirective {
+        schema: "autopilot.recovery_directive.v1".to_owned(),
+        trigger_phase: "execution".to_owned(),
+        repair_mode: ModeId("forward-critical".to_owned()),
+        trigger_assignment_id: binding.assignment_id.clone(),
+        diagnosis_refs,
+        diagnosis_ids: vec![idv("delivery-blocked"), idv(assessment.admission.as_str())],
+        diagnosis_details,
+        original_gate: "autopilot.delivery_submission.v2".to_owned(),
+        attempt_budget: crate::repair::SemanticRecoveryPolicy::package()?.max_attempts,
+    };
+    let assignment = recovery_runner_assignment(
+        binding,
+        base_commit,
+        approved_units,
+        directive,
+        continuation_run_revision,
+    )?;
+    let facts = runner::RunnerTransportFacts::from_env().map_err(|error| error.to_string())?;
+    match delivery_assignment_v4_for_binding(binding)? {
+        Some(source) => runner::delivery_issue_v4_with_facts(
+            &recovery_v4_assignment(assignment, source),
+            &facts,
+        )
+        .map_err(|error| error.to_string()),
+        None => runner::delivery_issue_with_facts(&assignment, &facts)
+            .map_err(|error| error.to_string()),
+    }
+}
+
+fn commit_staged_delivery_submit(
+    state: &mut CoreState,
+    request: &ChildControlRequest,
+    binding: &runner::ReceiptV1RunnerBinding,
+    _facade: &kernel::generated::AgentRunSpec,
+    raw: &[u8],
+    prepared: runner::child::PreparedCarrier,
+) -> Result<SubmitReceipt, SubmitDiagnostic> {
+    let legacy = runner::receipt_v1_validator_facade(binding);
+    if planning_result_consumed(state, &legacy) || terminal_consumed(state, &legacy) {
+        return Err(delivery_staging_retry(
+            "submit.already_consumed",
+            "",
+            "delivery binding is already terminal or consumed",
+        ));
+    }
+    let result: kernel::generated::DeliveryResultV2 =
+        serde_json::from_value(prepared.carrier.clone()).map_err(|error| {
+            delivery_staging_retry("submit.delivery_carrier", "/raw_payload", error.to_string())
+        })?;
+    let carrier_bytes = crate::evidence::canonical_json(&prepared.carrier).map_err(|error| {
+        delivery_staging_retry("submit.canonical_json", "/raw_payload", error.to_string())
+    })?;
+    let audit_path = PathBuf::from(&legacy.carrier_path).with_extension("tool-audit.json");
+    let mut staged_audits = Vec::new();
+    for artifact in &prepared.artifacts {
+        let (path, bytes) = prepared_artifact_bytes(artifact).map_err(|error| {
+            delivery_staging_retry("submit.delivery_audit", "/tool_audit_ref", error)
+        })?;
+        if path == audit_path {
+            staged_audits.push(bytes);
+        }
+    }
+    let audit_bytes = match staged_audits.len() {
+        1 => staged_audits.remove(0),
+        0 => {
+            return Err(delivery_staging_retry(
+                "submit.delivery_audit",
+                "/tool_audit_ref",
+                "staged delivery audit is absent",
+            ));
+        }
+        count => {
+            return Err(delivery_staging_retry(
+                "submit.delivery_audit",
+                "/tool_audit_ref",
+                format!("staged delivery audit is ambiguous: {count} exact-path artifacts"),
+            ));
+        }
+    };
+    let facts = validate_delivery_result_v2_staged(&result, &legacy, Some(binding), &audit_bytes)
+        .map_err(|error| {
+        delivery_staging_retry("submit.delivery_parent_predicate", "", error)
+    })?;
+    staged_delivery_runtime_evidence(&request.runtime_evidence, &facts).map_err(|error| {
+        delivery_staging_retry(
+            "submit.delivery_runtime_evidence",
+            "/runtime_evidence",
+            error,
+        )
+    })?;
+    let continuation_run_revision = receipt_v1_continuation_run_revision(binding)
+        .map_err(|error| delivery_staging_retry("submit.delivery_transition", "", error))?;
+    let semantic = stage_delivery_semantics(
+        state,
+        &legacy,
+        &result,
+        &facts,
+        &carrier_bytes,
+        continuation_run_revision,
+    )
+    .map_err(|error| delivery_staging_retry("submit.delivery_transition", "", error))?;
+    let sidecar = PreparedDeliveryTransitionV1 {
+        schema: PREPARED_DELIVERY_TRANSITION_SCHEMA.to_owned(),
+        event_kind: semantic.event_kind.clone(),
+        refs: semantic.refs.clone(),
+    };
+    validate_delivery_transition(&sidecar)
+        .map_err(|error| delivery_staging_retry("submit.delivery_transition", "", error))?;
+    let sidecar_path = prepared_delivery_transition_path(binding)
+        .map_err(|error| delivery_staging_retry("submit.delivery_transition", "", error))?;
+    let sidecar_bytes = crate::evidence::canonical_json(&sidecar)
+        .map_err(|error| delivery_staging_retry("submit.canonical_json", "", error.to_string()))?;
+    let mut staged_artifacts = prepared
+        .artifacts
+        .iter()
+        .map(|artifact| {
+            prepared_artifact_bytes(artifact).map(|(path, bytes)| {
+                (
+                    path,
+                    "autopilot.staged_submit_artifact.v1".to_owned(),
+                    bytes,
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| delivery_staging_retry("submit.delivery_artifact", "", error))?;
+    staged_artifacts.extend(semantic.artifacts);
+    staged_artifacts.push((
+        sidecar_path,
+        PREPARED_DELIVERY_TRANSITION_SCHEMA.to_owned(),
+        sidecar_bytes,
+    ));
+    let issued_actions = semantic
+        .issues
+        .iter()
+        .map(|issue| {
+            let binding_bytes =
+                crate::evidence::canonical_json(&issue.receipt_binding).map_err(|error| {
+                    delivery_staging_retry("submit.canonical_json", "", error.to_string())
+                })?;
+            Ok(PreparedSubmitIssuedAction {
+                action_ref: issued_action_ref(&issue.action, &issue.receipt_binding)
+                    .map_err(|error| delivery_staging_retry("submit.issued_action", "", error))?,
+                action: issue.action.clone(),
+                binding_ref: runner::receipt_binding_ref(&issue.receipt_binding).map_err(
+                    |error| delivery_staging_retry("submit.issued_binding", "", error.to_string()),
+                )?,
+                binding_digest: Digest(sha256_hex_local(&binding_bytes)),
+            })
+        })
+        .collect::<Result<Vec<_>, SubmitDiagnostic>>()?;
+    let carrier_artifact = artifact_ref(
+        Path::new(&legacy.carrier_path),
+        "autopilot.delivery_result.v2",
+        &carrier_bytes,
+    );
+    let artifact_refs = staged_artifacts
+        .iter()
+        .map(|(path, schema, bytes)| artifact_ref(path, schema, bytes))
+        .collect::<Vec<_>>();
+    let transition_path = submit_transition_path(binding)
+        .map_err(|error| delivery_staging_retry("submit.transition_path", "", error))?;
+    let effect = semantic.effect;
+    let transition_body = serde_json::json!({
+        "schema": "autopilot.prepared_submit_transition_body.v1",
+        "carrier": carrier_artifact,
+        "artifact_refs": artifact_refs,
+        "issued_actions": issued_actions,
+        "deferred_host_effect": effect,
+    });
+    let transition_bytes = crate::evidence::canonical_json(&transition_body)
+        .map_err(|error| delivery_staging_retry("submit.canonical_json", "", error.to_string()))?;
+    let receipt = SubmitReceipt {
+        schema: SchemaId("autopilot.submit_receipt.v1".to_owned()),
+        receipt_id: crate::state_root::fresh_uuid_v7()
+            .map_err(|error| delivery_staging_retry("submit.receipt_id", "", error.to_string()))?,
+        run_id: binding.run_id.clone(),
+        run_revision: binding.run_revision,
+        workstream: binding.workstream.clone(),
+        action_id: binding.action_id.clone(),
+        assignment_id: binding.assignment_id.clone(),
+        attempt: binding.attempt,
+        profile_id: binding.profile_id.clone(),
+        tool_name: binding.tool_name.clone(),
+        boundary_id: binding.boundary_id.clone(),
+        result_contract: binding.result_contract.clone(),
+        schema_digest: Digest(binding.schema_digest.clone()),
+        spec_digest: Digest(binding.spec_digest.clone()),
+        carrier_binding_digest: Digest(binding.carrier_binding_digest.clone()),
+        authority_digest: Digest(binding.authority_digest.clone()),
+        frozen_validator_versions: vec![SubmitReceiptValidatorVersion {
+            validator_id: Id("delivery-parent-stage".to_owned()),
+            version: "v1".to_owned(),
+            digest: Digest(sha256_hex_local(b"delivery-parent-stage:v1")),
+        }],
+        raw_payload_digest: Digest(sha256_hex_local(raw)),
+        raw_payload_byte_count: raw.len() as u64,
+        request_id: request.request_id.clone(),
+        tool_call_id: request.tool_call_id.clone(),
+        prepared_transition: PreparedSubmitTransitionV1 {
+            schema: SchemaId("autopilot.prepared_submit_transition.v1".to_owned()),
+            transition_ref: Ref(transition_path.display().to_string()),
+            transition_digest: Digest(sha256_hex_local(&transition_bytes)),
+            carrier: carrier_artifact,
+            artifact_refs,
+            issued_actions,
+            deferred_host_effect: effect,
+        },
+    };
+    let receipt_bytes = crate::evidence::canonical_json(&receipt)
+        .map_err(|error| delivery_staging_retry("submit.canonical_json", "", error.to_string()))?;
+    runner::write_bounded_file_create_once(
+        Path::new(&legacy.carrier_path),
+        &carrier_bytes,
+        MAX_TERMINAL_CARRIER_BYTES,
+    )
+    .map_err(|error| delivery_staging_retry("submit.carrier_write", "", error.to_string()))?;
+    for (path, _, bytes) in &staged_artifacts {
+        runner::write_bounded_file_create_once(path, bytes, SUBMIT_RECEIPT_MAX_BYTES).map_err(
+            |error| delivery_staging_retry("submit.artifact_write", "", error.to_string()),
+        )?;
+    }
+    runner::write_bounded_file_create_once(
+        &transition_path,
+        &transition_bytes,
+        SUBMIT_RECEIPT_MAX_BYTES,
+    )
+    .map_err(|error| delivery_staging_retry("submit.transition_write", "", error.to_string()))?;
+    let receipt_path = submit_receipt_path(binding)
+        .map_err(|error| delivery_staging_retry("submit.receipt_path", "", error))?;
+    runner::write_bounded_file_create_once(&receipt_path, &receipt_bytes, SUBMIT_RECEIPT_MAX_BYTES)
+        .map_err(|error| delivery_staging_retry("submit.receipt_write", "", error.to_string()))?;
+    root_or_verify_submit_receipt(state, &receipt, binding)
+        .map_err(|error| delivery_staging_retry("submit.receipt_root", "", error))?;
     Ok(receipt)
 }
 
@@ -2617,9 +3569,6 @@ fn verify_receipt_issued_actions_at_continuation_revision(
 ) -> Result<(), String> {
     if !receipt_matches_binding(receipt, parent_binding) {
         return Err("receipt continuation parent binding identity drift".to_owned());
-    }
-    if !receipt.result_contract.0.starts_with("planning.") {
-        return Ok(());
     }
     let continuation_run_revision = receipt_v1_continuation_run_revision(parent_binding)?;
     for issued in &receipt.prepared_transition.issued_actions {
@@ -4318,6 +5267,85 @@ fn versioned_binding_for(
     }
 }
 
+fn delivery_receipt_consumption_refs(
+    receipt: &SubmitReceipt,
+    binding: &runner::ReceiptV1RunnerBinding,
+    rooted: &SubmitReceiptEventRef,
+    transition: &PreparedDeliveryTransitionV1,
+) -> Result<Vec<Ref>, String> {
+    if !receipt_matches_binding(receipt, binding) {
+        return Err("delivery receipt consumption binding identity drift".to_owned());
+    }
+    validate_delivery_transition(transition)?;
+    let facade = runner::receipt_v1_validator_facade(binding);
+    let mut refs = vec![
+        Ref(format!(
+            "{SUBMIT_RECEIPT_CONSUMED_PREFIX}{}",
+            receipt.receipt_id.0
+        )),
+        terminal_consumed_ref(&facade),
+        delivery_result_consumed_ref(&facade),
+        receipt.prepared_transition.transition_ref.clone(),
+        receipt.prepared_transition.carrier.artifact_ref.clone(),
+        encode_submit_receipt_event_ref(rooted)?,
+        runner::receipt_binding_ref(binding).map_err(|error| error.to_string())?,
+        delivery_transition_kind_ref(&transition.event_kind)?,
+    ];
+    refs.extend(transition.refs.iter().cloned());
+    refs.extend(
+        receipt
+            .prepared_transition
+            .artifact_refs
+            .iter()
+            .map(|artifact| artifact.artifact_ref.clone()),
+    );
+    for issued in &receipt.prepared_transition.issued_actions {
+        verify_issued_action(issued)?;
+        refs.push(issued.action_ref.clone());
+        refs.push(issued.binding_ref.clone());
+    }
+    Ok(refs)
+}
+
+fn delivery_receipt_is_exactly_consumed(
+    state: &CoreState,
+    receipt: &SubmitReceipt,
+    binding: &runner::ReceiptV1RunnerBinding,
+    rooted: &SubmitReceiptEventRef,
+    transition: &PreparedDeliveryTransitionV1,
+) -> Result<bool, String> {
+    let consumed_ref = Ref(format!(
+        "{SUBMIT_RECEIPT_CONSUMED_PREFIX}{}",
+        receipt.receipt_id.0
+    ));
+    let rows = state
+        .events
+        .iter()
+        .filter(|event| {
+            event.kind.0 == "submit:receipt-consumed"
+                && event
+                    .artifact_refs
+                    .iter()
+                    .any(|reference| *reference == consumed_ref)
+        })
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
+        if state.state.refs.contains_key(&consumed_ref) {
+            return Err("delivery receipt-consumed ref lacks its durable row".to_owned());
+        }
+        return Ok(false);
+    }
+    if rows.len() != 1 {
+        return Err("delivery receipt has duplicate durable consume rows".to_owned());
+    }
+    if rows[0].artifact_refs
+        != delivery_receipt_consumption_refs(receipt, binding, rooted, transition)?
+    {
+        return Err("delivery receipt durable consume row identity drift".to_owned());
+    }
+    Ok(true)
+}
+
 fn route_receipt_v1_task_completed(
     id: u64,
     payload: HostToCoreTaskCompletedPayload,
@@ -4365,6 +5393,14 @@ fn route_receipt_v1_task_completed(
     } else {
         None
     };
+    let delivery_transition = if binding.result_contract.0 == "autopilot.delivery_result.v2" {
+        match prepared_delivery_transition_from_receipt(&receipt) {
+            Ok(transition) => Some(transition),
+            Err(error) => return done(id, rejection("submit-receipt", &error)),
+        }
+    } else {
+        None
+    };
     // An orphan receipt is never completion authority. Verify the actual
     // persisted accepted EventRow hash; do not root it from task completion.
     let rooted = match verify_rooted_submit_receipt(state, &receipt) {
@@ -4378,20 +5414,39 @@ fn route_receipt_v1_task_completed(
         "{SUBMIT_RECEIPT_CONSUMED_PREFIX}{}",
         receipt.receipt_id.0
     ));
-    let consumed = match planning_transition.as_ref() {
-        Some(transition) => {
+    let consumed = match (planning_transition.as_ref(), delivery_transition.as_ref()) {
+        (Some(transition), None) => {
             match receipt_is_exactly_consumed(state, &receipt, &binding, &rooted, transition) {
                 Ok(consumed) => consumed,
                 Err(error) => return done(id, rejection("submit-receipt", &error)),
             }
         }
-        None => state.state.refs.contains_key(&consumed_ref),
+        (None, Some(transition)) => {
+            match delivery_receipt_is_exactly_consumed(
+                state, &receipt, &binding, &rooted, transition,
+            ) {
+                Ok(consumed) => consumed,
+                Err(error) => return done(id, rejection("submit-receipt", &error)),
+            }
+        }
+        (None, None) => state.state.refs.contains_key(&consumed_ref),
+        (Some(_), Some(_)) => {
+            return done(
+                id,
+                rejection("submit-receipt", "ambiguous staged transition"),
+            );
+        }
     };
     if consumed {
         return deferred_effect_envelope(id, &receipt.prepared_transition.deferred_host_effect);
     }
     let refs = if let Some(transition) = planning_transition.as_ref() {
         match receipt_consumption_refs(&receipt, &binding, &rooted, transition) {
+            Ok(refs) => refs,
+            Err(error) => return done(id, rejection("submit-receipt", &error)),
+        }
+    } else if let Some(transition) = delivery_transition.as_ref() {
+        match delivery_receipt_consumption_refs(&receipt, &binding, &rooted, transition) {
             Ok(refs) => refs,
             Err(error) => return done(id, rejection("submit-receipt", &error)),
         }
@@ -4627,6 +5682,13 @@ fn planning_result_consumed_ref(binding: &runner::IssuedRunnerBinding) -> Ref {
     ))
 }
 
+fn delivery_result_consumed_ref(binding: &runner::IssuedRunnerBinding) -> Ref {
+    Ref(format!(
+        "delivery-result-consumed:{}:{}:{}",
+        binding.action_id.0, binding.assignment_id.0, binding.run_revision
+    ))
+}
+
 fn terminal_status_allowed(status: &str) -> bool {
     matches!(status, "completed" | "failed" | "killed")
 }
@@ -4798,6 +5860,7 @@ fn validate_delivery_artifact_units(units: &[ApprovedUnit]) -> Result<(), String
 struct ValidatedDeliveryFacts {
     assignment: ValidatedDeliveryAssignment,
     denial_ledger: runner::child::DeliveryPolicyDenialLedger,
+    command_execution_ledger: runner::child::ApprovedCommandExecutionLedger,
     command_executions: Vec<runner::VerifiedCommandExecution>,
 }
 
@@ -4830,9 +5893,28 @@ struct DeliveryToolAuditPolicy {
     command_executions: runner::child::ApprovedCommandExecutionLedger,
 }
 
+/// Legacy carrier reader delegates to the same staged-byte predicate used by
+/// ChildControl.  The path is forensic-only; only the exact audit bytes differ
+/// between an already-persisted replay_v0 carrier and an in-memory receipt
+/// transaction.
 fn validate_delivery_result_v2(
     result: &kernel::generated::DeliveryResultV2,
     binding: &runner::IssuedRunnerBinding,
+) -> Result<ValidatedDeliveryFacts, String> {
+    let expected_audit = PathBuf::from(&binding.carrier_path).with_extension("tool-audit.json");
+    let audit = runner::read_bounded_file(&expected_audit, MAX_TOOL_AUDIT_BYTES)
+        .map_err(|error| error.to_string())?;
+    validate_delivery_result_v2_staged(result, binding, None, &audit)
+}
+
+/// Parent delivery predicate over the exact in-memory carrier/audit bytes
+/// prepared by child admission.  Fresh V5 specs are authenticated against the
+/// receipt binding before their explicit V4 facade reaches legacy predicates.
+fn validate_delivery_result_v2_staged(
+    result: &kernel::generated::DeliveryResultV2,
+    binding: &runner::IssuedRunnerBinding,
+    receipt_binding: Option<&runner::ReceiptV1RunnerBinding>,
+    audit: &[u8],
 ) -> Result<ValidatedDeliveryFacts, String> {
     if result.schema.0 != "autopilot.delivery_result.v2"
         || result.action_id != binding.action_id
@@ -4883,8 +5965,27 @@ fn validate_delivery_result_v2(
     if sha256_hex_local(spec_bytes) != binding.spec_digest {
         return Err("delivery spec receipt mismatch".to_owned());
     }
-    let spec: kernel::generated::AgentRunSpec =
+    let spec_value: serde_json::Value =
         serde_json::from_slice(spec_bytes).map_err(|error| error.to_string())?;
+    let spec = match spec_value.get("admission_mode") {
+        None => {
+            if receipt_binding.is_some() {
+                return Err("receipt_v1 delivery captured a replay_v0 spec".to_owned());
+            }
+            serde_json::from_value::<kernel::generated::AgentRunSpec>(spec_value)
+                .map_err(|error| error.to_string())?
+        }
+        Some(serde_json::Value::String(mode)) if mode == "receipt_v1" => {
+            let receipt_binding = receipt_binding
+                .ok_or_else(|| "replay_v0 delivery captured a receipt_v1 spec".to_owned())?;
+            let fresh: kernel::generated::AgentRunSpecV5 = serde_json::from_value(spec_value)
+                .map_err(|error| format!("receipt_v1 delivery spec JSON: {error}"))?;
+            runner::validate_receipt_v1_spec(receipt_binding, &fresh)
+                .map_err(|error| format!("receipt_v1 delivery spec authority: {error}"))?;
+            runner::project_v5_spec_for_shared_admission(&fresh)
+        }
+        Some(_) => return Err("delivery captured spec has unsupported admission mode".to_owned()),
+    };
     let assignment = validate_delivery_assignment_binding(&spec, binding)?;
     match assignment.v4.as_ref() {
         Some(artifact) => runner::materializer_v4::admit_delivery_submission_v4(
@@ -4916,13 +6017,14 @@ fn validate_delivery_result_v2(
     if result.tool_audit_ref.0 != expected_audit.display().to_string() {
         return Err("delivery tool audit path drift".to_owned());
     }
-    let audit = runner::read_bounded_file(&expected_audit, MAX_TOOL_AUDIT_BYTES)
-        .map_err(|error| error.to_string())?;
-    if sha256_hex_local(&audit) != result.tool_audit_digest.0 {
+    if audit.len() > MAX_TOOL_AUDIT_BYTES {
+        return Err("delivery tool audit exceeds bounded authority size".to_owned());
+    }
+    if sha256_hex_local(audit) != result.tool_audit_digest.0 {
         return Err("delivery tool audit digest drift".to_owned());
     }
     let (denial_ledger, command_execution_ledger) =
-        validate_delivery_tool_audit_policy(&audit, &spec, result)?;
+        validate_delivery_tool_audit_policy(audit, &spec, result)?;
     let command_executions = validate_delivery_command_executions(
         &assignment.legacy,
         &command_execution_ledger,
@@ -4939,6 +6041,7 @@ fn validate_delivery_result_v2(
     Ok(ValidatedDeliveryFacts {
         assignment,
         denial_ledger,
+        command_execution_ledger,
         command_executions,
     })
 }
@@ -7629,7 +8732,7 @@ fn validation_issue_for_delivery(
     );
     let assignment_id = Id(format!("validator-{}", binding.assignment_id.0));
     let approved_units = read_delivery_assignment_units(binding)?;
-    runner::validation_issue_v3(
+    runner::validation_issue_v4(
         &runner::ValidationRunnerRequest {
             workstream: binding.workstream.clone(),
             action_id: Id(format!("action-{}", assignment_id.0)),

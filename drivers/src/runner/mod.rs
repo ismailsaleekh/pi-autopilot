@@ -1987,9 +1987,36 @@ pub fn validation_issue(
 
 /// Issue the closed v3 Validator boundary for new production work.  The v2
 /// issuer above remains byte-compatible for already-durable bindings only.
+/// Historical Validator V3-assignment issuer.  It remains available only to
+/// the explicit replay_v0 path; receipt-backed delivery continuations use
+/// `validation_issue_v4` below.
 pub fn validation_issue_v3(
     request: &ValidationRunnerRequest,
     facts: &RunnerTransportFacts,
+) -> Result<IssuedRunnerAction, RunnerError> {
+    validation_issue_with_assignment_version(request, facts, ValidationAssignmentVersion::V3)
+}
+
+/// Fresh receipt-backed Validator issuer.  The model boundary remains V3, but
+/// the package assignment is the closed V4 receipt_v1 shape and deliberately
+/// has no historical value-attempt field.
+pub fn validation_issue_v4(
+    request: &ValidationRunnerRequest,
+    facts: &RunnerTransportFacts,
+) -> Result<IssuedRunnerAction, RunnerError> {
+    validation_issue_with_assignment_version(request, facts, ValidationAssignmentVersion::V4)
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ValidationAssignmentVersion {
+    V3,
+    V4,
+}
+
+fn validation_issue_with_assignment_version(
+    request: &ValidationRunnerRequest,
+    facts: &RunnerTransportFacts,
+    assignment_version: ValidationAssignmentVersion,
 ) -> Result<IssuedRunnerAction, RunnerError> {
     // Rooted V4 proof evaluation is intentionally before any candidate diff,
     // authority, context, assignment, prompt, spec, or carrier file write.
@@ -2093,7 +2120,10 @@ pub fn validation_issue_v3(
         .parent()
         .ok_or_else(|| RunnerError::InvalidSpec("validation paths have no parent".to_owned()))?;
     let authority_path = base.join("authority.v3.json");
-    let assignment_path = base.join("assignment.v3.json");
+    let assignment_path = base.join(match assignment_version {
+        ValidationAssignmentVersion::V3 => "assignment.v3.json",
+        ValidationAssignmentVersion::V4 => "assignment.v4.json",
+    });
     let context_path = base.join("context.v3.json");
     let model_submission_path = base.join("model-submission.v3.json");
     let diff_path = base.join("candidate.v3.diff");
@@ -2463,48 +2493,92 @@ pub fn validation_issue_v3(
     let context_digest = sha256_hex(&context_bytes);
     write_parent_file_create_once_exact(&context_path, &context_bytes)?;
 
-    let assignment = kernel::generated::ValidationAssignmentV3 {
-        schema: kernel::generated::SchemaId("autopilot.validation_assignment.v3".to_owned()),
-        validation_id: validation_id.clone(),
-        validation_key: Digest(validation_key),
-        workstream: request.workstream.clone(),
-        run_revision: request.run_revision,
-        role_id: Id("validator".to_owned()),
-        mode: ModeId("forward-release".to_owned()),
-        assignment_id: request.assignment_id.clone(),
-        action_id: request.action_id.clone(),
-        validation_attempt: request.validation_attempt,
-        semantic_round: request.semantic_round,
-        producer_assignment_ids: request.producer_assignment_ids.clone(),
-        base_commit: base_commit.clone(),
-        exact_commit: exact_commit.clone(),
-        exact_tree: exact_tree.clone(),
-        candidate_root: to_contract_path(&cwd)?,
-        context_path: to_contract_path(&context_path)?,
-        context_digest: Digest(context_digest.clone()),
-        authority_path: to_contract_path(&authority_path)?,
-        authority_digest: Digest(authority_digest.clone()),
-        max_value_attempts: 3,
+    let role_id = Id("validator".to_owned());
+    let mode = ModeId("forward-release".to_owned());
+    let (assignment_value, assignment_bytes, assignment_max_bytes) = match assignment_version {
+        ValidationAssignmentVersion::V3 => {
+            let assignment = kernel::generated::ValidationAssignmentV3 {
+                schema: kernel::generated::SchemaId(
+                    "autopilot.validation_assignment.v3".to_owned(),
+                ),
+                validation_id: validation_id.clone(),
+                validation_key: Digest(validation_key.clone()),
+                workstream: request.workstream.clone(),
+                run_revision: request.run_revision,
+                role_id: role_id.clone(),
+                mode: mode.clone(),
+                assignment_id: request.assignment_id.clone(),
+                action_id: request.action_id.clone(),
+                validation_attempt: request.validation_attempt,
+                semantic_round: request.semantic_round,
+                producer_assignment_ids: request.producer_assignment_ids.clone(),
+                base_commit: base_commit.clone(),
+                exact_commit: exact_commit.clone(),
+                exact_tree: exact_tree.clone(),
+                candidate_root: to_contract_path(&cwd)?,
+                context_path: to_contract_path(&context_path)?,
+                context_digest: Digest(context_digest.clone()),
+                authority_path: to_contract_path(&authority_path)?,
+                authority_digest: Digest(authority_digest.clone()),
+                max_value_attempts: 3,
+            };
+            (
+                serde_json::to_value(&assignment)
+                    .map_err(|error| RunnerError::Io(error.to_string()))?,
+                serde_json::to_vec_pretty(&assignment)
+                    .map_err(|error| RunnerError::Io(error.to_string()))?,
+                kernel::generated::VALIDATION_ASSIGNMENT_V3_MAX_BYTES,
+            )
+        }
+        ValidationAssignmentVersion::V4 => {
+            let assignment = kernel::generated::ValidationAssignmentV4 {
+                schema: kernel::generated::SchemaId(
+                    "autopilot.validation_assignment.v4".to_owned(),
+                ),
+                admission_mode: AdmissionMode::ReceiptV1,
+                validation_id: validation_id.clone(),
+                validation_key: Digest(validation_key.clone()),
+                workstream: request.workstream.clone(),
+                run_revision: request.run_revision,
+                role_id: role_id.clone(),
+                mode: mode.clone(),
+                assignment_id: request.assignment_id.clone(),
+                action_id: request.action_id.clone(),
+                validation_attempt: request.validation_attempt,
+                semantic_round: request.semantic_round,
+                producer_assignment_ids: request.producer_assignment_ids.clone(),
+                base_commit: base_commit.clone(),
+                exact_commit: exact_commit.clone(),
+                exact_tree: exact_tree.clone(),
+                candidate_root: to_contract_path(&cwd)?,
+                context_path: to_contract_path(&context_path)?,
+                context_digest: Digest(context_digest.clone()),
+                authority_path: to_contract_path(&authority_path)?,
+                authority_digest: Digest(authority_digest.clone()),
+            };
+            (
+                serde_json::to_value(&assignment)
+                    .map_err(|error| RunnerError::Io(error.to_string()))?,
+                serde_json::to_vec_pretty(&assignment)
+                    .map_err(|error| RunnerError::Io(error.to_string()))?,
+                kernel::generated::VALIDATION_ASSIGNMENT_V4_MAX_BYTES,
+            )
+        }
     };
-    let assignment_bytes = serde_json::to_vec_pretty(&assignment)
-        .map_err(|error| RunnerError::Io(error.to_string()))?;
-    if assignment_bytes.len() > kernel::generated::VALIDATION_ASSIGNMENT_V3_MAX_BYTES {
+    if assignment_bytes.len() > assignment_max_bytes {
         return Err(RunnerError::InvalidSpec(
-            "v3 assignment exceeds generated bound".to_owned(),
+            "validation assignment exceeds generated bound".to_owned(),
         ));
     }
     let assignment_digest = sha256_hex(&assignment_bytes);
     write_parent_file_create_once_exact(&assignment_path, &assignment_bytes)?;
 
-    let role_id = assignment.role_id.clone();
-    let mode = assignment.mode.clone();
     let boundary = ContractId("autopilot.validation_submission.v3".to_owned());
     let result_contract = ContractId("autopilot.validation_result.v3".to_owned());
     let profile = terminal_profile_for(&role_id.0, &boundary.0, &result_contract.0)?;
     let resolved_tools = resolve_role_tools(&role_id.0, profile.0)?;
     let route = route_for_role(&role_id.0)?;
-    let mut model_assignment =
-        serde_json::to_value(&assignment).map_err(|error| RunnerError::Io(error.to_string()))?;
+    let mut model_assignment = assignment_value;
     model_assignment
         .as_object_mut()
         .ok_or_else(|| {

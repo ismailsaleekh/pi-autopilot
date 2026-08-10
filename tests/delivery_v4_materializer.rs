@@ -2330,3 +2330,38 @@ fn actual_v2_w0_scale_packed_rooted_proofs_are_complete_and_bounded() {
         );
     }
 }
+
+#[test]
+fn receipt_v1_validator_issue_uses_v4_assignment_without_value_attempts() {
+    let (fixture, request) = small_rooted_v2_proof_request();
+    let issue = with_fixture_cwd(&fixture.root, || {
+        runner::validation_issue_v4(&request, &transport(&fixture.root))
+    })
+    .expect("fresh receipt_v1 Validator issue");
+    let assignment_path = issue
+        .receipt_binding
+        .assignment_path
+        .as_ref()
+        .expect("fresh Validator assignment path");
+    let assignment: kernel::generated::ValidationAssignmentV4 =
+        serde_json::from_slice(&fs::read(assignment_path).expect("read V4 assignment"))
+            .expect("parse V4 assignment");
+    assert_eq!(assignment.schema.0, "autopilot.validation_assignment.v4");
+    assert_eq!(
+        assignment.admission_mode,
+        kernel::generated::AdmissionMode::ReceiptV1
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(&fs::read(assignment_path).expect("read V4 assignment bytes"))
+            .expect("assignment JSON");
+    assert!(value.get("max_value_attempts").is_none());
+    let spec: kernel::generated::AgentRunSpecV5 = serde_json::from_slice(
+        &fs::read(&issue.receipt_binding.spec_path).expect("read V5 Validator spec"),
+    )
+    .expect("parse V5 Validator spec");
+    assert_eq!(
+        spec.admission_mode,
+        kernel::generated::AdmissionMode::ReceiptV1
+    );
+    assert_eq!(spec.run_revision, request.run_revision);
+}
