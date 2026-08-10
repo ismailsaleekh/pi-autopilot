@@ -273,7 +273,29 @@ impl ValidationAuthorityIndex {
                 &error.to_string(),
             )
         })?;
-        let raw: Value = serde_json::from_slice(&bytes).map_err(|error| {
+        Self::load_staged_bytes(path, &bytes, expected_digest, expected)
+    }
+
+    /// Validate exactly the authority bytes captured by a parent staging turn.
+    /// This keeps fresh receipt admission from reopening a mutable authority
+    /// file between byte capture and semantic/source/diff verification.
+    pub fn load_staged_bytes(
+        path: &Path,
+        bytes: &[u8],
+        expected_digest: &str,
+        expected: &ValidationAuthorityExpectation<'_>,
+    ) -> Result<Self, AdmissionFailure> {
+        if bytes.len() > kernel::generated::VALIDATION_EVIDENCE_AUTHORITY_MAX_BYTES {
+            return Err(fatal_expected(
+                expected,
+                expected_digest,
+                "authority-read",
+                "/authority_path",
+                "bounded regular authority",
+                "staged authority bytes exceed generated bound",
+            ));
+        }
+        let raw: Value = serde_json::from_slice(bytes).map_err(|error| {
             fatal_expected(
                 expected,
                 expected_digest,

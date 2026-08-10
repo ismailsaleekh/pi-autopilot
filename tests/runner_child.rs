@@ -411,8 +411,18 @@ fn validation_v3_shape_and_value_repairs_are_three_attempt_bounded_and_receipt_r
     )
     .expect("v3 validation issue");
     let spec_path = PathBuf::from(&issue.binding.spec_path);
-    let spec: kernel::generated::AgentRunSpec =
-        serde_json::from_slice(&fs::read(&spec_path).expect("v3 spec")).expect("v3 spec json");
+    // This fixture exercises the retained explicit replay_v0 V3 repair loop.
+    // Fresh receipt_v1 V5 submissions use ValidationAssignmentV4 and return
+    // Core RETRY diagnostics without this child-side persistence path.
+    let fresh: kernel::generated::AgentRunSpecV5 =
+        serde_json::from_slice(&fs::read(&spec_path).expect("fresh v3 spec"))
+            .expect("fresh v3 spec json");
+    let spec = drivers::runner::project_v5_spec_for_shared_admission(&fresh);
+    fs::write(
+        &spec_path,
+        serde_json::to_vec_pretty(&spec).expect("replay_v0 v3 spec bytes"),
+    )
+    .expect("write explicit replay_v0 V3 spec");
     let assignment: kernel::generated::ValidationAssignmentV3 = serde_json::from_slice(
         &fs::read(&spec.assignment_path.as_ref().expect("assignment path").0)
             .expect("assignment bytes"),

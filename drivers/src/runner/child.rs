@@ -630,7 +630,7 @@ pub fn main(args: &[String]) -> Result<(), String> {
         let facade = super::project_v5_spec_for_shared_admission(&fresh);
         let control = super::v5_child_control_launch_config(&fresh)
             .map_err(|error| format!("agent-run V5 child-control authority drift: {error}"))?;
-        validate_spec(&facade, &spec_path)?;
+        validate_receipt_v1_spec(&facade, &spec_path)?;
         let prompt_path = PathBuf::from(&facade.prompt_path.0);
         let prompt = read_bounded_utf8(
             &prompt_path,
@@ -1118,7 +1118,15 @@ fn run_value_attempts(
         let source =
             run_prompt_with_terminal_continuation(runner, spec, session, &attempt_prompt, attempt)
                 .map_err(TerminalContinuationError::into_message)?;
-        match prepare_carrier(spec_path, spec_bytes, spec_digest, spec, &source, attempt) {
+        match prepare_carrier(
+            spec_path,
+            spec_bytes,
+            spec_digest,
+            spec,
+            &source,
+            attempt,
+            false,
+        ) {
             Ok(prepared) => return Ok((attempt, prepared)),
             Err(CarrierRejection::Identity(detail)) => {
                 append_attempt_event(
@@ -3621,6 +3629,22 @@ fn parse_args(args: &[String]) -> Result<PathBuf, String> {
 }
 
 fn validate_spec(strict: &AgentRunSpec, spec_path: &Path) -> Result<(), String> {
+    validate_spec_with_admission(strict, spec_path, false)
+}
+
+/// Fresh V5 launches retain the V4 facade only for shared transport checks.
+/// Validation assignment selection is nevertheless explicit: receipt_v1 V3
+/// uses only ValidationAssignmentV4, while the historical V3 reader remains
+/// reachable exclusively through the replay_v0 entry above.
+fn validate_receipt_v1_spec(strict: &AgentRunSpec, spec_path: &Path) -> Result<(), String> {
+    validate_spec_with_admission(strict, spec_path, true)
+}
+
+fn validate_spec_with_admission(
+    strict: &AgentRunSpec,
+    spec_path: &Path,
+    receipt_v1: bool,
+) -> Result<(), String> {
     if strict.schema.0 != "autopilot.agent_run_spec.v4" {
         return Err(format!(
             "unsupported agent-run spec schema: {}",
@@ -3643,7 +3667,7 @@ fn validate_spec(strict: &AgentRunSpec, spec_path: &Path) -> Result<(), String> 
     validate_digests(strict)?;
     validate_session_identity(strict)?;
     validate_terminal_route(strict)?;
-    validate_delivery_identity(strict)?;
+    validate_delivery_identity(strict, receipt_v1)?;
     validate_planning_documents(strict)?;
     validate_planning_atom_bindings(strict)?;
     Ok(())
@@ -3944,7 +3968,7 @@ fn validate_digests(strict: &AgentRunSpec) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_delivery_identity(strict: &AgentRunSpec) -> Result<(), String> {
+fn validate_delivery_identity(strict: &AgentRunSpec, receipt_v1: bool) -> Result<(), String> {
     if matches!(
         strict.assignment_kind,
         kernel::generated::ValidationAssignmentKind::PlanningReview
@@ -3977,7 +4001,7 @@ fn validate_delivery_identity(strict: &AgentRunSpec) -> Result<(), String> {
         strict.assignment_kind,
         kernel::generated::ValidationAssignmentKind::Validation
     ) {
-        return validate_validation_spec_identity(strict);
+        return validate_validation_spec_identity_for_admission(strict, receipt_v1);
     }
     let lane_id = strict
         .lane_id
@@ -4183,7 +4207,16 @@ fn validate_delivery_assignment_artifact(
     Ok(())
 }
 
-fn validate_validation_spec_identity(strict: &AgentRunSpec) -> Result<(), String> {
+fn validate_validation_spec_identity_for_admission(
+    strict: &AgentRunSpec,
+    receipt_v1: bool,
+) -> Result<(), String> {
+    if receipt_v1
+        && strict.boundary_id.0 == "autopilot.validation_submission.v3"
+        && strict.result_contract.0 == "autopilot.validation_result.v3"
+    {
+        return validate_validation_spec_identity_v3_receipt(strict);
+    }
     match (
         strict.boundary_id.0.as_str(),
         strict.result_contract.0.as_str(),
@@ -4301,6 +4334,161 @@ fn validate_validation_spec_identity_v2(strict: &AgentRunSpec) -> Result<(), Str
         .map_err(|error| format!("agent-run validation candidate tree: {error}"))?;
     if head.trim() != assignment.exact_commit.0 || tree.trim() != assignment.exact_tree.0 {
         return Err("agent-run validation candidate commit/tree drift before prompt".to_owned());
+    }
+    Ok(())
+}
+
+/// Receipt_v1 V3 validation has a closed V4 assignment with no historical
+/// `max_value_attempts` field. Do not route this through the V3 reader: that
+/// would silently make a legacy repair-loop policy fresh authority.
+fn validate_validation_spec_identity_v3_receipt(strict: &AgentRunSpec) -> Result<(), String> {
+    let assignment_path = strict
+        .assignment_path
+        .as_ref()
+        .ok_or_else(|| "agent-run receipt_v1 v3 validation missing assignment_path".to_owned())?;
+    let assignment_digest = strict
+        .assignment_digest
+        .as_ref()
+        .ok_or_else(|| "agent-run receipt_v1 v3 validation missing assignment_digest".to_owned())?;
+    let context_path = strict.context_manifest_path.as_ref().ok_or_else(|| {
+        "agent-run receipt_v1 v3 validation missing context_manifest_path".to_owned()
+    })?;
+    let context_digest = strict.context_manifest_digest.as_ref().ok_or_else(|| {
+        "agent-run receipt_v1 v3 validation missing context_manifest_digest".to_owned()
+    })?;
+    let model_submission_path = strict.model_submission_path.as_ref().ok_or_else(|| {
+        "agent-run receipt_v1 v3 validation missing model_submission_path".to_owned()
+    })?;
+    let artifact_root = Path::new(&assignment_path.0)
+        .parent()
+        .ok_or_else(|| "agent-run receipt_v1 v3 assignment path has no parent".to_owned())?;
+    let expected_assignment = artifact_root.join("assignment.v4.json");
+    let expected_context = artifact_root.join("context.v3.json");
+    let expected_authority = artifact_root.join("authority.v3.json");
+    let expected_submission = artifact_root.join("model-submission.v3.json");
+    if Path::new(&assignment_path.0) != expected_assignment
+        || Path::new(&context_path.0) != expected_context
+        || Path::new(&model_submission_path.0) != expected_submission
+    {
+        return Err("agent-run receipt_v1 v3 validation artifact path drift".to_owned());
+    }
+    for path in [
+        PathBuf::from(&model_submission_path.0),
+        PathBuf::from(&strict.carrier_path.0).with_extension("tool-audit.json"),
+    ] {
+        super::reject_link_components_for_path(&path).map_err(|error| error.to_string())?;
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => {
+                return Err(format!(
+                    "agent-run receipt_v1 v3 stale package output refused at {}",
+                    path.display()
+                ));
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    let assignment_bytes = super::read_bounded_file(
+        Path::new(&assignment_path.0),
+        kernel::generated::VALIDATION_ASSIGNMENT_V4_MAX_BYTES,
+    )
+    .map_err(|error| format!("agent-run receipt_v1 V4 assignment read: {error}"))?;
+    let context_bytes = super::read_bounded_file(
+        Path::new(&context_path.0),
+        kernel::generated::VALIDATION_CONTEXT_V3_MAX_BYTES,
+    )
+    .map_err(|error| format!("agent-run receipt_v1 V3 context read: {error}"))?;
+    if sha256_hex(&assignment_bytes) != assignment_digest.0
+        || sha256_hex(&context_bytes) != context_digest.0
+    {
+        return Err("agent-run receipt_v1 v3 assignment/context digest drift".to_owned());
+    }
+    let assignment: kernel::generated::ValidationAssignmentV4 =
+        serde_json::from_slice(&assignment_bytes)
+            .map_err(|error| format!("agent-run receipt_v1 V4 assignment JSON: {error}"))?;
+    let context: kernel::generated::ValidationContextV3 = serde_json::from_slice(&context_bytes)
+        .map_err(|error| format!("agent-run receipt_v1 V3 context JSON: {error}"))?;
+    if serde_json::to_vec_pretty(&assignment).map_err(|error| error.to_string())?
+        != assignment_bytes
+        || serde_json::to_vec_pretty(&context).map_err(|error| error.to_string())? != context_bytes
+    {
+        return Err(
+            "agent-run receipt_v1 v3 validation artifacts are not canonical bytes".to_owned(),
+        );
+    }
+    let validation_id = strict
+        .validation_id
+        .as_ref()
+        .ok_or_else(|| "agent-run receipt_v1 v3 validation missing validation_id".to_owned())?;
+    let producer_ids = strict
+        .producer_assignment_ids
+        .as_ref()
+        .ok_or_else(|| "agent-run receipt_v1 v3 validation missing producer ids".to_owned())?;
+    let base_commit = strict
+        .base_commit
+        .as_ref()
+        .ok_or_else(|| "agent-run receipt_v1 v3 validation missing base commit".to_owned())?;
+    if assignment.schema.0 != "autopilot.validation_assignment.v4"
+        || assignment.admission_mode != kernel::generated::AdmissionMode::ReceiptV1
+        || assignment.action_id != strict.action_id
+        || assignment.assignment_id != strict.assignment_id
+        || assignment.workstream != strict.workstream
+        || assignment.run_revision != strict.run_revision
+        || assignment.role_id != strict.role_id
+        || assignment.mode != strict.mode
+        || assignment.validation_id != *validation_id
+        || Some(assignment.validation_attempt) != strict.validation_attempt
+        || Some(assignment.semantic_round) != strict.semantic_round
+        || assignment.producer_assignment_ids != *producer_ids
+        || assignment.producer_assignment_ids.is_empty()
+        || assignment.base_commit.0 != base_commit.0
+        || assignment.candidate_root.0 != strict.cwd.0
+        || strict.worktree.as_ref().map(|path| path.0.as_str()) != Some(strict.cwd.0.as_str())
+        || assignment.context_path != *context_path
+        || assignment.context_digest != *context_digest
+        || Path::new(&assignment.authority_path.0) != expected_authority
+        || strict.validation_attempt.is_none_or(|attempt| attempt == 0)
+        || strict.semantic_round.is_none_or(|round| round == 0)
+        || strict.lane_id.is_none()
+        || strict.attempt.is_none_or(|attempt| attempt == 0)
+        || strict.required_focused_evidence != Some(1)
+    {
+        return Err(
+            "agent-run receipt_v1 V4 assignment/spec identity or authority drift".to_owned(),
+        );
+    }
+    let expected_key = sha256_hex(
+        format!(
+            "validation.v3\0{}\0{}\0{}",
+            assignment.validation_id.0, assignment.exact_commit.0, assignment.exact_tree.0
+        )
+        .as_bytes(),
+    );
+    if assignment.validation_key.0 != expected_key {
+        return Err("agent-run receipt_v1 v3 validation key drift".to_owned());
+    }
+    let expectation = crate::runner::validation_authority::ValidationAuthorityExpectation {
+        validation_id: &assignment.validation_id,
+        assignment_id: &assignment.assignment_id,
+        base_commit: &assignment.base_commit,
+        exact_commit: &assignment.exact_commit,
+        exact_tree: &assignment.exact_tree,
+        candidate_root: Path::new(&strict.cwd.0),
+    };
+    let index = crate::runner::validation_authority::ValidationAuthorityIndex::load_for(
+        Path::new(&assignment.authority_path.0),
+        &assignment.authority_digest.0,
+        &expectation,
+    )
+    .map_err(validation_failure_text)?;
+    if index.context_projection() != context
+        || context.validation_id != assignment.validation_id
+        || context.assignment_id != assignment.assignment_id
+        || context.authority_digest != assignment.authority_digest
+    {
+        return Err(
+            "agent-run receipt_v1 V3 context is not the exact authority projection".to_owned(),
+        );
     }
     Ok(())
 }
@@ -5349,6 +5537,7 @@ fn ensure_carrier_absent(spec: &AgentRunSpec) -> Result<(), String> {
 /// profile, boundary, schema, and carrier-binding facts are derived from the
 /// authenticated V5 spec facade. This never writes a carrier, audit, model
 /// submission, or receipt.
+#[allow(dead_code)]
 pub(crate) fn admit_submission(
     spec_path: &Path,
     spec_bytes: &str,
@@ -5358,6 +5547,56 @@ pub(crate) fn admit_submission(
     raw_payload: Value,
     runtime_evidence: ChildControlRuntimeEvidence,
     tool_call_id: String,
+) -> Result<PreparedCarrier, AdmissionFailure> {
+    admit_submission_with_admission(
+        spec_path,
+        spec_bytes,
+        spec_digest,
+        spec,
+        required_pi_version,
+        raw_payload,
+        runtime_evidence,
+        tool_call_id,
+        false,
+    )
+}
+
+/// Fresh ChildControl is explicitly receipt_v1. Keeping this separate from
+/// the historical entry prevents a V4 validator assignment from ever being
+/// read by the replay_v0 V3 admission/diagnostic path.
+pub(crate) fn admit_receipt_v1_submission(
+    spec_path: &Path,
+    spec_bytes: &str,
+    spec_digest: &str,
+    spec: &AgentRunSpec,
+    required_pi_version: &str,
+    raw_payload: Value,
+    runtime_evidence: ChildControlRuntimeEvidence,
+    tool_call_id: String,
+) -> Result<PreparedCarrier, AdmissionFailure> {
+    admit_submission_with_admission(
+        spec_path,
+        spec_bytes,
+        spec_digest,
+        spec,
+        required_pi_version,
+        raw_payload,
+        runtime_evidence,
+        tool_call_id,
+        true,
+    )
+}
+
+fn admit_submission_with_admission(
+    spec_path: &Path,
+    spec_bytes: &str,
+    spec_digest: &str,
+    spec: &AgentRunSpec,
+    required_pi_version: &str,
+    raw_payload: Value,
+    runtime_evidence: ChildControlRuntimeEvidence,
+    tool_call_id: String,
+    receipt_v1: bool,
 ) -> Result<PreparedCarrier, AdmissionFailure> {
     if contains_placeholder_sentinel(&raw_payload) {
         return Err(AdmissionFailure::PlaceholderLeaked);
@@ -5395,6 +5634,7 @@ pub(crate) fn admit_submission(
         spec,
         &CarrierSource::Tool(terminal),
         1,
+        receipt_v1,
     )
     .map_err(|error| match error {
         CarrierRejection::Identity(detail) => AdmissionFailure::Authority(detail),
@@ -5483,6 +5723,7 @@ fn prepare_carrier(
     spec: &AgentRunSpec,
     source: &CarrierSource,
     value_attempt: u32,
+    receipt_v1: bool,
 ) -> Result<PreparedCarrier, CarrierRejection> {
     let CarrierSource::Tool(terminal) = source;
     let profile = super::terminal_profile_for(
@@ -5543,6 +5784,7 @@ fn prepare_carrier(
                 )
             })?,
             "autopilot.delivery_result.v2",
+            false,
         )
         .map_err(Into::into);
     }
@@ -5574,15 +5816,20 @@ fn prepare_carrier(
                     )
                 })?,
                 "autopilot.validation_result.v2",
+                false,
             )
             .map_err(Into::into);
         }
         if spec.boundary_id.0 == "autopilot.validation_submission.v3" {
-            let (submission, admitted) = match admit_validation_submission_v3(
-                spec,
-                &terminal.details.payload,
-                value_attempt,
-            ) {
+            let (submission, admitted) = match if receipt_v1 {
+                admit_validation_submission_v3_receipt(
+                    spec,
+                    &terminal.details.payload,
+                    value_attempt,
+                )
+            } else {
+                admit_validation_submission_v3(spec, &terminal.details.payload, value_attempt)
+            } {
                 Ok(value) => value,
                 Err(ValidationV3AdmissionError::Value(rejection)) => {
                     return Err(rejection.into());
@@ -5604,6 +5851,7 @@ fn prepare_carrier(
                 terminal,
                 canonical_submission,
                 "autopilot.validation_result.v3",
+                receipt_v1,
             )
             .map_err(|rejection| {
                 CarrierRejection::Identity(format!(
@@ -6452,6 +6700,149 @@ fn admit_validation_submission_v3(
     }
 }
 
+/// Fresh receipt_v1 V3 admission intentionally never persists a diagnostic.
+/// Core returns the exact canonical diagnostic as RETRY; only the fully staged
+/// accepted carrier/audit/submission become durable after receipt commit.
+fn admit_validation_submission_v3_receipt(
+    spec: &AgentRunSpec,
+    payload: &Value,
+    value_attempt: u32,
+) -> Result<
+    (
+        kernel::generated::ValidationSubmissionV3,
+        crate::runner::validation_authority::AdmittedValidationV3,
+    ),
+    ValidationV3AdmissionError,
+> {
+    let assignment_path = spec.assignment_path.as_ref().ok_or_else(|| {
+        ValidationV3AdmissionError::Fatal(
+            "missing receipt_v1 V4 validation assignment path".to_owned(),
+        )
+    })?;
+    let assignment_digest = spec.assignment_digest.as_ref().ok_or_else(|| {
+        ValidationV3AdmissionError::Fatal(
+            "missing receipt_v1 V4 validation assignment digest".to_owned(),
+        )
+    })?;
+    let context_path = spec.context_manifest_path.as_ref().ok_or_else(|| {
+        ValidationV3AdmissionError::Fatal(
+            "missing receipt_v1 V3 validation context path".to_owned(),
+        )
+    })?;
+    let context_digest = spec.context_manifest_digest.as_ref().ok_or_else(|| {
+        ValidationV3AdmissionError::Fatal(
+            "missing receipt_v1 V3 validation context digest".to_owned(),
+        )
+    })?;
+    let assignment_bytes = super::read_bounded_file(
+        Path::new(&assignment_path.0),
+        kernel::generated::VALIDATION_ASSIGNMENT_V4_MAX_BYTES,
+    )
+    .map_err(|error| {
+        ValidationV3AdmissionError::Fatal(format!("receipt_v1 V4 assignment read: {error}"))
+    })?;
+    let context_bytes = super::read_bounded_file(
+        Path::new(&context_path.0),
+        kernel::generated::VALIDATION_CONTEXT_V3_MAX_BYTES,
+    )
+    .map_err(|error| {
+        ValidationV3AdmissionError::Fatal(format!("receipt_v1 V3 context read: {error}"))
+    })?;
+    if sha256_hex(&assignment_bytes) != assignment_digest.0
+        || sha256_hex(&context_bytes) != context_digest.0
+    {
+        return Err(ValidationV3AdmissionError::Fatal(
+            "receipt_v1 V4 assignment/context digest drift".to_owned(),
+        ));
+    }
+    let assignment: kernel::generated::ValidationAssignmentV4 =
+        serde_json::from_slice(&assignment_bytes).map_err(|error| {
+            ValidationV3AdmissionError::Fatal(format!("receipt_v1 V4 assignment parse: {error}"))
+        })?;
+    let context: kernel::generated::ValidationContextV3 = serde_json::from_slice(&context_bytes)
+        .map_err(|error| {
+            ValidationV3AdmissionError::Fatal(format!("receipt_v1 V3 context parse: {error}"))
+        })?;
+    if serde_json::to_vec_pretty(&assignment)
+        .map_err(|error| ValidationV3AdmissionError::Fatal(error.to_string()))?
+        != assignment_bytes
+        || serde_json::to_vec_pretty(&context)
+            .map_err(|error| ValidationV3AdmissionError::Fatal(error.to_string()))?
+            != context_bytes
+    {
+        return Err(ValidationV3AdmissionError::Fatal(
+            "receipt_v1 V4 assignment/context canonical bytes drift".to_owned(),
+        ));
+    }
+    let validation_id = spec.validation_id.as_ref().ok_or_else(|| {
+        ValidationV3AdmissionError::Fatal("missing receipt_v1 spec-bound validation id".to_owned())
+    })?;
+    let base_commit = spec.base_commit.as_ref().ok_or_else(|| {
+        ValidationV3AdmissionError::Fatal("missing receipt_v1 spec-bound base commit".to_owned())
+    })?;
+    if assignment.schema.0 != "autopilot.validation_assignment.v4"
+        || assignment.admission_mode != kernel::generated::AdmissionMode::ReceiptV1
+        || assignment.validation_id != *validation_id
+        || assignment.assignment_id != spec.assignment_id
+        || assignment.action_id != spec.action_id
+        || assignment.workstream != spec.workstream
+        || assignment.run_revision != spec.run_revision
+        || assignment.role_id != spec.role_id
+        || assignment.mode != spec.mode
+        || assignment.producer_assignment_ids
+            != spec.producer_assignment_ids.clone().ok_or_else(|| {
+                ValidationV3AdmissionError::Fatal("missing receipt_v1 producer ids".to_owned())
+            })?
+        || assignment.validation_attempt != spec.validation_attempt.unwrap_or(0)
+        || assignment.semantic_round != spec.semantic_round.unwrap_or(0)
+        || assignment.base_commit.0 != base_commit.0
+        || assignment.candidate_root.0 != spec.cwd.0
+        || assignment.context_path != *context_path
+        || assignment.context_digest != *context_digest
+    {
+        return Err(ValidationV3AdmissionError::Fatal(
+            "receipt_v1 V4 assignment/spec identity or authority drift".to_owned(),
+        ));
+    }
+    let expectation = crate::runner::validation_authority::ValidationAuthorityExpectation {
+        validation_id: &assignment.validation_id,
+        assignment_id: &assignment.assignment_id,
+        base_commit: &assignment.base_commit,
+        exact_commit: &assignment.exact_commit,
+        exact_tree: &assignment.exact_tree,
+        candidate_root: Path::new(&spec.cwd.0),
+    };
+    let authority_bytes = super::read_bounded_file(
+        Path::new(&assignment.authority_path.0),
+        kernel::generated::VALIDATION_EVIDENCE_AUTHORITY_MAX_BYTES,
+    )
+    .map_err(|error| ValidationV3AdmissionError::Fatal(format!("receipt_v1 V3 authority read: {error}")))?;
+    let index = crate::runner::validation_authority::ValidationAuthorityIndex::load_staged_bytes(
+        Path::new(&assignment.authority_path.0),
+        &authority_bytes,
+        &assignment.authority_digest.0,
+        &expectation,
+    )
+    .map_err(|failure| ValidationV3AdmissionError::Fatal(validation_failure_text(failure)))?;
+    if index.context_projection() != context {
+        return Err(ValidationV3AdmissionError::Fatal(
+            "receipt_v1 V3 context is not the exact authority projection".to_owned(),
+        ));
+    }
+    match index.admit_raw(payload, value_attempt) {
+        Ok(admitted) => Ok((admitted.submission.clone(), admitted)),
+        Err(failure) if failure.fatal_authority => Err(ValidationV3AdmissionError::Fatal(
+            validation_failure_text(failure),
+        )),
+        Err(failure) => Err(ValidationV3AdmissionError::Value(ValueRejection {
+            field: "validation_admission_diagnostic".to_owned(),
+            expected: "complete canonical V3 authority-confinement diagnostic".to_owned(),
+            got: validation_failure_text(failure),
+            diagnostic: None,
+        })),
+    }
+}
+
 fn persist_v3_diagnostic(
     spec: &AgentRunSpec,
     value_attempt: u32,
@@ -6597,6 +6988,7 @@ fn package_tool_result(
     terminal: &ToolTerminal,
     submission: Value,
     schema: &str,
+    receipt_v1_validation_v3: bool,
 ) -> Result<PreparedCarrier, ValueRejection> {
     let (_, runtime_digest) = runtime_addon(spec)
         .ok_or_else(|| value_rejection(RUNTIME_ADDON_DIGEST_FIELD, "digest", "missing"))?;
@@ -6846,48 +7238,119 @@ fn package_tool_result(
                 insert_serialized(object, "exact_tree", &assignment.exact_tree)?;
             }
             "autopilot.validation_submission.v3" => {
-                let assignment: kernel::generated::ValidationAssignmentV3 =
-                    serde_json::from_slice(&assignment_bytes).map_err(|error| {
-                        value_rejection(
-                            "assignment",
-                            "strict closed v3 validation assignment",
-                            error.to_string(),
-                        )
-                    })?;
-                if assignment.action_id != spec.action_id
-                    || assignment.assignment_id != spec.assignment_id
-                    || assignment.workstream != spec.workstream
-                    || assignment.run_revision != spec.run_revision
-                    || assignment.role_id != spec.role_id
-                    || assignment.mode != spec.mode
-                    || Some(&assignment.context_path) != spec.context_manifest_path.as_ref()
-                    || Some(&assignment.context_digest) != spec.context_manifest_digest.as_ref()
-                {
-                    return Err(value_rejection(
-                        "assignment",
-                        "exact spec-bound v3 assignment identity/context",
-                        "drift",
-                    ));
+                // The caller selects this parser from the authenticated V5
+                // path, never from assignment shape. Historical replay_v0
+                // retains its byte-exact V3 reader.
+                macro_rules! emit_assignment {
+                    ($assignment:expr, $fresh:expr) => {{
+                        let assignment = $assignment;
+                        if assignment.action_id != spec.action_id
+                            || assignment.assignment_id != spec.assignment_id
+                            || assignment.workstream != spec.workstream
+                            || assignment.run_revision != spec.run_revision
+                            || assignment.role_id != spec.role_id
+                            || assignment.mode != spec.mode
+                            || Some(&assignment.context_path) != spec.context_manifest_path.as_ref()
+                            || Some(&assignment.context_digest)
+                                != spec.context_manifest_digest.as_ref()
+                            || ($fresh
+                                && assignment.admission_mode
+                                    != kernel::generated::AdmissionMode::ReceiptV1)
+                        {
+                            return Err(value_rejection(
+                                "assignment",
+                                "exact receipt-selected v3 assignment identity/context",
+                                "drift",
+                            ));
+                        }
+                        insert_serialized(object, "validation_id", &assignment.validation_id)?;
+                        insert_serialized(object, "validation_key", &assignment.validation_key)?;
+                        object.insert(
+                            "validation_attempt".to_owned(),
+                            serde_json::json!(assignment.validation_attempt),
+                        );
+                        object.insert(
+                            "semantic_round".to_owned(),
+                            serde_json::json!(assignment.semantic_round),
+                        );
+                        insert_serialized(
+                            object,
+                            "producer_assignment_ids",
+                            &assignment.producer_assignment_ids,
+                        )?;
+                        insert_serialized(object, "exact_commit", &assignment.exact_commit)?;
+                        insert_serialized(object, "exact_tree", &assignment.exact_tree)?;
+                        insert_serialized(object, "authority_path", &assignment.authority_path)?;
+                        insert_serialized(
+                            object,
+                            "authority_digest",
+                            &assignment.authority_digest,
+                        )?;
+                    }};
                 }
-                insert_serialized(object, "validation_id", &assignment.validation_id)?;
-                insert_serialized(object, "validation_key", &assignment.validation_key)?;
-                object.insert(
-                    "validation_attempt".to_owned(),
-                    serde_json::json!(assignment.validation_attempt),
-                );
-                object.insert(
-                    "semantic_round".to_owned(),
-                    serde_json::json!(assignment.semantic_round),
-                );
-                insert_serialized(
-                    object,
-                    "producer_assignment_ids",
-                    &assignment.producer_assignment_ids,
-                )?;
-                insert_serialized(object, "exact_commit", &assignment.exact_commit)?;
-                insert_serialized(object, "exact_tree", &assignment.exact_tree)?;
-                insert_serialized(object, "authority_path", &assignment.authority_path)?;
-                insert_serialized(object, "authority_digest", &assignment.authority_digest)?;
+                if receipt_v1_validation_v3 {
+                    let assignment: kernel::generated::ValidationAssignmentV4 =
+                        serde_json::from_slice(&assignment_bytes).map_err(|error| {
+                            value_rejection(
+                                "assignment",
+                                "strict closed V4 receipt_v1 validation assignment",
+                                error.to_string(),
+                            )
+                        })?;
+                    if assignment.schema.0 != "autopilot.validation_assignment.v4" {
+                        return Err(value_rejection(
+                            "assignment",
+                            "autopilot.validation_assignment.v4",
+                            assignment.schema.0,
+                        ));
+                    }
+                    emit_assignment!(assignment, true);
+                } else {
+                    let assignment: kernel::generated::ValidationAssignmentV3 =
+                        serde_json::from_slice(&assignment_bytes).map_err(|error| {
+                            value_rejection(
+                                "assignment",
+                                "strict closed V3 replay_v0 validation assignment",
+                                error.to_string(),
+                            )
+                        })?;
+                    // Keep this historical body separate: it has no
+                    // admission_mode and cannot be selected by fresh V5.
+                    if assignment.action_id != spec.action_id
+                        || assignment.assignment_id != spec.assignment_id
+                        || assignment.workstream != spec.workstream
+                        || assignment.run_revision != spec.run_revision
+                        || assignment.role_id != spec.role_id
+                        || assignment.mode != spec.mode
+                        || Some(&assignment.context_path) != spec.context_manifest_path.as_ref()
+                        || Some(&assignment.context_digest) != spec.context_manifest_digest.as_ref()
+                    {
+                        return Err(value_rejection(
+                            "assignment",
+                            "exact replay_v0 V3 assignment identity/context",
+                            "drift",
+                        ));
+                    }
+                    insert_serialized(object, "validation_id", &assignment.validation_id)?;
+                    insert_serialized(object, "validation_key", &assignment.validation_key)?;
+                    object.insert(
+                        "validation_attempt".to_owned(),
+                        serde_json::json!(assignment.validation_attempt),
+                    );
+                    object.insert(
+                        "semantic_round".to_owned(),
+                        serde_json::json!(assignment.semantic_round),
+                    );
+                    insert_serialized(
+                        object,
+                        "producer_assignment_ids",
+                        &assignment.producer_assignment_ids,
+                    )?;
+                    insert_serialized(object, "exact_commit", &assignment.exact_commit)?;
+                    insert_serialized(object, "exact_tree", &assignment.exact_tree)?;
+                    insert_serialized(object, "authority_path", &assignment.authority_path)?;
+                    insert_serialized(object, "authority_digest", &assignment.authority_digest)?;
+                }
             }
             other => {
                 return Err(value_rejection(
