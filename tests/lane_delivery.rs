@@ -5,6 +5,7 @@ use std::{
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+    sync::atomic::{AtomicU64, Ordering},
     sync::{Mutex, OnceLock},
 };
 
@@ -27,6 +28,42 @@ use kernel::schedule::ResourceFacts;
 use sha2::{Digest as ShaDigest, Sha256};
 
 static CWD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static BROKER_SOCKET_COUNTER: AtomicU64 = AtomicU64::new(0);
+const TEST_BROKER_CAPABILITY: &str =
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+#[cfg(unix)]
+fn broker_socket() -> PathBuf {
+    use std::io::ErrorKind;
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixListener;
+
+    let root = PathBuf::from("/tmp/.pi-ap");
+    fs::create_dir_all(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let dir = loop {
+        let candidate = root.join(format!(
+            "{:010x}",
+            BROKER_SOCKET_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        match fs::create_dir(&candidate) {
+            Ok(()) => break candidate,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("broker socket directory {candidate:?}: {error}"),
+        }
+    };
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let path = dir.join("s");
+    let listener = UnixListener::bind(&path).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    drop(listener);
+    path
+}
+
+#[cfg(not(unix))]
+fn broker_socket() -> PathBuf {
+    PathBuf::from("/tmp/.pi-ap/0000000000/s")
+}
 
 struct CwdGuard {
     previous: PathBuf,
@@ -388,7 +425,8 @@ fn lane_delivery_agent_git_mutation_and_incomplete_delivery_are_refused_without_
     let facts = RunnerTransportFacts::new(
         node,
         wrapper,
-        PathBuf::from("/tmp/autopilot-test-control.sock"),
+        broker_socket(),
+        TEST_BROKER_CAPABILITY.to_owned(),
     )
     .expect("facts");
     unsafe {

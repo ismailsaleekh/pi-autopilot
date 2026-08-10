@@ -13,6 +13,40 @@ use sha2::{Digest as ShaDigest, Sha256};
 
 static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static FIXTURE_COUNTER: AtomicU64 = AtomicU64::new(0);
+const TEST_BROKER_CAPABILITY: &str =
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+#[cfg(unix)]
+fn broker_socket_path() -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixListener;
+
+    let root = PathBuf::from("/tmp/.pi-ap");
+    fs::create_dir_all(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let dir = loop {
+        let candidate = root.join(format!(
+            "{:010x}",
+            FIXTURE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        match fs::create_dir(&candidate) {
+            Ok(()) => break candidate,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("broker socket directory {candidate:?}: {error}"),
+        }
+    };
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let path = dir.join("s");
+    let listener = UnixListener::bind(&path).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    drop(listener);
+    path
+}
+
+#[cfg(not(unix))]
+fn broker_socket_path() -> PathBuf {
+    PathBuf::from("/tmp/.pi-ap/0000000000/s")
+}
 
 #[test]
 fn planning_prompt_is_the_rendered_seven_layer_prompt() {
@@ -427,6 +461,11 @@ impl Fixture {
                     "ension.ts"
                 )),
             );
+            std::env::set_var("AUTOPILOT_CHILD_CONTROL_SOCKET_PATH", broker_socket_path());
+            std::env::set_var(
+                "AUTOPILOT_CHILD_CONTROL_BROKER_CAPABILITY",
+                TEST_BROKER_CAPABILITY,
+            );
             let mut path_entries = vec![bin.clone()];
             if let Some(existing) = std::env::var_os("PATH") {
                 path_entries.extend(std::env::split_paths(&existing));
@@ -477,6 +516,7 @@ impl Fixture {
             role_id: Id(spec.role.to_owned()),
             mode: ModeId(spec.mode.to_owned()),
             boundary_id: ContractId(spec.boundary.to_owned()),
+            attempt: 1,
             run_revision: 1,
             authority_set_id: "auth".to_owned(),
             authority_documents: vec![runner_doc("task.md", "authority", "auth", "Do the work")],

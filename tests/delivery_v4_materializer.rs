@@ -24,6 +24,31 @@ use sha2::{Digest, Sha256};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 static CWD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+const TEST_BROKER_CAPABILITY: &str =
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+fn broker_socket() -> PathBuf {
+    use std::io::ErrorKind;
+    use std::os::unix::net::UnixListener;
+
+    let root = PathBuf::from("/tmp/.pi-ap");
+    fs::create_dir_all(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let dir = loop {
+        let candidate = root.join(format!("{:010x}", NEXT.fetch_add(1, Ordering::Relaxed)));
+        match fs::create_dir(&candidate) {
+            Ok(()) => break candidate,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("broker socket directory {candidate:?}: {error}"),
+        }
+    };
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let path = dir.join("s");
+    let listener = UnixListener::bind(&path).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    drop(listener);
+    path
+}
 
 struct CwdGuard {
     previous: PathBuf,
@@ -1129,7 +1154,8 @@ fn transport(root: &Path) -> RunnerTransportFacts {
     RunnerTransportFacts::new(
         node,
         wrapper,
-        PathBuf::from("/tmp/autopilot-test-control.sock"),
+        broker_socket(),
+        TEST_BROKER_CAPABILITY.to_owned(),
     )
     .unwrap()
 }

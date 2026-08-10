@@ -26,6 +26,43 @@ use sha2::{Digest as ShaDigest, Sha256};
 
 static PATH_LOCK: Mutex<()> = Mutex::new(());
 static CWD_LOCK: Mutex<()> = Mutex::new(());
+static BROKER_SOCKET_COUNTER: AtomicU32 = AtomicU32::new(0);
+const TEST_BROKER_CAPABILITY: &str =
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+#[cfg(unix)]
+fn test_broker_socket() -> PathBuf {
+    use std::io::ErrorKind;
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixListener;
+
+    let root = PathBuf::from("/tmp/.pi-ap");
+    fs::create_dir_all(&root).expect("broker root");
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).expect("broker root mode");
+    let dir = loop {
+        let id = format!(
+            "{:010x}",
+            BROKER_SOCKET_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let candidate = root.join(id);
+        match fs::create_dir(&candidate) {
+            Ok(()) => break candidate,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("broker directory {candidate:?}: {error}"),
+        }
+    };
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).expect("broker dir mode");
+    let path = dir.join("s");
+    let listener = UnixListener::bind(&path).expect("broker socket");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("broker socket mode");
+    drop(listener);
+    path
+}
+
+#[cfg(not(unix))]
+fn test_broker_socket() -> PathBuf {
+    PathBuf::from("/tmp/.pi-ap/0000000000/s")
+}
 
 #[test]
 fn fake_pi_journey_writes_identity_carrier_and_isolated_exact_args() {
@@ -261,7 +298,8 @@ fn validation_v3_shape_and_value_repairs_are_three_attempt_bounded_and_receipt_r
     let facts = RunnerTransportFacts::new(
         std::env::current_exe().expect("current exe"),
         std::env::current_exe().expect("current exe"),
-        PathBuf::from("/tmp/autopilot-test-control.sock"),
+        test_broker_socket(),
+        TEST_BROKER_CAPABILITY.to_owned(),
     )
     .expect("transport facts");
     let _cwd_guard = CWD_LOCK.lock().expect("cwd lock");
@@ -817,7 +855,8 @@ fn bug_187_unknown_delivery_role_is_rejected_by_identity_authority() {
     let facts = RunnerTransportFacts::new(
         std::env::current_exe().expect("current executable"),
         std::env::current_exe().expect("current executable"),
-        PathBuf::from("/tmp/autopilot-test-control.sock"),
+        test_broker_socket(),
+        TEST_BROKER_CAPABILITY.to_owned(),
     )
     .expect("transport facts");
     let error = delivery_issue_with_facts(&assignment, &facts)
@@ -3075,7 +3114,8 @@ fn write_delivery_spec(root: &Path, worktree: &Path, mutate: impl Fn(Value) -> V
     let facts = RunnerTransportFacts::new(
         std::env::current_exe().expect("current exe"),
         std::env::current_exe().expect("current exe"),
-        PathBuf::from("/tmp/autopilot-test-control.sock"),
+        test_broker_socket(),
+        TEST_BROKER_CAPABILITY.to_owned(),
     )
     .expect("transport facts");
     let _guard = CWD_LOCK.lock().expect("cwd lock");
@@ -3317,7 +3357,8 @@ fn write_recovery_delivery_spec(root: &Path, worktree: &Path) -> PathBuf {
     let facts = RunnerTransportFacts::new(
         std::env::current_exe().expect("current exe"),
         std::env::current_exe().expect("current exe"),
-        PathBuf::from("/tmp/autopilot-test-control.sock"),
+        test_broker_socket(),
+        TEST_BROKER_CAPABILITY.to_owned(),
     )
     .expect("transport facts");
     let _guard = CWD_LOCK.lock().expect("cwd lock");
@@ -3694,6 +3735,7 @@ fn issue_work_map_v2_spec(root: &Path, role: &str) -> PathBuf {
                 .clone()
                 .expect("V2 role boundary declaration"),
         ),
+        attempt: u32::from(assignment.ordinal),
         run_revision: 1,
         authority_set_id: "v2-set".to_owned(),
         authority_documents: vec![authority],
@@ -3707,6 +3749,11 @@ fn issue_work_map_v2_spec(root: &Path, role: &str) -> PathBuf {
         accepted_planning_artifacts,
     };
     let current_exe = std::env::current_exe().expect("test executable");
+    let broker_socket = test_broker_socket();
+    let broker_socket = broker_socket
+        .to_str()
+        .expect("broker socket UTF-8")
+        .to_owned();
     let previous = std::env::current_dir().expect("current directory");
     std::env::set_current_dir(root).expect("V2 issue cwd");
     let issue = with_env(
@@ -3720,7 +3767,19 @@ fn issue_work_map_v2_spec(root: &Path, role: &str) -> PathBuf {
                     with_env(
                         "AUTOPILOT_CHILD_ADDON_PATH",
                         child_addon_path().to_str().expect("child addon UTF-8"),
-                        || drivers::runner::planning_issue(&request),
+                        || {
+                            with_env(
+                                "AUTOPILOT_CHILD_CONTROL_SOCKET_PATH",
+                                &broker_socket,
+                                || {
+                                    with_env(
+                                        "AUTOPILOT_CHILD_CONTROL_BROKER_CAPABILITY",
+                                        TEST_BROKER_CAPABILITY,
+                                        || drivers::runner::planning_issue(&request),
+                                    )
+                                },
+                            )
+                        },
                     )
                 },
             )

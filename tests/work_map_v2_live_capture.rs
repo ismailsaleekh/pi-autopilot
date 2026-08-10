@@ -862,6 +862,7 @@ fn issue_work_map(
                 .clone()
                 .ok_or_else(|| format!("{} lacks declared boundary", expected.role))?,
         ),
+        attempt: u32::from(assignment.ordinal),
         run_revision: CAPTURE_RUN_REVISION,
         authority_set_id: AUTHORITY_SET.to_owned(),
         authority_documents: vec![authority],

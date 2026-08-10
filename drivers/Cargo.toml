@@ -14,7 +14,7 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1.1.4", features = ["fs"] }
+rustix = { version = "1.1.4", features = ["fs", "process"] }
 
 [target.'cfg(windows)'.dependencies]
 # NtCreateFile is required for handle-relative, no-reparse V2 authority I/O.

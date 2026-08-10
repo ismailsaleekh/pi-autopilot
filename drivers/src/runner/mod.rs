@@ -89,16 +89,32 @@ const AUTHORITY_GIT_ENVIRONMENT: &[(&str, &str)] = &[
 ];
 const SKILLS_IDENTITY: &str = "agent-run-skills:disabled:v1";
 pub const ISSUED_BINDING_REF_PREFIX: &str = "runner-binding:";
+pub const REQUIRED_PI_VERSION: &str = "0.84.1";
 const RECEIPT_BINDING_SCHEMA: &str = "autopilot.issued_runner_binding.v5";
 type AnyError = Box<dyn std::error::Error>;
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct RunnerTransportFacts {
     pub node_executable: PathBuf,
     pub runner_wrapper: PathBuf,
     /// Exact Host-supplied AF_UNIX child-control endpoint. It is transport
     /// routing only; it is never repository or package authority.
     pub child_control_socket_path: PathBuf,
+    /// Private Host/Core launch authority. It never enters a spec, binding,
+    /// receipt, diagnostic, or Debug output.
+    child_control_broker_capability: String,
+}
+
+impl std::fmt::Debug for RunnerTransportFacts {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RunnerTransportFacts")
+            .field("node_executable", &self.node_executable)
+            .field("runner_wrapper", &self.runner_wrapper)
+            .field("child_control_socket_path", &self.child_control_socket_path)
+            .field("child_control_broker_capability", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -187,6 +203,9 @@ pub struct PlanningRunnerRequest {
     pub role_id: Id,
     pub mode: ModeId,
     pub boundary_id: ContractId,
+    /// Package-issued attempt identity. Fresh planning never infers this from
+    /// a result contract or an absent V4 field.
+    pub attempt: u32,
     pub run_revision: u64,
     pub authority_set_id: String,
     pub authority_documents: Vec<RunnerTaskDocument>,
@@ -563,7 +582,7 @@ impl ReceiptV1RunnerBinding {
             || self.workstream.0.trim().is_empty()
             || self.role_id.0.trim().is_empty()
             || self.mode.0.trim().is_empty()
-            || (!self.result_contract.0.starts_with("planning.") && self.attempt == 0)
+            || self.attempt == 0
             || self.boundary_id.0.trim().is_empty()
             || self.result_contract.0.trim().is_empty()
             || self.profile_id.trim().is_empty()
@@ -651,13 +670,25 @@ impl RunnerTransportFacts {
         let socket = env::var_os("AUTOPILOT_CHILD_CONTROL_SOCKET_PATH").ok_or_else(|| {
             RunnerError::MissingTransport("AUTOPILOT_CHILD_CONTROL_SOCKET_PATH".to_owned())
         })?;
-        Self::new(PathBuf::from(node), PathBuf::from(wrapper), PathBuf::from(socket))
+        let broker_capability =
+            env::var("AUTOPILOT_CHILD_CONTROL_BROKER_CAPABILITY").map_err(|_| {
+                RunnerError::MissingTransport(
+                    "AUTOPILOT_CHILD_CONTROL_BROKER_CAPABILITY".to_owned(),
+                )
+            })?;
+        Self::new(
+            PathBuf::from(node),
+            PathBuf::from(wrapper),
+            PathBuf::from(socket),
+            broker_capability,
+        )
     }
 
     pub fn new(
         node_executable: PathBuf,
         runner_wrapper: PathBuf,
         child_control_socket_path: PathBuf,
+        child_control_broker_capability: String,
     ) -> Result<Self, RunnerError> {
         if !node_executable.is_absolute()
             || !runner_wrapper.is_absolute()
@@ -671,24 +702,132 @@ impl RunnerTransportFacts {
         reject_link_components_for_path(&runner_wrapper)?;
         require_regular_file(&node_executable)?;
         require_regular_file(&runner_wrapper)?;
-        let socket_text = child_control_socket_path.to_str().ok_or_else(|| {
-            RunnerError::InvalidTransport("child-control socket path is not UTF-8".to_owned())
-        })?;
-        // Unix-domain socket paths are platform bounded. Keep a conservative
-        // short absolute cap rather than truncating, hashing, or discovering a
-        // fallback endpoint.
-        if socket_text.is_empty() || socket_text.len() > 107 {
+        validate_child_control_socket_path(&child_control_socket_path)?;
+        if !is_lower_hex_64(&child_control_broker_capability) {
             return Err(RunnerError::InvalidTransport(
-                "child-control socket path is empty or exceeds the short absolute cap".to_owned(),
+                "child-control broker capability is not exact lowercase hex".to_owned(),
             ));
         }
-        reject_link_components_for_path(&child_control_socket_path)?;
         Ok(Self {
             node_executable,
             runner_wrapper,
             child_control_socket_path,
+            child_control_broker_capability,
         })
     }
+}
+
+/// Compare a Host-broker frame capability to the exact private launch
+/// authority. The boolean intentionally carries no secret-derived detail.
+pub fn host_broker_capability_matches(supplied: &str) -> Result<bool, RunnerError> {
+    let expected = env::var("AUTOPILOT_CHILD_CONTROL_BROKER_CAPABILITY").map_err(|_| {
+        RunnerError::MissingTransport("AUTOPILOT_CHILD_CONTROL_BROKER_CAPABILITY".to_owned())
+    })?;
+    if !is_lower_hex_64(&expected) {
+        return Err(RunnerError::InvalidTransport(
+            "child-control broker capability is not exact lowercase hex".to_owned(),
+        ));
+    }
+    Ok(constant_time_lower_hex_matches(supplied, &expected))
+}
+
+fn is_lower_hex_64(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+/// The Host socket is an explicit capability endpoint, never a discoverable
+/// path. Hold every parent directory with `O_NOFOLLOW`, then inspect the
+/// socket itself with `fstatat(..., AT_SYMLINK_NOFOLLOW)`.
+#[cfg(unix)]
+fn validate_child_control_socket_path(path: &Path) -> Result<(), RunnerError> {
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags, openat, statat};
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let text = path.to_str().ok_or_else(|| {
+        RunnerError::InvalidTransport("child-control socket path is not UTF-8".to_owned())
+    })?;
+    let bytes_with_terminator = text.len().checked_add(1).ok_or_else(|| {
+        RunnerError::InvalidTransport("child-control socket path length overflow".to_owned())
+    })?;
+    if bytes_with_terminator >= 104 {
+        return Err(RunnerError::InvalidTransport(
+            "child-control socket path exceeds the macOS-safe cap".to_owned(),
+        ));
+    }
+    let Some(run_component) = text
+        .strip_prefix("/tmp/.pi-ap/")
+        .and_then(|value| value.strip_suffix("/s"))
+    else {
+        return Err(RunnerError::InvalidTransport(
+            "child-control socket path is outside the exact Host capability root".to_owned(),
+        ));
+    };
+    if run_component.len() != 10
+        || !run_component
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        || text != format!("/tmp/.pi-ap/{run_component}/s")
+    {
+        return Err(RunnerError::InvalidTransport(
+            "child-control socket path is not the exact Host capability layout".to_owned(),
+        ));
+    }
+    // `/tmp` is the platform's fixed system directory (a Darwin symlink may
+    // resolve it); only the private `.pi-ap` capability parents are accepted
+    // through held `O_NOFOLLOW` descriptors.
+    let tmp = fs::File::open("/tmp").map_err(io_error)?;
+    let open_dir = |parent: &fs::File, name: &str| {
+        openat(
+            parent,
+            name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map(fs::File::from)
+        .map_err(|_| {
+            RunnerError::InvalidTransport(
+                "child-control socket parent is unavailable or linked".to_owned(),
+            )
+        })
+    };
+    let broker_root = open_dir(&tmp, ".pi-ap")?;
+    let broker_run = open_dir(&broker_root, run_component)?;
+    let effective_uid = rustix::process::geteuid().as_raw();
+    for parent in [&broker_root, &broker_run] {
+        let metadata = parent.metadata().map_err(io_error)?;
+        if !metadata.file_type().is_dir()
+            || metadata.uid() != effective_uid
+            || metadata.permissions().mode() & 0o7777 != 0o700
+        {
+            return Err(RunnerError::InvalidTransport(
+                "child-control socket parent ownership or mode drift".to_owned(),
+            ));
+        }
+    }
+    let stat = statat(&broker_run, "s", AtFlags::SYMLINK_NOFOLLOW).map_err(|_| {
+        RunnerError::InvalidTransport(
+            "child-control socket is absent, linked, or unreadable".to_owned(),
+        )
+    })?;
+    if !FileType::from_raw_mode(stat.st_mode).is_socket()
+        || stat.st_uid != effective_uid
+        || stat.st_mode & 0o7777 != 0o600
+    {
+        return Err(RunnerError::InvalidTransport(
+            "child-control socket type, ownership, or mode drift".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_child_control_socket_path(_path: &Path) -> Result<(), RunnerError> {
+    Err(RunnerError::InvalidTransport(
+        "child-control AF_UNIX capability validation is unavailable on this platform".to_owned(),
+    ))
 }
 
 fn planning_subject_for_request(
@@ -815,7 +954,7 @@ pub fn planning_issue(request: &PlanningRunnerRequest) -> Result<IssuedRunnerAct
         skills_digest: Digest(binding_digests.skills_digest.clone()),
         subscription_digest: Digest(binding_digests.subscription_digest.clone()),
         lane_id: None,
-        attempt: None,
+        attempt: Some(request.attempt),
         base_commit: None,
         worktree: None,
         required_focused_evidence: None,
@@ -899,7 +1038,7 @@ pub fn planning_issue(request: &PlanningRunnerRequest) -> Result<IssuedRunnerAct
         planning_subject_path: planning_subject.map(|artifact| artifact.path.clone()),
         planning_subject_digest: planning_subject.map(|artifact| artifact.digest.clone()),
         lane_id: None,
-        attempt: None,
+        attempt: Some(request.attempt),
         base_commit: None,
         worktree: None,
         required_focused_evidence: 0,
@@ -3023,20 +3162,23 @@ pub fn decode_versioned_binding_ref(value: &str) -> Result<VersionedRunnerBindin
             // V4 form, then prove that its canonical field set is precisely
             // the one decoded; a defaulted/missing mandatory field or an
             // unknown field cannot silently select replay_v0.
-            let binding: IssuedRunnerBinding = serde_json::from_value(raw.clone()).map_err(|error| {
-                RunnerError::InvalidSpec(format!("legacy replay_v0 binding: {error}"))
+            let binding: IssuedRunnerBinding =
+                serde_json::from_value(raw.clone()).map_err(|error| {
+                    RunnerError::InvalidSpec(format!("legacy replay_v0 binding: {error}"))
+                })?;
+            let supplied = crate::evidence::canonical_json(&raw).map_err(|error| {
+                RunnerError::InvalidSpec(format!("legacy replay_v0 canonical JSON: {error}"))
             })?;
-            let supplied = crate::evidence::canonical_json(&raw)
-                .map_err(|error| RunnerError::InvalidSpec(format!("legacy replay_v0 canonical JSON: {error}")))?;
-            let decoded = crate::evidence::canonical_json(&binding)
-                .map_err(|error| RunnerError::InvalidSpec(format!("legacy replay_v0 canonical binding: {error}")))?;
+            let decoded = crate::evidence::canonical_json(&binding).map_err(|error| {
+                RunnerError::InvalidSpec(format!("legacy replay_v0 canonical binding: {error}"))
+            })?;
             if supplied != decoded {
                 return Err(RunnerError::InvalidSpec(
                     "legacy replay_v0 binding field-set/default drift".to_owned(),
                 ));
             }
             Ok(VersionedRunnerBinding::ReplayV0(binding))
-        },
+        }
         Some(serde_json::Value::String(mode)) if mode == "receipt_v1" => {
             let binding: ReceiptV1RunnerBinding = serde_json::from_value(raw).map_err(|error| {
                 RunnerError::InvalidSpec(format!("receipt_v1 binding: {error}"))
@@ -3143,6 +3285,7 @@ pub fn validate_receipt_v1_spec(
 ) -> Result<(), RunnerError> {
     if spec.schema.0 != "autopilot.agent_run_spec.v5"
         || spec.admission_mode != AdmissionMode::ReceiptV1
+        || spec.required_pi_version != REQUIRED_PI_VERSION
         || spec.action_id != binding.action_id
         || spec.assignment_id != binding.assignment_id
         || spec.run_id != binding.run_id
@@ -3168,8 +3311,8 @@ pub fn validate_receipt_v1_spec(
     if profile.0 != binding.profile_id
         || profile.1 != binding.tool_name.0
         || profile.4 != binding.schema_digest
-        || !Path::new(&spec.child_control_socket_path.0).is_absolute()
-        || spec.child_control_socket_path.0.len() > 107
+        || validate_child_control_socket_path(Path::new(&spec.child_control_socket_path.0)).is_err()
+        || !is_lower_hex_64(&spec.child_control_token)
         || !is_sha256_hex(&spec.child_control_token_digest.0)
         || !constant_time_hex_digest_matches(
             &spec.child_control_token,
@@ -3202,6 +3345,17 @@ pub fn constant_time_hex_digest_matches(value: &str, expected: &str) -> bool {
     let actual = sha256_hex(value.as_bytes());
     let mut diff = 0_u8;
     for (left, right) in actual.bytes().zip(expected.bytes()) {
+        diff |= left ^ right;
+    }
+    diff == 0
+}
+
+pub fn constant_time_lower_hex_matches(value: &str, expected: &str) -> bool {
+    if !is_lower_hex_64(value) || !is_lower_hex_64(expected) {
+        return false;
+    }
+    let mut diff = 0_u8;
+    for (left, right) in value.bytes().zip(expected.bytes()) {
         diff |= left ^ right;
     }
     diff == 0
@@ -3290,6 +3444,11 @@ fn route_for_role(role_id: &str) -> Result<roster::Route, RunnerError> {
 }
 
 fn validate_planning_request(request: &PlanningRunnerRequest) -> Result<(), RunnerError> {
+    if request.attempt == 0 {
+        return Err(RunnerError::InvalidSpec(
+            "planning attempt must be explicit and nonzero".to_owned(),
+        ));
+    }
     let runtime = role_runtime(&request.role_id.0)?;
     if !runtime.modes.iter().any(|mode| mode == &request.mode.0) {
         return Err(RunnerError::InvalidSpec(format!(
@@ -4831,20 +4990,48 @@ pub fn render_delivery_submission_authority(
     ))
 }
 
-/// Build and publish a fresh V5 spec. The capability is minted exactly here,
-/// from the OS CSPRNG, and is never copied into the durable binding.
+/// Build and publish a fresh V5 spec. An existing deterministic path is an
+/// immutable issuance replay: validate every facade/transport field and reuse
+/// its one minted token byte-for-byte. A mismatched pre-existing path is never
+/// overwritten or reminted.
 fn write_receipt_v1_spec_document(
     path: &Path,
     facade: &AgentRunSpec,
     facts: &RunnerTransportFacts,
 ) -> Result<(AgentRunSpecV5, String), RunnerError> {
+    if let Some(bytes) = read_bounded_file_optional(path, child::MAX_AGENT_RUN_SPEC_BYTES)? {
+        let existing: AgentRunSpecV5 = serde_json::from_slice(&bytes).map_err(|error| {
+            RunnerError::InvalidSpec(format!("existing receipt_v1 spec JSON: {error}"))
+        })?;
+        if existing.schema.0 != "autopilot.agent_run_spec.v5"
+            || existing.admission_mode != AdmissionMode::ReceiptV1
+            || existing.required_pi_version != REQUIRED_PI_VERSION
+            || existing.child_control_socket_path.0
+                != path_to_string(&facts.child_control_socket_path)?
+            || !is_lower_hex_64(&existing.child_control_token)
+            || !constant_time_hex_digest_matches(
+                &existing.child_control_token,
+                &existing.child_control_token_digest.0,
+            )
+            || project_v5_spec_for_shared_admission(&existing) != *facade
+        {
+            return Err(RunnerError::InvalidSpec(
+                "existing receipt_v1 spec conflicts with exact issuance authority".to_owned(),
+            ));
+        }
+        return Ok((existing, sha256_hex(&bytes)));
+    }
     let random = crate::state_root::os_csprng_32()
         .map_err(|error| RunnerError::Io(format!("child-control capability CSPRNG: {error}")))?;
-    let token = random.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    let token = random
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     let token_digest = sha256_hex(token.as_bytes());
     let spec = AgentRunSpecV5 {
         schema: kernel::generated::SchemaId("autopilot.agent_run_spec.v5".to_owned()),
         admission_mode: AdmissionMode::ReceiptV1,
+        required_pi_version: REQUIRED_PI_VERSION.to_owned(),
         child_control_socket_path: to_contract_path(&facts.child_control_socket_path)?,
         child_control_token: token,
         child_control_token_digest: Digest(token_digest),
@@ -4906,7 +5093,8 @@ fn write_receipt_v1_spec_document(
         planning_inputs_path: facade.planning_inputs_path.clone(),
         planning_inputs_digest: facade.planning_inputs_digest.clone(),
     };
-    let data = serde_json::to_vec_pretty(&spec).map_err(|error| RunnerError::Io(error.to_string()))?;
+    let data =
+        serde_json::to_vec_pretty(&spec).map_err(|error| RunnerError::Io(error.to_string()))?;
     let digest = sha256_hex(&data);
     write_bounded_file_create_once(path, &data, child::MAX_AGENT_RUN_SPEC_BYTES)?;
     Ok((spec, digest))
@@ -4921,14 +5109,14 @@ fn receipt_v1_binding_from_fresh_issue(
         &legacy.boundary_id.0,
         &legacy.result_contract.0,
     )?;
-    // Planning has no retry-attempt identity in its V4 facade. Receipt V1
-    // represents that closed fact as explicit zero; delivery/Validator must
-    // carry their issued nonzero attempt and never receive a default.
-    let attempt = match legacy.attempt {
-        Some(attempt) => attempt,
-        None if legacy.result_contract.0.starts_with("planning.") => 0,
-        None => return Err(RunnerError::InvalidSpec("fresh non-planning issue lacks attempt".to_owned())),
-    };
+    let attempt = legacy.attempt.ok_or_else(|| {
+        RunnerError::InvalidSpec("fresh issue lacks explicit nonzero attempt".to_owned())
+    })?;
+    if attempt == 0 {
+        return Err(RunnerError::InvalidSpec(
+            "fresh issue has zero attempt".to_owned(),
+        ));
+    }
     let mut binding = ReceiptV1RunnerBinding {
         schema: RECEIPT_BINDING_SCHEMA.to_owned(),
         admission_mode: AdmissionMode::ReceiptV1,
@@ -5000,11 +5188,14 @@ pub fn receipt_authority_digest_for_binding(
         "carrier_binding_digest": binding.carrier_binding_digest,
         "run_capability_digest": binding.run_capability_digest,
         "spec_token_digest": spec.child_control_token_digest,
+        "required_pi_version": spec.required_pi_version,
         "spec_context_digest": spec.context_digest,
         "spec_boundary_digest": spec.boundary_digest,
         "spec_result_contract_digest": spec.result_contract_digest,
     }))
-    .map_err(|error| RunnerError::InvalidSpec(format!("receipt authority canonical JSON: {error}")))?;
+    .map_err(|error| {
+        RunnerError::InvalidSpec(format!("receipt authority canonical JSON: {error}"))
+    })?;
     Ok(sha256_hex(&bytes))
 }
 

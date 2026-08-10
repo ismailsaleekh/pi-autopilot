@@ -42,6 +42,10 @@ struct AgentCarrier {
     spec_digest: String,
     spec_path: String,
     carrier_path: String,
+    /// V5 package authority inserted after child value admission. Historical
+    /// V4 carrier bytes intentionally predate it and remain explicit None.
+    #[serde(default)]
+    required_pi_version: Option<String>,
     raw_output: String,
 }
 
@@ -111,6 +115,7 @@ fn planning_bg_action(workstream: &str, assignment: &AgentAssignment, run_revisi
         role_id: idv(&assignment.role),
         mode: ModeId(assignment.mode.clone()),
         boundary_id: kernel::generated::ContractId(assignment.boundary_id.clone().unwrap_or_else(|| "planning.questions.v1".to_owned())),
+        attempt: u32::from(assignment.ordinal),
         run_revision,
         authority_set_id: input_set.authority_set_id.clone(),
         authority_documents: input_set.authority_documents.iter().map(runner_doc_from_task).collect(),

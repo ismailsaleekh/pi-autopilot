@@ -7,7 +7,7 @@ use std::sync::{Mutex, OnceLock};
 use drivers::runner::{self, PlanningRunnerRequest, RunnerTaskDocument};
 use drivers::seam::{self, CoreState};
 use drivers::vcs::GitVcs;
-use kernel::generated::{ContractId, Id, ModeId, Ref, SeamEnvelope};
+use kernel::generated::{ContractId, EventKind, EventRow, Id, ModeId, Ref, SeamEnvelope};
 use serde_json::json;
 use sha2::{Digest as ShaDigest, Sha256};
 
@@ -21,15 +21,12 @@ fn receipt_v1_planning_accepts_then_consumes_without_carrier_or_spec_rereads() {
     fixture.install_transport_with_nonexistent_command_names();
     fixture.write_manifest();
     let mut state = CoreState::open(None).unwrap();
-    let issue = fixture.seed_receipt_planning_binding(
-        &mut state,
-        "planning-ws-task-extractor-01",
-        "TE01-",
-    );
+    let issue =
+        fixture.seed_receipt_planning_binding(&mut state, "planning-ws-task-extractor-01", "TE01-");
     let spec: kernel::generated::AgentRunSpecV5 =
         serde_json::from_slice(&fs::read(&issue.binding.spec_path).unwrap()).unwrap();
     let raw: serde_json::Value = serde_json::from_str(&task_atoms("TE01-A")).unwrap();
-    let submit = json!({"v":1,"id":6,"kind":"child-control","payload":{"request":{
+    let submit = json!({"v":1,"id":6,"kind":"child-control","payload":{"broker_capability":fixture.broker_capability(),"request":{
         "schema":"autopilot.child_control_request.v1","request_id":"request-1",
         "token":spec.child_control_token,"run_id":issue.receipt_binding.run_id,
         "assignment_id":issue.receipt_binding.assignment_id,"attempt":issue.receipt_binding.attempt,
@@ -44,21 +41,149 @@ fn receipt_v1_planning_accepts_then_consumes_without_carrier_or_spec_rereads() {
 
     // Exact replay returns the original receipt and appends no second accepted
     // root. A changed raw payload is rejected before it can create artifacts.
-    let replay = seam::handle_line(&submit.to_string(), &mut state).unwrap();
+    let mut replay_submit = submit.clone();
+    replay_submit["payload"]["request"]["request_id"] = json!("request-2");
+    replay_submit["payload"]["request"]["tool_call_id"] = json!("tool-call-2");
+    let replay = seam::handle_line(&replay_submit.to_string(), &mut state).unwrap();
     assert_eq!(replay.payload["response"]["outcome"], "ACCEPT");
+    assert_eq!(replay.payload["response"]["request_id"], "request-2");
     assert_eq!(replay.payload["response"]["receipt"]["receipt"], receipt);
+    assert_eq!(
+        replay.payload["response"]["receipt"]["receipt"]["tool_call_id"],
+        "tool-call-1"
+    );
     let mut conflict = submit.clone();
-    conflict["payload"]["request"]["raw_payload"] = serde_json::from_str(&task_atoms("TE01-B")).unwrap();
+    conflict["payload"]["request"]["raw_payload"] =
+        serde_json::from_str(&task_atoms("TE01-B")).unwrap();
     let retry = seam::handle_line(&conflict.to_string(), &mut state).unwrap();
     assert_eq!(retry.payload["response"]["outcome"], "RETRY");
 
-    fs::remove_file(&issue.binding.carrier_path).unwrap();
     fs::remove_file(&issue.binding.spec_path).unwrap();
+    let replay_without_spec = seam::handle_line(&replay_submit.to_string(), &mut state).unwrap();
+    assert_eq!(replay_without_spec.payload["response"]["outcome"], "ACCEPT");
+    fs::remove_file(&issue.binding.carrier_path).unwrap();
     let frame = json!({"v":1,"id":7,"kind":"task-completed","payload":{"task_id":"task-terminal","action_id":issue.receipt_binding.action_id,"assignment_id":issue.receipt_binding.assignment_id,"status":"completed"}});
     let completed = seam::handle_line(&frame.to_string(), &mut state).unwrap();
     assert_spawn_assignment(&completed, "planning-ws-task-extractor-02");
     let again = seam::handle_line(&frame.to_string(), &mut state).unwrap();
-    assert_eq!(spawned_assignment_ids(&again), spawned_assignment_ids(&completed));
+    assert_eq!(
+        spawned_assignment_ids(&again),
+        spawned_assignment_ids(&completed)
+    );
+}
+
+#[test]
+fn receipt_v1_missing_receipt_never_falls_back_to_legacy_carrier() {
+    let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+    let fixture = Fixture::new("receipt-missing-no-legacy");
+    fixture.install_transport_with_nonexistent_command_names();
+    let mut state = CoreState::open(None).unwrap();
+    let issue = fixture.seed_receipt_planning_binding(
+        &mut state,
+        "planning-ws-task-extractor-01",
+        "TE01-",
+    );
+    fs::create_dir_all(Path::new(&issue.binding.carrier_path).parent().unwrap()).unwrap();
+    fs::write(&issue.binding.carrier_path, b"not a receipt-backed carrier").unwrap();
+    let completed = seam::handle_line(
+        &json!({"v":1,"id":54,"kind":"task-completed","payload":{
+            "task_id":"task-missing","action_id":issue.receipt_binding.action_id,
+            "assignment_id":issue.receipt_binding.assignment_id,"status":"completed"
+        }})
+        .to_string(),
+        &mut state,
+    )
+    .unwrap();
+    assert_eq!(completed.kind, "done");
+    assert_eq!(completed.payload["status"], "rejection:submit-receipt:missing receipt");
+}
+
+#[test]
+fn receipt_v1_issuance_replays_exact_v5_token_spec_and_attempt() {
+    let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+    let fixture = Fixture::new("receipt-issuance-replay");
+    fixture.install_transport_with_nonexistent_command_names();
+    let first = fixture.issue_planning("planning-ws-task-extractor-01", "TE01-");
+    let first_spec: kernel::generated::AgentRunSpecV5 =
+        serde_json::from_slice(&fs::read(&first.binding.spec_path).unwrap()).unwrap();
+    let second = fixture.issue_planning("planning-ws-task-extractor-01", "TE01-");
+    let second_bytes = fs::read(&second.binding.spec_path).unwrap();
+    let second_spec: kernel::generated::AgentRunSpecV5 =
+        serde_json::from_slice(&second_bytes).unwrap();
+
+    assert_eq!(first_spec, second_spec);
+    assert_eq!(first.binding.spec_digest, second.binding.spec_digest);
+    assert_eq!(
+        first.receipt_binding.run_capability_digest,
+        second.receipt_binding.run_capability_digest
+    );
+    assert_eq!(first_spec.required_pi_version, runner::REQUIRED_PI_VERSION);
+    assert_eq!(first_spec.attempt, Some(1));
+    assert_eq!(first.receipt_binding.attempt, 1);
+}
+
+#[test]
+fn receipt_root_uses_actual_event_bytes_and_refuses_duplicate_roots() {
+    let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+    let fixture = Fixture::new("receipt-root-hash");
+    fixture.install_transport_with_nonexistent_command_names();
+    fixture.write_manifest();
+    let event_path = fixture.root.join("events.jsonl");
+    let mut state = CoreState::open(Some(event_path.clone())).unwrap();
+    let issue =
+        fixture.seed_receipt_planning_binding(&mut state, "planning-ws-task-extractor-01", "TE01-");
+    let spec: kernel::generated::AgentRunSpecV5 =
+        serde_json::from_slice(&fs::read(&issue.binding.spec_path).unwrap()).unwrap();
+    let submit = json!({"v":1,"id":61,"kind":"child-control","payload":{"broker_capability":fixture.broker_capability(),"request":{
+        "schema":"autopilot.child_control_request.v1","request_id":"request-61",
+        "token":spec.child_control_token,"run_id":issue.receipt_binding.run_id,
+        "assignment_id":issue.receipt_binding.assignment_id,"attempt":issue.receipt_binding.attempt,
+        "tool_call_id":"tool-call-61","kind":"submit",
+        "tool_name":issue.receipt_binding.tool_name,"profile_id":issue.receipt_binding.profile_id,
+        "raw_payload":serde_json::from_str::<serde_json::Value>(&task_atoms("TE01-A")).unwrap()
+    }}});
+    let accepted = seam::handle_line(&submit.to_string(), &mut state).unwrap();
+    assert_eq!(accepted.payload["response"]["outcome"], "ACCEPT");
+    drop(state);
+    let mut persisted = CoreState::open(Some(event_path.clone())).unwrap();
+    let replay = seam::handle_line(&submit.to_string(), &mut persisted).unwrap();
+    assert_eq!(replay.payload["response"]["outcome"], "ACCEPT");
+    drop(persisted);
+
+    let mut rows = fs::read_to_string(&event_path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<EventRow>(line).unwrap())
+        .collect::<Vec<_>>();
+    let accepted_row = rows
+        .iter()
+        .find(|row| row.kind.0 == "submit:accepted")
+        .cloned()
+        .unwrap();
+    let last = rows.last().unwrap().clone();
+    rows.push(EventRow {
+        sequence: last.sequence + 1,
+        previous_revision: last.new_revision,
+        new_revision: last.new_revision + 1,
+        kind: EventKind("submit:accepted".to_owned()),
+        artifact_refs: accepted_row.artifact_refs,
+    });
+    let bytes = rows
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+        .join("\n");
+    fs::write(&event_path, format!("{bytes}\n")).unwrap();
+
+    let mut replayed = CoreState::open(Some(event_path)).unwrap();
+    let retry = seam::handle_line(&submit.to_string(), &mut replayed).unwrap();
+    assert_eq!(retry.kind, "child-control");
+    assert_eq!(retry.payload["response"]["outcome"], "RETRY");
+    assert_eq!(
+        retry.payload["response"]["diagnostic"]["errors"][0]["code"],
+        "submit.receipt_root"
+    );
 }
 
 struct Fixture {
@@ -109,8 +234,16 @@ impl Fixture {
                 "AUTOPILOT_CHILD_ADDON_PATH",
                 Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/generated/child-extension.ts"),
             );
-            std::env::set_var("AUTOPILOT_CHILD_CONTROL_SOCKET_PATH", self.root.join("cc.sock"));
+            std::env::set_var("AUTOPILOT_CHILD_CONTROL_SOCKET_PATH", broker_socket_path());
+            std::env::set_var(
+                "AUTOPILOT_CHILD_CONTROL_BROKER_CAPABILITY",
+                self.broker_capability(),
+            );
         }
+    }
+
+    fn broker_capability(&self) -> &'static str {
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     }
 
     fn write_manifest(&self) {
@@ -140,7 +273,10 @@ impl Fixture {
         prefix: &str,
     ) -> runner::IssuedRunnerAction {
         let issue = self.issue_planning(assignment_id, prefix);
-        append_ref(state, &runner::receipt_binding_ref(&issue.receipt_binding).unwrap());
+        append_ref(
+            state,
+            &runner::receipt_binding_ref(&issue.receipt_binding).unwrap(),
+        );
         append_ref(state, &Ref(assignment_id.to_owned()));
         issue
     }
@@ -159,6 +295,7 @@ impl Fixture {
             role_id: Id("task-extractor".to_owned()),
             mode: ModeId("inventory".to_owned()),
             boundary_id: ContractId("planning.task-atoms.v1".to_owned()),
+            attempt: 1,
             run_revision: 1,
             authority_set_id: "auth".to_owned(),
             authority_documents: vec![runner_doc("task.md", "authority", "auth", "Do the work")],
@@ -282,6 +419,36 @@ fn sha256_hex(data: &[u8]) -> String {
         out.push_str(&format!("{byte:02x}"));
     }
     out
+}
+
+#[cfg(unix)]
+fn broker_socket_path() -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixListener;
+
+    let root = PathBuf::from("/tmp/.pi-ap");
+    fs::create_dir_all(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let dir = loop {
+        let id = format!("{:010x}", FIXTURE_COUNTER.fetch_add(1, Ordering::Relaxed));
+        let candidate = root.join(id);
+        match fs::create_dir(&candidate) {
+            Ok(()) => break candidate,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("broker socket directory {candidate:?}: {error}"),
+        }
+    };
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let path = dir.join("s");
+    let listener = UnixListener::bind(&path).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    drop(listener);
+    path
+}
+
+#[cfg(not(unix))]
+fn broker_socket_path() -> PathBuf {
+    PathBuf::from("/tmp/.pi-ap/0000000000/s")
 }
 
 fn make_executable(path: &Path) {

@@ -622,6 +622,7 @@ pub fn main(args: &[String]) -> Result<(), String> {
         })?;
         if fresh.schema.0 != "autopilot.agent_run_spec.v5"
             || fresh.admission_mode != AdmissionMode::ReceiptV1
+            || fresh.required_pi_version != super::REQUIRED_PI_VERSION
             || fresh.child_control_socket_path.0.is_empty()
             || !super::constant_time_hex_digest_matches(
                 &fresh.child_control_token,
@@ -4895,6 +4896,7 @@ pub(crate) fn admit_submission(
     spec_bytes: &str,
     spec_digest: &str,
     spec: &AgentRunSpec,
+    required_pi_version: &str,
     raw_payload: Value,
     tool_call_id: String,
 ) -> Result<PreparedCarrier, AdmissionFailure> {
@@ -4926,7 +4928,7 @@ pub(crate) fn admit_submission(
         },
         details_value: raw_payload,
     };
-    prepare_carrier(
+    let mut prepared = prepare_carrier(
         spec_path,
         spec_bytes,
         spec_digest,
@@ -4941,7 +4943,17 @@ pub(crate) fn admit_submission(
             expected: value.expected,
             actual: value.got,
         },
-    })
+    })?;
+    let carrier = prepared.carrier.as_object_mut().ok_or_else(|| {
+        AdmissionFailure::Authority("prepared receipt carrier is not an object".to_owned())
+    })?;
+    // This is package-bound V5 authority supplied by Core, never a field from
+    // the model payload and never an input to a child validator.
+    carrier.insert(
+        "required_pi_version".to_owned(),
+        serde_json::Value::String(required_pi_version.to_owned()),
+    );
+    Ok(prepared)
 }
 
 fn contains_placeholder_sentinel(value: &Value) -> bool {
