@@ -120,20 +120,14 @@ test("ChildControlBroker rejects extra frames before Core and applies a blocked 
               receipt: {
                 kind: "blocked",
                 schema: "autopilot.child_control_accept_receipt.v1",
-                receipt: {
-                  schema: "autopilot.blocked_receipt.v1",
-                  receipt_id: "receipt-1",
-                  run_id: "run-1",
-                  request_id: child.request.request_id,
-                  tool_call_id: "call-1",
-                },
+                receipt: blockedReceipt(child.request.request_id),
               },
             },
             blocked_gate: {
               schema: "autopilot.child_control_blocked_gate.v1",
               latch_id: "latch-1",
               run_id: "run-1",
-              cancellations: [{ task_id: "task-reporter", reporter: true }],
+              cancellations: [{ task_id: "task-reporter", action_id: "action-reporter", assignment_id: "assignment-reporter", reporter: true }],
             },
           },
         };
@@ -144,6 +138,7 @@ test("ChildControlBroker rejects extra frames before Core and applies a blocked 
       return {
         reporterTaskId: "task-reporter",
         async afterChildResponseWritten() { order.push("after-write"); },
+        async blockedObservationArrived() {},
         async afterBlockedResultAcknowledged() { order.push("reporter"); },
       };
     },
@@ -165,6 +160,26 @@ test("ChildControlBroker rejects extra frames before Core and applies a blocked 
   } finally {
     await broker.stop();
   }
+});
+
+test("ChildControlBroker acquires a scheduling hold before BLOCKED forwarding and releases it only on explicit RETRY", async () => {
+  const order: string[] = [];
+  const broker = await startChildControlBroker({
+    transport: {
+      async request(kind, payload) {
+        order.push(`core:${kind}`);
+        const request = payload as { request: { request_id: string } };
+        return { v: 1, id: 1, kind: "child-control", payload: { response: retryResponse(request.request.request_id), blocked_gate: null } };
+      },
+    } as never,
+    async beforeBlockedForward() { order.push("hold"); },
+    releaseBlockedHoldOnRetry() { order.push("release"); },
+  });
+  try {
+    const blocked = { ...request("blocked-retry"), kind: "blocked", tool_name: "autopilot_report_blocked", profile_id: "autopilot.blocked_report.v1:autopilot_report_blocked" };
+    assert.notEqual((await exchange(broker.socketPath, framed(blocked))).length, 0);
+    assert.deepEqual(order, ["hold", "core:child-control", "release"]);
+  } finally { await broker.stop(); }
 });
 
 test("ChildControlBroker keeps the 4 MiB frame ceiling closed", async () => {
@@ -206,6 +221,7 @@ test("ChildControlBroker orders blocked ACCEPT, nonreporters, exact acknowledgme
           await nonreporters;
           order.push("nonreporter-kill-done");
         },
+        async blockedObservationArrived() { order.push("observation-arrived"); },
         async afterBlockedResultAcknowledged() { order.push("reporter-kill"); },
       };
     },
@@ -217,12 +233,13 @@ test("ChildControlBroker orders blocked ACCEPT, nonreporters, exact acknowledgme
     assert.deepEqual(order, ["gate", "nonreporter-kill-start", "child-accept-observed"]);
 
     const observation = exchange(broker.socketPath, framed(blockedObservation()));
-    await waitFor(() => order.includes("core-observation"));
-    assert.deepEqual(order, ["gate", "nonreporter-kill-start", "child-accept-observed", "core-observation"]);
+    await waitFor(() => order.includes("observation-arrived"));
+    assert.deepEqual(order, ["gate", "nonreporter-kill-start", "child-accept-observed", "observation-arrived"]);
     assert.ok(releaseNonreporters !== undefined);
     releaseNonreporters();
+    await waitFor(() => order.includes("core-observation"));
     assert.equal((await observation).length, 0);
-    assert.deepEqual(order, ["gate", "nonreporter-kill-start", "child-accept-observed", "core-observation", "nonreporter-kill-done", "reporter-kill"]);
+    assert.deepEqual(order, ["gate", "nonreporter-kill-start", "child-accept-observed", "observation-arrived", "nonreporter-kill-done", "core-observation", "reporter-kill"]);
   } finally {
     await broker.stop();
   }
@@ -242,6 +259,7 @@ test("ChildControlBroker refuses a wrong observation acknowledgment and keeps th
       return {
         reporterTaskId: "task-reporter",
         async afterChildResponseWritten() {},
+        async blockedObservationArrived() {},
         async afterBlockedResultAcknowledged() { reporterKills.push("task-reporter"); },
       };
     },
@@ -295,13 +313,7 @@ function blockedFrame(requestId: string) {
         receipt: {
           kind: "blocked",
           schema: "autopilot.child_control_accept_receipt.v1",
-          receipt: {
-            schema: "autopilot.blocked_receipt.v1",
-            receipt_id: "receipt-1",
-            run_id: "run-1",
-            request_id: requestId,
-            tool_call_id: "call-1",
-          },
+          receipt: blockedReceipt(requestId),
         },
       },
       blocked_gate: {
@@ -309,11 +321,31 @@ function blockedFrame(requestId: string) {
         latch_id: "latch-1",
         run_id: "run-1",
         cancellations: [
-          { task_id: "task-nonreporter", reporter: false },
-          { task_id: "task-reporter", reporter: true },
+          { task_id: "task-nonreporter", action_id: "action-nonreporter", assignment_id: "assignment-nonreporter", reporter: false },
+          { task_id: "task-reporter", action_id: "action-reporter", assignment_id: "assignment-1", reporter: true },
         ],
       },
     },
+  };
+}
+
+function blockedReceipt(requestId: string) {
+  return {
+    schema: "autopilot.blocked_receipt.v1",
+    receipt_id: "receipt-1",
+    run_id: "run-1",
+    run_revision: 1,
+    workstream: "workstream-1",
+    action_id: "action-reporter",
+    assignment_id: "assignment-1",
+    attempt: 1,
+    profile_id: "autopilot.blocked_report.v1:autopilot_report_blocked",
+    tool_name: "autopilot_report_blocked",
+    request_id: requestId,
+    tool_call_id: "call-1",
+    report_digest: "a".repeat(64),
+    reason_code: "infrastructure",
+    cancellation_set_digest: "b".repeat(64),
   };
 }
 

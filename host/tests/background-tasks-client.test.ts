@@ -200,6 +200,20 @@ test("PiBackgroundTaskClient killMany sends only supplied correlated kill reques
   await client.close();
 });
 
+test("PiBackgroundTaskClient keeps unrelated kill diagnostics pending", async () => {
+  const bus = eventBus();
+  bus.on(BG_REQUEST_CHANNEL, (request) => bus.emit(BG_RESPONSE_CHANNEL, {
+    schema_version: BG_RESPONSE_SCHEMA,
+    request_id: request.request_id,
+    operation: "kill",
+    ok: false,
+    error: "task is not running because unrelated infrastructure failed",
+  }));
+  const client = new PiBackgroundTaskClient(bus);
+  await assert.rejects(client.killMany(["task-1"]), /unrelated infrastructure failed/u);
+  await client.close();
+});
+
 test("unavailableCapabilities is fail-closed and contains no silent partial fallback", () => {
   assert.deepEqual(unavailableCapabilities(), {
     api_version: 1,

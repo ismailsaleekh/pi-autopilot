@@ -2,9 +2,10 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 
 import { PiBackgroundTaskClient, type BgTaskSnapshot } from "./background-tasks.ts";
 import { registerAutopilotCommands, applyAndRecord, type RegisterCommandOptions } from "./commands.ts";
-import type { BackgroundActionLaunchDedupe, BackgroundLaunchGate, OperatorMessageLevel, OperatorMessageSink } from "./effects.ts";
+import type { BackgroundActionLaunchDedupe, OperatorMessageLevel, OperatorMessageSink } from "./effects.ts";
 import {
   AutopilotActivation,
+  activationStateRoot,
   pruneActivationRecord,
   readActivationRecord,
   type ActivationDeps,
@@ -19,7 +20,14 @@ import {
   type ChildControlBroker,
   type ChildControlBrokerDiagnostic,
 } from "./child-control-broker.ts";
-import type { BackgroundAction, ChildControlBlockedGate } from "./generated/index.ts";
+import type { BackgroundAction, BlockedReconcileRecord } from "./generated/index.ts";
+import { validateCoreToHostFrame } from "./generated/frame-validation.ts";
+import {
+  HostOwnershipCoordinator,
+  OwnershipPersistenceError,
+  type BlockedGateDirective,
+  type BlockedObservationWire,
+} from "./ownership-journal.ts";
 import { AUTOPILOT_STATUS_CUSTOM_TYPE, buildAutopilotStatusEntryData } from "./status-channel.ts";
 
 export interface AutopilotExtensionOptions extends ResolveCoreOptions {
@@ -46,15 +54,6 @@ interface TaskBinding {
   readonly action: BackgroundAction;
 }
 
-class SessionLaunchGate implements BackgroundLaunchGate {
-  private closed = false;
-
-  close(): void { this.closed = true; }
-  assertOpen(): void {
-    if (this.closed) throw new Error("Autopilot launch gate is closed by a blocked workstream");
-  }
-}
-
 interface ActionLaunchEntry {
   readonly descriptor: string;
   readonly launch: Promise<BgTaskSnapshot>;
@@ -67,6 +66,13 @@ interface ActionLaunchEntry {
  */
 class SessionActionLaunchDedupe implements BackgroundActionLaunchDedupe {
   private readonly entries = new Map<string, ActionLaunchEntry>();
+
+  restore(action: BackgroundAction, task: BgTaskSnapshot, descriptor: string): void {
+    if (JSON.stringify(action) !== descriptor) throw new Error(`Autopilot restored action descriptor drift for action_id=${action.action_id}`);
+    const existing = this.entries.get(action.action_id);
+    if (existing !== undefined && (existing.descriptor !== descriptor || existing.task?.id !== task.id)) throw new Error(`Autopilot restored action conflict for action_id=${action.action_id}`);
+    if (existing === undefined) this.entries.set(action.action_id, { descriptor, launch: Promise.resolve(task), task });
+  }
 
   launch(action: BackgroundAction, run: () => Promise<BgTaskSnapshot>): Promise<{ readonly task: BgTaskSnapshot; readonly firstLaunch: boolean }> {
     const descriptor = JSON.stringify(action);
@@ -88,7 +94,11 @@ class SessionActionLaunchDedupe implements BackgroundActionLaunchDedupe {
         return { task, firstLaunch: true };
       },
       (error: unknown) => {
-        if (this.entries.get(action.action_id) === entry) this.entries.delete(action.action_id);
+        // A real run followed by journal failure is not retryable as a second
+        // run. Retain its task/action identity and let the closed coordinator
+        // surface the original durable failure.
+        if (error instanceof OwnershipPersistenceError) entry.task = error.task;
+        else if (this.entries.get(action.action_id) === entry) this.entries.delete(action.action_id);
         throw error;
       },
     );
@@ -115,27 +125,49 @@ export default function autopilotExtension(pi: ExtensionAPI, options: AutopilotE
   let currentCtx: ExtensionContext | undefined;
   let unsubscribeTerminal: (() => void) | undefined;
   let broker: ChildControlBroker | undefined;
-  const launchGate = new SessionLaunchGate();
+  let ownership: HostOwnershipCoordinator | undefined;
 
   const activationDeps: ActivationDeps = activationDepsFrom(options);
 
-  // Subscription is established INSIDE activation and BEFORE any command frame
-  // can be sent, so no Autopilot-owned launch can precede its own subscription.
+  // Restoration, the one broker, terminal subscription, launch-ack replay,
+  // and generated reconciliation are one activation transaction. Commands and
+  // onActivated remain unavailable until every exact authority is installed.
   const activation = new AutopilotActivation(pi, activationDeps, async (services) => {
+    const sessionId = activation.boundSessionId();
+    if (sessionId === undefined) throw new Error("Autopilot ownership restoration requires the exact Pi session identity");
+    ownership = HostOwnershipCoordinator.open(activationStateRoot(activationDeps), sessionId);
+    restoreOwnership(ownership);
     const startBroker = options.startChildControlBroker ?? startChildControlBroker;
     const started = await startBroker({
       transport: services.transport,
-      applyBlockedGate: async (gate) => applyBlockedGate(gate, services.backgroundTasks),
+      beforeBlockedForward: async () => {
+        const coordinator = requireOwnership();
+        await coordinator.acquireBlockedAdmission();
+        await replayPendingLaunchAcknowledgements(services, coordinator);
+      },
+      releaseBlockedHoldOnRetry: () => requireOwnership().releaseBlockedAdmissionOnRetry(),
+      applyBlockedGate: async (directive) => applyBlockedGate(directive, services.backgroundTasks),
       onConnectionFailure: noteBrokerConnectionFailure,
     });
     try {
-      // Broker facts are bound before any command can start Core. Core reuses
-      // this one activation-owned broker across its own child-process restarts.
+      // Broker facts are bound before any Core request can start its child.
       if (services.transport instanceof CoreTransport) services.transport.bindChildControlBroker(started.launchFacts);
       unsubscribeTerminal = services.backgroundTasks.onTerminal(handleTerminal);
+      await replayPendingTerminals(services, requireOwnership());
+      await replayPendingLaunchAcknowledgements(services, requireOwnership());
+      const records = await reconcileBlocked(services, started);
+      requireOwnership().finishActivation(records.map((record) => ({
+        receiptId: record.blocked_receipt.receipt_id,
+        gate: record.blocked_gate,
+        reporterObserved: record.reporter_observed,
+      })));
       await options.onActivated?.();
       broker = started;
     } catch (error) {
+      // Preserve a durable fail-closed scheduling fact even when the failure
+      // happened before Core supplied a gate/reconciliation record.
+      try { requireOwnership().retainFailClosedHold(); }
+      catch (holdError) { throw combinedLifecycleFailure("Autopilot activation could not retain its fail-closed ownership hold", error, holdError); }
       unsubscribeTerminal?.();
       unsubscribeTerminal = undefined;
       const cleanupFailure = await stopFailure(started);
@@ -156,12 +188,77 @@ export default function autopilotExtension(pi: ExtensionAPI, options: AutopilotE
       operatorMessage,
       statusEntry,
       onSpawn: rememberSpawn,
-      launchGate,
+      onLaunchAcknowledged: ({ action, task }) => requireOwnership().markLaunchAcknowledged(action, task),
+      launchGate: requireOwnership(),
       actionLaunchDedupe,
     };
   }
 
+  function requireOwnership(): HostOwnershipCoordinator {
+    if (ownership === undefined) throw new Error("Autopilot ownership coordinator is unavailable outside activation");
+    return ownership;
+  }
+
+  function restoreOwnership(coordinator: HostOwnershipCoordinator): void {
+    taskBindings.clear();
+    ownedTaskBindings.clear();
+    launchedTaskIds.clear();
+    for (const binding of coordinator.ownership) {
+      const taskBinding = { task_id: binding.task.id, action: binding.action };
+      ownedTaskBindings.set(binding.task.id, taskBinding);
+      launchedTaskIds.add(binding.task.id);
+      if (!binding.terminal) taskBindings.set(binding.task.id, taskBinding);
+      actionLaunchDedupe.restore(binding.action, binding.task, binding.descriptor);
+    }
+  }
+
+  async function replayPendingLaunchAcknowledgements(services: ActivationServices, coordinator: HostOwnershipCoordinator): Promise<void> {
+    for (const binding of coordinator.pendingAcknowledgements) {
+      const frame = validateCoreToHostFrame(await services.transport.request("spawn-result", {
+        action_id: binding.action.action_id,
+        assignment_id: binding.action.assignment_id,
+        status: "launched",
+        task_id: binding.task.id,
+      }));
+      // spawn-result is an acknowledgement route, never an activation effect.
+      if (frame.kind !== "done") throw new Error(`spawn-result replay received Core effect ${frame.kind}`);
+      coordinator.markLaunchAcknowledged(binding.action, binding.task);
+    }
+  }
+
+  async function replayPendingTerminals(services: ActivationServices, coordinator: HostOwnershipCoordinator): Promise<void> {
+    const ctx = currentCtx;
+    if (ctx === undefined) throw new Error("Autopilot cannot replay terminal ownership before Pi supplied its session context");
+    for (const binding of coordinator.pendingTerminals) {
+      const frame = await services.transport.request("task-completed", {
+        task_id: binding.task.id,
+        action_id: binding.action.action_id,
+        assignment_id: binding.action.assignment_id,
+        status: binding.task.status,
+      });
+      await applyAndRecord(frame, ctx, commandOptions(services));
+      coordinator.markTerminalForwarded(binding.task.id);
+    }
+  }
+
+  async function reconcileBlocked(services: ActivationServices, started: ChildControlBroker): Promise<BlockedReconcileRecord[]> {
+    const frame = validateCoreToHostFrame(await services.transport.request("blocked-reconcile", {
+      schema: "autopilot.blocked_reconcile.v1",
+      broker_capability: started.launchFacts.capability,
+    }));
+    if (frame.kind !== "blocked-reconcile" || frame.payload.schema !== "autopilot.blocked_reconcile_response.v1") throw new Error(`blocked reconciliation received Core effect ${frame.kind}`);
+    for (const record of frame.payload.records) await started.reconcileBlockedGate(record);
+    return frame.payload.records;
+  }
+
   async function rememberSpawn({ action, task }: { readonly action: BackgroundAction; readonly task: BgTaskSnapshot }): Promise<void> {
+    const coordinator = requireOwnership();
+    try { coordinator.registerSuccessfulRun(action, task); }
+    catch (error) {
+      coordinator.retainFailClosedHold();
+      if (error instanceof OwnershipPersistenceError) throw error;
+      throw new OwnershipPersistenceError(action, task, error);
+    }
     const binding = bindTaskToAction(task, action);
     taskBindings.set(task.id, binding);
     ownedTaskBindings.set(task.id, binding);
@@ -173,12 +270,14 @@ export default function autopilotExtension(pi: ExtensionAPI, options: AutopilotE
   }
 
   async function applyBlockedGate(
-    gate: ChildControlBlockedGate,
+    directive: BlockedGateDirective,
     backgroundTasks: PiBackgroundTaskClient,
   ): Promise<BlockedGateApplication> {
-    // The durable Core latch was committed before this typed directive. Close
-    // the local process gate before looking at any task or issuing any kill.
-    launchGate.close();
+    const coordinator = requireOwnership();
+    // The durable Core latch was committed before this typed directive. Its
+    // journal row promotes the provisional hold before any child ACCEPT byte.
+    coordinator.promoteBlockedGate(directive);
+    const gate = directive.gate;
     const nonReporterTaskIds: string[] = [];
     let reporterTaskId: string | undefined;
     let reporterCount = 0;
@@ -186,8 +285,9 @@ export default function autopilotExtension(pi: ExtensionAPI, options: AutopilotE
     for (const cancellation of gate.cancellations) {
       if (seen.has(cancellation.task_id)) throw new Error(`blocked gate repeats task id ${cancellation.task_id}`);
       seen.add(cancellation.task_id);
-      if (!ownedTaskBindings.has(cancellation.task_id)) {
-        throw new Error(`blocked gate named task outside Host Autopilot jurisdiction: ${cancellation.task_id}`);
+      const owned = ownedTaskBindings.get(cancellation.task_id);
+      if (owned === undefined || owned.action.action_id !== cancellation.action_id || owned.action.assignment_id !== cancellation.assignment_id) {
+        throw new Error(`blocked gate named task outside exact Host Autopilot jurisdiction: ${cancellation.task_id}`);
       }
       if (cancellation.reporter) {
         reporterCount += 1;
@@ -201,18 +301,28 @@ export default function autopilotExtension(pi: ExtensionAPI, options: AutopilotE
     return {
       reporterTaskId: exactReporterTaskId,
       async afterChildResponseWritten(): Promise<void> {
-        // No status/enumeration/inference: only the exact Core-derived ids are
-        // sent through the existing correlated kill operation.
-        await backgroundTasks.killMany(nonReporterTaskIds);
+        // One exact id at a time lets a successful cancellation become a
+        // durable tombstone before a later id's failure. No status/enumeration
+        // is used, and retries name only rows still absent from this journal.
+        for (const taskId of nonReporterTaskIds) {
+          const cancellation = gate.cancellations.find((item) => item.task_id === taskId);
+          if (cancellation === undefined) throw new Error(`blocked nonreporter membership drift: ${taskId}`);
+          if (coordinator.wasCancelled(directive, taskId)) continue;
+          await backgroundTasks.killMany([taskId]);
+          coordinator.markCancelled(directive, cancellation);
+        }
+      },
+      async blockedObservationArrived(observation: BlockedObservationWire): Promise<void> {
+        coordinator.recordObservationArrived(observation, directive);
       },
       async afterBlockedResultAcknowledged(): Promise<void> {
-        // The broker has authenticated receipt/latch/reporter correlation. The
-        // Host still rechecks its append-only own-launch record before naming
-        // the reporter to EventBus; no foreign task can be canceled here.
-        if (!ownedTaskBindings.has(exactReporterTaskId)) {
-          throw new Error(`blocked reporter task left Host Autopilot jurisdiction: ${exactReporterTaskId}`);
-        }
-        await backgroundTasks.killMany([exactReporterTaskId]);
+        // Persist Core's exact observed state before the reporter-last kill.
+        coordinator.markObservationObserved(directive);
+        const reporter = gate.cancellations.find((item) => item.reporter);
+        if (reporter === undefined || reporter.task_id !== exactReporterTaskId) throw new Error("blocked reporter membership drift");
+        if (coordinator.wasCancelled(directive, reporter.task_id)) return;
+        await backgroundTasks.killMany([reporter.task_id]);
+        coordinator.markCancelled(directive, reporter);
       },
     };
   }
@@ -234,9 +344,10 @@ export default function autopilotExtension(pi: ExtensionAPI, options: AutopilotE
       bufferUnmatchedTerminal(task, unmatchedTerminalTasks);
       return;
     }
-    taskBindings.delete(task.id);
     try {
       validateTaskActionCorrelation(task, binding.action);
+      requireOwnership().recordTerminal(task, binding.action);
+      taskBindings.delete(task.id);
       const ctx = currentCtx;
       if (ctx === undefined) throw new Error(`Autopilot received terminal background task ${correlationLabel(binding)} before Pi supplied a session context; terminal correlation was not forwarded.`);
       // A terminal event can only reach this point via a subscription created
@@ -250,6 +361,7 @@ export default function autopilotExtension(pi: ExtensionAPI, options: AutopilotE
         status: task.status,
       });
       await applyAndRecord(frame, ctx, commandOptions(services));
+      requireOwnership().markTerminalForwarded(task.id);
     } catch (error) {
       const detail = boundedError(error);
       await statusEntry(`rejection:host-terminal:${detail}`).catch(async (statusError) => {

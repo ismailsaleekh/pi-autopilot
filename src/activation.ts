@@ -54,9 +54,13 @@ function currentProcessIdentity(deps: ActivationDeps): string {
   return `pid:${String(process.pid)}:started:${String(Math.trunc(Date.now() - Math.trunc(process.uptime() * 1000)))}`;
 }
 
+export function activationStateRoot(deps: ActivationDeps = {}): string {
+  return deps.stateRoot ?? join(homedir(), ".pi", "agent", "autopilot", "v2");
+}
+
 export function activationRecordPath(sessionId: string, deps: ActivationDeps = {}): string {
   assertUsableSessionId(sessionId);
-  return join(deps.stateRoot ?? join(homedir(), ".pi", "agent", "autopilot", "v2"), "sessions", `${sessionId}.json`);
+  return join(activationStateRoot(deps), "sessions", `${sessionId}.json`);
 }
 
 function assertUsableSessionId(sessionId: string): void {
@@ -151,7 +155,9 @@ export class AutopilotActivation {
   }
 
   async ensureActivated(command: string): Promise<ActivationServices> {
-    if (this.currentState === "failed" && this.failure !== undefined) throw this.failure;
+    // A durable recovery fault is loud for operating commands, but a later
+    // explicit activating command is the required idempotent retry boundary.
+    if (this.currentState === "failed") { this.currentState = "inert"; this.failure = undefined; }
     if (this.currentState === "active" && this.services !== undefined) return this.services;
     if (this.inFlight !== undefined) return this.inFlight;
     assertActivatingCommand(command);

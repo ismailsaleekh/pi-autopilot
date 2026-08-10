@@ -214,17 +214,16 @@ function requireTaskStatus(value: unknown, label: string, terminal: boolean): Bg
   throw new PiBackgroundTaskError(`${label} must be one of ${allowed.join(", ")}; got ${status}`);
 }
 
+// The v1 EventBus protocol exposes only an error value for an already-ended
+// kill. Keep the deliberately tiny exact set; arbitrary diagnostics stay
+// pending and are retried only on the same journaled Core gate.
+const IDEMPOTENT_KILL_FAILURES = new Set([
+  "pi-background-tasks kill failed: task already terminal",
+  "pi-background-tasks kill failed: task already killed",
+  "pi-background-tasks kill failed: task not found",
+]);
 function isIdempotentKillFailure(error: unknown): boolean {
-  const message = errorMessage(error).toLowerCase();
-  return [
-    "already terminal",
-    "already dead",
-    "already killed",
-    "task not found",
-    "unknown task",
-    "no such task",
-    "not running",
-  ].some((marker) => message.includes(marker));
+  return IDEMPOTENT_KILL_FAILURES.has(errorMessage(error));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }

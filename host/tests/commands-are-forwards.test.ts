@@ -171,6 +171,7 @@ test("completed terminal sends only task-completed without Host carrier reads", 
     calls: [],
     async request(kind, payload) {
       this.calls.push({ kind, payload });
+      if (kind === "blocked-reconcile") return { v: 1, id: this.calls.length, kind: "blocked-reconcile", payload: { schema: "autopilot.blocked_reconcile_response.v1", records: [] } };
       if (kind === "command") return { v: 1, id: this.calls.length, kind: "spawn", payload: { action } };
       return { v: 1, id: this.calls.length, kind: "done", payload: { status: "ok" } };
     },
@@ -188,7 +189,7 @@ test("completed terminal sends only task-completed without Host carrier reads", 
   await pi.registrations.get("autopilot-plan").handler("main TASK-A.md TASK-B.md TASK-C.md CONTEXT.md", fakeCtx());
   await terminalHandler(taskFromDescriptor(action.bg_run, "task-plan", "completed"));
 
-  assert.deepEqual(transport.calls.map((call) => call.kind), ["command", "task-completed"]);
+  assert.deepEqual(transport.calls.map((call) => call.kind), ["blocked-reconcile", "command", "spawn-result", "task-completed"]);
   assert.deepEqual(transport.calls.at(-1).payload, { task_id: "task-plan", action_id: action.action_id, assignment_id: action.assignment_id, status: "completed" });
 });
 
@@ -240,6 +241,7 @@ test("extension dedupes concurrent receipt-replayed action ids, preserves their 
     calls: [],
     async request(kind, payload) {
       this.calls.push({ kind, payload });
+      if (kind === "blocked-reconcile") return { v: 1, id: this.calls.length, kind: "blocked-reconcile", payload: { schema: "autopilot.blocked_reconcile_response.v1", records: [] } };
       if (kind === "command") return { v: 1, id: this.calls.length, kind: "spawn-wave", payload: { actions: [action] } };
       return { v: 1, id: this.calls.length, kind: "done", payload: { status: "ok" } };
     },
@@ -286,6 +288,7 @@ test("extension fails closed when the same action id drifts its exact descriptor
   let runs = 0;
   const transport = {
     async request(kind) {
+      if (kind === "blocked-reconcile") return { v: 1, id: 8, kind: "blocked-reconcile", payload: { schema: "autopilot.blocked_reconcile_response.v1", records: [] } };
       if (kind === "command") {
         commandCount += 1;
         return { v: 1, id: commandCount, kind: "spawn", payload: { action: commandCount === 1 ? stable : drifted } };
@@ -321,6 +324,7 @@ test("extension buffers an immediate terminal task until its exact action bindin
     async request(kind, payload, timeoutMs) {
       const call = timeoutMs === undefined ? { kind, payload } : { kind, payload, timeoutMs };
       this.calls.push(call);
+      if (kind === "blocked-reconcile") return { v: 1, id: this.calls.length, kind: "blocked-reconcile", payload: { schema: "autopilot.blocked_reconcile_response.v1", records: [] } };
       if (kind === "command") return { v: 1, id: this.calls.length, kind: "spawn", payload: { action: firstAction } };
       if (kind === "task-completed") {
         assert.deepEqual(payload, {
@@ -354,17 +358,18 @@ test("extension buffers an immediate terminal task until its exact action bindin
   await pi.registrations.get("autopilot-plan").handler("main TASK-A.md TASK-B.md TASK-C.md CONTEXT.md", fakeCtx());
 
   assert.deepEqual(started, [firstAction.bg_run, secondAction.bg_run]);
-  assert.deepEqual(transport.calls.map((call) => call.kind), ["command", "task-completed"]);
+  assert.deepEqual(transport.calls.map((call) => call.kind), ["blocked-reconcile", "command", "task-completed", "spawn-result", "spawn-result"]);
 });
 
 async function terminalFailureHarness(failure, appendEntry) {
   const action = terminalAction("action-fail", "assignment-fail", "failing terminal", "node terminal-fail");
   const pi = fakePi();
-  if (appendEntry !== undefined) pi.appendEntry = appendEntry;
   let terminalHandler;
   const transport = {
     async request(kind) {
+      if (kind === "blocked-reconcile") return { v: 1, id: 0, kind: "blocked-reconcile", payload: { schema: "autopilot.blocked_reconcile_response.v1", records: [] } };
       if (kind === "command") return { v: 1, id: 1, kind: "spawn", payload: { action } };
+      if (kind === "spawn-result") return { v: 1, id: 2, kind: "done", payload: { status: "ok" } };
       throw failure;
     },
     close() {},
@@ -378,6 +383,8 @@ async function terminalFailureHarness(failure, appendEntry) {
   autopilotExtension(pi, extensionOptions({ transport, backgroundTasks }));
   await pi.events.get("session_start")({ reason: "startup" }, fakeCtx());
   await pi.registrations.get("autopilot-plan").handler("main TASK-A.md TASK-B.md TASK-C.md CONTEXT.md", fakeCtx());
+  pi.messages.length = 0;
+  if (appendEntry !== undefined) pi.appendEntry = appendEntry;
   return { action, pi, terminalHandler };
 }
 
@@ -434,6 +441,7 @@ function fakeTransport(options = {}) {
     async request(kind, payload, timeoutMs) {
       const call = timeoutMs === undefined ? { kind, payload } : { kind, payload, timeoutMs };
       calls.push(call);
+      if (kind === "blocked-reconcile") return { v: 1, id: calls.length, kind: "blocked-reconcile", payload: { schema: "autopilot.blocked_reconcile_response.v1", records: [] } };
       return { v: 1, id: calls.length, kind: "done", payload: { status: "ok" } };
     },
     close() {

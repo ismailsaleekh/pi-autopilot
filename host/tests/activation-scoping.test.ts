@@ -125,7 +125,8 @@ test("BUG-184 T3+T4: activation subscribes exactly once, before the first Core r
     await pi.commands.get("autopilot-plan").handler("main A.md B.md C.md CTX.md", commandCtx(SESSION_A));
 
     assert.equal(background.terminalSubscriptions, 1, "exactly one terminal subscription");
-    assert.equal(transport.calls.length, 1, "activation must contact Core exactly once");
+    assert.equal(transport.calls.length, 2, "activation must reconcile before its first command");
+    assert.equal(transport.calls[0]?.kind, "blocked-reconcile");
 
     // T4 ordering: subscription strictly precedes the first Core frame.
     const subscribeIndex = callLog.indexOf("bg:onTerminal");
@@ -207,6 +208,7 @@ test("blocked gate closes launches, cancels only exact owned nonreporters after 
     calls: [],
     async request(kind, payload, timeoutMs) {
       this.calls.push(timeoutMs === undefined ? { kind, payload } : { kind, payload, timeoutMs });
+      if (kind === "blocked-reconcile") return { v: 1, id: this.calls.length, kind: "blocked-reconcile", payload: { schema: "autopilot.blocked_reconcile_response.v1", records: [] } };
       if (kind === "command") {
         const action = actions.shift();
         return action === undefined
@@ -250,13 +252,17 @@ test("blocked gate closes launches, cancels only exact owned nonreporters after 
     assert.deepEqual(runs, [first.bg_run.command, second.bg_run.command]);
 
     const application = await gateHook({
-      schema: "autopilot.child_control_blocked_gate.v1",
-      latch_id: "latch-1",
-      run_id: "run-1",
-      cancellations: [
-        { task_id: "task-1", reporter: false },
-        { task_id: "task-2", reporter: true },
-      ],
+      receiptId: "receipt-1",
+      reporterObserved: false,
+      gate: {
+        schema: "autopilot.child_control_blocked_gate.v1",
+        latch_id: "latch-1",
+        run_id: "run-1",
+        cancellations: [
+          { task_id: "task-1", action_id: first.action_id, assignment_id: first.assignment_id, reporter: false },
+          { task_id: "task-2", action_id: second.action_id, assignment_id: second.assignment_id, reporter: true },
+        ],
+      },
     });
     assert.deepEqual(kills, [], "gate validation must precede the post-ACCEPT callback");
     await application.afterChildResponseWritten();
@@ -264,13 +270,13 @@ test("blocked gate closes launches, cancels only exact owned nonreporters after 
 
     await assert.rejects(
       () => pi.commands.get("autopilot").handler("main", commandCtx(SESSION_A)),
-      /launch gate is closed/u,
+      /launch gate is closed|durable blocked ownership state/u,
     );
     assert.deepEqual(runs, [first.bg_run.command, second.bg_run.command], "closed gate is checked immediately before run");
 
     await assert.rejects(
-      () => gateHook({ schema: "autopilot.child_control_blocked_gate.v1", latch_id: "latch-2", run_id: "run-1", cancellations: [{ task_id: "foreign", reporter: true }] }),
-      /outside Host Autopilot jurisdiction/u,
+      () => gateHook({ receiptId: "receipt-2", reporterObserved: false, gate: { schema: "autopilot.child_control_blocked_gate.v1", latch_id: "latch-2", run_id: "run-1", cancellations: [{ task_id: "foreign", action_id: "foreign-action", assignment_id: "foreign-assignment", reporter: true }] } }),
+      /outside exact durable Host ownership|outside exact Host Autopilot jurisdiction/u,
     );
     assert.deepEqual(kills, ["task-1"], "foreign task ids are never killed");
   } finally {
@@ -561,6 +567,7 @@ test("BUG-184 T11: foreign terminal events are out of jurisdiction while launche
     closed: false,
     async request(kind, payload, timeoutMs) {
       this.calls.push(timeoutMs === undefined ? { kind, payload } : { kind, payload, timeoutMs });
+      if (kind === "blocked-reconcile") return { v: 1, id: this.calls.length, kind: "blocked-reconcile", payload: { schema: "autopilot.blocked_reconcile_response.v1", records: [] } };
       if (kind === "command") return { v: 1, id: this.calls.length, kind: "spawn", payload: { action } };
       return { v: 1, id: this.calls.length, kind: "done", payload: { status: "ok" } };
     },
@@ -608,6 +615,7 @@ test("BUG-184 T11b: a task Autopilot launched and lost still produces an operato
     calls: [],
     async request(kind, payload, timeoutMs) {
       this.calls.push(timeoutMs === undefined ? { kind, payload } : { kind, payload, timeoutMs });
+      if (kind === "blocked-reconcile") return { v: 1, id: this.calls.length, kind: "blocked-reconcile", payload: { schema: "autopilot.blocked_reconcile_response.v1", records: [] } };
       if (kind === "command") return { v: 1, id: this.calls.length, kind: "spawn", payload: { action } };
       // Force the binding to be dropped so the task becomes launched-and-lost.
       return { v: 1, id: this.calls.length, kind: "done", payload: { status: "ok" } };
@@ -730,6 +738,7 @@ function fakeTransport(callLog = []) {
     async request(kind, payload, timeoutMs) {
       callLog.push(`core:${kind}`);
       calls.push(timeoutMs === undefined ? { kind, payload } : { kind, payload, timeoutMs });
+      if (kind === "blocked-reconcile") return { v: 1, id: calls.length, kind: "blocked-reconcile", payload: { schema: "autopilot.blocked_reconcile_response.v1", records: [] } };
       return { v: 1, id: calls.length, kind: "done", payload: { status: "ok" } };
     },
     close() { this.closed = true; },

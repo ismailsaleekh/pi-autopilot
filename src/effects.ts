@@ -11,11 +11,15 @@ export type OperatorMessageLevel = "info" | "warning" | "error";
 export type OperatorMessageSink = (message: string, level: OperatorMessageLevel) => unknown | Promise<unknown>;
 export type StatusEntrySink = (status: string) => unknown | Promise<unknown>;
 export type HostEffectContext = Pick<ExtensionContext, "ui" | "hasUI" | "mode">;
-export interface BackgroundLaunchGate { assertOpen(): void; }
+export interface BackgroundLaunchGate {
+  assertOpen(): void;
+  /** Optional scheduling-only entry that remains held through durable ownership. */
+  enterLaunch?(): () => void;
+}
 export interface BackgroundActionLaunchDedupe {
   launch(action: BackgroundAction, run: () => Promise<BgTaskSnapshot>): Promise<{ readonly task: BgTaskSnapshot; readonly firstLaunch: boolean }>;
 }
-export interface HostEffectServices { readonly backgroundTasks: Pick<PiBackgroundTaskClient, "run">; readonly launchGate?: BackgroundLaunchGate; readonly actionLaunchDedupe?: BackgroundActionLaunchDedupe; readonly operatorMessage: OperatorMessageSink; readonly statusEntry: StatusEntrySink; }
+export interface HostEffectServices { readonly backgroundTasks: Pick<PiBackgroundTaskClient, "run">; readonly launchGate?: BackgroundLaunchGate; readonly actionLaunchDedupe?: BackgroundActionLaunchDedupe; readonly onSpawn?: (binding: { readonly action: BackgroundAction; readonly task: BgTaskSnapshot }) => void | Promise<void>; readonly operatorMessage: OperatorMessageSink; readonly statusEntry: StatusEntrySink; }
 export interface LaunchedBackgroundTask { readonly action: BackgroundAction; readonly task: BgTaskSnapshot; readonly firstLaunch: boolean; }
 export interface BackgroundLaunchFailure { readonly action: BackgroundAction; readonly diagnostic: string; }
 export type CoreEffectResult = { readonly kind: "spawn"; readonly acknowledge: boolean; readonly launched: readonly LaunchedBackgroundTask[]; readonly failures: readonly BackgroundLaunchFailure[] } | undefined;
@@ -61,11 +65,19 @@ async function launchWave(actions: readonly BackgroundAction[], acknowledge: boo
 }
 
 function launchBackground(action: BackgroundAction, services: HostEffectServices): Promise<{ readonly task: BgTaskSnapshot; readonly firstLaunch: boolean }> {
-  const run = (): Promise<BgTaskSnapshot> => {
-    // This is deliberately immediately adjacent to run(): no singular or wave
-    // launch can pass a Host-closed blocked gate between check and invocation.
-    services.launchGate?.assertOpen();
-    return services.backgroundTasks.run(action.bg_run);
+  const run = async (): Promise<BgTaskSnapshot> => {
+    // The launch coordinator entry and the one permitted run() invocation are
+    // adjacent. Its completion is deliberately delayed through onSpawn's
+    // journal fsync, so a BLOCKED snapshot drains returned runs completely.
+    const complete = services.launchGate?.enterLaunch?.();
+    if (complete === undefined) services.launchGate?.assertOpen();
+    try {
+      const task = await services.backgroundTasks.run(action.bg_run);
+      await services.onSpawn?.({ action, task });
+      return task;
+    } finally {
+      complete?.();
+    }
   };
   if (services.actionLaunchDedupe !== undefined) return services.actionLaunchDedupe.launch(action, run);
   return run().then((task) => ({ task, firstLaunch: true }));
