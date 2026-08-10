@@ -997,8 +997,8 @@ type PendingCall = {
 };
 type CorrelationState = {
   readonly pending: Map<string, PendingCall>;
-  readonly nonceByToken: Map<object, string>;
-  readonly consumed: Set<string>;
+  readonly pendingNonceByToken: WeakMap<object, string>;
+  readonly consumedNonceByToken: WeakMap<object, string>;
   readonly usedToolCallIds: Set<string>;
 };
 
@@ -1090,7 +1090,7 @@ export function createReplayV0ValidationRawCapture(profileId: string): ReplayV0R
 }
 
 function createCorrelationState(): CorrelationState {
-  return { pending: new Map<string, PendingCall>(), nonceByToken: new Map<object, string>(), consumed: new Set<string>(), usedToolCallIds: new Set<string>() };
+  return { pending: new Map<string, PendingCall>(), pendingNonceByToken: new WeakMap<object, string>(), consumedNonceByToken: new WeakMap<object, string>(), usedToolCallIds: new Set<string>() };
 }
 
 function prepareCorrelatedPlaceholder(state: CorrelationState, profileId: string, rawPayload: unknown): Record<string, unknown> {
@@ -1102,7 +1102,7 @@ function prepareCorrelatedPlaceholder(state: CorrelationState, profileId: string
   const token = {};
   Object.defineProperty(placeholder, PLACEHOLDER_TOKEN, { configurable: false, enumerable: false, value: token, writable: false });
   state.pending.set(nonce, { metadata, rawPayload: structuredClone(rawPayload), placeholder, token });
-  state.nonceByToken.set(token, nonce);
+  state.pendingNonceByToken.set(token, nonce);
   return placeholder as Record<string, unknown>;
 }
 
@@ -1112,21 +1112,25 @@ function consumeCorrelatedPlaceholder(state: CorrelationState, toolCallId: strin
   if (token === null || typeof token !== "object") throw new ChildControlBridgeProtocolError("placeholder-tamper", "placeholder identity is absent");
   const nonce = placeholderNonce(holder);
   if (nonce === undefined || !/^[0-9a-f]{64}$/u.test(nonce)) throw new ChildControlBridgeProtocolError("placeholder-tamper", "placeholder marker is malformed");
-  const expectedNonce = state.nonceByToken.get(token);
-  if (expectedNonce !== undefined && expectedNonce !== nonce) throw new ChildControlBridgeProtocolError("placeholder-tamper", "placeholder marker drifted");
+  const pendingNonce = state.pendingNonceByToken.get(token);
+  const consumedNonce = state.consumedNonceByToken.get(token);
+  if ((pendingNonce !== undefined && pendingNonce !== nonce) || (consumedNonce !== undefined && consumedNonce !== nonce)) {
+    throw new ChildControlBridgeProtocolError("placeholder-tamper", "placeholder marker drifted");
+  }
   const call = state.pending.get(nonce);
   if (call === undefined) {
-    if (state.consumed.has(nonce) && expectedNonce === nonce) throw new ChildControlBridgeProtocolError("consumed-nonce", "placeholder was consumed");
-    if (expectedNonce !== undefined || state.consumed.has(nonce)) throw new ChildControlBridgeProtocolError("placeholder-tamper", "placeholder identity drifted");
+    if (consumedNonce === nonce) throw new ChildControlBridgeProtocolError("consumed-nonce", "placeholder was consumed");
+    if (pendingNonce !== undefined || consumedNonce !== undefined) throw new ChildControlBridgeProtocolError("placeholder-tamper", "placeholder identity drifted");
     throw new ChildControlBridgeProtocolError("unknown-nonce", "placeholder nonce is unknown");
   }
-  if (expectedNonce !== nonce || call.placeholder !== holder || call.token !== token) throw new ChildControlBridgeProtocolError("placeholder-tamper", "placeholder identity drifted");
+  if (pendingNonce !== nonce || consumedNonce !== undefined || call.placeholder !== holder || call.token !== token) throw new ChildControlBridgeProtocolError("placeholder-tamper", "placeholder identity drifted");
   const expected = structuredClone(call.metadata.placeholder) as PlaceholderObject;
   setPointer(expected, call.metadata.placeholder_pointer, `${CHILD_CONTROL_PLACEHOLDER_SENTINEL}${nonce}`);
   if (!sameJsonShape(holder, expected)) throw new ChildControlBridgeProtocolError("placeholder-tamper", "placeholder shape drifted");
   if (state.usedToolCallIds.has(toolCallId)) throw new ChildControlBridgeProtocolError("duplicate-tool-call-id", "tool call id was consumed");
   state.pending.delete(nonce);
-  state.consumed.add(nonce);
+  state.pendingNonceByToken.delete(token);
+  state.consumedNonceByToken.set(token, nonce);
   state.usedToolCallIds.add(toolCallId);
   return call;
 }
@@ -1387,24 +1391,33 @@ function isPreparedSubmitIssuedAction(value: unknown): boolean {
 
 function isDeferredHostEffect(value: unknown): boolean {
   if (!isRecord(value) || !closedKeys(value, ["kind", "payload"])) return false;
-  if (value.kind === "done") return isRecord(value.payload) && closedKeys(value.payload, ["status"]) && typeof value.payload.status === "string";
+  if (value.kind === "done") return isRecord(value.payload) && closedKeys(value.payload, ["status"]) && isNonemptyString(value.payload.status);
   if (value.kind === "spawn") return isRecord(value.payload) && closedKeys(value.payload, ["action"]) && isBackgroundAction(value.payload.action);
-  return value.kind === "spawn-wave" && isRecord(value.payload) && closedKeys(value.payload, ["actions"]) && Array.isArray(value.payload.actions) && value.payload.actions.every(isBackgroundAction);
+  return value.kind === "spawn-wave" && isRecord(value.payload) && closedKeys(value.payload, ["actions"]) && Array.isArray(value.payload.actions) && value.payload.actions.length > 0 && value.payload.actions.every(isBackgroundAction);
 }
 
 function isBackgroundAction(value: unknown): boolean {
   if (!isRecord(value) || !closedOptionalKeys(value, ["action_id", "assignment_id", "kind", "bg_run", "run_revision", "supersession_state"], ["expires_at"])) return false;
-  if (!isNonemptyString(value.action_id) || !isNonemptyString(value.assignment_id) || !isNonemptyString(value.kind) || !isU64(value.run_revision) || !isNonemptyString(value.supersession_state)) return false;
+  if (!isNonemptyString(value.action_id) || !isNonemptyString(value.assignment_id) || !isActionKind(value.kind) || !isU64(value.run_revision) || !isNonemptyString(value.supersession_state)) return false;
   if (value.expires_at !== undefined && value.expires_at !== null && !isNonemptyString(value.expires_at)) return false;
   const bgRun = value.bg_run;
   return isRecord(bgRun)
     && closedOptionalKeys(bgRun, ["name", "command", "isAgent", "notifyOnCompletion", "triggerOnCompletion"], ["timeoutSeconds"])
-    && typeof bgRun.name === "string"
-    && typeof bgRun.command === "string"
+    && isNonemptyString(bgRun.name)
+    && isNonemptyString(bgRun.command)
     && typeof bgRun.isAgent === "boolean"
     && typeof bgRun.notifyOnCompletion === "boolean"
     && typeof bgRun.triggerOnCompletion === "boolean"
     && (bgRun.timeoutSeconds === undefined || isU32(bgRun.timeoutSeconds));
+}
+
+function isActionKind(value: unknown): boolean {
+  return value === "launch-background"
+    || value === "reconcile-background"
+    || value === "read-failure-log"
+    || value === "stop-background"
+    || value === "request-operator"
+    || value === "return-idle";
 }
 
 function isBlockedReceipt(value: unknown): boolean {

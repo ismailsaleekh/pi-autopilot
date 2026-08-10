@@ -524,6 +524,10 @@ fn unified_submit_contracts_emit_closed_frames_and_non_fifo_placeholder_metadata
     assert_eq!(bridge.matches("\"profile_id\":").count(), 15);
     assert!(bridge.contains("randomBytes(32)"));
     assert!(bridge.contains("new Map<string, PendingCall>()"));
+    assert!(bridge.contains("new WeakMap<object, string>()"));
+    assert!(bridge.contains("consumedNonceByToken"));
+    assert!(!bridge.contains("readonly consumed: Set<string>"));
+    assert!(!bridge.contains("readonly nonceByToken: Map<object, string>"));
     assert!(bridge.contains("PLACEHOLDER_TOKEN"));
     assert!(bridge.contains("createConnection({ path: socketPath, allowHalfOpen: true })"));
     assert!(bridge.contains("AUTOPILOT_CONTROL_ATTEMPT"));
@@ -537,6 +541,8 @@ fn unified_submit_contracts_emit_closed_frames_and_non_fifo_placeholder_metadata
     assert!(bridge.contains("placeholder-tamper"));
     assert!(bridge.contains("isSubmitReceipt(value"));
     assert!(bridge.contains("isBlockedReceipt(value"));
+    assert!(bridge.contains("isActionKind(value.kind)"));
+    assert!(bridge.contains("value.payload.actions.length > 0"));
     assert!(bridge.contains("compareDiagnosticErrors"));
     assert!(!bridge.contains("shift()"));
 

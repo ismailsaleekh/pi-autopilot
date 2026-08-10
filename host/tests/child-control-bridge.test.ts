@@ -28,6 +28,14 @@ const evidence = {
 const UUID_V7 = "018f0f00-0000-7000-8000-000000000001";
 const DIGEST = "a".repeat(64);
 
+function backgroundAction() {
+  return {
+    action_id: "action-1", assignment_id: "assignment-1", kind: "launch-background",
+    bg_run: { name: "background", command: "command", isAgent: true, notifyOnCompletion: true, triggerOnCompletion: false },
+    run_revision: 1, expires_at: null, supersession_state: "current",
+  };
+}
+
 function submitReceipt() {
   return {
     schema: "autopilot.submit_receipt.v1", receipt_id: UUID_V7, run_id: "run-1", run_revision: 1,
@@ -39,7 +47,9 @@ function submitReceipt() {
     prepared_transition: {
       schema: "autopilot.prepared_submit_transition.v1", transition_ref: "transition-1", transition_digest: DIGEST,
       carrier: { artifact_ref: "carrier-1", artifact_schema: "artifact-1", sha256: DIGEST, byte_count: 0 },
-      artifact_refs: [], issued_actions: [], deferred_host_effect: { kind: "done", payload: { status: "done" } },
+      artifact_refs: [],
+      issued_actions: [{ action_ref: "action-ref", action: backgroundAction(), binding_ref: "binding-ref", binding_digest: DIGEST }],
+      deferred_host_effect: { kind: "done", payload: { status: "done" } },
     },
   };
 }
@@ -157,6 +167,10 @@ test("generated bridge returns distinct secret-free RETRY diagnostics for correl
     await assert.rejects(bridge.execute("twice", placeholder, evidence), (error) => {
       fixedRetry(error, "consumed-nonce"); return true;
     });
+    assert.equal(replacePlaceholderMarker(placeholder, "__autopilot_child_control_placeholder__:" + "b".repeat(64)), true);
+    await assert.rejects(bridge.execute("twice-drifted", placeholder, evidence), (error) => {
+      fixedRetry(error, "placeholder-tamper"); return true;
+    });
   }
   {
     const bridge = injectedBridge([]);
@@ -243,6 +257,31 @@ test("generated bridge rejects malformed ACCEPT leaves and noncanonical RETRY le
       (response.receipt.receipt as Record<string, unknown>).run_revision = Number.MAX_SAFE_INTEGER + 1;
       return response;
     },
+    (requestId) => {
+      const response = accept(requestId);
+      submitIssuedAction(response).kind = "not-an-action-kind";
+      return response;
+    },
+    (requestId) => {
+      const response = accept(requestId);
+      (submitIssuedAction(response).bg_run as Record<string, unknown>).name = "";
+      return response;
+    },
+    (requestId) => {
+      const response = accept(requestId);
+      (submitIssuedAction(response).bg_run as Record<string, unknown>).command = "";
+      return response;
+    },
+    (requestId) => {
+      const response = accept(requestId);
+      submitTransition(response).deferred_host_effect = { kind: "done", payload: { status: "" } };
+      return response;
+    },
+    (requestId) => {
+      const response = accept(requestId);
+      submitTransition(response).deferred_host_effect = { kind: "spawn-wave", payload: { actions: [] } };
+      return response;
+    },
     (requestId) => ({ schema: "autopilot.child_control_response.v1", request_id: requestId, outcome: "RETRY", diagnostic: { ...diagnostic, errors: [{ ...diagnostic.errors[0]!, actual: { ...diagnostic.errors[0]!.actual, byte_count: -1 } }] } }),
     (requestId) => ({ schema: "autopilot.child_control_response.v1", request_id: requestId, outcome: "RETRY", diagnostic: { ...diagnostic, error_count: 2, errors: [{ ...diagnostic.errors[0]!, pointer: "/z" }, { ...diagnostic.errors[0]!, index: 1, pointer: "/a" }] } }),
   ];
@@ -254,6 +293,14 @@ test("generated bridge rejects malformed ACCEPT leaves and noncanonical RETRY le
     });
   }
 });
+
+function submitTransition(response: ReturnType<typeof accept>): Record<string, unknown> {
+  return (response.receipt.receipt as { prepared_transition: Record<string, unknown> }).prepared_transition;
+}
+
+function submitIssuedAction(response: ReturnType<typeof accept>): Record<string, unknown> {
+  return (submitTransition(response).issued_actions as Array<{ action: Record<string, unknown> }>)[0]!.action;
+}
 
 test("generated environment reader rejects absent, partial, empty, and malformed five-variable bindings", { concurrency: false }, async () => {
   for (const patch of [
