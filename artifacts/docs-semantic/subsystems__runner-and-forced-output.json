@@ -1,20 +1,31 @@
 {
   "schema_version": "autopilot.docs_semantic_attestation.v2",
   "doc_id": "subsystems/runner-and-forced-output",
-  "reviewed_body_hash": "sha256:09b5b07dfbb155e250a5bbef9d8c3041b7ce72973190c6fdd7b8318643303457",
-  "reviewed_doc_sha256": "sha256:ecc59727ce0c211895a88596f1ccc6601b6964f43eeda42c830cfa00f070f697",
+  "reviewed_body_hash": "sha256:0a6ea52b20af826eefe9edd194ed0eee8f25a91f97634e7cf3e65d645acdb937",
+  "reviewed_doc_sha256": "sha256:2a8202ef5b3b79e286418761c769805f82aaa1679c96b53c5b4ec36454beda00",
   "covers_sources": [
+    "child-runtime/child-extension-runtime.ts",
+    "codegen/src/contracts.rs",
+    "codegen/src/emit.rs",
+    "data/checkpoint-policy.kdl",
+    "data/contracts.kdl",
     "data/control.kdl",
+    "data/pi-rpc.kdl",
     "data/seam_real_producers.rs",
+    "drivers/src/checkpoint/mod.rs",
     "drivers/src/control/mod.rs",
     "drivers/src/runner/child.rs",
     "drivers/src/runner/mod.rs",
+    "drivers/src/runner/rpc.rs",
+    "drivers/src/runner/rpc/order.rs",
+    "drivers/src/seam/mod.rs",
     "drivers/src/watchdog/mod.rs",
+    "src/child-control-broker.ts",
     "src/extension.ts",
     "src/resolve-core.ts"
   ],
   "verdict": "PASS",
-  "reviewer": "anthropic/claude-opus-4-6 audit d3356884334df6b70df6ad905c1087cd1; Fusion validate ca370cb0 corroboration",
-  "reviewed_at": "2026-08-09T19:11:34.197Z",
-  "notes": "PASS: independent inspection found no critical/high/medium defect and confirmed V2 child value repair catches map-shape, atom-link, topology, ownership, and proof-ordinal errors before sealing while registry identity, recovery-subject, and derived package authority remain fatal or parent-owned. Two Fusion candidates independently returned no findings; the operator adjudicated the timed-out third candidate as nonblocking."
+  "reviewer": "Pi Fusion investigate-ce3e48c5dffbf83e7cbf8d3999c51185 (subscription harness), answer sha256 2f9acb02faa121bb2a3621951f57b4c690655337edee2e5ac350be2b3be88ea8",
+  "reviewed_at": "2026-08-10T23:48:17.000Z",
+  "notes": "PASS after source-grounded corrections for JSONL EOF framing, V5 receipt/shutdown timing, interruptible checkpointing, and fresh V3 bounded RETRY diagnostics."
 }
