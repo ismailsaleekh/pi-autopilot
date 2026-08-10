@@ -1318,7 +1318,29 @@ struct PreparedValidationTransitionV1 {
     schema: String,
     event_kind: String,
     refs: Vec<Ref>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    finalization: Option<PreparedValidationFinalizationV1>,
 }
+
+/// Exact final-close facts sealed with the validation receipt. This is not a
+/// presentation status: it is the immutable publication/result-ref authority
+/// that makes a crash after publication and before the receipt replay-safe.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PreparedValidationFinalizationV1 {
+    schema: String,
+    workstream: String,
+    run_id: String,
+    tip: String,
+    tree: String,
+    revision: u64,
+    final_evidence_digest: String,
+    gate_digest: String,
+    result_ref: String,
+    close_signal: String,
+}
+const PREPARED_VALIDATION_FINALIZATION_SCHEMA: &str =
+    "autopilot.prepared_validation_finalization.v1";
 
 /// The candidate plan is persisted before its single CAS. It gives a retry
 /// after a crash-between-CAS-and-receipt one exact old/new ref pair to prove,
@@ -1460,6 +1482,16 @@ fn validate_validation_transition(
     if unique.len() != transition.refs.len() {
         return Err("prepared validation transition has duplicate semantic refs".to_owned());
     }
+    if let Some(finalization) = &transition.finalization {
+        validate_validation_finalization(finalization)?;
+        if transition.event_kind != "integration:forward-integrated"
+            || !validation_finalization_refs(finalization)
+                .iter()
+                .all(|reference| transition.refs.contains(reference))
+        {
+            return Err("prepared validation final-close refs drift".to_owned());
+        }
+    }
     Ok(())
 }
 
@@ -1477,6 +1509,126 @@ fn prepared_validation_integration_path(
     let mut path = submit_receipt_path(binding)?;
     path.set_extension("validation-integration.json");
     Ok(path)
+}
+
+fn prepared_validation_finalization_path(
+    binding: &runner::ReceiptV1RunnerBinding,
+) -> Result<PathBuf, String> {
+    let mut path = submit_receipt_path(binding)?;
+    path.set_extension("validation-finalization.json");
+    Ok(path)
+}
+
+fn validation_finalization_refs(finalization: &PreparedValidationFinalizationV1) -> Vec<Ref> {
+    vec![
+        Ref(format!(
+            "lifecycle:ExecutionComplete:{}:{}",
+            finalization.workstream, finalization.run_id
+        )),
+        Ref(format!(
+            "lifecycle:Finalizing:{}:{}",
+            finalization.workstream, finalization.run_id
+        )),
+        Ref(format!("final-commands-pass:{}", finalization.tip)),
+        Ref(format!("full-suite-pass:{}", finalization.tip)),
+        Ref(format!("final-validator-pass:{}", finalization.tip)),
+        Ref(format!("final-evidence-run:{}", finalization.run_id)),
+        Ref(format!(
+            "final-evidence-digest:{}",
+            finalization.final_evidence_digest
+        )),
+        Ref(format!(
+            "lifecycle:Publishing:{}:{}",
+            finalization.workstream, finalization.run_id
+        )),
+        Ref(finalization.gate_digest.clone()),
+        Ref(format!(
+            "lifecycle:Closed:{}:{}",
+            finalization.workstream, finalization.run_id
+        )),
+        Ref(finalization.workstream.clone()),
+        Ref(finalization.run_id.clone()),
+        Ref(finalization.result_ref.clone()),
+        Ref(finalization.tip.clone()),
+        Ref("module-wired:finalize".to_owned()),
+    ]
+}
+
+fn validate_validation_finalization(
+    finalization: &PreparedValidationFinalizationV1,
+) -> Result<(), String> {
+    if finalization.schema != PREPARED_VALIDATION_FINALIZATION_SCHEMA
+        || finalization.workstream.trim().is_empty()
+        || finalization.run_id.trim().is_empty()
+        || !is_git_oid(&finalization.tip)
+        || !is_git_oid(&finalization.tree)
+        || finalization.result_ref.trim().is_empty()
+        || finalization.close_signal != exact_close_signal(&finalization.result_ref)
+    {
+        return Err("prepared validation finalization identity drift".to_owned());
+    }
+    let expected_evidence = sha256_hex_local(
+        format!(
+            "{}\n{}\n{}\n{}\n{}",
+            finalization.workstream,
+            finalization.run_id,
+            finalization.tip,
+            finalization.tree,
+            finalization.revision
+        )
+        .as_bytes(),
+    );
+    let expected_gate = sha256_hex_local(
+        format!(
+            "{}\n{}\n{}\n{}\n{}",
+            finalization.workstream,
+            finalization.run_id,
+            finalization.tip,
+            finalization.tree,
+            expected_evidence
+        )
+        .as_bytes(),
+    );
+    if finalization.final_evidence_digest != expected_evidence
+        || finalization.gate_digest != expected_gate
+    {
+        return Err("prepared validation finalization digest authority drift".to_owned());
+    }
+    Ok(())
+}
+
+fn read_prepared_validation_finalization(
+    binding: &runner::ReceiptV1RunnerBinding,
+) -> Result<Option<(PreparedValidationFinalizationV1, PathBuf, Vec<u8>)>, String> {
+    let path = prepared_validation_finalization_path(binding)?;
+    let Some(bytes) = runner::read_bounded_file_optional(&path, SUBMIT_RECEIPT_MAX_BYTES)
+        .map_err(|error| format!("prepared validation finalization read: {error}"))?
+    else {
+        return Ok(None);
+    };
+    let finalization: PreparedValidationFinalizationV1 = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("prepared validation finalization JSON: {error}"))?;
+    if crate::evidence::canonical_json(&finalization).map_err(|error| error.to_string())? != bytes {
+        return Err("prepared validation finalization canonical bytes drift".to_owned());
+    }
+    validate_validation_finalization(&finalization)?;
+    Ok(Some((finalization, path, bytes)))
+}
+
+fn persist_prepared_validation_finalization(
+    binding: &runner::ReceiptV1RunnerBinding,
+    finalization: &PreparedValidationFinalizationV1,
+) -> Result<(PathBuf, String, Vec<u8>), String> {
+    validate_validation_finalization(finalization)?;
+    let path = prepared_validation_finalization_path(binding)?;
+    let bytes = crate::evidence::canonical_json(finalization).map_err(|error| error.to_string())?;
+    runner::write_bounded_file_create_once(&path, &bytes, SUBMIT_RECEIPT_MAX_BYTES)
+        .map_err(|error| format!("prepared validation finalization write: {error}"))?;
+    Ok((
+        path,
+        PREPARED_VALIDATION_FINALIZATION_SCHEMA.to_owned(),
+        bytes,
+    ))
 }
 
 fn prepared_validation_transition_from_receipt(
@@ -2474,6 +2626,7 @@ struct StagedValidationSemantics {
     effect: DeferredHostEffectV1,
     issues: Vec<runner::IssuedRunnerAction>,
     artifacts: Vec<(PathBuf, String, Vec<u8>)>,
+    finalization: Option<PreparedValidationFinalizationV1>,
 }
 
 fn validation_staging_retry(
@@ -2494,15 +2647,21 @@ fn exact_prepared_artifact(
     artifacts: &[runner::child::PreparedArtifact],
     path: &Path,
 ) -> Result<Vec<u8>, String> {
-    let matches = artifacts
-        .iter()
-        .filter_map(|artifact| {
-            prepared_artifact_bytes(artifact)
-                .ok()
-                .filter(|(candidate, _)| candidate == path)
-                .map(|(_, bytes)| bytes)
-        })
-        .collect::<Vec<_>>();
+    let mut matches = Vec::new();
+    for artifact in artifacts {
+        // A PreparedCarrier is all-or-nothing authority. In particular, an
+        // unrelated malformed JSON artifact must not be hidden by filtering
+        // it out before the exact path cardinality check.
+        let (candidate, bytes) = prepared_artifact_bytes(artifact).map_err(|error| {
+            format!(
+                "staged artifact serialization/path failure while selecting {}: {error}",
+                path.display()
+            )
+        })?;
+        if candidate == path {
+            matches.push(bytes);
+        }
+    }
     match matches.as_slice() {
         [bytes] => Ok(bytes.clone()),
         [] => Err(format!("staged artifact is absent at {}", path.display())),
@@ -2685,6 +2844,14 @@ fn validate_validation_result_v3_staged(
     audit: &[u8],
 ) -> Result<Vec<(PathBuf, String, Vec<u8>)>, String> {
     let facade = runner::receipt_v1_validator_facade(binding);
+    let assignment_path = binding
+        .assignment_path
+        .as_deref()
+        .ok_or_else(|| "fresh V3 receipt binding lacks required assignment path".to_owned())?;
+    let assignment_digest = binding
+        .assignment_digest
+        .as_deref()
+        .ok_or_else(|| "fresh V3 receipt binding lacks required assignment digest".to_owned())?;
     if result.schema.0 != "autopilot.validation_result.v3"
         || result.action_id != facade.action_id
         || result.assignment_id != facade.assignment_id
@@ -2704,8 +2871,8 @@ fn validate_validation_result_v3_staged(
         || result.settings_digest.0 != facade.settings_digest
         || result.skills_digest.0 != facade.skills_digest
         || result.subscription_digest.0 != facade.subscription_digest
-        || result.assignment_path.0 != binding.assignment_path.as_deref().unwrap_or_default()
-        || result.assignment_digest.0 != binding.assignment_digest.as_deref().unwrap_or_default()
+        || result.assignment_path.0 != assignment_path
+        || result.assignment_digest.0 != assignment_digest
     {
         return Err("fresh V3 validation package identity/provenance drift".to_owned());
     }
@@ -2961,6 +3128,7 @@ fn stage_validation_recovery(
             },
             issues: Vec::new(),
             artifacts: Vec::new(),
+            finalization: None,
         });
     }
     let findings = findings
@@ -2986,6 +3154,7 @@ fn stage_validation_recovery(
             },
             issues: Vec::new(),
             artifacts: Vec::new(),
+            finalization: None,
         });
     }
     let repair_mode = if findings
@@ -3078,6 +3247,7 @@ fn stage_validation_recovery(
         },
         issues: vec![issue],
         artifacts,
+        finalization: None,
     })
 }
 
@@ -3097,7 +3267,13 @@ fn staged_validation_integration(
     receipt_binding: &runner::ReceiptV1RunnerBinding,
     binding: &runner::IssuedRunnerBinding,
     verdict: &kernel::generated::ValidationVerdict,
-) -> Result<(Vec<Ref>, (PathBuf, String, Vec<u8>)), String> {
+) -> Result<
+    (
+        crate::integration::PreparedCandidate,
+        (PathBuf, String, Vec<u8>),
+    ),
+    String,
+> {
     let cwd = fs::canonicalize(std::env::current_dir().map_err(|error| error.to_string())?)
         .map_err(|error| error.to_string())?;
     verify_run_main_stable(&cwd, &binding.workstream.0)?;
@@ -3183,21 +3359,15 @@ fn staged_validation_integration(
             plan.old_tip, plan.new_tip
         ));
     }
+    let prepared = crate::integration::PreparedCandidate {
+        request: candidate,
+        old_tip: plan.old_tip.clone(),
+        new_tip: plan.new_tip.clone(),
+        tree: plan.tree.clone(),
+        changed_paths: plan.changed_paths.clone(),
+    };
     Ok((
-        vec![
-            Ref("module-wired:integration".to_owned()),
-            Ref(plan.old_tip.clone()),
-            Ref(plan.new_tip.clone()),
-            Ref(plan.tree.clone()),
-            Ref(format!(
-                "unit-closed:{}",
-                binding
-                    .lane_id
-                    .as_ref()
-                    .map(|lane| lane.0.as_str())
-                    .unwrap_or("unknown")
-            )),
-        ],
+        prepared,
         (
             plan_path,
             PREPARED_VALIDATION_INTEGRATION_SCHEMA.to_owned(),
@@ -3206,11 +3376,109 @@ fn staged_validation_integration(
     ))
 }
 
+/// Exact semantic predicates shared with the historical integration path.
+/// The only new input is the receipt-sealed PreparedCandidate; no source,
+/// package, or carrier is reread after the child admission turn.
+fn validation_integration_semantic_refs(
+    state: &CoreState,
+    binding: &runner::IssuedRunnerBinding,
+    verdict: &kernel::generated::ValidationVerdict,
+    prepared: &crate::integration::PreparedCandidate,
+) -> Result<Vec<Ref>, String> {
+    let lane_id = binding
+        .lane_id
+        .as_ref()
+        .ok_or_else(|| "fresh Validator integration lacks required lane authority".to_owned())?;
+    let change = crate::staleness::MergeChange {
+        changed_paths: prepared.changed_paths.clone(),
+        changed_surfaces: prepared.changed_paths.clone(),
+        affected_forward_edges: vec![format!("edge:{}", lane_id.0)],
+        closed_forward_edges: Vec::new(),
+    };
+    let records = vec![crate::staleness::ValidationRecord {
+        evidence_id: format!("validation:{}", binding.assignment_id.0),
+        role_id: binding.role_id.0.clone(),
+        assignment_id: binding.assignment_id.0.clone(),
+        commit: verdict.exact_commit.0.clone(),
+        tree: verdict.exact_tree.0.clone(),
+        covered: validation_coverage_from_verdict(verdict),
+        command_evidence: crate::staleness::CommandEvidence {
+            command: "git rev-parse --verify HEAD".to_owned(),
+            exit_code: 0,
+            output_ref: format!("validation-output:{}", binding.assignment_id.0),
+        },
+        forward_edges: change.affected_forward_edges.clone(),
+        closure_edges: Vec::new(),
+    }];
+    let stale = crate::staleness::compute_staleness(&records, &change);
+    let closure_bundle = closure_bundle_for_integration(prepared, &stale)?;
+    let policy = crate::closure::RepairPolicy::package()
+        .map_err(|error| format!("closure-policy:{error:?}"))?;
+    let mut ledger = crate::closure::RepairLedger::new(policy);
+    let repair_route = ledger.record_fix_attempt(&closure_bundle);
+    Ok(vec![
+        Ref("module-wired:integration".to_owned()),
+        Ref("module-wired:staleness".to_owned()),
+        Ref("module-wired:closure".to_owned()),
+        Ref("module-wired:repair".to_owned()),
+        Ref(prepared.request.candidate_id.clone()),
+        Ref(prepared.old_tip.clone()),
+        Ref(prepared.new_tip.clone()),
+        Ref(prepared.tree.clone()),
+        Ref(format!("stale:{}", stale.stale.len())),
+        Ref(format!("repair-route:{repair_route:?}")),
+        Ref(format!("unit-closed:{}", lane_id.0)),
+    ]
+    .into_iter()
+    .chain(
+        satisfied_forward_gate_refs(&binding.workstream.0, Some(lane_id), state)
+            .map_err(|error| error.to_string())?,
+    )
+    .collect())
+}
+
 struct StagedValidationNextEffect {
     refs: Vec<Ref>,
     effect: DeferredHostEffectV1,
     issues: Vec<runner::IssuedRunnerAction>,
     artifacts: Vec<(PathBuf, String, Vec<u8>)>,
+    finalization: Option<PreparedValidationFinalizationV1>,
+}
+
+fn staged_validation_done_effect(
+    mut refs: Vec<Ref>,
+    status: String,
+    receipt_binding: &runner::ReceiptV1RunnerBinding,
+    binding: &runner::IssuedRunnerBinding,
+) -> Result<StagedValidationNextEffect, String> {
+    let mut artifacts = Vec::new();
+    let finalization = if status.starts_with("lifecycle:close:result_ref=") {
+        let (finalization, path, bytes) = read_prepared_validation_finalization(receipt_binding)?
+            .ok_or_else(|| "fresh Validator close lacks prepared finalization intent".to_owned())?;
+        if finalization.workstream != binding.workstream.0 {
+            return Err("fresh Validator finalization workstream drift".to_owned());
+        }
+        verify_result_ref(&finalization.result_ref, &finalization.tip)
+            .map_err(|error| error.to_string())?;
+        append_unique_refs(&mut refs, validation_finalization_refs(&finalization));
+        artifacts.push((
+            path,
+            PREPARED_VALIDATION_FINALIZATION_SCHEMA.to_owned(),
+            bytes,
+        ));
+        Some(finalization)
+    } else {
+        None
+    };
+    Ok(StagedValidationNextEffect {
+        refs,
+        effect: DeferredHostEffectV1::Done {
+            payload: CoreToHostDonePayload { status },
+        },
+        issues: Vec::new(),
+        artifacts,
+        finalization,
+    })
 }
 
 /// Select the post-integration delivery continuation against a private
@@ -3219,33 +3487,75 @@ struct StagedValidationNextEffect {
 /// projected event/root revision.
 fn stage_next_delivery_after_validation_integration(
     state: &CoreState,
+    receipt_binding: &runner::ReceiptV1RunnerBinding,
     binding: &runner::IssuedRunnerBinding,
+    verdict: &kernel::generated::ValidationVerdict,
+    prepared: &crate::integration::PreparedCandidate,
     continuation_run_revision: u64,
 ) -> Result<StagedValidationNextEffect, String> {
+    let integration_refs = validation_integration_semantic_refs(state, binding, verdict, prepared)?;
     let mut projected = CoreState {
         event_path: None,
         state: state.state.clone(),
         events: state.events.clone(),
         event_bytes: state.event_bytes.clone(),
     };
-    let mut integration_refs = vec![Ref(format!(
-        "unit-closed:{}",
-        binding
-            .lane_id
-            .as_ref()
-            .map(|lane| lane.0.as_str())
-            .unwrap_or("unknown")
-    ))];
-    integration_refs.extend(
-        satisfied_forward_gate_refs(&binding.workstream.0, binding.lane_id.as_ref(), state)
-            .map_err(|error| error.to_string())?,
-    );
+    // The current Validator is terminal for all post-integration predicates
+    // even though the real terminal row is deliberately deferred until the
+    // receipt is rooted. Without this private consumption projection, the
+    // final lane can never reach lifecycle readiness before ACCEPT.
+    projected
+        .append(
+            EventKind("submit:receipt-projected".to_owned()),
+            vec![terminal_consumed_ref(binding)],
+        )
+        .map_err(|error| error.to_string())?;
     projected
         .append(
             EventKind("integration:forward-integrated".to_owned()),
             integration_refs.clone(),
         )
         .map_err(|error| error.to_string())?;
+    // A finalization intent is written before the result-ref CAS. On a
+    // crash/response-loss retry it is the sole authority for publication: do
+    // not re-run final checks, source/package reads, or lifecycle selection.
+    if let Some((finalization, _, _)) = read_prepared_validation_finalization(receipt_binding)? {
+        if finalization.workstream != binding.workstream.0
+            || finalization.tip != prepared.new_tip
+            || finalization.close_signal != exact_close_signal(&finalization.result_ref)
+        {
+            return Err("fresh Validator prepared finalization/integration drift".to_owned());
+        }
+        let publication = PublicationPrepared {
+            schema: "PublicationPrepared".to_owned(),
+            run_id: finalization.run_id.clone(),
+            tip: finalization.tip.clone(),
+            result_ref: finalization.result_ref.clone(),
+            gate_digest: finalization.gate_digest.clone(),
+        };
+        let result = publish_prepared_result_ref(&binding.workstream.0, &publication, &mut projected)
+            .map_err(|error| error.to_string())?;
+        return staged_validation_done_effect(
+            integration_refs,
+            exact_close_signal(&result.name),
+            receipt_binding,
+            binding,
+        );
+    }
+    // This is the legacy ordering: closure readiness is evaluated immediately
+    // after integration, before allocation attempts to describe any remaining
+    // lane. A fully closed one-lane plan has zero open allocation lanes.
+    if let Some(status) = advance_lifecycle_if_ready_with_finalization(
+        &binding.workstream.0,
+        None,
+        ClosureTrigger::IntegrationComplete,
+        &mut projected,
+        Some(receipt_binding),
+    )
+    .map_err(|error| error.to_string())?
+    {
+        return staged_validation_done_effect(integration_refs, status, receipt_binding, binding);
+    }
     let approved_artifact = read_approved_plan_artifact(&binding.workstream.0, &projected)
         .map_err(|error| format!("next delivery approved plan: {error}"))?;
     let approved = approved_artifact.units();
@@ -3263,29 +3573,55 @@ fn stage_next_delivery_after_validation_integration(
     let resources = host_resource_facts()?;
     let mut selected = dispatch::select_ready_lanes(&DispatchInput {
         lanes: allocation.lanes,
-        readiness,
+        readiness: readiness.clone(),
         active_implementers: active_implementers(&projected),
         parallel_cap: 8,
         resources,
     });
-    selected
-        .retain(|lane| !lane_closed(&projected, lane) && !lane_has_live_delivery(&projected, lane));
+    selected.retain(|lane| !lane_closed(&projected, lane));
+    let mut dispatchable = Vec::new();
+    for lane in selected {
+        if !lane_has_live_delivery(&projected, &lane)? {
+            dispatchable.push(lane);
+        }
+    }
+    let selected = dispatchable;
     let Some(lane_id) = selected.first() else {
+        if let Some(status) = advance_lifecycle_if_ready_with_finalization(
+            &binding.workstream.0,
+            None,
+            ClosureTrigger::IntegrationComplete,
+            &mut projected,
+            Some(receipt_binding),
+        )
+        .map_err(|error| error.to_string())?
+        {
+            return staged_validation_done_effect(integration_refs, status, receipt_binding, binding);
+        }
+        let status = if active_or_unknown_work(&projected) || queued_candidates(&projected) > 0 {
+            format!(
+                "dispatch:waiting:{};{}",
+                advance_diagnostics(&projected, &submission, approved, &readiness, &selected),
+                projected.summary()
+            )
+        } else {
+            rejection(
+                "dispatch-stuck",
+                &format!(
+                    "{};{}",
+                    advance_diagnostics(&projected, &submission, approved, &readiness, &selected),
+                    projected.summary()
+                ),
+            )
+        };
         return Ok(StagedValidationNextEffect {
-            refs: integration_refs
-                .into_iter()
-                .filter(|reference| reference.0.starts_with("gate:"))
-                .collect(),
+            refs: integration_refs,
             effect: DeferredHostEffectV1::Done {
-                payload: CoreToHostDonePayload {
-                    status: format!(
-                        "validation-integrated:closure-or-wait:workstream={}",
-                        binding.workstream.0
-                    ),
-                },
+                payload: CoreToHostDonePayload { status },
             },
             issues: Vec::new(),
             artifacts: Vec::new(),
+            finalization: None,
         });
     };
     let facts = runner::RunnerTransportFacts::from_env().map_err(|error| error.to_string())?;
@@ -3318,10 +3654,7 @@ fn stage_next_delivery_after_validation_integration(
         return Err("next delivery action/binding continuation revision drift".to_owned());
     }
     let artifacts = staged_issue_artifacts(&issue)?;
-    let mut refs = integration_refs
-        .into_iter()
-        .filter(|reference| reference.0.starts_with("gate:"))
-        .collect::<Vec<_>>();
+    let mut refs = integration_refs;
     refs.extend([
         Ref("delivery:next-required".to_owned()),
         Ref(issue.binding.assignment_id.0.clone()),
@@ -3336,6 +3669,7 @@ fn stage_next_delivery_after_validation_integration(
         },
         issues: vec![issue],
         artifacts,
+        finalization: None,
     })
 }
 
@@ -3449,15 +3783,20 @@ fn commit_staged_validation_submit(
                     .map(|finding| Ref(finding.finding_id.0.clone()))
                     .collect(),
             };
-            let (mut refs, integration) = staged_validation_integration(binding, &legacy, &verdict)
-                .map_err(|error| {
+            let (integration_prepared, integration) =
+                staged_validation_integration(binding, &legacy, &verdict).map_err(|error| {
                     validation_staging_retry("submit.validation_integration", "", error)
                 })?;
-            let next =
-                stage_next_delivery_after_validation_integration(state, &legacy, continuation)
-                    .map_err(|error| {
-                        validation_staging_retry("submit.validation_next_effect", "", error)
-                    })?;
+            let next = stage_next_delivery_after_validation_integration(
+                state,
+                binding,
+                &legacy,
+                &verdict,
+                &integration_prepared,
+                continuation,
+            )
+            .map_err(|error| validation_staging_retry("submit.validation_next_effect", "", error))?;
+            let mut refs = next.refs.clone();
             append_unique_refs(
                 &mut refs,
                 std::iter::once(Ref(result.exact_commit.0.clone()))
@@ -3502,6 +3841,7 @@ fn commit_staged_validation_submit(
                 effect: next.effect,
                 issues: next.issues,
                 artifacts,
+                finalization: next.finalization,
             }
         } else if result.submission.outcome != kernel::generated::ValidationOutcomeV2::FORWARDREADY
             && !blockers.is_empty()
@@ -3612,15 +3952,20 @@ fn commit_staged_validation_submit(
                     .map(|finding| Ref(finding.finding_id.0.clone()))
                     .collect(),
             };
-            let (mut refs, integration) = staged_validation_integration(binding, &legacy, &verdict)
-                .map_err(|error| {
+            let (integration_prepared, integration) =
+                staged_validation_integration(binding, &legacy, &verdict).map_err(|error| {
                     validation_staging_retry("submit.validation_integration", "", error)
                 })?;
-            let next =
-                stage_next_delivery_after_validation_integration(state, &legacy, continuation)
-                    .map_err(|error| {
-                        validation_staging_retry("submit.validation_next_effect", "", error)
-                    })?;
+            let next = stage_next_delivery_after_validation_integration(
+                state,
+                binding,
+                &legacy,
+                &verdict,
+                &integration_prepared,
+                continuation,
+            )
+            .map_err(|error| validation_staging_retry("submit.validation_next_effect", "", error))?;
+            let mut refs = next.refs.clone();
             append_unique_refs(
                 &mut refs,
                 std::iter::once(Ref(result.exact_commit.0.clone()))
@@ -3680,6 +4025,7 @@ fn commit_staged_validation_submit(
                 effect: next.effect,
                 issues: next.issues,
                 artifacts,
+                finalization: next.finalization,
             }
         } else if result.verdict.outcome != kernel::generated::ValidationOutcomeV2::FORWARDREADY
             && !blockers.is_empty()
@@ -3721,6 +4067,7 @@ fn commit_staged_validation_submit(
         schema: PREPARED_VALIDATION_TRANSITION_SCHEMA.to_owned(),
         event_kind: semantic.event_kind.clone(),
         refs: semantic.refs.clone(),
+        finalization: semantic.finalization.clone(),
     };
     validate_validation_transition(&sidecar)
         .map_err(|error| validation_staging_retry("submit.validation_transition", "", error))?;
@@ -5750,8 +6097,15 @@ fn advance_run(
     // Independent of the `unit-active:` bookkeeping written at dispatch time: a lane
     // whose implementer binding is already live must never be dispatched twice. This
     // is derived from the runner invocation log itself, so losing the dispatch-time
-    // marker cannot silently re-enable double dispatch.
-    selected.retain(|lane_id| !lane_has_live_delivery(state, lane_id));
+    // marker cannot silently re-enable double dispatch. A malformed namespaced
+    // binding is authority failure, never an absent live delivery.
+    let mut dispatchable = Vec::new();
+    for lane_id in selected {
+        if !lane_has_live_delivery(state, &lane_id)? {
+            dispatchable.push(lane_id);
+        }
+    }
+    let selected = dispatchable;
     if let Some(lane_id) = selected.first() {
         // The ready-root enum is the explicit version authority. V1 keeps the
         // historical V3 assignment/policy path; only a rooted V2 image enters
@@ -5954,20 +6308,27 @@ fn resume_pending_delivery_recovery(
     Ok(None)
 }
 
-fn lane_has_live_delivery(state: &CoreState, lane_id: &Id) -> bool {
-    state
+fn lane_has_live_delivery(state: &CoreState, lane_id: &Id) -> Result<bool, String> {
+    for reference in state
         .state
         .refs
         .keys()
-        .filter_map(|reference| match runner::decode_versioned_binding_ref(&reference.0).ok()? {
-            VersionedRunnerBinding::ReplayV0(binding) => Some(binding),
-            VersionedRunnerBinding::ReceiptV1(binding) => Some(runner::receipt_v1_validator_facade(&binding)),
-        })
-        .any(|binding| {
-            matches!(binding.role_id.0.as_str(), "implementer" | "recovery-engineer")
-                && binding.lane_id.as_ref().is_some_and(|lane| lane == lane_id)
-                && !terminal_consumed(state, &binding)
-        })
+        .filter(|reference| reference.0.starts_with(runner::ISSUED_BINDING_REF_PREFIX))
+    {
+        let binding = match runner::decode_versioned_binding_ref(&reference.0)
+            .map_err(|error| format!("live-delivery namespaced binding decode: {error}"))?
+        {
+            VersionedRunnerBinding::ReplayV0(binding) => binding,
+            VersionedRunnerBinding::ReceiptV1(binding) => runner::receipt_v1_validator_facade(&binding),
+        };
+        if matches!(binding.role_id.0.as_str(), "implementer" | "recovery-engineer")
+            && binding.lane_id.as_ref() == Some(lane_id)
+            && !terminal_consumed(state, &binding)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Forward-criterion gates satisfied by the lane that just closed.
@@ -9568,69 +9929,12 @@ fn integrate_validated_candidate(
         Err(error) => return done(id, rejection("integration", &format!("{error:?}"))),
     };
     queue.complete_active();
-    let change = crate::staleness::MergeChange {
-        changed_paths: prepared.changed_paths.clone(),
-        changed_surfaces: prepared.changed_paths.clone(),
-        affected_forward_edges: vec![format!(
-            "edge:{}",
-            binding
-                .lane_id
-                .as_ref()
-                .map(|id| id.0.as_str())
-                .unwrap_or("unknown")
-        )],
-        closed_forward_edges: Vec::new(),
-    };
-    let records = vec![crate::staleness::ValidationRecord {
-        evidence_id: format!("validation:{}", binding.assignment_id.0),
-        role_id: binding.role_id.0.clone(),
-        assignment_id: binding.assignment_id.0.clone(),
-        commit: verdict.exact_commit.0.clone(),
-        tree: verdict.exact_tree.0.clone(),
-        covered: validation_coverage_from_verdict(verdict),
-        command_evidence: crate::staleness::CommandEvidence {
-            command: "git rev-parse --verify HEAD".to_owned(),
-            exit_code: 0,
-            output_ref: format!("validation-output:{}", binding.assignment_id.0),
-        },
-        forward_edges: change.affected_forward_edges.clone(),
-        closure_edges: Vec::new(),
-    }];
-    let stale = crate::staleness::compute_staleness(&records, &change);
-    let closure_bundle = closure_bundle_for_integration(&prepared, &stale)?;
-    let policy = crate::closure::RepairPolicy::package()
-        .map_err(|error| format!("closure-policy:{error:?}"))?;
-    let mut ledger = crate::closure::RepairLedger::new(policy);
-    let repair_route = ledger.record_fix_attempt(&closure_bundle);
+    // Fresh receipt staging and replay_v0 integration deliberately share the
+    // same staleness, closure, repair, lane-close, and forward-gate predicate.
+    let integration_refs = validation_integration_semantic_refs(state, binding, verdict, &prepared)?;
     state.append(
         EventKind("integration:forward-integrated".to_owned()),
-        vec![
-            Ref("module-wired:integration".to_owned()),
-            Ref("module-wired:staleness".to_owned()),
-            Ref("module-wired:closure".to_owned()),
-            Ref("module-wired:repair".to_owned()),
-            Ref(prepared.request.candidate_id),
-            Ref(prepared.old_tip),
-            Ref(prepared.new_tip.clone()),
-            Ref(prepared.tree.clone()),
-            Ref(format!("stale:{}", stale.stale.len())),
-            Ref(format!("repair-route:{repair_route:?}")),
-            Ref(format!(
-                "unit-closed:{}",
-                binding
-                    .lane_id
-                    .as_ref()
-                    .map(|id| id.0.as_str())
-                    .unwrap_or("unknown")
-            )),
-        ]
-        .into_iter()
-        .chain(satisfied_forward_gate_refs(
-            workstream,
-            binding.lane_id.as_ref(),
-            state,
-        )?)
-        .collect::<Vec<_>>(),
+        integration_refs,
     )?;
     if let Some(status) =
         advance_lifecycle_if_ready(workstream, None, ClosureTrigger::IntegrationComplete, state)?
@@ -10729,6 +11033,25 @@ fn advance_lifecycle_if_ready(
     trigger: ClosureTrigger,
     state: &mut CoreState,
 ) -> Result<Option<String>, AnyError> {
+    advance_lifecycle_if_ready_with_finalization(
+        workstream,
+        request,
+        trigger,
+        state,
+        None,
+    )
+}
+
+/// The fresh Validator path persists its immutable close facts before the
+/// result-ref CAS. Historical lifecycle callers pass no receipt binding and
+/// retain their exact behavior.
+fn advance_lifecycle_if_ready_with_finalization(
+    workstream: &str,
+    request: Option<&ParsedCloseRequestArgs>,
+    trigger: ClosureTrigger,
+    state: &mut CoreState,
+    validation_receipt: Option<&runner::ReceiptV1RunnerBinding>,
+) -> Result<Option<String>, AnyError> {
     if let Some(prepared) = read_publication_prepared(workstream)? {
         return publish_prepared_result_ref(workstream, &prepared, state)
             .map(|result| Some(exact_close_signal(&result.name)));
@@ -10791,6 +11114,22 @@ fn advance_lifecycle_if_ready(
             "lifecycle:awaiting-close:workstream={};run_id={};tip={};sequence={}",
             snapshot.workstream, snapshot.run_id, snapshot.tip, state.state.sequence
         )));
+    }
+    if let Some(binding) = validation_receipt {
+        let finalization = PreparedValidationFinalizationV1 {
+            schema: PREPARED_VALIDATION_FINALIZATION_SCHEMA.to_owned(),
+            workstream: snapshot.workstream.clone(),
+            run_id: snapshot.run_id.clone(),
+            tip: snapshot.tip.clone(),
+            tree: snapshot.tree.clone(),
+            revision: snapshot.revision,
+            final_evidence_digest: evidence.digest.clone(),
+            gate_digest: qualified.gate_digest.clone(),
+            result_ref: qualified.result_ref.clone(),
+            close_signal: exact_close_signal(&qualified.result_ref),
+        };
+        persist_prepared_validation_finalization(binding, &finalization)
+            .map_err(|error| format!("validation finalization intent: {error}"))?;
     }
     publish_result_ref(&qualified, state).map(|result| Some(exact_close_signal(&result.name)))
 }
@@ -11382,9 +11721,32 @@ impl Drop for CloseLock {
 
 fn active_or_unknown_work(state: &CoreState) -> bool {
     active_work(state)
+        || has_malformed_runner_binding(state)
         || has_ref_prefix(state, "unknown-job:")
         || has_ref_prefix(state, "fixer-active:")
         || has_ref_prefix(state, "validator-unknown:")
+}
+
+/// Activity accounting is fail-closed for malformed namespaced bindings and
+/// recognizes the explicit receipt_v1 form instead of treating V5 work as an
+/// absent legacy binding.
+fn has_malformed_runner_binding(state: &CoreState) -> bool {
+    state
+        .state
+        .refs
+        .keys()
+        .filter(|reference| reference.0.starts_with(runner::ISSUED_BINDING_REF_PREFIX))
+        .any(|reference| runner::decode_versioned_binding_ref(&reference.0).is_err())
+}
+
+fn activity_binding(reference: &Ref) -> Option<runner::IssuedRunnerBinding> {
+    match runner::decode_versioned_binding_ref(&reference.0) {
+        Ok(VersionedRunnerBinding::ReplayV0(binding)) => Some(binding),
+        Ok(VersionedRunnerBinding::ReceiptV1(binding)) => {
+            Some(runner::receipt_v1_validator_facade(&binding))
+        }
+        Err(_) => None,
+    }
 }
 
 fn has_exact_ref(state: &CoreState, reference: &str) -> bool {
@@ -11416,7 +11778,7 @@ fn active_validators(state: &CoreState) -> usize {
         .state
         .refs
         .keys()
-        .filter_map(|reference| runner::decode_binding_ref(&reference.0))
+        .filter_map(activity_binding)
         .filter(|binding| binding.role_id.0 == "validator" && !terminal_consumed(state, binding))
         .count()
 }

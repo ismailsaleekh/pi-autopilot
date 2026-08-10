@@ -1993,6 +1993,199 @@ fn receipt_v1_delivery_child_control_stages_v4_package_and_consumes_without_carr
 }
 
 #[test]
+fn receipt_v1_validator_child_control_seals_final_close_and_replays_without_authority() {
+    let (mut core, delivery_spawn, delivery_spec, _carrier_path, worktree) =
+        launched_core_delivery("receipt-v1-validator-final-close");
+    let delivery: kernel::generated::AgentRunSpecV5 =
+        serde_json::from_value(delivery_spec.clone()).expect("fresh delivery V5 spec");
+    let delivery_facade = runner::project_v5_spec_for_shared_admission(&delivery);
+    fs::write(
+        worktree.join("README.md"),
+        "receipt validator child-control change\n",
+    )
+    .expect("delivery edit");
+    let delivery_request = serde_json::json!({
+        "schema": "autopilot.child_control_request.v1",
+        "request_id": "receipt-v1-validator-delivery",
+        "token": delivery.child_control_token,
+        "run_id": delivery.run_id,
+        "assignment_id": delivery.assignment_id,
+        "attempt": delivery.attempt,
+        "tool_call_id": "receipt-v1-validator-delivery-tool",
+        "kind": "submit",
+        "tool_name": "autopilot_emit_status",
+        "profile_id": "delivery-status.v2",
+        "raw_payload": {
+            "actual_changed_paths": ["README.md"],
+            "execution_audit_ref": "audit:receipt-v1-validator",
+            "focused_evidence_refs": ["evidence:1", "evidence:2"],
+            "terminal_status": "succeeded",
+            "hard_boundary_violations": []
+        },
+        "runtime_evidence": {
+            "schema": "autopilot.child_control_runtime_evidence.v1",
+            "delivery_policy_denials": {"schema":"autopilot.delivery_policy_denials.v2","overflowed":false,"entries":[]},
+            "approved_command_executions": successful_command_execution_ledger(&delivery_facade)
+        }
+    });
+    let delivery_accept = core.send_json(serde_json::json!({
+        "v":1,"id":2,"kind":"child-control",
+        "payload":{"broker_capability":TEST_BROKER_CAPABILITY,"request":delivery_request}
+    }));
+    assert_eq!(delivery_accept.payload["response"]["outcome"], "ACCEPT");
+    let validator_spawn: CoreToHostSpawnPayload = serde_json::from_value(
+        core.send_json(serde_json::json!({
+            "v":1,"id":3,"kind":"task-completed","payload":{
+                "task_id":"receipt-v1-validator-delivery-task",
+                "action_id":delivery_spawn.action.action_id,
+                "assignment_id":delivery_spawn.action.assignment_id,
+                "status":"completed"
+            }
+        }))
+        .payload,
+    )
+    .expect("Validator spawn");
+    let validation_spec_path = runner::validation_paths(
+        &worktree,
+        "main",
+        &validator_spawn.action.assignment_id,
+    )
+    .spec_path;
+    let validation: kernel::generated::AgentRunSpecV5 = serde_json::from_slice(
+        &fs::read(&validation_spec_path).expect("fresh Validator V5 spec"),
+    )
+    .expect("fresh Validator V5 JSON");
+    let assignment: kernel::generated::ValidationAssignmentV4 = serde_json::from_slice(
+        &fs::read(validation.assignment_path.as_ref().expect("assignment path").0.as_str())
+            .expect("V4 assignment"),
+    )
+    .expect("V4 assignment JSON");
+    let context: kernel::generated::ValidationContextV3 = serde_json::from_slice(
+        &fs::read(
+            validation
+                .context_manifest_path
+                .as_ref()
+                .expect("context path")
+                .0
+                .as_str(),
+        )
+        .expect("V3 context"),
+    )
+    .expect("V3 context JSON");
+    let raw_payload = serde_json::json!({
+        "schema":"autopilot.validation_submission.v3",
+        "criterion_results":context.criteria.iter().map(|criterion| serde_json::json!({
+            "criterion_id":criterion.criterion_id,
+            "verdict":"PASS",
+            "citation_refs":[criterion.allowed_citation_refs[0]],
+            "finding_ids":[]
+        })).collect::<Vec<_>>(),
+        "findings":[]
+    });
+    let validation_request = serde_json::json!({
+        "schema":"autopilot.child_control_request.v1",
+        "request_id":"receipt-v1-validator-submit",
+        "token":validation.child_control_token,
+        "run_id":validation.run_id,
+        "assignment_id":validation.assignment_id,
+        "attempt":validation.attempt,
+        "tool_call_id":"receipt-v1-validator-tool",
+        "kind":"submit",
+        "tool_name":"autopilot_emit_status",
+        "profile_id":"validation-status.v3",
+        "raw_payload":raw_payload,
+        "runtime_evidence":{"schema":"autopilot.child_control_runtime_evidence.v1","delivery_policy_denials":null,"approved_command_executions":null}
+    });
+    let mut malformed_request = validation_request.clone();
+    malformed_request["raw_payload"]["criterion_results"][0]["citation_refs"] =
+        serde_json::json!(["validation-source:malformed"]);
+    let malformed = core.send_json(serde_json::json!({
+        "v":1,"id":4,"kind":"child-control",
+        "payload":{"broker_capability":TEST_BROKER_CAPABILITY,"request":malformed_request}
+    }));
+    assert_eq!(malformed.payload["response"]["outcome"], "RETRY");
+    assert!(
+        !Path::new(&validation.carrier_path.0).exists()
+            && !PathBuf::from(&validation.carrier_path.0)
+                .with_extension("tool-audit.json")
+                .exists(),
+        "fresh V3 RETRY must not persist rejected diagnostics/carrier artifacts"
+    );
+    let accepted = core.send_json(serde_json::json!({
+        "v":1,"id":5,"kind":"child-control",
+        "payload":{"broker_capability":TEST_BROKER_CAPABILITY,"request":validation_request.clone()}
+    }));
+    assert_eq!(accepted.kind, "child-control");
+    assert_eq!(accepted.payload["response"]["outcome"], "ACCEPT", "{accepted:?}");
+    let receipt = &accepted.payload["response"]["receipt"]["receipt"];
+    assert_eq!(
+        receipt["prepared_transition"]["deferred_host_effect"]["kind"],
+        "done"
+    );
+    assert!(
+        receipt["prepared_transition"]["deferred_host_effect"]["payload"]["status"]
+            .as_str()
+            .expect("close status")
+            .starts_with("lifecycle:close:result_ref="),
+        "{receipt}"
+    );
+    assert!(receipt["prepared_transition"]["artifact_refs"]
+        .as_array()
+        .expect("receipt artifacts")
+        .iter()
+        .any(|artifact| artifact["artifact_schema"]
+            == "autopilot.prepared_validation_finalization.v1"));
+    let exact_replay = core.send_json(serde_json::json!({
+        "v":1,"id":6,"kind":"child-control",
+        "payload":{"broker_capability":TEST_BROKER_CAPABILITY,"request":validation_request.clone()}
+    }));
+    assert_eq!(exact_replay.payload, accepted.payload, "exact raw replay");
+    let mut changed = validation_request;
+    changed["raw_payload"]["criterion_results"][0]["citation_refs"] =
+        serde_json::json!(["validation-source:changed"]);
+    let conflict = core.send_json(serde_json::json!({
+        "v":1,"id":7,"kind":"child-control",
+        "payload":{"broker_capability":TEST_BROKER_CAPABILITY,"request":changed}
+    }));
+    assert_eq!(conflict.payload["response"]["outcome"], "RETRY");
+    for path in [
+        PathBuf::from(&validation.carrier_path.0),
+        PathBuf::from(&validation.carrier_path.0).with_extension("tool-audit.json"),
+        validation_spec_path,
+        PathBuf::from(validation.assignment_path.expect("assignment").0),
+        PathBuf::from(validation.context_manifest_path.expect("context").0),
+        PathBuf::from(assignment.authority_path.0),
+        worktree.join("README.md"),
+    ] {
+        fs::remove_file(path).expect("remove mutable validation authority");
+    }
+    let completed = core.send_json(serde_json::json!({
+        "v":1,"id":8,"kind":"task-completed","payload":{
+            "task_id":"receipt-v1-validator-task",
+            "action_id":validator_spawn.action.action_id,
+            "assignment_id":validator_spawn.action.assignment_id,
+            "status":"completed"
+        }
+    }));
+    assert_eq!(completed.kind, "done", "receipt-only completion: {completed:?}");
+    assert_eq!(
+        completed.payload,
+        receipt["prepared_transition"]["deferred_host_effect"]["payload"],
+        "completion returns the stored final close effect"
+    );
+    let replay = core.send_json(serde_json::json!({
+        "v":1,"id":9,"kind":"task-completed","payload":{
+            "task_id":"receipt-v1-validator-task",
+            "action_id":validator_spawn.action.action_id,
+            "assignment_id":validator_spawn.action.assignment_id,
+            "status":"completed"
+        }
+    }));
+    assert_eq!(replay.payload, completed.payload, "stored completion replay");
+    core.shutdown();
+}
+
+#[test]
 fn receipt_v1_blocked_delivery_stages_one_recovery_effect() {
     let (mut core, spawn, spec, _carrier_path, _worktree) =
         launched_core_delivery("receipt-v1-blocked");

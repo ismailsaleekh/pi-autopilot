@@ -6777,6 +6777,15 @@ fn admit_validation_submission_v3_receipt(
     let validation_id = spec.validation_id.as_ref().ok_or_else(|| {
         ValidationV3AdmissionError::Fatal("missing receipt_v1 spec-bound validation id".to_owned())
     })?;
+    let producer_assignment_ids = spec.producer_assignment_ids.as_ref().ok_or_else(|| {
+        ValidationV3AdmissionError::Fatal("missing receipt_v1 spec-bound producer ids".to_owned())
+    })?;
+    let validation_attempt = spec.validation_attempt.ok_or_else(|| {
+        ValidationV3AdmissionError::Fatal("missing receipt_v1 spec-bound validation attempt".to_owned())
+    })?;
+    let semantic_round = spec.semantic_round.ok_or_else(|| {
+        ValidationV3AdmissionError::Fatal("missing receipt_v1 spec-bound semantic round".to_owned())
+    })?;
     let base_commit = spec.base_commit.as_ref().ok_or_else(|| {
         ValidationV3AdmissionError::Fatal("missing receipt_v1 spec-bound base commit".to_owned())
     })?;
@@ -6789,12 +6798,9 @@ fn admit_validation_submission_v3_receipt(
         || assignment.run_revision != spec.run_revision
         || assignment.role_id != spec.role_id
         || assignment.mode != spec.mode
-        || assignment.producer_assignment_ids
-            != spec.producer_assignment_ids.clone().ok_or_else(|| {
-                ValidationV3AdmissionError::Fatal("missing receipt_v1 producer ids".to_owned())
-            })?
-        || assignment.validation_attempt != spec.validation_attempt.unwrap_or(0)
-        || assignment.semantic_round != spec.semantic_round.unwrap_or(0)
+        || assignment.producer_assignment_ids != *producer_assignment_ids
+        || assignment.validation_attempt != validation_attempt
+        || assignment.semantic_round != semantic_round
         || assignment.base_commit.0 != base_commit.0
         || assignment.candidate_root.0 != spec.cwd.0
         || assignment.context_path != *context_path

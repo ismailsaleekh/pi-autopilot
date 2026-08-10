@@ -1429,19 +1429,20 @@ fn visit_approved_unit(id: &Id, by_id: &BTreeMap<Id, &ApprovedUnit>, visiting: &
 fn approved_lane_id(index: usize) -> Id { idv(&format!("L{}", index + 1)) }
 fn allocation_submission_from_plan(workstream: &str, approved: &[ApprovedUnit], state: &CoreState) -> Result<AllocationSubmission, String> {
     validate_approved_units(approved).map_err(|error| error.to_string())?;
-    let mut open = approved.iter().enumerate().filter(|(index, _)| !lane_closed(state, &approved_lane_id(*index))).collect::<Vec<_>>();
-    open.sort_by_key(|(index, unit)| {
-        let lane_id = approved_lane_id(*index);
-        let live = lane_has_live_delivery(state, &lane_id);
+    let mut open = approved.iter().enumerate().filter(|(index, _)| !lane_closed(state, &approved_lane_id(*index))).map(|(index, unit)| {
+        let lane_id = approved_lane_id(index);
+        lane_has_live_delivery(state, &lane_id).map(|live| (index, unit, live))
+    }).collect::<Result<Vec<_>, _>>()?;
+    open.sort_by_key(|(index, unit, live)| {
         let blocked = unit.predecessor_forward_criteria.iter().any(|gate| !state.state.refs.contains_key(&Ref(format!("gate:{}", gate.0))));
-        (!live, blocked, *index)
+        (!*live, blocked, *index)
     });
     let scheduled = open.into_iter().take(6).collect::<Vec<_>>();
-    let scheduled_ids = scheduled.iter().map(|(_, unit)| unit.id.clone()).collect::<BTreeSet<_>>();
-    let lanes = scheduled.into_iter().map(|(index, unit)| {
+    let scheduled_ids = scheduled.iter().map(|(_, unit, _)| unit.id.clone()).collect::<BTreeSet<_>>();
+    let lanes = scheduled.into_iter().map(|(index, unit, live)| {
         let focused_tests = unit.commands.iter().map(|command| TestId(command.command.clone())).collect::<Vec<_>>();
         let lane_id = approved_lane_id(index);
-        let continuation = lane_has_live_delivery(state, &lane_id).then_some(true);
+        let continuation = live.then_some(true);
         AllocationLaneProposal { lane_id, objective: unit.objective.clone(), ordered_unit_ids: vec![unit.id.clone()], rationale: format!("unit {} from approved plan", unit.id.0), delivery_boundary: DeliveryBoundary("approved-plan-unit".to_owned()), predecessor_forward_criteria: unit.predecessor_forward_criteria.clone(), downstream_release_edges: unit.downstream_release_edges.clone(), context_family_id: idv(&format!("approved-plan:{workstream}")), context_estimate: 100, focused_tests, launch_wave: index as u32, continue_existing_logical_lane: continuation }
     }).collect();
     let future_units = approved.iter().enumerate().filter(|(_, unit)| !scheduled_ids.contains(&unit.id)).map(|(index, unit)| FutureUnit {
@@ -1453,8 +1454,8 @@ fn allocation_submission_from_plan(workstream: &str, approved: &[ApprovedUnit], 
 fn lane_readiness_from_events(lanes: &[AllocationLaneProposal], approved: &[ApprovedUnit], state: &CoreState) -> Vec<LaneReadiness> {
     lanes.iter().map(|lane| { let units = lane.ordered_unit_ids.iter().filter_map(|id| approved.iter().find(|unit| unit.id == *id)).collect::<Vec<_>>(); LaneReadiness { lane_id: lane.lane_id.clone(), predecessor_gates_met: units.iter().flat_map(|unit| &unit.predecessor_forward_criteria).all(|gate| state.state.refs.contains_key(&Ref(format!("gate:{}", gate.0)))), blockers_clear: !state.state.refs.contains_key(&Ref(format!("blocker:{}", lane.lane_id.0))), unit_free: lane.ordered_unit_ids.iter().all(|unit| !state.state.refs.contains_key(&Ref(format!("unit-active:{}", unit.0)))), route_ready: true, preflight_passed: git_stdout(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")), &["rev-parse", "--verify", "HEAD"]).is_ok(), pressure_delay: false } }).collect()
 }
-fn active_implementers(state: &CoreState) -> usize { state.state.refs.keys().filter_map(|reference| runner::decode_binding_ref(&reference.0)).filter(|binding| binding.role_id.0 == "implementer" && !terminal_consumed(state, binding)).count() }
-fn active_recovery_engineers(state: &CoreState) -> usize { state.state.refs.keys().filter_map(|reference| runner::decode_binding_ref(&reference.0)).filter(|binding| binding.role_id.0 == "recovery-engineer" && !terminal_consumed(state, binding)).count() }
+fn active_implementers(state: &CoreState) -> usize { state.state.refs.keys().filter_map(activity_binding).filter(|binding| binding.role_id.0 == "implementer" && !terminal_consumed(state, binding)).count() }
+fn active_recovery_engineers(state: &CoreState) -> usize { state.state.refs.keys().filter_map(activity_binding).filter(|binding| binding.role_id.0 == "recovery-engineer" && !terminal_consumed(state, binding)).count() }
 fn assignment(workstream: &str, lane_id: &Id, approved: &[ApprovedUnit], submission: &AllocationSubmission) -> Result<RunnerAssignment, AnyError> {
     assignment_with_worktree_cleanliness(workstream, lane_id, approved, submission, true)
 }
