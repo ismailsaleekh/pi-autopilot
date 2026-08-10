@@ -514,6 +514,32 @@ fn unified_submit_contracts_emit_closed_frames_and_non_fifo_placeholder_metadata
     assert!(rust.contains("pub struct BlockedReceipt"));
     assert!(rust.contains("pub struct BlockedLatch"));
     assert!(rust.contains("pub struct AgentRunSpecV5"));
+    let v5 = rust
+        .split_once("pub struct AgentRunSpecV5")
+        .expect("fresh V5 spec")
+        .1
+        .split_once("/// Clean v2 runtime identity namespace")
+        .expect("next generated artifact")
+        .0;
+    assert!(v5.contains("/// package-issued expected nested Pi runtime version; RpcClient::spawn must compare its existing pre-spawn pi --version observation exactly before exposing the existing five child-control variables; Core may use the capability-bound field as the staged carrier's Pi-version authority before ACCEPT.\n    #[serde(rename = \"required_pi_version\")]\n    pub required_pi_version: String,"));
+    let contracts = fs::read_to_string(temp.path().join("data/contracts.kdl"))
+        .expect("read contract authority");
+    let v5_contract = contracts
+        .split_once("artifact \"agent_run_spec_v5\"")
+        .expect("fresh V5 contract")
+        .1
+        .split_once("artifact \"run_identity\"")
+        .expect("next V5 artifact")
+        .0;
+    assert_eq!(v5_contract.matches("field \"required_pi_version\" type=\"string\" required=#true constant=\"0.84.1\"").count(), 1);
+    let v4_contract = contracts
+        .split_once("artifact \"agent_run_spec\"")
+        .expect("V4 contract")
+        .1
+        .split_once("artifact \"agent_run_spec_v5\"")
+        .expect("next V4 artifact")
+        .0;
+    assert!(!v4_contract.contains("required_pi_version"));
     assert!(rust.contains("pub struct ValidationAssignmentV4"));
     assert!(rust.contains("pub struct PreparedSubmitTransitionV1"));
     assert!(rust.contains("pub enum DeferredHostEffectV1"));

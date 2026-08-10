@@ -1096,6 +1096,9 @@ pub struct AgentRunSpecV5 {
     /// Fresh issuance is receipt_v1; replay_v0 is explicit legacy classification only.
     #[serde(rename = "admission_mode")]
     pub admission_mode: AdmissionMode,
+    /// package-issued expected nested Pi runtime version; RpcClient::spawn must compare its existing pre-spawn pi --version observation exactly before exposing the existing five child-control variables; Core may use the capability-bound field as the staged carrier's Pi-version authority before ACCEPT.
+    #[serde(rename = "required_pi_version")]
+    pub required_pi_version: String,
     #[serde(rename = "child_control_socket_path")]
     pub child_control_socket_path: Path,
     #[serde(rename = "child_control_token")]

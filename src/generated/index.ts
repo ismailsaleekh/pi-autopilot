@@ -183,6 +183,7 @@ export interface AgentRunSpec {
 export interface AgentRunSpecV5 {
   schema: SchemaId;
   admission_mode: AdmissionMode;
+  required_pi_version: string;
   child_control_socket_path: Path;
   child_control_token: string;
   child_control_token_digest: Digest;

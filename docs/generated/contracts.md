@@ -452,6 +452,7 @@ Sources: `data/contracts.kdl`.
 | agent_run_spec | field | planning_inputs_digest | digest | false | true |  |
 | agent_run_spec_v5 | field | schema | schema-id | true |  |  |
 | agent_run_spec_v5 | field | admission_mode | admission-mode | true |  | Fresh issuance is receipt_v1; replay_v0 is explicit legacy classification only. |
+| agent_run_spec_v5 | field | required_pi_version | string | true |  | package-issued expected nested Pi runtime version; RpcClient::spawn must compare its existing pre-spawn pi --version observation exactly before exposing the existing five child-control variables; Core may use the capability-bound field as the staged carrier's Pi-version authority before ACCEPT. |
 | agent_run_spec_v5 | field | child_control_socket_path | path | true |  |  |
 | agent_run_spec_v5 | field | child_control_token | string | true |  |  |
 | agent_run_spec_v5 | field | child_control_token_digest | digest | true |  |  |

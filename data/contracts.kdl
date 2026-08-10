@@ -504,6 +504,7 @@ artifact "agent_run_spec_v5" schema="autopilot.agent_run_spec.v5" producer="Pack
     doc "Fresh receipt-backed child runner specification. Fresh writers emit receipt_v1 only; pre-v5 bytes remain under their explicit replay_v0 legacy reader."
     field "schema" type="schema-id" required=#true constant="autopilot.agent_run_spec.v5"
     field "admission_mode" type="admission-mode" required=#true constant="receipt_v1" doc="Fresh issuance is receipt_v1; replay_v0 is explicit legacy classification only."
+    field "required_pi_version" type="string" required=#true constant="0.84.1" doc="package-issued expected nested Pi runtime version; RpcClient::spawn must compare its existing pre-spawn pi --version observation exactly before exposing the existing five child-control variables; Core may use the capability-bound field as the staged carrier's Pi-version authority before ACCEPT."
     field "child_control_socket_path" type="path" required=#true
     field "child_control_token" type="string" required=#true
     field "child_control_token_digest" type="digest" required=#true
