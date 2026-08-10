@@ -103,7 +103,6 @@ impl RpcClient {
         if let Some(control) = &config.child_control {
             validate_child_control_config(control, &config)?;
         }
-        let allow_automatic_compaction = config.child_control.is_some();
         let legacy_pi_version_evidence = matches!(
             config.terminal_profile.as_deref(),
             Some(
@@ -218,10 +217,7 @@ impl RpcClient {
                 BufReader::new(stdout),
                 DEFAULT_MAX_TERMINAL_BYTES,
             ),
-            protocol: RpcProtocol::with_automatic_compaction(
-                config.max_terminal_bytes,
-                allow_automatic_compaction,
-            ),
+            protocol: RpcProtocol::new(config.max_terminal_bytes),
             stderr,
             stderr_read: None,
             stderr_completion_failed: false,
@@ -236,7 +232,10 @@ impl RpcClient {
     }
     pub fn send_command(&mut self, command: RpcCommand) -> Result<(), RpcError> {
         self.protocol.register_request(&command)?;
-        if matches!(command.command, RpcCommandKind::Prompt) {
+        if matches!(
+            command.command,
+            RpcCommandKind::Prompt | RpcCommandKind::Compact
+        ) {
             self.protocol.begin_cycle();
         }
         let mut data = serde_json::to_vec(&command)
@@ -454,15 +453,9 @@ pub struct RpcProtocol {
 impl RpcProtocol {
     #[must_use]
     pub fn new(max_terminal_bytes: usize) -> Self {
-        Self::with_automatic_compaction(max_terminal_bytes, false)
-    }
-    pub fn with_automatic_compaction(
-        max_terminal_bytes: usize,
-        allow_automatic_compaction: bool,
-    ) -> Self {
         Self {
             pending: HashMap::new(),
-            order: EventOrder::with_automatic_compaction(allow_automatic_compaction),
+            order: EventOrder::new(),
             max_terminal_bytes,
             frames: 0,
             message_update_frames: 0,

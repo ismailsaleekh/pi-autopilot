@@ -403,7 +403,7 @@ function validateChildControlResponseCorrelation(response: ChildControlResponse,
     response.outcome !== "ACCEPT"
     || !isRecord(response.receipt)
     || response.receipt.schema !== "autopilot.child_control_accept_receipt.v1"
-    || (response.receipt.kind !== "submit" && response.receipt.kind !== "blocked")
+    || (response.receipt.kind !== "submit" && response.receipt.kind !== "blocked" && response.receipt.kind !== "checkpoint")
     || !isRecord(response.receipt.receipt)
   ) {
     throw new ChildControlBrokerProtocolError("child-control response is not a generated ACCEPT or RETRY");
@@ -431,6 +431,12 @@ function validateRequestReceiptGateCorrelation(
   if (request.kind === "submit") {
     if (response.receipt.kind !== "submit" || gate !== null) {
       throw new ChildControlBrokerProtocolError("submit request requires a submit ACCEPT receipt and no blocked gate");
+    }
+    return;
+  }
+  if (request.kind === "checkpoint") {
+    if (response.receipt.kind !== "checkpoint" || gate !== null) {
+      throw new ChildControlBrokerProtocolError("checkpoint request requires a checkpoint ACCEPT receipt and no blocked gate");
     }
     return;
   }

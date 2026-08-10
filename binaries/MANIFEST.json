@@ -15,17 +15,17 @@
       "buildMethod": "native cargo build --release --target aarch64-apple-darwin -p drivers --bin autopilot-core",
       "evidence": {
         "buildExitCode": 0,
-        "builtBinaryPath": "/Users/lizavasilyeva/work/ai-pipeline/packages/pi-autopilot/target/aarch64-apple-darwin/release/autopilot-core",
+        "builtBinaryPath": "/private/tmp/pi-autopilot-v5-checkpoint-resume/target/aarch64-apple-darwin/release/autopilot-core",
         "method": "current-host-target-release-only",
-        "packagedBinaryPath": "/Users/lizavasilyeva/work/ai-pipeline/packages/pi-autopilot/binaries/darwin-arm64/autopilot-core",
-        "sourceHash": "4f1c65bb4d0e7db0bce3c8bb3a981663633af2a9df8707d58e24bb525ba38c1a",
-        "stderrSha256": "f88a2f7d03bbd1e8d8feb47fee02d2912b4c0fb13b1f1f0af5552a768974b079",
+        "packagedBinaryPath": "/private/tmp/pi-autopilot-v5-checkpoint-resume/binaries/darwin-arm64/autopilot-core",
+        "sourceHash": "df129648bb85e7fde548819df44254a56b2f39d0d23db0ef095397b4c7d223d9",
+        "stderrSha256": "a1f01c761f24c3feca4cb5b2270de77dd6525e5d2fdd10f9e008056d181103b9",
         "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
       },
       "path": "binaries/darwin-arm64/autopilot-core",
-      "sha256": "f80308f7959bb5bc1006297fdbe97962d7329fb451330bab54ade3f5f45a1428",
-      "sizeBytes": 9549312,
-      "sourceHash": "4f1c65bb4d0e7db0bce3c8bb3a981663633af2a9df8707d58e24bb525ba38c1a",
+      "sha256": "d142dfbb3a827288558d8f58f18f60cdb8c7173a8c4cc2473e2f0c6d5df2f55a",
+      "sizeBytes": 9702608,
+      "sourceHash": "df129648bb85e7fde548819df44254a56b2f39d0d23db0ef095397b4c7d223d9",
       "target": "aarch64-apple-darwin"
     },
     "darwin-x64": {
@@ -53,7 +53,7 @@
       "target": "x86_64-unknown-linux-musl"
     }
   },
-  "generatedAt": "2026-08-10T14:28:51Z",
+  "generatedAt": "2026-08-10T23:39:40Z",
   "schema": 1,
   "source": {
     "directories": [
@@ -69,7 +69,7 @@
       "Cargo.lock",
       "rust-toolchain.toml"
     ],
-    "hash": "4f1c65bb4d0e7db0bce3c8bb3a981663633af2a9df8707d58e24bb525ba38c1a",
+    "hash": "df129648bb85e7fde548819df44254a56b2f39d0d23db0ef095397b4c7d223d9",
     "hashAlgorithm": "sha256(path-nul-content-nul over build-affecting tracked and untracked inputs)"
   }
 }

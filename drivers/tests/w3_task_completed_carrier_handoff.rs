@@ -74,6 +74,106 @@ fn receipt_v1_planning_accepts_then_consumes_without_carrier_or_spec_rereads() {
 }
 
 #[test]
+fn checkpoint_accepts_a_role_complete_handoff_without_terminalizing_the_assignment() {
+    let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+    let fixture = Fixture::new("checkpoint-handoff");
+    fixture.install_transport_with_nonexistent_command_names();
+    fixture.write_manifest();
+    let mut state = CoreState::open(None).unwrap();
+    let issue =
+        fixture.seed_receipt_planning_binding(&mut state, "planning-ws-task-extractor-01", "CP01-");
+    let spec: kernel::generated::AgentRunSpecV5 =
+        serde_json::from_slice(&fs::read(&issue.binding.spec_path).unwrap()).unwrap();
+    let allowed = spec
+        .allowed_tools
+        .iter()
+        .map(|tool| tool.0.as_str())
+        .collect::<Vec<_>>();
+    assert!(allowed.contains(&"autopilot_checkpoint"), "{allowed:?}");
+    assert!(allowed.contains(&"autopilot_report_blocked"), "{allowed:?}");
+    let handoff = json!({
+        "schema":"autopilot.agent-handoff.v1",
+        "completed":["read the first authority range"],
+        "remaining":["extract the remaining atoms"],
+        "critical_state":{
+            "semantic_lens":"WORK",
+            "authority_coverage":["task://mission#first-range"],
+            "atom_ledger":["CP01-A|WORK|first atom|task://mission#first-range"],
+            "duplicate_dispositions":["none"],
+            "unresolved_ambiguities":["none"]
+        },
+        "next_action":"continue with the next unread authority range",
+        "\u{10000}":"supplementary-key",
+        "\u{e000}":"bmp-private-use-key"
+    });
+    let checkpoint = json!({"v":1,"id":60,"kind":"child-control","payload":{
+        "broker_capability":fixture.broker_capability(),"request":{
+            "schema":"autopilot.child_control_request.v1","request_id":"checkpoint-request-1",
+            "token":spec.child_control_token,"run_id":issue.receipt_binding.run_id,
+            "assignment_id":issue.receipt_binding.assignment_id,"attempt":issue.receipt_binding.attempt,
+            "tool_call_id":"checkpoint-call-1","kind":"checkpoint",
+            "tool_name":"autopilot_checkpoint",
+            "profile_id":"autopilot.agent-handoff.v1:autopilot_checkpoint",
+            "raw_payload":handoff,
+            "runtime_evidence":{"schema":"autopilot.child_control_runtime_evidence.v1","delivery_policy_denials":null,"approved_command_executions":null}
+        }
+    }});
+    let accepted = seam::handle_line(&checkpoint.to_string(), &mut state).unwrap();
+    assert_eq!(accepted.kind, "child-control", "{accepted:?}");
+    assert_eq!(
+        accepted.payload["response"]["outcome"], "ACCEPT",
+        "{accepted:?}"
+    );
+    assert_eq!(
+        accepted.payload["response"]["receipt"]["kind"],
+        "checkpoint"
+    );
+    assert_eq!(accepted.payload["blocked_gate"], serde_json::Value::Null);
+    let receipt: kernel::generated::CheckpointReceipt =
+        serde_json::from_value(accepted.payload["response"]["receipt"]["receipt"].clone()).unwrap();
+    assert_eq!(receipt.assignment_id, issue.receipt_binding.assignment_id);
+    assert_eq!(receipt.session_id, spec.session_id);
+    assert_eq!(receipt.role_id, spec.role_id);
+    assert_eq!(receipt.mode, spec.mode);
+    assert_eq!(receipt.tool_call_id, "checkpoint-call-1");
+    let canonical = drivers::evidence::canonical_json(&handoff).unwrap();
+    assert_eq!(receipt.handoff_digest.0, sha256_hex(&canonical));
+    assert_eq!(receipt.handoff, handoff);
+
+    let mut malformed = checkpoint.clone();
+    malformed["payload"]["request"]["request_id"] = json!("checkpoint-request-2");
+    malformed["payload"]["request"]["tool_call_id"] = json!("checkpoint-call-2");
+    malformed["payload"]["request"]["raw_payload"]["critical_state"]
+        .as_object_mut()
+        .unwrap()
+        .remove("atom_ledger");
+    let retry = seam::handle_line(&malformed.to_string(), &mut state).unwrap();
+    assert_eq!(retry.payload["response"]["outcome"], "RETRY");
+    assert_eq!(
+        retry.payload["response"]["diagnostic"]["errors"][0]["code"],
+        "checkpoint.handoff"
+    );
+
+    // A checkpoint is control evidence only. The exact assignment remains
+    // live and may subsequently terminalize only through its generated submit.
+    let raw: serde_json::Value = serde_json::from_str(&task_atoms("CP01-A")).unwrap();
+    let submit = json!({"v":1,"id":61,"kind":"child-control","payload":{
+        "broker_capability":fixture.broker_capability(),"request":{
+            "schema":"autopilot.child_control_request.v1","request_id":"submit-after-checkpoint",
+            "token":spec.child_control_token,"run_id":issue.receipt_binding.run_id,
+            "assignment_id":issue.receipt_binding.assignment_id,"attempt":issue.receipt_binding.attempt,
+            "tool_call_id":"submit-call-after-checkpoint","kind":"submit",
+            "tool_name":issue.receipt_binding.tool_name,"profile_id":issue.receipt_binding.profile_id,
+            "raw_payload":raw,
+            "runtime_evidence":{"schema":"autopilot.child_control_runtime_evidence.v1","delivery_policy_denials":null,"approved_command_executions":null}
+        }
+    }});
+    let submitted = seam::handle_line(&submit.to_string(), &mut state).unwrap();
+    assert_eq!(submitted.payload["response"]["outcome"], "ACCEPT");
+    assert_eq!(submitted.payload["response"]["receipt"]["kind"], "submit");
+}
+
+#[test]
 fn blocked_latch_is_rooted_replayed_and_observed_once() {
     let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
     let fixture = Fixture::new("blocked-latch");

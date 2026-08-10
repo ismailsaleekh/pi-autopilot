@@ -549,6 +549,7 @@ pub struct TerminalMessage {
     pub text: Option<String>,
     pub error_message: Option<String>,
     pub details: Option<Value>,
+    pub is_error: Option<bool>,
 }
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub enum CompactionReason {
@@ -652,6 +653,8 @@ pub(crate) struct AgentMessage {
     #[serde(rename = "errorMessage")]
     pub error_message: Option<String>,
     pub details: Option<Value>,
+    #[serde(rename = "isError")]
+    pub is_error: Option<bool>,
 }
 impl AgentMessage {
     pub(crate) fn into_terminal(self) -> TerminalMessage {
@@ -665,6 +668,7 @@ impl AgentMessage {
             text: self.content.map(extract_text),
             error_message: self.error_message,
             details: self.details,
+            is_error: self.is_error,
         }
     }
 }

@@ -1767,6 +1767,48 @@ export const SUBMIT_TOOLS: readonly SubmitToolDescriptor[] = [
   { profile_id: "validation-status.v3", name: "autopilot_emit_status", label: "Submit validation status", boundary_id: "autopilot.validation_submission.v3", result_contract: "autopilot.validation_result.v3", schema_digest: VALIDATION_SUBMISSION_V3_TOOL_SCHEMA_DIGEST, parameters: VALIDATION_SUBMISSION_V3_TOOL_PARAMETERS },
 ] as const;
 
+export const AGENT_HANDOFF_TOOL_PARAMETERS = {
+  "additionalProperties": true,
+  "properties": {
+    "completed": {
+      "description": "Bounded finished obligations/results that must survive compaction.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "critical_state": {
+      "additionalProperties": true,
+      "description": "Role-specific slots; values must be scalar or arrays of scalar as declared in checkpoint-policy.kdl.",
+      "type": "object"
+    },
+    "next_action": {
+      "description": "Immediate next action after resume.",
+      "type": "string"
+    },
+    "remaining": {
+      "description": "Bounded unfinished obligations/results that must survive compaction.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "schema": {
+      "const": "autopilot.agent-handoff.v1",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema",
+    "completed",
+    "remaining",
+    "critical_state",
+    "next_action"
+  ],
+  "type": "object"
+} as TSchema;
+export const AGENT_HANDOFF_TOOL_SCHEMA_DIGEST = "755c5d282fc7c1b1dcbec38f68a0b6096879b142c33e41375673b8d5f116245a";
+
 export const BLOCKED_REPORT_TOOL_PARAMETERS = {
   "additionalProperties": false,
   "properties": {
@@ -1838,6 +1880,8 @@ export interface UniversalChildToolDescriptor extends SubmitToolDescriptor {
 }
 
 export const UNIVERSAL_CHILD_TOOLS: readonly UniversalChildToolDescriptor[] = [
+  { profile_id: "autopilot.agent-handoff.v1:autopilot_checkpoint", name: "autopilot_checkpoint", label: "Checkpoint assignment", description: "Use only after the parent runner requests a context checkpoint. Finish the nearest atomic action, then submit the bounded handoff. ACCEPT pauses this prompt for same-session manual compaction and does not complete, validate, integrate, or close the assignment. RETRY means correct the handoff and call this tool again in the same session.", boundary_id: "autopilot.agent-handoff.v1", result_contract: "autopilot.agent-handoff.v1", schema_digest: AGENT_HANDOFF_TOOL_SCHEMA_DIGEST, parameters: AGENT_HANDOFF_TOOL_PARAMETERS },
   { profile_id: "autopilot.blocked_report.v1:autopilot_report_blocked", name: "autopilot_report_blocked", label: "Report blocked", description: "NEVER use this tool unless you are genuinely stuck and no further work is possible. Accepted use immediately terminates the ENTIRE workstream and process, including every parallel line of work. Never use it for an ordinary retry — if your submit was rejected, fix the reported problem and submit again.", boundary_id: "autopilot.blocked_report.v1", result_contract: "autopilot.blocked_report.v1", schema_digest: BLOCKED_REPORT_TOOL_SCHEMA_DIGEST, parameters: BLOCKED_REPORT_TOOL_PARAMETERS },
 ] as const;
-export const BLOCKED_REPORT_TOOL = UNIVERSAL_CHILD_TOOLS[0]!;
+export const CHECKPOINT_TOOL = UNIVERSAL_CHILD_TOOLS.find((tool) => tool.profile_id === "autopilot.agent-handoff.v1:autopilot_checkpoint")!;
+export const BLOCKED_REPORT_TOOL = UNIVERSAL_CHILD_TOOLS.find((tool) => tool.profile_id === "autopilot.blocked_report.v1:autopilot_report_blocked")!;

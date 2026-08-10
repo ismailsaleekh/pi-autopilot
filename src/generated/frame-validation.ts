@@ -77,7 +77,8 @@ const FRAME_VALIDATION_DESCRIPTORS = {
     ],
     "child-control-request-kind": [
       "submit",
-      "blocked"
+      "blocked",
+      "checkpoint"
     ],
     "closure_verdict": [
       "PASS",

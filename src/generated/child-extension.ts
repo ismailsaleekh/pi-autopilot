@@ -2,6 +2,6 @@
 // Child add-on digest covers this wrapper plus ../../child-runtime/child-extension-runtime.ts.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { CHILD_RECEIPT_ENTRY, runAutopilotChild } from "../../child-runtime/child-extension-runtime.ts";
-import { BLOCKED_REPORT_TOOL, SUBMIT_TOOLS } from "./tool-schemas.ts";
+import { SUBMIT_TOOLS, UNIVERSAL_CHILD_TOOLS } from "./tool-schemas.ts";
 export { CHILD_RECEIPT_ENTRY };
-export default function(pi: ExtensionAPI): void { runAutopilotChild(pi, SUBMIT_TOOLS, BLOCKED_REPORT_TOOL, import.meta.url); }
+export default function(pi: ExtensionAPI): void { runAutopilotChild(pi, SUBMIT_TOOLS, UNIVERSAL_CHILD_TOOLS, import.meta.url); }

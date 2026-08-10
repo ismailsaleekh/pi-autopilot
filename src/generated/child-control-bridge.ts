@@ -7,9 +7,9 @@ import type { ChildControlAcceptReceipt, ChildControlRequest, ChildControlRespon
 
 export const CHILD_CONTROL_PLACEHOLDER_SENTINEL = "__autopilot_child_control_placeholder__:";
 export const CHILD_CONTROL_TERMINAL_PROFILE_COUNT = 14;
-export const CHILD_CONTROL_PLACEHOLDER_SCHEMA_VALIDATED_COUNT = 15;
+export const CHILD_CONTROL_PLACEHOLDER_SCHEMA_VALIDATED_COUNT = 16;
 
-export type ChildControlKind = "submit" | "blocked";
+export type ChildControlKind = "submit" | "blocked" | "checkpoint";
 type JsonTree = null | boolean | number | string | readonly JsonTree[] | { readonly [key: string]: JsonTree };
 
 export interface ChildControlToolMetadata {
@@ -24,6 +24,26 @@ export interface ChildControlToolMetadata {
 }
 
 export const CHILD_CONTROL_TOOL_METADATA = [
+  {
+    "boundary_id": "autopilot.agent-handoff.v1",
+    "kind": "checkpoint",
+    "placeholder": {
+      "completed": [
+        "x"
+      ],
+      "critical_state": {},
+      "next_action": "x",
+      "remaining": [
+        "x"
+      ],
+      "schema": "autopilot.agent-handoff.v1"
+    },
+    "placeholder_pointer": "/completed/0",
+    "profile_id": "autopilot.agent-handoff.v1:autopilot_checkpoint",
+    "result_contract": "autopilot.agent-handoff.v1",
+    "schema_digest": "755c5d282fc7c1b1dcbec38f68a0b6096879b142c33e41375673b8d5f116245a",
+    "tool_name": "autopilot_checkpoint"
+  },
   {
     "boundary_id": "autopilot.blocked_report.v1",
     "kind": "blocked",
@@ -990,7 +1010,31 @@ function throwCoreRetry(value: unknown): never {
 
 function isChildControlAcceptReceipt(value: unknown): value is ChildControlAcceptReceipt {
   if (!isRecord(value) || !closedKeys(value, ["kind", "schema", "receipt"]) || value.schema !== "autopilot.child_control_accept_receipt.v1") return false;
-  return value.kind === "submit" ? isSubmitReceipt(value.receipt) : value.kind === "blocked" && isBlockedReceipt(value.receipt);
+  if (value.kind === "submit") return isSubmitReceipt(value.receipt);
+  if (value.kind === "blocked") return isBlockedReceipt(value.receipt);
+  return value.kind === "checkpoint" && isCheckpointReceipt(value.receipt);
+}
+
+function isCheckpointReceipt(value: unknown): boolean {
+  if (!isRecord(value) || !closedKeys(value, ["schema", "receipt_id", "run_id", "run_revision", "assignment_id", "attempt", "role_id", "mode", "session_id", "profile_id", "tool_name", "tool_call_id", "handoff_digest", "handoff"])) return false;
+  return value.schema === "autopilot.checkpoint_receipt.v1"
+    && isUuidV7(value.receipt_id)
+    && [value.run_id, value.assignment_id, value.role_id, value.mode, value.session_id, value.profile_id, value.tool_name, value.tool_call_id].every(isNonemptyString)
+    && isU64(value.run_revision)
+    && isU32(value.attempt)
+    && isDigest(value.handoff_digest)
+    && isAgentHandoff(value.handoff)
+    && sha256(canonicalJson(value.handoff)) === value.handoff_digest;
+}
+
+function isAgentHandoff(value: unknown): boolean {
+  if (!isRecord(value) || value.schema !== "autopilot.agent-handoff.v1") return false;
+  return Array.isArray(value.completed)
+    && value.completed.every(isNonemptyString)
+    && Array.isArray(value.remaining)
+    && value.remaining.every(isNonemptyString)
+    && isRecord(value.critical_state)
+    && isNonemptyString(value.next_action);
 }
 
 function isSubmitReceipt(value: unknown): boolean {
@@ -1145,6 +1189,10 @@ function isDigest(value: unknown): value is string {
   return typeof value === "string" && /^[0-9a-f]{64}$/u.test(value);
 }
 
+function sha256(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
 function isU32(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= 0xffffffff;
 }
@@ -1236,6 +1284,6 @@ function canonicalJson(value: unknown): string {
     if (encoded !== undefined) return encoded;
   }
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  if (isRecord(value)) return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  if (isRecord(value)) return `{${Object.keys(value).sort((left, right) => Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"))).map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
   throw new ChildControlBridgeProtocolError("protocol", "child-control value is not JSON");
 }

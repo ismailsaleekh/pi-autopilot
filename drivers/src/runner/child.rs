@@ -4,10 +4,15 @@ use std::io::{Read, Write};
 #[cfg(unix)]
 use std::net::Shutdown as NetShutdown;
 #[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::checkpoint::{
+    AgentHandoff, CheckpointPolicy, ContextBudget, ContextPercent, ResumeOverlay,
+};
 use crate::runner::rpc::{
     AppendedEntry, ChildControlLaunchConfig, DeliveryPolicyLaunchConfig, RpcClient, RpcCommand,
     RpcCommandKind, RpcEvent, RpcFrame, RpcResponse, RpcSpawnConfig, ToolCarrierDetails,
@@ -15,8 +20,8 @@ use crate::runner::rpc::{
 };
 
 use kernel::generated::{
-    AgentRunSpec, AgentRunSpecV5, ChildControlAcceptReceipt, ChildControlRuntimeEvidence,
-    SessionContinuity, TaskDocument,
+    AgentRunSpec, AgentRunSpecV5, CheckpointReceipt, ChildControlAcceptReceipt,
+    ChildControlRuntimeEvidence, SessionContinuity, TaskDocument,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -27,6 +32,8 @@ pub const MAX_AGENT_RUN_SPEC_BYTES: usize = 2 << 20;
 pub const MAX_RENDERED_PROMPT_BYTES: usize = 4 << 20;
 pub const MAX_VALIDATION_ARTIFACT_BYTES: usize = 2 << 20;
 const RUNTIME_ADDON_DIGEST_FIELD: &str = concat!("runtime_", "ext", "ension_digest");
+const V5_CHECKPOINT_PROFILE_ID: &str = "autopilot.agent-handoff.v1:autopilot_checkpoint";
+const V5_CHECKPOINT_TOOL_NAME: &str = "autopilot_checkpoint";
 #[rustfmt::skip]
 fn runtime_addon(spec: &AgentRunSpec) -> Option<(&kernel::generated::Path, &kernel::generated::Digest)> { spec.runtime_extension_path.as_ref().zip(spec.runtime_extension_digest.as_ref()) }
 
@@ -367,6 +374,7 @@ pub fn main(args: &[String]) -> Result<(), String> {
         let control = super::v5_child_control_launch_config(&fresh)
             .map_err(|error| format!("agent-run V5 child-control authority drift: {error}"))?;
         validate_receipt_v1_spec(&facade, &spec_path)?;
+        validate_v5_checkpoint_startup(&fresh)?;
         let prompt_path = PathBuf::from(&facade.prompt_path.0);
         let prompt = read_bounded_utf8(
             &prompt_path,
@@ -412,43 +420,98 @@ enum V5AcceptedTerminal {
     },
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum V5AcceptedControl {
+    Terminal(V5AcceptedTerminal),
+    Checkpoint {
+        receipt: CheckpointReceipt,
+        handoff: AgentHandoff,
+    },
+}
+
 #[derive(Debug, Clone)]
 struct V5SuccessfulTool {
     tool_call_id: String,
+    tool_name: String,
     details: Value,
-    accepted: V5AcceptedTerminal,
+    accepted: V5AcceptedControl,
     message_correlated: bool,
 }
 
-fn v5_accepted_if_correlated(
-    successful: &Option<V5SuccessfulTool>,
-    prompt_response_seen: bool,
-) -> Option<V5AcceptedTerminal> {
-    successful
-        .as_ref()
-        .filter(|item| prompt_response_seen && item.message_correlated)
-        .map(|item| item.accepted.clone())
+#[derive(Debug, Clone)]
+struct V5ToolResultMessage {
+    tool_name: String,
+    details: Option<Value>,
+    is_error: bool,
 }
 
-/// Fresh V5 has one live Pi session. A generated bridge turns a Core RETRY
-/// into an ordinary nonterminating tool error, so this loop deliberately has
-/// no counter, deadline, repair prompt, or tool freeze.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum V5SteerKind {
+    SoftWarning,
+    Checkpoint,
+}
+
+struct V5CycleState {
+    prompt_id: String,
+    prompt_response_seen: bool,
+    agent_end_seen: bool,
+    successful: Option<V5SuccessfulTool>,
+    tool_result_ids: BTreeSet<String>,
+    tool_result_messages: BTreeMap<String, V5ToolResultMessage>,
+    pending_stats: BTreeMap<String, u64>,
+    pending_steers: BTreeMap<String, V5SteerKind>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct V5Checkpoint {
+    observed_context: ContextPercent,
+    resume_overlay: ResumeOverlay,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct V5CheckpointRef {
+    path: String,
+    digest: String,
+}
+
+impl V5CycleState {
+    fn new(prompt_id: String) -> Self {
+        Self {
+            prompt_id,
+            prompt_response_seen: false,
+            agent_end_seen: false,
+            successful: None,
+            tool_result_ids: BTreeSet::new(),
+            tool_result_messages: BTreeMap::new(),
+            pending_stats: BTreeMap::new(),
+            pending_steers: BTreeMap::new(),
+        }
+    }
+
+    fn has_pending_control(&self) -> bool {
+        !self.pending_stats.is_empty() || !self.pending_steers.is_empty()
+    }
+}
+
+/// Fresh V5 has one live Pi process and one Pi session. Core RETRY remains an
+/// ordinary in-turn tool error. At observed context boundaries, only the
+/// package policy may warn, request a typed checkpoint, manually compact after
+/// settlement, and inject the checkpoint-derived resume overlay. There is no
+/// attempt counter, deadline, replacement agent, or context-free replay.
 fn run_v5_child_control_session(
     runner: &mut RpcAssignment,
     facade: &AgentRunSpec,
     fresh: &AgentRunSpecV5,
     prompt: &str,
 ) -> Result<V5AcceptedTerminal, String> {
-    let prompt_id = runner.next_id("v5-prompt");
-    runner
-        .client
-        .send_command(RpcCommand::prompt(prompt_id.clone(), prompt.to_owned()))
-        .map_err(|error| format!("agent-run V5 rpc prompt failed: {error}"))?;
+    let mut warning_sent = false;
+    let mut warning_required: Option<ContextPercent> = None;
+    let mut checkpoint_request: Option<ContextPercent> = None;
+    let mut checkpoint_instruction_dispatched = false;
+    let mut latest_budget: Option<(u64, ContextBudget)> = None;
+    let mut stats_sequence = 0_u64;
+    let mut cycle = V5CycleState::new(runner.send_v5_prompt(prompt)?);
 
-    let mut prompt_response_seen = false;
-    let mut successful: Option<V5SuccessfulTool> = None;
-    let mut tool_result_ids = BTreeSet::new();
-    let mut tool_result_details = BTreeMap::new();
     loop {
         let frame = runner
             .client
@@ -456,22 +519,36 @@ fn run_v5_child_control_session(
             .map_err(|error| format!("agent-run V5 rpc stream failed: {error}"))?
             .ok_or_else(|| "agent-run V5 rpc stream ended before agent_settled".to_owned())?;
         match frame {
-            RpcFrame::Response(response) if response.id == prompt_id => {
-                if response.command != RpcCommandKind::Prompt || !response.success {
-                    return Err("agent-run V5 prompt response drift".to_owned());
-                }
-                prompt_response_seen = true;
-                if let Some(accepted) = v5_accepted_if_correlated(&successful, prompt_response_seen)
+            RpcFrame::Response(response) => runner.handle_v5_runtime_response(
+                facade,
+                &mut cycle,
+                response,
+                &mut latest_budget,
+                &mut warning_sent,
+                &mut warning_required,
+                &mut checkpoint_request,
+                &mut checkpoint_instruction_dispatched,
+                false,
+            )?,
+            RpcFrame::Event(RpcEvent::AgentStart) => {
+                let retry_start = cycle.agent_end_seen;
+                cycle.agent_end_seen = false;
+                if checkpoint_request.is_some()
+                    && (retry_start || !checkpoint_instruction_dispatched)
                 {
-                    return Ok(accepted);
+                    let checkpoint_prompt = runner.checkpoint_prompt(facade)?;
+                    runner.send_v5_steer(&mut cycle, V5SteerKind::Checkpoint, checkpoint_prompt)?;
+                    checkpoint_instruction_dispatched = true;
+                } else if let Some(percent) = warning_required
+                    && !warning_sent
+                {
+                    let warning = runner.warning_prompt(facade, percent);
+                    runner.send_v5_steer(&mut cycle, V5SteerKind::SoftWarning, warning)?;
+                    warning_required = None;
+                    warning_sent = true;
                 }
             }
-            RpcFrame::Response(response) => {
-                return Err(format!(
-                    "agent-run V5 unexpected rpc response id {} during child-control session",
-                    response.id
-                ));
-            }
+            RpcFrame::Event(RpcEvent::AgentEnd { .. }) => cycle.agent_end_seen = true,
             RpcFrame::Event(RpcEvent::ToolExecutionStart) => {}
             RpcFrame::Event(RpcEvent::ToolExecutionEnd {
                 tool_call_id,
@@ -480,119 +557,268 @@ fn run_v5_child_control_session(
                 is_error,
                 terminate,
             }) => {
-                // Pi executes a parallel batch concurrently. A receipt already
-                // correlated from this prompt is durable; later tool activity
-                // belongs to work normal process shutdown will cancel.
-                if successful.is_some() {
-                    continue;
-                }
-                let Some(kind) = v5_child_control_tool_kind(facade, &tool_name)? else {
-                    continue;
-                };
-                if is_error && !terminate {
-                    // RETRY is deliberately model-visible and nonterminal.
-                    continue;
-                }
-                if is_error || !terminate {
+                let kind = v5_child_control_tool_kind(facade, &tool_name)?;
+                if kind.is_none() && terminate {
                     return Err(format!(
-                        "agent-run V5 child-control tool {tool_name} has invalid isError={is_error} terminate={terminate} outcome"
+                        "agent-run V5 non-control tool {tool_name} attempted terminating authority"
                     ));
                 }
-                let details = details.ok_or_else(|| {
-                    format!(
-                        "agent-run V5 child-control tool {tool_name} returned no receipt details"
-                    )
-                })?;
-                let receipt: ChildControlAcceptReceipt = serde_json::from_value(details.clone())
-                    .map_err(|error| {
-                        format!(
-                            "agent-run V5 child-control tool {tool_name} details are not a generated ACCEPT receipt: {error}"
-                        )
-                    })?;
-                let accepted =
-                    verify_v5_accept_receipt(facade, fresh, kind, &tool_call_id, &receipt)?;
-                let message_correlated = if let Some(message_details) =
-                    tool_result_details.get(&tool_call_id)
-                {
-                    if canonical_detail_bytes(&details)? != canonical_detail_bytes(message_details)?
-                    {
-                        return Err(format!(
-                            "agent-run V5 tool details drift between tool_execution_end and toolResult for {tool_call_id}"
-                        ));
+                if cycle.successful.is_some() && kind.is_none() {
+                    return Err(format!(
+                        "agent-run V5 ordinary tool {tool_name} completed after a pending ACCEPT"
+                    ));
+                }
+                if let Some(kind) = kind {
+                    // A parallel RETRY may finish after a pending ACCEPT, but
+                    // every later successful or malformed control candidate is
+                    // a multiple-terminal protocol violation.
+                    if cycle.successful.is_some() {
+                        if !(is_error && !terminate) {
+                            return Err(format!(
+                                "agent-run V5 received multiple terminal candidates; later tool {tool_name} has isError={is_error} terminate={terminate}"
+                            ));
+                        }
+                    } else if is_error && !terminate {
+                        // Core RETRY is model-visible and stays in this session.
+                    } else {
+                        if is_error || !terminate {
+                            return Err(format!(
+                                "agent-run V5 child-control tool {tool_name} has invalid isError={is_error} terminate={terminate} outcome"
+                            ));
+                        }
+                        if kind == V5ChildControlTool::Checkpoint
+                            && (checkpoint_request.is_none() || !checkpoint_instruction_dispatched)
+                        {
+                            return Err(
+                                "agent-run V5 checkpoint ACCEPT before a parent-observed checkpoint request or its dispatched instruction"
+                                    .to_owned(),
+                            );
+                        }
+                        let details = details.ok_or_else(|| {
+                            format!(
+                                "agent-run V5 child-control tool {tool_name} returned no receipt details"
+                            )
+                        })?;
+                        let receipt: ChildControlAcceptReceipt =
+                            serde_json::from_value(details.clone()).map_err(|error| {
+                                format!(
+                                    "agent-run V5 child-control tool {tool_name} details are not a generated ACCEPT receipt: {error}"
+                                )
+                            })?;
+                        let accepted = verify_v5_accept_receipt(
+                            runner,
+                            facade,
+                            fresh,
+                            kind,
+                            &tool_call_id,
+                            &receipt,
+                        )?;
+                        let message_correlated =
+                            if let Some(message) = cycle.tool_result_messages.get(&tool_call_id) {
+                                correlate_v5_tool_result_message(
+                                    &tool_call_id,
+                                    &tool_name,
+                                    &details,
+                                    message,
+                                )?;
+                                true
+                            } else {
+                                false
+                            };
+                        cycle.successful = Some(V5SuccessfulTool {
+                            tool_call_id,
+                            tool_name,
+                            details,
+                            accepted,
+                            message_correlated,
+                        });
                     }
-                    true
-                } else {
-                    false
-                };
-                successful = Some(V5SuccessfulTool {
-                    tool_call_id,
-                    details,
-                    accepted,
-                    message_correlated,
-                });
-                if let Some(accepted) = v5_accepted_if_correlated(&successful, prompt_response_seen)
-                {
-                    return Ok(accepted);
+                }
+                if cycle.successful.is_none() {
+                    runner.request_v5_stats(&mut cycle, &mut stats_sequence)?;
                 }
             }
             RpcFrame::Event(RpcEvent::MessageEnd { message }) if message.role == "toolResult" => {
                 let tool_call_id = message
                     .tool_call_id
                     .ok_or_else(|| "agent-run V5 toolResult missing toolCallId".to_owned())?;
-                if !tool_result_ids.insert(tool_call_id.clone()) {
+                let tool_name = message
+                    .tool_name
+                    .ok_or_else(|| "agent-run V5 toolResult missing toolName".to_owned())?;
+                let is_error = message
+                    .is_error
+                    .ok_or_else(|| "agent-run V5 toolResult missing isError".to_owned())?;
+                if !cycle.tool_result_ids.insert(tool_call_id.clone()) {
                     return Err(format!(
                         "agent-run V5 received duplicate toolResult for {tool_call_id}"
                     ));
                 }
-                let Some(details) = message.details else {
-                    continue;
+                if let Some(accepted) = cycle.successful.as_ref()
+                    && accepted.tool_call_id != tool_call_id
+                    && !(is_error && v5_child_control_tool_kind(facade, &tool_name)?.is_some())
+                {
+                    return Err(format!(
+                        "agent-run V5 unrelated toolResult {tool_name}/{tool_call_id} followed a pending ACCEPT"
+                    ));
+                }
+                let result_message = V5ToolResultMessage {
+                    tool_name,
+                    details: message.details,
+                    is_error,
                 };
-                if tool_result_details
-                    .insert(tool_call_id.clone(), details.clone())
+                if cycle
+                    .tool_result_messages
+                    .insert(tool_call_id.clone(), result_message.clone())
                     .is_some()
                 {
                     return Err(format!(
-                        "agent-run V5 received duplicate toolResult details for {tool_call_id}"
+                        "agent-run V5 received duplicate toolResult message for {tool_call_id}"
                     ));
                 }
-                if let Some(accepted) = successful
+                if let Some(accepted) = cycle
+                    .successful
                     .as_mut()
                     .filter(|item| item.tool_call_id == tool_call_id)
                 {
-                    if canonical_detail_bytes(&accepted.details)?
-                        != canonical_detail_bytes(&details)?
-                    {
-                        return Err(format!(
-                            "agent-run V5 tool details drift between tool_execution_end and toolResult for {tool_call_id}"
-                        ));
-                    }
+                    correlate_v5_tool_result_message(
+                        &tool_call_id,
+                        &accepted.tool_name,
+                        &accepted.details,
+                        &result_message,
+                    )?;
                     accepted.message_correlated = true;
                 }
-                if let Some(accepted) = v5_accepted_if_correlated(&successful, prompt_response_seen)
-                {
-                    return Ok(accepted);
+            }
+            RpcFrame::Event(RpcEvent::MessageEnd { .. }) => {
+                if cycle.successful.is_some() {
+                    return Err(
+                        "agent-run V5 assistant message followed a pending ACCEPT".to_owned()
+                    );
+                }
+                runner.request_v5_stats(&mut cycle, &mut stats_sequence)?;
+            }
+            RpcFrame::Event(RpcEvent::TurnEnd) => {
+                if cycle.successful.is_none() {
+                    runner.request_v5_stats(&mut cycle, &mut stats_sequence)?;
                 }
             }
             RpcFrame::Event(RpcEvent::AgentSettled) => {
-                if !prompt_response_seen {
+                if !cycle.prompt_response_seen {
                     return Err(
                         "agent-run V5 prompt response missing before agent_settled".to_owned()
                     );
                 }
-                let accepted = successful.ok_or_else(|| {
-                    "agent-run V5 session settled without an accepted child-control receipt"
-                        .to_owned()
-                })?;
-                if !accepted.message_correlated {
-                    return Err(format!(
-                        "agent-run V5 terminating tool missing correlated toolResult details for {}",
-                        accepted.tool_call_id
-                    ));
+                if cycle.successful.is_none() {
+                    runner.request_v5_stats(&mut cycle, &mut stats_sequence)?;
                 }
-                return Ok(accepted.accepted);
+                while cycle.has_pending_control() {
+                    let pending = runner
+                        .client
+                        .next_frame()
+                        .map_err(|error| {
+                            format!("agent-run V5 rpc stream failed after settlement: {error}")
+                        })?
+                        .ok_or_else(|| {
+                            "agent-run V5 rpc stream ended before boundary telemetry completed"
+                                .to_owned()
+                        })?;
+                    match pending {
+                        RpcFrame::Response(response) => runner.handle_v5_runtime_response(
+                            facade,
+                            &mut cycle,
+                            response,
+                            &mut latest_budget,
+                            &mut warning_sent,
+                            &mut warning_required,
+                            &mut checkpoint_request,
+                            &mut checkpoint_instruction_dispatched,
+                            true,
+                        )?,
+                        RpcFrame::Event(event) => {
+                            return Err(format!(
+                                "agent-run V5 rpc event after agent_settled while awaiting control responses: {event:?}"
+                            ));
+                        }
+                    }
+                }
+
+                if let Some(accepted) = cycle.successful.take() {
+                    if !accepted.message_correlated {
+                        return Err(format!(
+                            "agent-run V5 terminating tool missing correlated toolResult details for {}",
+                            accepted.tool_call_id
+                        ));
+                    }
+                    match accepted.accepted {
+                        V5AcceptedControl::Terminal(terminal) => return Ok(terminal),
+                        V5AcceptedControl::Checkpoint { receipt, handoff } => {
+                            let observed = checkpoint_request.ok_or_else(|| {
+                                "agent-run V5 received checkpoint ACCEPT before a parent-observed checkpoint request".to_owned()
+                            })?;
+                            if !checkpoint_instruction_dispatched {
+                                return Err(
+                                    "agent-run V5 checkpoint ACCEPT lacked a dispatched checkpoint instruction"
+                                        .to_owned(),
+                                );
+                            }
+                            runner.verify_settled_queue_state(facade)?;
+                            let checkpoint = runner.checkpoint_record(facade, observed, handoff)?;
+                            let checkpoint_ref = persist_v5_checkpoint(fresh, &receipt)?;
+                            runner.manual_compact(&checkpoint)?;
+                            runner.verify_post_compact_state(facade)?;
+                            let resume = runner.resume_prompt(
+                                facade,
+                                &checkpoint,
+                                &checkpoint_ref,
+                                &receipt,
+                            )?;
+                            warning_sent = false;
+                            warning_required = None;
+                            checkpoint_request = None;
+                            checkpoint_instruction_dispatched = false;
+                            latest_budget = None;
+                            cycle = V5CycleState::new(runner.send_v5_prompt(&resume)?);
+                            continue;
+                        }
+                    }
+                }
+
+                let next_prompt = if checkpoint_request.is_some() {
+                    checkpoint_instruction_dispatched = true;
+                    runner.checkpoint_prompt(facade)?
+                } else {
+                    match latest_budget.map(|(_, budget)| budget) {
+                        Some(ContextBudget::Known(percent)) => {
+                            let continuation = runner.continuation_prompt(facade, percent)?;
+                            if let Some(warning_percent) = warning_required
+                                && !warning_sent
+                            {
+                                warning_sent = true;
+                                warning_required = None;
+                                format!(
+                                    "{}\n\n{continuation}",
+                                    runner.warning_prompt(facade, warning_percent)
+                                )
+                            } else {
+                                continuation
+                            }
+                        }
+                        Some(ContextBudget::Unknown) | None => {
+                            return Err(
+                                "agent-run V5 context usage is unknown at a clean no-ACCEPT settlement; refusing context-free continuation"
+                                    .to_owned(),
+                            );
+                        }
+                    }
+                };
+                runner.verify_settled_queue_state(facade)?;
+                cycle = V5CycleState::new(runner.send_v5_prompt(&next_prompt)?);
             }
-            // Threshold and overflow compaction preserve this same Pi session.
-            // Fresh V5 has no context deadline, repair turn, or tool reset here.
+            RpcFrame::Event(RpcEvent::CompactionStart { reason }) => {
+                return Err(format!(
+                    "agent-run V5 Pi attempted automatic compaction: {reason:?}"
+                ));
+            }
             RpcFrame::Event(_) => {}
         }
     }
@@ -601,6 +827,7 @@ fn run_v5_child_control_session(
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum V5ChildControlTool {
     Submit,
+    Checkpoint,
     Blocked,
 }
 
@@ -617,15 +844,23 @@ fn v5_child_control_tool_kind(
     if tool_name == submit.1 {
         return Ok(Some(V5ChildControlTool::Submit));
     }
-    let blocked = kernel::generated::UNIVERSAL_CHILD_TOOLS
-        .first()
-        .ok_or_else(|| "agent-run V5 lacks generated blocked tool metadata".to_owned())?;
+    let checkpoint = v5_universal_tool(V5_CHECKPOINT_PROFILE_ID, V5_CHECKPOINT_TOOL_NAME)?;
+    if tool_name == checkpoint.1 {
+        return Ok(Some(V5ChildControlTool::Checkpoint));
+    }
+    let blocked = v5_universal_tool(
+        "autopilot.blocked_report.v1:autopilot_report_blocked",
+        "autopilot_report_blocked",
+    )?;
     if tool_name == blocked.1 {
         return Ok(Some(V5ChildControlTool::Blocked));
     }
     if kernel::generated::TERMINAL_PROFILES
         .iter()
         .any(|profile| profile.1 == tool_name)
+        || kernel::generated::UNIVERSAL_CHILD_TOOLS
+            .iter()
+            .any(|profile| profile.1 == tool_name)
     {
         return Err(format!(
             "agent-run V5 received an unexpected terminal tool {tool_name}"
@@ -634,13 +869,36 @@ fn v5_child_control_tool_kind(
     Ok(None)
 }
 
+fn v5_universal_tool(
+    profile_id: &str,
+    tool_name: &str,
+) -> Result<
+    &'static (
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+    ),
+    String,
+> {
+    kernel::generated::UNIVERSAL_CHILD_TOOLS
+        .iter()
+        .find(|row| row.0 == profile_id && row.1 == tool_name)
+        .ok_or_else(|| {
+            format!("agent-run V5 lacks generated universal tool metadata for {profile_id}")
+        })
+}
+
 fn verify_v5_accept_receipt(
+    runner: &RpcAssignment,
     facade: &AgentRunSpec,
     fresh: &AgentRunSpecV5,
     kind: V5ChildControlTool,
     tool_call_id: &str,
     receipt: &ChildControlAcceptReceipt,
-) -> Result<V5AcceptedTerminal, String> {
+) -> Result<V5AcceptedControl, String> {
     let attempt = fresh
         .attempt
         .filter(|attempt| *attempt != 0)
@@ -673,12 +931,50 @@ fn verify_v5_accept_receipt(
             {
                 return Err("agent-run V5 submit receipt identity drift".to_owned());
             }
-            Ok(V5AcceptedTerminal::Submit)
+            Ok(V5AcceptedControl::Terminal(V5AcceptedTerminal::Submit))
+        }
+        (
+            V5ChildControlTool::Checkpoint,
+            ChildControlAcceptReceipt::Checkpoint { schema, receipt },
+        ) => {
+            let checkpoint = v5_universal_tool(V5_CHECKPOINT_PROFILE_ID, V5_CHECKPOINT_TOOL_NAME)?;
+            let canonical_handoff =
+                crate::evidence::canonical_json(&receipt.handoff).map_err(|error| {
+                    format!("agent-run V5 checkpoint handoff canonicalization failed: {error}")
+                })?;
+            let handoff: AgentHandoff = serde_json::from_value(receipt.handoff.clone())
+                .map_err(|error| format!("agent-run V5 checkpoint handoff malformed: {error}"))?;
+            let handoff = runner
+                .policy
+                .validate_handoff(&facade.role_id.0, handoff)
+                .map_err(|error| format!("agent-run V5 checkpoint handoff rejected: {error}"))?;
+            if schema.0 != "autopilot.child_control_accept_receipt.v1"
+                || receipt.schema.0 != "autopilot.checkpoint_receipt.v1"
+                || receipt.run_id != fresh.run_id
+                || receipt.run_revision != facade.run_revision
+                || receipt.assignment_id != fresh.assignment_id
+                || receipt.attempt != attempt
+                || receipt.role_id != facade.role_id
+                || receipt.mode != facade.mode
+                || receipt.session_id != facade.session_id
+                || receipt.profile_id != checkpoint.0
+                || receipt.tool_name.0 != checkpoint.1
+                || receipt.tool_call_id != tool_call_id
+                || !is_uuid_v7(&receipt.receipt_id.0)
+                || receipt.handoff_digest.0 != sha256_hex(&canonical_handoff)
+            {
+                return Err("agent-run V5 checkpoint receipt identity drift".to_owned());
+            }
+            Ok(V5AcceptedControl::Checkpoint {
+                receipt: receipt.clone(),
+                handoff,
+            })
         }
         (V5ChildControlTool::Blocked, ChildControlAcceptReceipt::Blocked { schema, receipt }) => {
-            let blocked = kernel::generated::UNIVERSAL_CHILD_TOOLS
-                .first()
-                .ok_or_else(|| "agent-run V5 lacks generated blocked tool metadata".to_owned())?;
+            let blocked = v5_universal_tool(
+                "autopilot.blocked_report.v1:autopilot_report_blocked",
+                "autopilot_report_blocked",
+            )?;
             if schema.0 != "autopilot.child_control_accept_receipt.v1"
                 || receipt.schema.0 != "autopilot.blocked_receipt.v1"
                 || receipt.run_id != fresh.run_id
@@ -695,18 +991,315 @@ fn verify_v5_accept_receipt(
             {
                 return Err("agent-run V5 blocked receipt identity drift".to_owned());
             }
-            Ok(V5AcceptedTerminal::Blocked {
+            Ok(V5AcceptedControl::Terminal(V5AcceptedTerminal::Blocked {
                 receipt_id: receipt.receipt_id.0.clone(),
                 current_tool_call_id: tool_call_id.to_owned(),
-            })
+            }))
         }
         _ => Err("agent-run V5 child-control receipt/tool kind drift".to_owned()),
     }
 }
 
+fn correlate_v5_tool_result_message(
+    tool_call_id: &str,
+    tool_name: &str,
+    details: &Value,
+    message: &V5ToolResultMessage,
+) -> Result<(), String> {
+    if message.tool_name != tool_name || message.is_error {
+        return Err(format!(
+            "agent-run V5 toolResult identity/error drift for {tool_call_id}: expected {tool_name}/isError=false, got {}/isError={}",
+            message.tool_name, message.is_error
+        ));
+    }
+    let message_details = message.details.as_ref().ok_or_else(|| {
+        format!("agent-run V5 terminating toolResult missing details for {tool_call_id}")
+    })?;
+    if canonical_detail_bytes(details)? != canonical_detail_bytes(message_details)? {
+        return Err(format!(
+            "agent-run V5 tool details drift between tool_execution_end and toolResult for {tool_call_id}"
+        ));
+    }
+    Ok(())
+}
+
 fn canonical_detail_bytes(value: &Value) -> Result<Vec<u8>, String> {
     crate::evidence::canonical_json(value)
         .map_err(|error| format!("agent-run V5 receipt canonicalization failed: {error}"))
+}
+
+fn validate_v5_compaction_response(response: &RpcResponse) -> Result<(), String> {
+    let data = response
+        .data
+        .as_ref()
+        .ok_or_else(|| "agent-run V5 manual compaction response missing data".to_owned())?;
+    let value: Value = serde_json::from_str(data)
+        .map_err(|error| format!("agent-run V5 manual compaction response malformed: {error}"))?;
+    let summary = value
+        .get("summary")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "agent-run V5 manual compaction response missing summary".to_owned())?;
+    let first_kept = value
+        .get("firstKeptEntryId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            "agent-run V5 manual compaction response missing firstKeptEntryId".to_owned()
+        })?;
+    let tokens_before = value
+        .get("tokensBefore")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "agent-run V5 manual compaction response missing tokensBefore".to_owned())?;
+    let estimated_after = value
+        .get("estimatedTokensAfter")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            "agent-run V5 manual compaction response missing estimatedTokensAfter".to_owned()
+        })?;
+    if summary.trim().is_empty()
+        || first_kept.trim().is_empty()
+        || tokens_before == 0
+        || estimated_after >= tokens_before
+    {
+        return Err(
+            "agent-run V5 manual compaction response did not prove context reduction".to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn v5_state_value(response: &RpcResponse) -> Result<Value, String> {
+    let data = response
+        .data
+        .as_ref()
+        .ok_or_else(|| "agent-run V5 get_state missing data".to_owned())?;
+    serde_json::from_str(data)
+        .map_err(|error| format!("agent-run V5 get_state malformed data: {error}"))
+}
+
+fn context_budget_from_stats(
+    response: &RpcResponse,
+    expected_session: &str,
+) -> Result<ContextBudget, String> {
+    let data = response
+        .data
+        .as_ref()
+        .ok_or_else(|| "agent-run V5 get_session_stats missing data".to_owned())?;
+    let value: Value = serde_json::from_str(data)
+        .map_err(|error| format!("agent-run V5 get_session_stats malformed data: {error}"))?;
+    let session = value
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "agent-run V5 get_session_stats missing sessionId".to_owned())?;
+    if session != expected_session {
+        return Err(format!(
+            "agent-run V5 session continuity lost in context telemetry: expected {expected_session}, got {session}"
+        ));
+    }
+    let Some(context) = value.get("contextUsage") else {
+        return Ok(ContextBudget::Unknown);
+    };
+    if context.is_null() {
+        return Ok(ContextBudget::Unknown);
+    }
+    let context = context
+        .as_object()
+        .ok_or_else(|| "agent-run V5 contextUsage has wrong type".to_owned())?;
+    match context.get("percent") {
+        Some(Value::Null) | None => Ok(ContextBudget::Unknown),
+        Some(Value::Number(number)) => ContextBudget::known(
+            number
+                .as_f64()
+                .ok_or_else(|| "agent-run V5 context percent was not finite f64".to_owned())?,
+        )
+        .map_err(|error| format!("agent-run V5 context percent invalid: {error:?}")),
+        _ => Err("agent-run V5 context percent has wrong type".to_owned()),
+    }
+}
+
+fn validate_v5_checkpoint_startup(spec: &AgentRunSpecV5) -> Result<(), String> {
+    let session_path = Path::new(&spec.session_dir.0);
+    let run_root = match fs::canonicalize(session_path) {
+        Ok(session_dir) => session_dir
+            .parent()
+            .ok_or_else(|| "agent-run V5 checkpoint session directory has no run root".to_owned())?
+            .to_path_buf(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let parent = session_path.parent().ok_or_else(|| {
+                "agent-run V5 checkpoint session directory has no run root".to_owned()
+            })?;
+            fs::canonicalize(parent).map_err(|parent_error| {
+                format!(
+                    "agent-run V5 checkpoint run root unavailable at {}: {parent_error}",
+                    parent.display()
+                )
+            })?
+        }
+        Err(error) => {
+            return Err(format!(
+                "agent-run V5 checkpoint session directory unavailable at {}: {error}",
+                spec.session_dir.0
+            ));
+        }
+    };
+    let directory = run_root.join("checkpoints");
+    super::reject_link_components_for_path(&directory).map_err(|error| error.to_string())?;
+    match fs::symlink_metadata(&directory) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(metadata) if metadata.file_type().is_dir() => {
+            let continuity = match &spec.session_continuity {
+                SessionContinuity::Fresh => "fresh",
+                SessionContinuity::Resume => "resume",
+            };
+            Err(format!(
+                "agent-run V5 {continuity} startup found prior checkpoint authority; refusing original-prompt replay and requiring an explicit checkpoint-derived recovery path"
+            ))
+        }
+        Ok(_) => Err(format!(
+            "agent-run V5 checkpoint root is not a directory: {}",
+            directory.display()
+        )),
+        Err(error) => Err(format!(
+            "agent-run V5 checkpoint root metadata failed {}: {error}",
+            directory.display()
+        )),
+    }
+}
+
+fn persist_v5_checkpoint(
+    spec: &AgentRunSpecV5,
+    receipt: &CheckpointReceipt,
+) -> Result<V5CheckpointRef, String> {
+    if !is_uuid_v7(&receipt.receipt_id.0) {
+        return Err("agent-run V5 checkpoint persistence requires a UUIDv7 receipt".to_owned());
+    }
+    let bytes = crate::evidence::canonical_json(receipt)
+        .map_err(|error| format!("agent-run V5 checkpoint canonicalization failed: {error}"))?;
+    let digest = sha256_hex(&bytes);
+    let session_dir = fs::canonicalize(Path::new(&spec.session_dir.0)).map_err(|error| {
+        format!(
+            "agent-run V5 checkpoint session directory unavailable at {}: {error}",
+            spec.session_dir.0
+        )
+    })?;
+    let run_root = session_dir
+        .parent()
+        .ok_or_else(|| "agent-run V5 checkpoint session directory has no run root".to_owned())?;
+    let directory = run_root.join("checkpoints");
+    super::reject_link_components_for_path(&directory).map_err(|error| error.to_string())?;
+    let mut created_directory = false;
+    match fs::symlink_metadata(&directory) {
+        Ok(metadata) if metadata.file_type().is_dir() => {}
+        Ok(_) => {
+            return Err(format!(
+                "agent-run V5 checkpoint root is not a directory: {}",
+                directory.display()
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut builder = fs::DirBuilder::new();
+            #[cfg(unix)]
+            builder.mode(0o700);
+            builder.create(&directory).map_err(|error| {
+                format!(
+                    "agent-run V5 checkpoint root create failed {}: {error}",
+                    directory.display()
+                )
+            })?;
+            created_directory = true;
+        }
+        Err(error) => {
+            return Err(format!(
+                "agent-run V5 checkpoint root metadata failed {}: {error}",
+                directory.display()
+            ));
+        }
+    }
+    super::reject_link_components_for_path(&directory).map_err(|error| error.to_string())?;
+    if created_directory {
+        fs::File::open(run_root)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| {
+                format!(
+                    "agent-run V5 checkpoint run-root fsync failed {}: {error}",
+                    run_root.display()
+                )
+            })?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).map_err(|error| {
+            format!(
+                "agent-run V5 checkpoint root private mode failed {}: {error}",
+                directory.display()
+            )
+        })?;
+    }
+    let path = directory.join(format!("{}.json", receipt.receipt_id.0));
+    super::reject_link_components_for_path(&path).map_err(|error| error.to_string())?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(&path).map_err(|error| {
+        format!(
+            "agent-run V5 checkpoint create failed {}: {error}",
+            path.display()
+        )
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|error| {
+                format!(
+                    "agent-run V5 checkpoint private mode failed {}: {error}",
+                    path.display()
+                )
+            })?;
+    }
+    file.write_all(&bytes).map_err(|error| {
+        format!(
+            "agent-run V5 checkpoint write failed {}: {error}",
+            path.display()
+        )
+    })?;
+    file.sync_all().map_err(|error| {
+        format!(
+            "agent-run V5 checkpoint fsync failed {}: {error}",
+            path.display()
+        )
+    })?;
+    fs::File::open(&directory)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| {
+            format!(
+                "agent-run V5 checkpoint directory fsync failed {}: {error}",
+                directory.display()
+            )
+        })?;
+    let reread = super::read_bounded_file(&path, 128 * 1024)
+        .map_err(|error| format!("agent-run V5 checkpoint verification read failed: {error}"))?;
+    if reread != bytes {
+        return Err("agent-run V5 checkpoint verification byte drift".to_owned());
+    }
+    Ok(V5CheckpointRef {
+        path: path.display().to_string(),
+        digest,
+    })
+}
+
+fn is_uuid_v7(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36
+        && [8, 13, 18, 23]
+            .into_iter()
+            .all(|index| bytes[index] == b'-')
+        && bytes[14] == b'7'
+        && matches!(bytes[19], b'8' | b'9' | b'a' | b'b')
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            [8, 13, 18, 23].contains(&index) || byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')
+        })
 }
 
 fn observe_blocked_result(
@@ -765,6 +1358,7 @@ fn observe_blocked_result(
 struct RpcAssignment {
     client: RpcClient,
     next_command: u64,
+    policy: CheckpointPolicy,
     bootstrap_entry: Option<AppendedEntry>,
 }
 
@@ -998,6 +1592,11 @@ impl RpcAssignment {
         spec: &AgentRunSpec,
         child_control: ChildControlLaunchConfig,
     ) -> Result<Self, String> {
+        let policy = CheckpointPolicy::parse()
+            .map_err(|error| format!("agent-run checkpoint policy: {error}"))?;
+        policy
+            .role(&spec.role_id.0)
+            .map_err(|error| format!("agent-run checkpoint role policy: {error}"))?;
         let tools = spec
             .allowed_tools
             .iter()
@@ -1124,28 +1723,361 @@ impl RpcAssignment {
         let mut runner = Self {
             client,
             next_command: 0,
+            policy,
             bootstrap_entry: None,
         };
-        let auto_id = runner.next_id("auto-off");
-        let response = runner.command_response(RpcCommand::set_auto_compaction(auto_id, false))?;
-        if !response.success {
-            return Err("agent-run set_auto_compaction returned success:false".to_owned());
+        let configuration = (|| -> Result<(), String> {
+            let auto_id = runner.next_id("auto-off");
+            let response =
+                runner.command_response(RpcCommand::set_auto_compaction(auto_id, false))?;
+            if !response.success {
+                return Err("agent-run set_auto_compaction returned success:false".to_owned());
+            }
+            let state_id = runner.next_id("state");
+            let state = runner.command_response(RpcCommand::get_state(state_id))?;
+            runner.validate_state_v5(spec, &state)?;
+            if runtime_addon(spec).is_some() {
+                let entries_id = runner.next_id("entries");
+                let entries = runner.command_response(RpcCommand::get_entries(entries_id))?;
+                runner.validate_child_receipt(spec, &entries)?;
+            } else if runner.bootstrap_entry.is_some() {
+                return Err(
+                    "agent-run child emitted a registration entry without a runtime add-on"
+                        .to_owned(),
+                );
+            }
+            runner.client.complete_bootstrap();
+            runner.bootstrap_entry = None;
+            Ok(())
+        })();
+        if let Err(error) = configuration {
+            return match runner.shutdown_v5() {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(format!(
+                    "{error}; agent-run V5 bootstrap cleanup failed: {cleanup}"
+                )),
+            };
         }
-        let state_id = runner.next_id("state");
-        let state = runner.command_response(RpcCommand::get_state(state_id))?;
-        runner.validate_state_v5(spec, &state)?;
-        if runtime_addon(spec).is_some() {
-            let entries_id = runner.next_id("entries");
-            let entries = runner.command_response(RpcCommand::get_entries(entries_id))?;
-            runner.validate_child_receipt(spec, &entries)?;
-        } else if runner.bootstrap_entry.is_some() {
+        Ok(runner)
+    }
+
+    fn send_v5_prompt(&mut self, message: &str) -> Result<String, String> {
+        let id = self.next_id("v5-prompt");
+        self.client
+            .send_command(RpcCommand::prompt(id.clone(), message.to_owned()))
+            .map_err(|error| format!("agent-run V5 rpc prompt failed: {error}"))?;
+        Ok(id)
+    }
+
+    fn request_v5_stats(
+        &mut self,
+        cycle: &mut V5CycleState,
+        sequence: &mut u64,
+    ) -> Result<(), String> {
+        *sequence = sequence
+            .checked_add(1)
+            .ok_or_else(|| "agent-run V5 context telemetry sequence overflow".to_owned())?;
+        let id = self.next_id("v5-stats");
+        self.client
+            .send_command(RpcCommand::get_session_stats(id.clone()))
+            .map_err(|error| format!("agent-run V5 context telemetry request failed: {error}"))?;
+        if cycle.pending_stats.insert(id, *sequence).is_some() {
+            return Err("agent-run V5 duplicate context telemetry request id".to_owned());
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn handle_v5_runtime_response(
+        &mut self,
+        spec: &AgentRunSpec,
+        cycle: &mut V5CycleState,
+        response: RpcResponse,
+        latest_budget: &mut Option<(u64, ContextBudget)>,
+        warning_sent: &mut bool,
+        warning_required: &mut Option<ContextPercent>,
+        checkpoint_request: &mut Option<ContextPercent>,
+        checkpoint_instruction_dispatched: &mut bool,
+        settled: bool,
+    ) -> Result<(), String> {
+        if response.id == cycle.prompt_id {
+            if response.command != RpcCommandKind::Prompt || !response.success {
+                return Err("agent-run V5 prompt response drift".to_owned());
+            }
+            if cycle.prompt_response_seen {
+                return Err("agent-run V5 duplicate prompt response".to_owned());
+            }
+            cycle.prompt_response_seen = true;
+            return Ok(());
+        }
+        if let Some(sequence) = cycle.pending_stats.remove(&response.id) {
+            if response.command != RpcCommandKind::GetSessionStats || !response.success {
+                return Err("agent-run V5 context telemetry response drift".to_owned());
+            }
+            let budget = context_budget_from_stats(&response, &spec.session_id.0)?;
+            if latest_budget.is_none_or(|(latest, _)| sequence > latest) {
+                *latest_budget = Some((sequence, budget));
+            }
+            let ContextBudget::Known(percent) = budget else {
+                return Ok(());
+            };
+            let checkpoint_threshold = self.context_threshold("checkpoint")?;
+            if percent.as_f64() >= checkpoint_threshold {
+                let interruptible = self
+                    .policy
+                    .role(&spec.role_id.0)
+                    .map_err(|error| format!("agent-run checkpoint role policy: {error}"))?
+                    .interruptible;
+                if !interruptible {
+                    return Err(format!(
+                        "agent-run role `{}` is not interruptible at observed context {:.2}%; checkpoint refused",
+                        spec.role_id.0,
+                        percent.as_f64()
+                    ));
+                }
+                if checkpoint_request.is_none_or(|observed| percent.as_f64() > observed.as_f64()) {
+                    *checkpoint_request = Some(percent);
+                }
+                *warning_required = None;
+                if !*checkpoint_instruction_dispatched && !settled && !cycle.agent_end_seen {
+                    let prompt = self.checkpoint_prompt(spec)?;
+                    self.send_v5_steer(cycle, V5SteerKind::Checkpoint, prompt)?;
+                    *checkpoint_instruction_dispatched = true;
+                }
+                return Ok(());
+            }
+            if percent.as_f64() >= self.context_threshold("arm")? && !*warning_sent {
+                if warning_required.is_none_or(|observed| percent.as_f64() > observed.as_f64()) {
+                    *warning_required = Some(percent);
+                }
+                if !settled && !cycle.agent_end_seen {
+                    let warning = self.warning_prompt(spec, percent);
+                    self.send_v5_steer(cycle, V5SteerKind::SoftWarning, warning)?;
+                    *warning_required = None;
+                    *warning_sent = true;
+                }
+            }
+            return Ok(());
+        }
+        if let Some(_kind) = cycle.pending_steers.remove(&response.id) {
+            if response.command != RpcCommandKind::Steer
+                || !response.success
+                || !response.queued_not_delivered
+            {
+                return Err("agent-run V5 steer response drift".to_owned());
+            }
+            return Ok(());
+        }
+        Err(format!(
+            "agent-run V5 unexpected rpc response id {} during child-control session",
+            response.id
+        ))
+    }
+
+    fn send_v5_steer(
+        &mut self,
+        cycle: &mut V5CycleState,
+        kind: V5SteerKind,
+        message: String,
+    ) -> Result<(), String> {
+        let id = self.next_id(match kind {
+            V5SteerKind::SoftWarning => "v5-warning",
+            V5SteerKind::Checkpoint => "v5-checkpoint",
+        });
+        self.client
+            .send_command(RpcCommand::steer(id.clone(), message))
+            .map_err(|error| format!("agent-run V5 steer failed: {error}"))?;
+        if cycle.pending_steers.insert(id, kind).is_some() {
+            return Err("agent-run V5 duplicate steer request id".to_owned());
+        }
+        Ok(())
+    }
+
+    fn context_threshold(&self, name: &str) -> Result<f64, String> {
+        self.policy
+            .thresholds
+            .get(name)
+            .copied()
+            .map(|value| value as f64)
+            .ok_or_else(|| format!("agent-run checkpoint policy missing {name} threshold"))
+    }
+
+    fn warning_prompt(&self, spec: &AgentRunSpec, percent: ContextPercent) -> String {
+        format!(
+            "Autopilot context warning for assignment {} in session {}: observed usage is {:.2}%. Finish the nearest atomic action, avoid broad new exploration, and prepare a coherent role-complete checkpoint if the parent requests one. Continue the current assignment; this warning is not completion.",
+            spec.assignment_id.0,
+            spec.session_id.0,
+            percent.as_f64()
+        )
+    }
+
+    fn checkpoint_prompt(&self, spec: &AgentRunSpec) -> Result<String, String> {
+        let slots = self.policy.required_slot_names(&spec.role_id.0)?;
+        Ok(format!(
+            "Autopilot context checkpoint is now required for assignment {} in this same session. Finish only the nearest atomic action, then call {} with one {} payload. critical_state must include these role-required slots: {}. ACCEPT pauses for parent-controlled manual compaction and is not assignment completion. RETRY means correct the handoff and call {} again; do not return the handoff as prose.",
+            spec.assignment_id.0,
+            V5_CHECKPOINT_TOOL_NAME,
+            self.policy.handoff_contract,
+            slots.join(", "),
+            V5_CHECKPOINT_TOOL_NAME,
+        ))
+    }
+
+    fn continuation_prompt(
+        &self,
+        spec: &AgentRunSpec,
+        percent: ContextPercent,
+    ) -> Result<String, String> {
+        if percent.as_f64() >= self.context_threshold("checkpoint")? {
             return Err(
-                "agent-run child emitted a registration entry without a runtime add-on".to_owned(),
+                "agent-run V5 refused a below-threshold continuation at checkpoint usage"
+                    .to_owned(),
             );
         }
-        runner.client.complete_bootstrap();
-        runner.bootstrap_entry = None;
-        Ok(runner)
+        Ok(format!(
+            "Continue the current assignment {} in the same role, mode, worktree, and Pi session. Parent-observed context usage at the last settled boundary was {:.2}%, below the package checkpoint threshold. Do not reread or infer authority. Completion still requires a generated receipt-backed submit ACCEPT; BLOCKED retains its universal whole-workstream semantics.",
+            spec.assignment_id.0,
+            percent.as_f64(),
+        ))
+    }
+
+    /// Pi 0.84 `abort` waits for idle but does not clear steering/follow-up
+    /// queues. Exact `pendingMessageCount == 0` is therefore the only
+    /// fail-closed authority before another prompt or manual compaction.
+    fn verify_settled_queue_state(&mut self, spec: &AgentRunSpec) -> Result<(), String> {
+        let id = self.next_id("v5-settled-state");
+        let response = self.command_response(RpcCommand::get_state(id))?;
+        self.validate_state_identity_v5(spec, &response)
+            .map_err(|error| format!("agent-run V5 settled queue verification failed: {error}"))
+    }
+
+    fn checkpoint_record(
+        &self,
+        spec: &AgentRunSpec,
+        context_percent: ContextPercent,
+        handoff: AgentHandoff,
+    ) -> Result<V5Checkpoint, String> {
+        // Conversation checkpoint authority is deliberately repository-free.
+        // Execution worktree/edit/test facts remain role-required typed handoff
+        // slots; this runner neither invents a planning identity for execution
+        // nor inspects Git while deriving the same-session resume overlay.
+        Ok(V5Checkpoint {
+            observed_context: context_percent,
+            resume_overlay: ResumeOverlay {
+                assignment_id: spec.assignment_id.clone(),
+                session_ref: kernel::generated::Ref(format!("session:{}", spec.session_id.0)),
+                run_revision: spec.run_revision,
+                handoff,
+            },
+        })
+    }
+
+    fn manual_compact(&mut self, checkpoint: &V5Checkpoint) -> Result<(), String> {
+        let slots = self
+            .policy
+            .required_slot_names_from_handoff(&checkpoint.resume_overlay.handoff)?;
+        let instructions = format!(
+            "Manual parent-controlled Autopilot checkpoint compaction for assignment {}. Preserve the accepted handoff exactly, especially role-required critical_state slots: {}. Do not infer completed work absent from the handoff.",
+            checkpoint.resume_overlay.assignment_id.0,
+            slots.join(", ")
+        );
+        let id = self.next_id("v5-compact");
+        self.client
+            .send_command(RpcCommand::compact(id.clone(), instructions))
+            .map_err(|error| format!("agent-run V5 manual compaction command failed: {error}"))?;
+        let mut saw_start = false;
+        let mut saw_end = false;
+        let mut saw_response = false;
+        while !(saw_start && saw_end && saw_response) {
+            let frame = self
+                .client
+                .next_frame()
+                .map_err(|error| format!("agent-run V5 manual compaction stream failed: {error}"))?
+                .ok_or_else(|| {
+                    "agent-run V5 rpc stream ended during manual compaction".to_owned()
+                })?;
+            match frame {
+                RpcFrame::Response(response) if response.id == id => {
+                    if saw_response
+                        || response.command != RpcCommandKind::Compact
+                        || !response.success
+                    {
+                        return Err("agent-run V5 manual compaction response drift".to_owned());
+                    }
+                    validate_v5_compaction_response(&response)?;
+                    saw_response = true;
+                }
+                RpcFrame::Response(response) => {
+                    return Err(format!(
+                        "agent-run V5 unexpected response during manual compaction: {}",
+                        response.id
+                    ));
+                }
+                RpcFrame::Event(RpcEvent::CompactionStart {
+                    reason: crate::runner::rpc::CompactionReason::Manual,
+                }) if !saw_start && !saw_end => saw_start = true,
+                RpcFrame::Event(RpcEvent::CompactionEnd {
+                    reason: crate::runner::rpc::CompactionReason::Manual,
+                    aborted: false,
+                    will_retry: false,
+                }) if saw_start && !saw_end => saw_end = true,
+                RpcFrame::Event(RpcEvent::CompactionEnd { aborted: true, .. }) => {
+                    return Err("agent-run V5 manual compaction aborted".to_owned());
+                }
+                RpcFrame::Event(event) => {
+                    return Err(format!(
+                        "agent-run V5 unexpected rpc event during manual compaction: {event:?}"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn verify_post_compact_state(&mut self, spec: &AgentRunSpec) -> Result<(), String> {
+        let id = self.next_id("v5-post-compact-state");
+        let response = self.command_response(RpcCommand::get_state(id))?;
+        self.validate_state_identity_v5(spec, &response)
+            .map_err(|error| format!("agent-run V5 post-compaction verification failed: {error}"))
+    }
+
+    fn resume_prompt(
+        &self,
+        spec: &AgentRunSpec,
+        checkpoint: &V5Checkpoint,
+        checkpoint_ref: &V5CheckpointRef,
+        receipt: &CheckpointReceipt,
+    ) -> Result<String, String> {
+        let overlay = &checkpoint.resume_overlay;
+        let packet = serde_json::json!({
+            "run_id": receipt.run_id,
+            "workstream": spec.workstream,
+            "action_id": spec.action_id,
+            "assignment_id": overlay.assignment_id,
+            "attempt": receipt.attempt,
+            "run_revision": overlay.run_revision,
+            "role_id": receipt.role_id,
+            "mode": receipt.mode,
+            "session_id": receipt.session_id,
+            "session_ref": overlay.session_ref,
+            "boundary_id": spec.boundary_id,
+            "result_contract": spec.result_contract,
+            "prompt_digest": spec.prompt_digest,
+            "context_digest": spec.context_digest,
+            "observed_context_percent": checkpoint.observed_context.as_f64(),
+            "checkpoint_receipt_id": receipt.receipt_id,
+            "checkpoint_receipt_path": checkpoint_ref.path,
+            "checkpoint_receipt_digest": checkpoint_ref.digest,
+            "handoff": overlay.handoff,
+        });
+        let bytes = crate::evidence::canonical_json(&packet).map_err(|error| {
+            format!("agent-run V5 resume packet canonicalization failed: {error}")
+        })?;
+        let packet = String::from_utf8(bytes)
+            .map_err(|error| format!("agent-run V5 resume packet UTF-8 failed: {error}"))?;
+        Ok(format!(
+            "Resume the same assignment from this package-authored checkpoint packet after verified manual compaction of this same Pi session. The original role, mode, assignment, and prompt authority remain unchanged. Treat only the referenced canonical checkpoint receipt and this derived packet as retained state; do not invent completed work or reread completed authority. Continue with handoff.next_action. A checkpoint is not delivery, validation, integration, closure, or assignment completion. Resume packet JSON: {packet}"
+        ))
     }
 
     fn command_response(&mut self, command: RpcCommand) -> Result<RpcResponse, String> {
@@ -1286,16 +2218,30 @@ impl RpcAssignment {
     /// historical startup marker. Receipt admission, not a runner artifact,
     /// owns fresh V5 persistence.
     fn validate_state_v5(&self, spec: &AgentRunSpec, response: &RpcResponse) -> Result<(), String> {
-        let data = response
-            .data
-            .as_ref()
-            .ok_or_else(|| "agent-run V5 get_state missing data".to_owned())?;
-        let value: Value = serde_json::from_str(data)
-            .map_err(|error| format!("agent-run V5 get_state malformed data: {error}"))?;
+        let value = v5_state_value(response)?;
         Self::validate_session_history(spec, &value)?;
+        self.validate_state_identity_value_v5(spec, &value)
+    }
+
+    fn validate_state_identity_v5(
+        &self,
+        spec: &AgentRunSpec,
+        response: &RpcResponse,
+    ) -> Result<(), String> {
+        let value = v5_state_value(response)?;
+        self.validate_state_identity_value_v5(spec, &value)
+    }
+
+    fn validate_state_identity_value_v5(
+        &self,
+        spec: &AgentRunSpec,
+        value: &Value,
+    ) -> Result<(), String> {
         let session = value.get("sessionId").and_then(Value::as_str);
         let thinking = value.get("thinkingLevel").and_then(Value::as_str);
         let auto = value.get("autoCompactionEnabled").and_then(Value::as_bool);
+        let streaming = value.get("isStreaming").and_then(Value::as_bool);
+        let compacting = value.get("isCompacting").and_then(Value::as_bool);
         let model = value
             .get("model")
             .and_then(Value::as_object)
@@ -1309,6 +2255,18 @@ impl RpcAssignment {
             || auto != Some(false)
         {
             return Err("agent-run V5 get_state identity drift".to_owned());
+        }
+        if streaming != Some(false) || compacting != Some(false) {
+            return Err("agent-run V5 get_state runtime is not idle".to_owned());
+        }
+        let pending = value
+            .get("pendingMessageCount")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "agent-run V5 get_state missing pendingMessageCount".to_owned())?;
+        if pending != 0 {
+            return Err(format!(
+                "agent-run V5 get_state retained {pending} queued message(s); refusing stale steer continuation"
+            ));
         }
         Ok(())
     }
@@ -1344,13 +2302,26 @@ impl RpcAssignment {
         format!("{prefix}-{}", self.next_command)
     }
 
-    /// V5 success    /// V5 success must wait for the same exact process/stderr lifecycle, but
+    /// V5 success must wait for the same exact process/stderr lifecycle, but
     /// must not create the historical optional runner diagnostics artifact.
     fn shutdown_v5(&mut self) -> Result<(), String> {
         let shutdown = self
             .client
             .shutdown(Duration::from_millis(250))
             .map_err(|error| error.to_string())?;
+        match self.client.next_frame() {
+            Ok(None) => {}
+            Ok(Some(frame)) => {
+                return Err(format!(
+                    "agent-run V5 received a trailing rpc frame after terminal settlement: {frame:?}"
+                ));
+            }
+            Err(error) => {
+                return Err(format!(
+                    "agent-run V5 terminal protocol EOF validation failed: {error}"
+                ));
+            }
+        }
         if shutdown.escalated {
             // The verified ACCEPT is already the semantic terminal. A successful
             // shutdown result proves process-group cleanup, reaping, and stderr
@@ -1584,8 +2555,13 @@ fn validate_route_and_role(strict: &AgentRunSpec) -> Result<(), String> {
             profile.0
         ));
     }
-    let resolved = super::resolve_role_tools(&strict.role_id.0, profile_id)
+    let mut resolved = super::resolve_role_tools(&strict.role_id.0, profile_id)
         .map_err(|error| error.to_string())?;
+    for (_, tool_name, _, _, _, _) in kernel::generated::UNIVERSAL_CHILD_TOOLS {
+        if !resolved.active.iter().any(|active| active == tool_name) {
+            resolved.active.push(tool_name.to_owned());
+        }
+    }
     let actual_tools = strict
         .allowed_tools
         .iter()

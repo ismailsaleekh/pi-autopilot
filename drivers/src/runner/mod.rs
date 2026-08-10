@@ -5115,6 +5115,8 @@ fn write_receipt_v1_spec_document(
     facade: &AgentRunSpec,
     facts: &RunnerTransportFacts,
 ) -> Result<(AgentRunSpecV5, String), RunnerError> {
+    let facade = v5_child_control_facade(facade.clone());
+    let facade = &facade;
     if let Some(bytes) = read_bounded_file_optional(path, child::MAX_AGENT_RUN_SPEC_BYTES)? {
         let existing: AgentRunSpecV5 = serde_json::from_slice(&bytes).map_err(|error| {
             RunnerError::InvalidSpec(format!("existing receipt_v1 spec JSON: {error}"))
@@ -5215,6 +5217,19 @@ fn write_receipt_v1_spec_document(
     let digest = sha256_hex(&data);
     write_bounded_file_create_once(path, &data, child::MAX_AGENT_RUN_SPEC_BYTES)?;
     Ok((spec, digest))
+}
+
+fn v5_child_control_facade(mut facade: AgentRunSpec) -> AgentRunSpec {
+    for (_, tool_name, _, _, _, _) in kernel::generated::UNIVERSAL_CHILD_TOOLS {
+        if !facade
+            .allowed_tools
+            .iter()
+            .any(|allowed| allowed.0 == tool_name)
+        {
+            facade.allowed_tools.push(ToolName(tool_name.to_owned()));
+        }
+    }
+    facade
 }
 
 fn receipt_v1_binding_from_fresh_issue(

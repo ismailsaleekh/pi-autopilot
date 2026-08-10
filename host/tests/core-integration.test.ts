@@ -1,8 +1,9 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { test } from "node:test";
+import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
-import { accessSync, constants, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { accessSync, chmodSync, constants, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,10 +14,37 @@ import { CoreTransport } from "../src/transport.ts";
 const PACKAGE_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const CORE_BINARY_NAME = process.platform === "win32" ? "autopilot-core.exe" : "autopilot-core";
 const CORE_BINARY = join(PACKAGE_ROOT, "target", "release", CORE_BINARY_NAME);
+const BROKER_ROOT = "/tmp/.pi-ap";
+const BROKER_RUN = createHash("sha256").update(`core-integration:${process.pid}`, "utf8").digest("hex").slice(0, 10);
+const BROKER_RUN_DIR = join(BROKER_ROOT, BROKER_RUN);
+const BROKER_SOCKET = join(BROKER_RUN_DIR, "s");
+const BROKER_CAPABILITY = "a".repeat(64);
+const brokerServer = createServer((socket) => socket.destroy());
 
 const PLAN_ARGS = "main TASK-A.md TASK-B.md TASK-C.md CONTEXT.md";
 
 let activeEffects;
+
+before(async () => {
+  mkdirSync(BROKER_ROOT, { recursive: true, mode: 0o700 });
+  chmodSync(BROKER_ROOT, 0o700);
+  mkdirSync(BROKER_RUN_DIR, { mode: 0o700 });
+  await new Promise<void>((resolve, reject) => {
+    brokerServer.once("error", reject);
+    brokerServer.listen(BROKER_SOCKET, () => {
+      brokerServer.off("error", reject);
+      chmodSync(BROKER_SOCKET, 0o600);
+      resolve();
+    });
+  });
+});
+
+after(async () => {
+  if (brokerServer.listening) {
+    await new Promise<void>((resolve, reject) => brokerServer.close((error) => error === undefined ? resolve() : reject(error)));
+  }
+  rmSync(BROKER_RUN_DIR, { recursive: true, force: true });
+});
 
 const VALID_COMMAND_ARGS = Object.freeze({
   "autopilot-plan": PLAN_ARGS,
@@ -40,7 +68,7 @@ test("registered Pi slash handlers reach the real compiled autopilot-core over s
   process.env.AUTOPILOT_CORE_EVENT_LOG = eventLog;
   process.chdir(root);
 
-  const transport = new CoreTransport({ binaryPath: CORE_BINARY });
+  const transport = realCoreTransport();
   const pi = registrationHarness();
   const backgroundTasks = fakeBackgroundTasks();
   registerAutopilotCommands(pi, fixedServiceResolver({ transport, backgroundTasks, operatorMessage: recordingOperatorMessage, statusEntry: recordingStatusEntry }));
@@ -97,7 +125,7 @@ test("planning rejects a bare directory with typed CONTEXT_GAP instead of fabric
   process.env.AUTOPILOT_CORE_EVENT_LOG = eventLog;
   process.chdir(root);
 
-  const transport = new CoreTransport({ binaryPath: CORE_BINARY });
+  const transport = realCoreTransport();
   const pi = registrationHarness();
   const backgroundTasks = fakeBackgroundTasks();
   registerAutopilotCommands(pi, fixedServiceResolver({ transport, backgroundTasks, operatorMessage: recordingOperatorMessage, statusEntry: recordingStatusEntry }));
@@ -124,7 +152,7 @@ test("successful run route uses recorded model transcripts and records agent spa
   process.env.AUTOPILOT_CORE_EVENT_LOG = eventLog;
   process.chdir(root);
 
-  const transport = new CoreTransport({ binaryPath: CORE_BINARY });
+  const transport = realCoreTransport();
   const pi = registrationHarness();
   const backgroundTasks = fakeBackgroundTasks();
   registerAutopilotCommands(pi, fixedServiceResolver({ transport, backgroundTasks, operatorMessage: recordingOperatorMessage, statusEntry: recordingStatusEntry }));
@@ -146,6 +174,12 @@ test("successful run route uses recorded model transcripts and records agent spa
     restoreEventLog(previousEventLog);
   }
 });
+
+function realCoreTransport() {
+  const transport = new CoreTransport({ binaryPath: CORE_BINARY });
+  transport.bindChildControlBroker({ socketPath: BROKER_SOCKET, capability: BROKER_CAPABILITY });
+  return transport;
+}
 
 function assertCoreBinaryPresent() {
   try {
@@ -347,7 +381,7 @@ async function completePlanningFromSpawn(transport, firstActions) {
     assert.ok(action !== undefined, "planning ran out of assignments before ready-to-execute");
     if (consumed.has(action.assignment_id)) continue;
     consumed.add(action.assignment_id);
-    const carrier = planningCarrierForAction(action);
+    const carrier = await planningCompletionForAction(transport, action);
     // Mirror the real Host terminal path: Core reads the exact durable carrier
     // while accepting this terminal observation.
     const frame = await transport.request("task-completed", {
@@ -384,18 +418,48 @@ async function completePlanningFromSpawn(transport, firstActions) {
   assert.fail("planning did not reach ready-to-execute within 200 carrier acceptances");
 }
 
-function planningCarrierForAction(action) {
+async function planningCompletionForAction(transport, action) {
   const specPath = specPathFromCommand(action.bg_run.command);
   const specBytes = readFileSync(specPath);
   const spec = JSON.parse(specBytes.toString("utf8"));
   const rawOutput = replayOutputForSpec(spec, specPath);
+  if (spec.admission_mode === "receipt_v1") {
+    const toolName = requireString(spec.terminal_route?.tool_name, "V5 planning terminal tool_name");
+    const frame = await transport.request("child-control", {
+      broker_capability: BROKER_CAPABILITY,
+      request: {
+        schema: "autopilot.child_control_request.v1",
+        request_id: `host-core-${spec.assignment_id}`,
+        token: requireString(spec.child_control_token, "V5 planning child-control token"),
+        run_id: requireString(spec.run_id, "V5 planning run_id"),
+        assignment_id: requireString(spec.assignment_id, "V5 planning assignment_id"),
+        attempt: requireRunRevision(spec.attempt, "V5 planning attempt"),
+        tool_call_id: `host-core-call-${spec.assignment_id}`,
+        kind: "submit",
+        tool_name: toolName,
+        profile_id: requireString(spec.terminal_profile_id, "V5 planning terminal profile"),
+        raw_payload: JSON.parse(rawOutput),
+        runtime_evidence: {
+          schema: "autopilot.child_control_runtime_evidence.v1",
+          delivery_policy_denials: null,
+          approved_command_executions: null,
+        },
+      },
+    }, 5000);
+    assert.equal(frame.kind, "child-control");
+    assert.equal(frame.payload.response.outcome, "ACCEPT");
+    assert.equal(frame.payload.response.receipt.kind, "submit");
+    assert.equal(frame.payload.blocked_gate, null);
+    return spec;
+  }
+
   const hasV2Route = spec.terminal_route?.version === "v2";
   const isV2WorkMap = spec.boundary_id === "planning.work-map.v2";
   const carrier = hasV2Route || isV2WorkMap
     ? planningV2CarrierForSpec(spec, specBytes, specPath, rawOutput)
     : planningV1CarrierForSpec(spec, specBytes, specPath, rawOutput);
   mkdirSync(dirname(spec.carrier_path), { recursive: true });
-  // Core re-reads this exact V2 authority object; do not persist a projection.
+  // Historical replay re-reads this exact V2 authority object; do not persist a projection.
   writeFileSync(spec.carrier_path, JSON.stringify(carrier), "utf8");
   return carrier;
 }

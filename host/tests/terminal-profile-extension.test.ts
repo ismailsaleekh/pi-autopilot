@@ -15,7 +15,7 @@ import { test } from "node:test";
 
 import childExtension from "../../src/generated/child-extension.ts";
 import { ValidationReadPolicy } from "../../child-runtime/child-extension-runtime.ts";
-import { BLOCKED_REPORT_TOOL, SUBMIT_TOOLS } from "../../src/generated/tool-schemas.ts";
+import { BLOCKED_REPORT_TOOL, CHECKPOINT_TOOL, SUBMIT_TOOLS } from "../../src/generated/tool-schemas.ts";
 import { startChildControlBroker } from "../../src/child-control-broker.ts";
 
 interface RegisteredTool {
@@ -134,7 +134,7 @@ test("terminal profiles carry the exact hard-coded descriptor tuples and schema 
   assert.notEqual(recovery.schema_digest, regular.schema_digest);
 });
 
-test("fresh child-control registration exposes every submit profile plus the exact universal blocked description", { concurrency: false }, () => {
+test("fresh child-control registration exposes every submit profile plus both exact universal control descriptions", { concurrency: false }, () => {
   const prior = new Map([
     ["AUTOPILOT_CONTROL_SOCK", process.env.AUTOPILOT_CONTROL_SOCK],
     ["AUTOPILOT_CONTROL_TOKEN", process.env.AUTOPILOT_CONTROL_TOKEN],
@@ -165,12 +165,15 @@ test("fresh child-control registration exposes every submit profile plus the exa
       } finally {
         process.chdir(cwd);
       }
+      const checkpoint = tools.find((tool) => tool.name === CHECKPOINT_TOOL.name);
       const blocked = tools.find((tool) => tool.name === BLOCKED_REPORT_TOOL.name);
       const submit = tools.find((tool) => tool.name === descriptor.name);
       assert.ok(submit, descriptor.profile_id);
       assert.deepEqual(submit.promptGuidelines, [`Call ${descriptor.name} when the payload is ready. If it returns RETRY, correct the reported diagnostic and call ${descriptor.name} again in this same session. Only ACCEPT terminalizes. Do not return the payload as assistant prose or markdown.`], descriptor.profile_id);
+      assert.equal(checkpoint?.description, CHECKPOINT_TOOL.description, descriptor.profile_id);
+      assert.deepEqual(checkpoint?.promptGuidelines, [CHECKPOINT_TOOL.description], descriptor.profile_id);
       assert.equal(blocked?.description, BLOCKED_REPORT_TOOL.description, descriptor.profile_id);
-      assert.equal(tools.length, descriptor.profile_id === "delivery-status.v2" ? 5 : descriptor.profile_id === "validation-status.v3" ? 3 : 2);
+      assert.equal(tools.length, descriptor.profile_id === "delivery-status.v2" ? 6 : descriptor.profile_id === "validation-status.v3" ? 4 : 3);
     }
   } finally {
     for (const [key, value] of prior) {
@@ -554,7 +557,7 @@ test("selected terminal profile registers exactly one same-name schema", { concu
   }
 });
 
-test("replay_v0 V3 raw capture preserves malformed trees across reversed calls without a BLOCKED fallback", { concurrency: false }, async () => {
+test("replay_v0 V3 raw capture preserves malformed trees without universal control fallbacks", { concurrency: false }, async () => {
   const controlKeys = ["AUTOPILOT_CONTROL_SOCK", "AUTOPILOT_CONTROL_TOKEN", "AUTOPILOT_CONTROL_RUN_ID", "AUTOPILOT_CONTROL_ASSIGNMENT", "AUTOPILOT_CONTROL_ATTEMPT", "AUTOPILOT_TERMINAL_PROFILE"] as const;
   const prior = new Map(controlKeys.map((key) => [key, process.env[key]]));
   const validation = installValidationPolicyEnv();
@@ -570,7 +573,8 @@ test("replay_v0 V3 raw capture preserves malformed trees across reversed calls w
       process.chdir(cwd);
     }
     const submit = tools.find((tool) => tool.name === "autopilot_emit_status")!;
-    // replay_v0 has no authenticated ChildControl; registering BLOCKED here would be silent/nonfunctional.
+    // replay_v0 has no authenticated ChildControl; registering either universal control here would be silent/nonfunctional.
+    assert.equal(tools.some((tool) => tool.name === CHECKPOINT_TOOL.name), false);
     assert.equal(tools.some((tool) => tool.name === BLOCKED_REPORT_TOOL.name), false);
     assert.notEqual(submit.prepareArguments, undefined);
     const firstRaw = ["malformed-top-level", { null_value: null }];

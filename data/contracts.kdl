@@ -594,7 +594,8 @@ artifact "state_cache" schema="autopilot.state_cache.v1" producer="Package" mode
 
 artifact "agent_handoff" schema="autopilot.agent-handoff.v1" producer="Model" model_produced=#true {
     doc "Model-facing checkpoint handoff. The package preserves unknown top-level properties and validates role-required critical_state slots from data/checkpoint-policy.kdl before compaction/resume."
-    admits "When checkpointed, return one autopilot.agent-handoff.v1 object with exactly these required fields: schema, completed, remaining, critical_state, and next_action. Put finished obligations in completed, unfinished obligations in remaining, role-required scalar or array-of-scalar slots in critical_state, and the immediate resume instruction in next_action; do not invent completion."
+    admits "When the parent requests a context checkpoint, call autopilot_checkpoint with one autopilot.agent-handoff.v1 object containing exactly these required fields: schema, completed, remaining, critical_state, and next_action. Put finished obligations in completed, unfinished obligations in remaining, role-required scalar or array-of-scalar slots in critical_state, and the immediate resume instruction in next_action; do not invent completion. A checkpoint never completes the assignment. If the tool returns RETRY, correct the handoff and call it again in this same session."
+    submit_tool "autopilot_checkpoint" label="Checkpoint assignment" description="Use only after the parent runner requests a context checkpoint. Finish the nearest atomic action, then submit the bounded handoff. ACCEPT pauses this prompt for same-session manual compaction and does not complete, validate, integrate, or close the assignment. RETRY means correct the handoff and call this tool again in the same session." profile="autopilot.agent-handoff.v1:autopilot_checkpoint" result_contract="autopilot.agent-handoff.v1" closed=#false universal=#true
     field "schema" type="schema-id" required=#true constant="autopilot.agent-handoff.v1"
     list "completed" item="string" required=#true doc="Bounded finished obligations/results that must survive compaction."
     list "remaining" item="string" required=#true doc="Bounded unfinished obligations/results that must survive compaction."
@@ -1436,8 +1437,26 @@ artifact "child_control_request" schema="autopilot.child_control_request.v1" pro
     field "runtime_evidence" type="child_control_runtime_evidence" required=#true
 }
 
+artifact "checkpoint_receipt" schema="autopilot.checkpoint_receipt.v1" producer="Package" model_produced=#false {
+    doc "Core-generated acceptance receipt for one bounded model handoff. It pauses one prompt for parent-controlled same-session compaction and never completes the assignment."
+    field "schema" type="schema-id" required=#true constant="autopilot.checkpoint_receipt.v1"
+    field "receipt_id" type="uuidv7" required=#true
+    field "run_id" type="id" required=#true
+    field "run_revision" type="u64" required=#true
+    field "assignment_id" type="id" required=#true
+    field "attempt" type="u32" required=#true
+    field "role_id" type="id" required=#true
+    field "mode" type="mode-id" required=#true
+    field "session_id" type="id" required=#true
+    field "profile_id" type="string" required=#true
+    field "tool_name" type="tool-name" required=#true
+    field "tool_call_id" type="string" required=#true
+    field "handoff_digest" type="digest" required=#true
+    field "handoff" type="json-value" required=#true doc="Exact accepted autopilot.agent-handoff.v1 JSON tree, including bounded unknown top-level fields preserved by checkpoint policy."
+}
+
 artifact "child_control_accept_receipt" schema="autopilot.child_control_accept_receipt.v1" producer="Package" model_produced=#false union_tag="kind" {
-    doc "Typed receipt envelope returned only for an accepted child-control request."
+    doc "Typed receipt envelope returned only for an accepted child-control request. Checkpoint ACCEPT pauses one prompt but is not assignment completion."
     record "submit" variant="submit" {
         field "schema" type="schema-id" required=#true constant="autopilot.child_control_accept_receipt.v1"
         field "receipt" type="submit_receipt" required=#true
@@ -1445,6 +1464,10 @@ artifact "child_control_accept_receipt" schema="autopilot.child_control_accept_r
     record "blocked" variant="blocked" {
         field "schema" type="schema-id" required=#true constant="autopilot.child_control_accept_receipt.v1"
         field "receipt" type="blocked_receipt" required=#true
+    }
+    record "checkpoint" variant="checkpoint" {
+        field "schema" type="schema-id" required=#true constant="autopilot.child_control_accept_receipt.v1"
+        field "receipt" type="checkpoint_receipt" required=#true
     }
 }
 
@@ -2262,6 +2285,7 @@ enum "approved-command-execution-outcome" {
 enum "child-control-request-kind" {
     value "submit"
     value "blocked"
+    value "checkpoint"
 }
 
 enum "delivery-policy-denial-kind" {

@@ -319,7 +319,7 @@ export class DeliveryPolicy {
 export function runAutopilotChild(
   pi: ExtensionAPI,
   tools: SubmitTools,
-  blockedTool: UniversalChildToolDescriptor,
+  universalTools: readonly UniversalChildToolDescriptor[],
   wrapperUrl: string,
 ): void {
   const tool = selectedTerminalTool(tools);
@@ -329,7 +329,7 @@ export function runAutopilotChild(
   const replayV0RawCapture = bridge === undefined ? createReplayV0ValidationRawCapture(tool.profile_id) : undefined;
   if (deliveryPolicy) registerDeliveryPolicyTools(pi, deliveryPolicy); if (validationPolicy) registerValidationReadOverride(pi, validationPolicy);
   registerTool(pi, tool, deliveryPolicy, bridge, undefined, replayV0RawCapture);
-  if (bridge) registerTool(pi, blockedTool, deliveryPolicy, bridge, blockedTool.description);
+  if (bridge) for (const universalTool of universalTools) registerTool(pi, universalTool, deliveryPolicy, bridge, universalTool.description);
   pi.on("session_start", async () => {
     const receipt: Record<string, unknown> = {
       self_digest: selfDigest(wrapperUrl),
@@ -480,9 +480,7 @@ function registerTool(
     label: tool.label,
     description,
     promptSnippet: `Submit ${tool.boundary_id} as a typed Autopilot payload`,
-    promptGuidelines: [
-      `Call ${tool.name} when the payload is ready. If it returns RETRY, correct the reported diagnostic and call ${tool.name} again in this same session. Only ACCEPT terminalizes. Do not return the payload as assistant prose or markdown.`,
-    ],
+    promptGuidelines: [description],
     parameters: tool.parameters,
     ...(bridge !== undefined ? { prepareArguments(args: unknown) { return bridge.prepareArguments(tool.profile_id, args); } } : replayV0RawCapture === undefined ? {} : { prepareArguments(args: unknown) { return replayV0RawCapture.prepareArguments(args); } }),
     async execute(toolCallId, params) {

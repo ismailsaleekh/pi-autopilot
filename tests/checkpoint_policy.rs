@@ -307,6 +307,22 @@ fn checkpoint_policy_agent_handoff_validator_preserves_unknown_properties() {
 }
 
 #[test]
+fn checkpoint_policy_rejects_numeric_unknowns_outside_the_cross_runtime_canonical_domain() {
+    let policy =
+        CheckpointPolicy::parse_source(&policy_source()).expect("checkpoint policy parses");
+    for value in [json!(0.000001), json!({"nested": [1, 2, 3]})] {
+        let mut handoff = complete_handoff_for_role(&policy, "repository-scout");
+        handoff
+            .as_object_mut()
+            .expect("handoff object")
+            .insert("future_numeric_state".to_owned(), value);
+        let error = validate_handoff(&policy, "repository-scout", &handoff)
+            .expect_err("numeric unknowns must be encoded as strings");
+        assert!(error.contains("cross-runtime canonical domain"), "{error}");
+    }
+}
+
+#[test]
 fn malformed_checkpoint_policy_fails_loudly() {
     let broken = policy_source().replace(
         "role_policy \"task-extractor\" interruptible=#true slot_set=\"task-atom-ledger\"",

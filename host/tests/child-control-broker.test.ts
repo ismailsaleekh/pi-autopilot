@@ -242,6 +242,36 @@ test("ChildControlBroker rejects every closed request/receipt/gate mismatch befo
   }
 });
 
+test("ChildControlBroker accepts checkpoint control without installing a blocked gate", async () => {
+  const child = {
+    ...request("checkpoint-accept"),
+    kind: "checkpoint",
+    tool_name: "autopilot_checkpoint",
+    profile_id: "autopilot.agent-handoff.v1:autopilot_checkpoint",
+  };
+  let gateCalls = 0;
+  const broker = await startChildControlBroker({
+    transport: {
+      async request(_kind, payload) {
+        return checkpointFrame((payload as { request: { request_id: string } }).request.request_id);
+      },
+    } as never,
+    async applyBlockedGate() {
+      gateCalls += 1;
+      throw new Error("checkpoint must not install a blocked gate");
+    },
+  });
+  try {
+    const reply = await exchange(broker.socketPath, framed(child));
+    assert.notEqual(reply.length, 0);
+    const response = JSON.parse(reply.subarray(4).toString("utf8"));
+    assert.equal(response.receipt.kind, "checkpoint");
+    assert.equal(gateCalls, 0);
+  } finally {
+    await broker.stop();
+  }
+});
+
 test("ChildControlBroker keeps the 4 MiB frame ceiling closed", async () => {
   const broker = await startChildControlBroker({ transport: { async request() { throw new Error("must not forward"); } } as never });
   try {
@@ -398,6 +428,42 @@ test("ChildControlBroker surfaces verified cleanup failure without a fallback", 
   rmdirSync(broker.socketPath);
   rmdirSync(directory);
 });
+
+function checkpointFrame(requestId: string) {
+  return {
+    v: 1,
+    id: 8,
+    kind: "child-control",
+    payload: {
+      response: {
+        schema: "autopilot.child_control_response.v1",
+        request_id: requestId,
+        outcome: "ACCEPT",
+        receipt: {
+          kind: "checkpoint",
+          schema: "autopilot.child_control_accept_receipt.v1",
+          receipt: {
+            schema: "autopilot.checkpoint_receipt.v1",
+            receipt_id: "018f0f00-0000-7000-8000-000000000001",
+            run_id: "run-1",
+            run_revision: 1,
+            assignment_id: "assignment-1",
+            attempt: 1,
+            role_id: "task-extractor",
+            mode: "inventory",
+            session_id: "session-1",
+            profile_id: "autopilot.agent-handoff.v1:autopilot_checkpoint",
+            tool_name: "autopilot_checkpoint",
+            tool_call_id: "call-1",
+            handoff_digest: "a".repeat(64),
+            handoff: {},
+          },
+        },
+      },
+      blocked_gate: null,
+    },
+  };
+}
 
 function blockedFrame(requestId: string) {
   return {

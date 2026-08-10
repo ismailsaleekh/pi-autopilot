@@ -594,6 +594,14 @@ impl CheckpointPolicy {
         handoff: AgentHandoff,
         total_bytes: usize,
     ) -> Result<AgentHandoff, String> {
+        let canonical_domain = serde_json::to_value(&handoff)
+            .map_err(|error| format!("checkpoint handoff serialize failed: {error}"))?;
+        if json_contains_number(&canonical_domain) {
+            return Err(
+                "agent-run handoff numeric leaves are not in the cross-runtime canonical domain; encode unknown numeric state as a string"
+                    .to_owned(),
+            );
+        }
         if handoff.completed.iter().any(|item| item.trim().is_empty())
             || handoff.remaining.iter().any(|item| item.trim().is_empty())
             || handoff.next_action.trim().is_empty()
@@ -736,6 +744,15 @@ fn enforce_bound(bound: &str, observed: usize, limit: usize, location: &str) -> 
         ));
     }
     Ok(())
+}
+
+fn json_contains_number(value: &Value) -> bool {
+    match value {
+        Value::Number(_) => true,
+        Value::Array(items) => items.iter().any(json_contains_number),
+        Value::Object(items) => items.values().any(json_contains_number),
+        Value::Null | Value::Bool(_) | Value::String(_) => false,
+    }
 }
 
 fn json_depth_two(value: &Value) -> bool {

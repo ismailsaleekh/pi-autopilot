@@ -155,7 +155,7 @@ fn fake_pi_journey_writes_identity_carrier_and_isolated_exact_args() {
 
 #[cfg(unix)]
 #[test]
-fn fresh_v5_keeps_one_session_through_retries_compaction_and_parallel_alias_blocked_accept() {
+fn fresh_v5_keeps_one_session_through_retries_and_parallel_alias_blocked_accept() {
     let root = temp_root("runner-v5-retry-accept");
     let socket = test_broker_socket();
     fs::remove_file(&socket).expect("replace inert broker socket");
@@ -173,7 +173,9 @@ fn fresh_v5_keeps_one_session_through_retries_compaction_and_parallel_alias_bloc
             fs::write(&observed, &body).expect("observation record");
             let mut trailing = [0_u8; 1];
             assert_eq!(
-                stream.read(&mut trailing).expect("observation write-half close"),
+                stream
+                    .read(&mut trailing)
+                    .expect("observation write-half close"),
                 0,
                 "runner must expose no response channel after observation"
             );
@@ -206,7 +208,6 @@ fn fresh_v5_keeps_one_session_through_retries_compaction_and_parallel_alias_bloc
         concat!(
             "writeFileSync({prompt_count:?}, String(promptCount)); send({{type:'agent_start'}}); ",
             "for (let i=0;i<{retries};i++) {{ const callId='call-v5-retry-'+i; send({{type:'tool_execution_start',toolCallId:callId,toolName:'autopilot_submit_atoms'}}); send({{type:'tool_execution_end',toolCallId:callId,toolName:'autopilot_submit_atoms',result:{{content:[],terminate:false}},isError:true}}); send({{type:'message_end',message:{{role:'toolResult',toolCallId:callId,toolName:'autopilot_submit_atoms',content:[],isError:true}}}}); }} ",
-            "for (const reason of ['threshold','overflow','threshold']) {{ send({{type:'compaction_start',reason}}); send({{type:'compaction_end',reason,aborted:false,willRetry:false}}); }} ",
             "const receipt={receipt}; send({{type:'tool_execution_start',toolCallId:'call-v5-accept',toolName:'autopilot_report_blocked'}}); send({{type:'tool_execution_end',toolCallId:'call-v5-accept',toolName:'autopilot_report_blocked',result:{{content:[],details:receipt,terminate:true}},isError:false}}); const laterRetry='call-v5-retry-after-accept'; send({{type:'tool_execution_start',toolCallId:laterRetry,toolName:'autopilot_submit_atoms'}}); send({{type:'tool_execution_end',toolCallId:laterRetry,toolName:'autopilot_submit_atoms',result:{{content:[],terminate:false}},isError:true}}); send({{type:'message_end',message:{{role:'toolResult',toolCallId:'call-v5-accept',toolName:'autopilot_report_blocked',content:[],details:receipt,isError:false}}}}); send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}});"
         ),
         receipt = serde_json::to_string(&receipt).expect("receipt json"),
@@ -233,8 +234,7 @@ fn fresh_v5_keeps_one_session_through_retries_compaction_and_parallel_alias_bloc
     assert_eq!(observed["receipt_id"], "receipt-v5-1");
     assert_eq!(observed["tool_call_id"], "call-v5-accept");
     assert_ne!(
-        observed["tool_call_id"],
-        receipt["receipt"]["tool_call_id"],
+        observed["tool_call_id"], receipt["receipt"]["tool_call_id"],
         "observation must carry the current correlated Pi call, not the durable replay call"
     );
     assert!(
@@ -245,6 +245,1389 @@ fn fresh_v5_keeps_one_session_through_retries_compaction_and_parallel_alias_bloc
         !root.join(".pi/autopilot/runner/attempt-events").exists(),
         "fresh V5 wrote historical attempt evidence"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_rejects_automatic_compaction_with_child_control_active() {
+    let root = temp_root("runner-v5-auto-compaction-refused");
+    let socket = test_broker_socket();
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&spec, &socket);
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            "",
+            "if (promptCount === 1) { send({type:'agent_start'}); send({type:'compaction_start',reason:'threshold'}); send({type:'compaction_end',reason:'threshold',aborted:false,willRetry:false}); send({type:'agent_end',willRetry:false}); send({type:'agent_settled'}); } else { process.exit(108); }",
+        )
+        .replace("fake-pi-v2", "0.84.1"),
+    );
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("fresh V5 automatic compaction must remain fail-closed");
+    assert!(error.contains("automatic compaction"), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_rejects_an_enabled_automatic_compaction_state_before_prompt() {
+    let root = temp_root("runner-v5-auto-compaction-state-refused");
+    let socket = test_broker_socket();
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&spec, &socket);
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            "const autoCompactionEnabledOverride=true;",
+            "process.exit(99);",
+        )
+        .replace("fake-pi-v2", "0.84.1"),
+    );
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("fresh V5 must attest that automatic compaction is disabled before prompting");
+    assert!(error.contains("get_state identity drift"), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_rejects_a_nonidle_child_state_before_prompt() {
+    let root = temp_root("runner-v5-nonidle-state-refused");
+    let socket = test_broker_socket();
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&spec, &socket);
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi("const isStreamingOverride=true;", "process.exit(101);")
+            .replace("fake-pi-v2", "0.84.1"),
+    );
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("fresh V5 must observe an idle child before prompting");
+    assert!(error.contains("get_state runtime is not idle"), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_clean_settlement_continues_only_below_the_known_checkpoint_threshold() {
+    let root = temp_root("runner-v5-known-continuation");
+    let socket = test_broker_socket();
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&spec, &socket);
+    let submit = v5_submit_accept_receipt(&spec);
+    let commands = root.join("v5-known-continuation-commands.jsonl");
+    let accepted = v5_accept_events(
+        &submit,
+        "autopilot_submit_atoms",
+        "call-v5-known-continuation",
+        "call-v5-known-continuation",
+        true,
+    );
+    let setup = format!(
+        "contextPercent=50; const commandLog={commands:?}; function beforeCommand(cmd) {{ appendFileSync(commandLog, JSON.stringify({{type:cmd.type,message:cmd.message}})+'\\n'); }}"
+    );
+    let on_prompt = format!(
+        "if (promptCount === 1) {{ send({{type:'agent_start'}}); send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}}); }} else if (promptCount === 2) {{ {accepted} }} else {{ process.exit(93); }}"
+    );
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(&setup, &on_prompt).replace("fake-pi-v2", "0.84.1"),
+    );
+    with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect("known below-threshold settlement may continue in the same session");
+    let rows = fs::read_to_string(&commands)
+        .expect("continuation command log")
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("command row"))
+        .collect::<Vec<_>>();
+    let prompts = rows
+        .iter()
+        .filter(|row| row["type"] == "prompt")
+        .collect::<Vec<_>>();
+    assert_eq!(prompts.len(), 2);
+    let continuation = prompts[1]["message"].as_str().expect("continuation prompt");
+    assert!(continuation.contains("50.00%"), "{continuation}");
+    assert!(
+        continuation.contains("same role, mode, worktree, and Pi session"),
+        "{continuation}"
+    );
+    assert_eq!(rows.iter().filter(|row| row["type"] == "steer").count(), 0);
+    assert_eq!(
+        rows.iter().filter(|row| row["type"] == "compact").count(),
+        0
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_unknown_context_refuses_a_clean_no_accept_continuation() {
+    let root = temp_root("runner-v5-unknown-continuation");
+    let socket = test_broker_socket();
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&spec, &socket);
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            "statsData=()=>({sessionId,contextUsage:{tokens:null,contextWindow:100000,percent:null}});",
+            "if (promptCount === 1) { send({type:'agent_start'}); send({type:'agent_end',willRetry:false}); send({type:'agent_settled'}); } else { process.exit(109); }",
+        )
+        .replace("fake-pi-v2", "0.84.1"),
+    );
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("unknown context cannot authorize another prompt cycle");
+    assert!(error.contains("context usage is unknown"), "{error}");
+    assert!(
+        error.contains("refusing context-free continuation"),
+        "{error}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_restart_with_checkpoint_authority_refuses_original_prompt_replay() {
+    let root = temp_root("runner-v5-checkpoint-restart-guard");
+    let socket = test_broker_socket();
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&spec, &socket);
+    let mut value: Value =
+        serde_json::from_slice(&fs::read(&spec).expect("V5 spec bytes")).expect("V5 spec JSON");
+    value["session_continuity"] = json!("resume");
+    let session_dir = PathBuf::from(value["session_dir"].as_str().expect("session dir"));
+    let checkpoint_root = fs::canonicalize(&session_dir)
+        .expect("canonical session dir")
+        .parent()
+        .expect("run root")
+        .join("checkpoints");
+    fs::create_dir(&checkpoint_root).expect("prior checkpoint root");
+    fs::set_permissions(&checkpoint_root, fs::Permissions::from_mode(0o700))
+        .expect("checkpoint root mode");
+    fs::write(
+        checkpoint_root.join("019fa883-1eaf-75f9-99af-6aa246736f74.json"),
+        b"{}",
+    )
+    .expect("prior checkpoint witness");
+    fs::write(
+        &spec,
+        serde_json::to_vec_pretty(&value).expect("V5 spec JSON"),
+    )
+    .expect("write V5 resume spec");
+    let session_id = value["session_id"].as_str().expect("session id");
+    fs::write(
+        session_dir.join(format!("{session_id}.jsonl")),
+        "{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"prior session\"}]}\n",
+    )
+    .expect("resumable session history");
+    let submit = v5_submit_accept_receipt(&spec);
+    let accepted = v5_accept_events(
+        &submit,
+        "autopilot_submit_atoms",
+        "call-v5-forbidden-replayed-prompt",
+        "call-v5-forbidden-replayed-prompt",
+        true,
+    );
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi("", &accepted).replace("fake-pi-v2", "0.84.1"),
+    );
+
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("V5 restart may not replay the original prompt over checkpoint authority");
+    assert!(error.contains("refusing original-prompt replay"), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_delayed_high_telemetry_cannot_retroactively_authorize_checkpoint() {
+    let root = temp_root("runner-v5-retroactive-checkpoint");
+    let socket = test_broker_socket();
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&spec, &socket);
+    let checkpoint_call = "call-v5-before-delayed-high";
+    let checkpoint = v5_checkpoint_accept_receipt(&spec, valid_handoff(), checkpoint_call);
+    let on_prompt = format!(
+        concat!(
+            "send({{type:'agent_start'}}); emitReadTool(); const details={checkpoint}; const callId={checkpoint_call:?}; ",
+            "send({{type:'tool_execution_end',toolCallId:callId,toolName:'autopilot_checkpoint',result:{{content:[],details,terminate:true}},isError:false}}); ",
+            "send({{type:'message_end',message:{{role:'toolResult',toolCallId:callId,toolName:'autopilot_checkpoint',content:[],details,isError:false}}}}); ",
+            "send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}});"
+        ),
+        checkpoint = serde_json::to_string(&checkpoint).expect("checkpoint receipt JSON"),
+        checkpoint_call = checkpoint_call,
+    );
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi("contextPercent=86;", &on_prompt).replace("fake-pi-v2", "0.84.1"),
+    );
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("later high telemetry cannot authorize an earlier checkpoint tool call");
+    assert!(
+        error.contains("checkpoint ACCEPT before a parent-observed checkpoint request"),
+        "{error}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_reordered_context_responses_retain_the_high_water_checkpoint() {
+    let root = temp_root("runner-v5-reordered-context-high-water");
+    let socket = test_broker_socket();
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&spec, &socket);
+    let checkpoint_call = "call-v5-reordered-context-checkpoint";
+    let checkpoint = v5_checkpoint_accept_receipt(&spec, valid_handoff(), checkpoint_call);
+    let submit = v5_submit_accept_receipt(&spec);
+    let submit_events = v5_accept_events(
+        &submit,
+        "autopilot_submit_atoms",
+        "call-v5-submit-after-reordered-context",
+        "call-v5-submit-after-reordered-context",
+        true,
+    );
+    let setup = format!(
+        concat!(
+            "let heldStats; function handleStats(cmd) {{ if (heldStats === undefined) {{ heldStats=cmd; return true; }} ",
+            "send({{id:cmd.id,type:'response',command:'get_session_stats',success:true,data:{{sessionId,contextUsage:{{tokens:50000,contextWindow:100000,percent:50}}}}}}); ",
+            "send({{id:heldStats.id,type:'response',command:'get_session_stats',success:true,data:{{sessionId,contextUsage:{{tokens:86000,contextWindow:100000,percent:86}}}}}}); setTimeout(()=>process.exit(112),1000); return true; }} ",
+            "const checkpointReceipt={checkpoint}; function afterSteer(cmd) {{ const details=checkpointReceipt; const callId={checkpoint_call:?}; ",
+            "send({{type:'tool_execution_end',toolCallId:callId,toolName:'autopilot_checkpoint',result:{{content:[],details,terminate:true}},isError:false}}); ",
+            "send({{type:'message_end',message:{{role:'toolResult',toolCallId:callId,toolName:'autopilot_checkpoint',content:[],details,isError:false}}}}); send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}}); }}"
+        ),
+        checkpoint = serde_json::to_string(&checkpoint).expect("checkpoint receipt JSON"),
+        checkpoint_call = checkpoint_call,
+    );
+    let on_prompt = format!(
+        "if (promptCount === 1) {{ send({{type:'agent_start'}}); emitReadTool(); send({{type:'turn_end'}}); }} else if (promptCount === 2) {{ {submit_events} }} else {{ process.exit(113); }}"
+    );
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(&setup, &on_prompt).replace("fake-pi-v2", "0.84.1"),
+    );
+    with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect("an earlier high telemetry response must survive a newer low response");
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_retry_agent_receives_a_stranded_checkpoint_instruction() {
+    let root = temp_root("runner-v5-retry-checkpoint-instruction");
+    let socket = test_broker_socket();
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&spec, &socket);
+    let checkpoint_call = "call-v5-retry-checkpoint";
+    let checkpoint = v5_checkpoint_accept_receipt(&spec, valid_handoff(), checkpoint_call);
+    let submit = v5_submit_accept_receipt(&spec);
+    let submit_events = v5_accept_events(
+        &submit,
+        "autopilot_submit_atoms",
+        "call-v5-submit-after-retry-checkpoint",
+        "call-v5-submit-after-retry-checkpoint",
+        true,
+    );
+    let setup = format!(
+        concat!(
+            "contextPercent=86; let retried=false; function afterStats(cmd) {{ if (retried) return; retried=true; send({{type:'auto_retry_start'}}); send({{type:'auto_retry_end',success:true}}); send({{type:'agent_start'}}); setTimeout(()=>process.exit(114),1000); }} ",
+            "const checkpointReceipt={checkpoint}; function afterSteer(cmd) {{ const details=checkpointReceipt; const callId={checkpoint_call:?}; ",
+            "send({{type:'tool_execution_end',toolCallId:callId,toolName:'autopilot_checkpoint',result:{{content:[],details,terminate:true}},isError:false}}); ",
+            "send({{type:'message_end',message:{{role:'toolResult',toolCallId:callId,toolName:'autopilot_checkpoint',content:[],details,isError:false}}}}); send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}}); }}"
+        ),
+        checkpoint = serde_json::to_string(&checkpoint).expect("checkpoint receipt JSON"),
+        checkpoint_call = checkpoint_call,
+    );
+    let on_prompt = format!(
+        "if (promptCount === 1) {{ send({{type:'agent_start'}}); emitReadTool(); send({{type:'agent_end',willRetry:true}}); }} else if (promptCount === 2) {{ {submit_events} }} else {{ process.exit(115); }}"
+    );
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(&setup, &on_prompt).replace("fake-pi-v2", "0.84.1"),
+    );
+    with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect("retry AgentStart must receive a pending typed checkpoint instruction");
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_late_arm_observation_is_carried_into_the_next_prompt_once() {
+    let root = temp_root("runner-v5-late-arm-warning");
+    let socket = test_broker_socket();
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&spec, &socket);
+    let submit = v5_submit_accept_receipt(&spec);
+    let commands = root.join("late-warning-commands.jsonl");
+    let submit_events = v5_accept_events(
+        &submit,
+        "autopilot_submit_atoms",
+        "call-v5-submit-after-late-warning",
+        "call-v5-submit-after-late-warning",
+        true,
+    );
+    let setup = format!(
+        "contextPercent=76; let settled=false; const commandLog={commands:?}; function beforeCommand(cmd) {{ appendFileSync(commandLog, JSON.stringify({{type:cmd.type,message:cmd.message}})+'\\n'); }} function afterStats(cmd) {{ if (!settled) {{ settled=true; send({{type:'agent_settled'}}); }} }}",
+        commands = commands,
+    );
+    let on_prompt = format!(
+        "if (promptCount === 1) {{ send({{type:'agent_start'}}); emitReadTool(); send({{type:'agent_end',willRetry:false}}); }} else if (promptCount === 2) {{ {submit_events} }} else {{ process.exit(116); }}"
+    );
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(&setup, &on_prompt).replace("fake-pi-v2", "0.84.1"),
+    );
+    with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect("late arm telemetry must carry one warning into the next prompt");
+    let log = fs::read_to_string(commands).expect("late warning command log");
+    assert_eq!(log.matches("context warning").count(), 1, "{log}");
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_checkpoint_accept_settles_compacts_and_resumes_the_same_session() {
+    let root = temp_root("runner-v5-checkpoint-resume");
+    let socket = test_broker_socket();
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&spec, &socket);
+    let handoff = valid_handoff();
+    let checkpoint_call = "call-v5-checkpoint";
+    let checkpoint = v5_checkpoint_accept_receipt(&spec, handoff, checkpoint_call);
+    let submit = v5_submit_accept_receipt(&spec);
+    let commands = root.join("v5-checkpoint-commands.jsonl");
+    let pid_path = root.join("v5-checkpoint-pid.txt");
+    let submit_events = v5_accept_events(
+        &submit,
+        "autopilot_submit_atoms",
+        "call-v5-submit-after-checkpoint",
+        "call-v5-submit-after-checkpoint",
+        true,
+    );
+    let setup = format!(
+        concat!(
+            "contextPercent=76; writeFileSync({pid_path:?}, String(process.pid)); ",
+            "const commandLog={commands:?}; const checkpointReceipt={checkpoint}; ",
+            "function beforeCommand(cmd) {{ appendFileSync(commandLog, JSON.stringify({{type:cmd.type,message:cmd.message,enabled:cmd.enabled,customInstructions:cmd.customInstructions,pid:process.pid}})+'\\n'); }} ",
+            "function afterSteer(cmd) {{ if (String(cmd.message).includes('context warning')) {{ contextPercent=86; emitReadTool(); return; }} if (!String(cmd.message).includes('autopilot_checkpoint')) process.exit(91); ",
+            "const retryCall='call-v5-checkpoint-retry'; send({{type:'tool_execution_end',toolCallId:retryCall,toolName:'autopilot_checkpoint',result:{{content:[],terminate:false}},isError:true}}); send({{type:'message_end',message:{{role:'toolResult',toolCallId:retryCall,toolName:'autopilot_checkpoint',content:[],isError:true}}}}); ",
+            "const details=checkpointReceipt; const callId={checkpoint_call:?}; send({{type:'tool_execution_start',toolCallId:callId,toolName:'autopilot_checkpoint'}}); ",
+            "send({{type:'tool_execution_end',toolCallId:callId,toolName:'autopilot_checkpoint',result:{{content:[],details,terminate:true}},isError:false}}); ",
+            "send({{type:'message_end',message:{{role:'toolResult',toolCallId:callId,toolName:'autopilot_checkpoint',content:[],details,isError:false}}}}); ",
+            "send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}}); }}"
+        ),
+        pid_path = pid_path,
+        commands = commands,
+        checkpoint = serde_json::to_string(&checkpoint).expect("checkpoint receipt JSON"),
+        checkpoint_call = checkpoint_call,
+    );
+    let on_prompt = format!(
+        "if (promptCount === 1) {{ send({{type:'agent_start'}}); emitReadTool(); }} else if (promptCount === 2) {{ {submit_events} }} else {{ process.exit(92); }}"
+    );
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(&setup, &on_prompt).replace("fake-pi-v2", "0.84.1"),
+    );
+
+    with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect("checkpoint must compact and resume in the same V5 session");
+
+    let log = fs::read_to_string(&commands).expect("checkpoint command log");
+    let rows = log
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("command row"))
+        .collect::<Vec<_>>();
+    let pids = rows
+        .iter()
+        .filter_map(|row| row["pid"].as_u64())
+        .collect::<Vec<_>>();
+    assert!(!pids.is_empty());
+    assert!(pids.iter().all(|pid| *pid == pids[0]), "{log}");
+    assert_eq!(
+        fs::read_to_string(&pid_path).expect("single child pid"),
+        pids[0].to_string()
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row["type"] == "set_auto_compaction")
+            .map(|row| row["enabled"].as_bool())
+            .collect::<Vec<_>>(),
+        vec![Some(false)]
+    );
+    let steers = rows
+        .iter()
+        .filter(|row| row["type"] == "steer")
+        .collect::<Vec<_>>();
+    assert_eq!(steers.len(), 2, "{log}");
+    assert_eq!(
+        steers
+            .iter()
+            .filter(|row| row["message"]
+                .as_str()
+                .is_some_and(|text| text.contains("context warning")))
+            .count(),
+        1,
+        "{log}"
+    );
+    assert_eq!(
+        steers
+            .iter()
+            .filter(|row| row["message"]
+                .as_str()
+                .is_some_and(|text| text.contains("autopilot_checkpoint")))
+            .count(),
+        1,
+        "{log}"
+    );
+    assert_eq!(
+        rows.iter().filter(|row| row["type"] == "compact").count(),
+        1
+    );
+    assert_eq!(rows.iter().filter(|row| row["type"] == "prompt").count(), 2);
+    assert!(
+        rows.iter()
+            .find(|row| row["type"] == "compact")
+            .and_then(|row| row["customInstructions"].as_str())
+            .is_some_and(|text| text.contains("semantic_lens") && text.contains("atom_ledger")),
+        "{log}"
+    );
+    let fresh: kernel::generated::AgentRunSpecV5 =
+        serde_json::from_slice(&fs::read(&spec).expect("V5 spec bytes")).expect("V5 spec JSON");
+    let checkpoint_path = fs::canonicalize(&fresh.session_dir.0)
+        .expect("canonical session dir")
+        .parent()
+        .expect("run root")
+        .join("checkpoints/019fa883-1eaf-75f9-99af-6aa246736f74.json");
+    let persisted = fs::read(&checkpoint_path).expect("persisted canonical checkpoint receipt");
+    assert_eq!(
+        fs::metadata(checkpoint_path.parent().expect("checkpoint root"))
+            .expect("checkpoint root metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    assert_eq!(
+        fs::metadata(&checkpoint_path)
+            .expect("checkpoint receipt metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    assert_eq!(
+        persisted,
+        drivers::evidence::canonical_json(&checkpoint["receipt"])
+            .expect("canonical checkpoint receipt")
+    );
+    let resume = rows
+        .iter()
+        .filter(|row| row["type"] == "prompt")
+        .nth(1)
+        .and_then(|row| row["message"].as_str())
+        .expect("resume prompt");
+    assert!(
+        resume.contains(&checkpoint_path.display().to_string()),
+        "{resume}"
+    );
+    assert!(resume.contains("checkpoint is not delivery"), "{resume}");
+    assert!(!resume.contains("AUTHORITY-A-SENTINEL"), "{resume}");
+    assert!(
+        resume.contains("\"observed_context_percent\":86.0")
+            && resume.contains("\"role_id\":\"task-extractor\"")
+            && resume.contains("\"mode\":\"inventory\"")
+            && resume
+                .contains("\"checkpoint_receipt_id\":\"019fa883-1eaf-75f9-99af-6aa246736f74\""),
+        "{resume}"
+    );
+    assert!(
+        !carrier_path(&root).exists(),
+        "checkpoint path must not create a legacy carrier"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_delivery_checkpoint_keeps_execution_authority_without_a_planning_identity() {
+    let root = temp_root("runner-v5-delivery-checkpoint");
+    let worktree = delivery_worktree(&root, "checkpoint");
+    let socket = test_broker_socket();
+    let spec = write_delivery_spec(&root, &worktree, |value| value);
+    upgrade_to_v5_spec(&spec, &socket);
+    let checkpoint_call = "call-v5-delivery-checkpoint";
+    let checkpoint = v5_checkpoint_accept_receipt(&spec, valid_delivery_handoff(), checkpoint_call);
+    let submit = v5_submit_accept_receipt(&spec);
+    let commands = root.join("v5-delivery-checkpoint-commands.jsonl");
+    let submit_events = v5_accept_events(
+        &submit,
+        "autopilot_emit_status",
+        "call-v5-delivery-submit",
+        "call-v5-delivery-submit",
+        true,
+    );
+    let setup = format!(
+        concat!(
+            "contextPercent=86; const commandLog={commands:?}; const checkpointReceipt={checkpoint}; ",
+            "function beforeCommand(cmd) {{ appendFileSync(commandLog, JSON.stringify({{type:cmd.type,message:cmd.message,customInstructions:cmd.customInstructions}})+'\\n'); }} ",
+            "function afterSteer(cmd) {{ const details=checkpointReceipt; const callId={checkpoint_call:?}; ",
+            "send({{type:'tool_execution_end',toolCallId:callId,toolName:'autopilot_checkpoint',result:{{content:[],details,terminate:true}},isError:false}}); ",
+            "send({{type:'message_end',message:{{role:'toolResult',toolCallId:callId,toolName:'autopilot_checkpoint',content:[],details,isError:false}}}}); ",
+            "send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}}); }}"
+        ),
+        commands = commands,
+        checkpoint = serde_json::to_string(&checkpoint).expect("checkpoint receipt JSON"),
+        checkpoint_call = checkpoint_call,
+    );
+    let on_prompt = format!(
+        "if (promptCount === 1) {{ send({{type:'agent_start'}}); emitReadTool(); }} else if (promptCount === 2) {{ {submit_events} }} else {{ process.exit(98); }}"
+    );
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(&setup, &on_prompt).replace("fake-pi-v2", "0.84.1"),
+    );
+
+    with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect("delivery checkpoint must compact and resume without inventing planning identity");
+
+    let rows = fs::read_to_string(commands)
+        .expect("delivery checkpoint command log")
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("command row"))
+        .collect::<Vec<_>>();
+    let compact = rows
+        .iter()
+        .find(|row| row["type"] == "compact")
+        .and_then(|row| row["customInstructions"].as_str())
+        .expect("delivery compact instructions");
+    assert!(
+        compact.contains("worktree_identity") && compact.contains("tdd_command_ledger"),
+        "{compact}"
+    );
+    let resume = rows
+        .iter()
+        .filter(|row| row["type"] == "prompt")
+        .nth(1)
+        .and_then(|row| row["message"].as_str())
+        .expect("delivery resume prompt");
+    assert!(resume.contains("\"role_id\":\"implementer\""), "{resume}");
+    assert!(resume.contains("\"worktree_identity\""), "{resume}");
+    assert!(!resume.contains("\"identity\":\"planning\""), "{resume}");
+    assert!(
+        !delivery_carrier_path(&worktree).exists(),
+        "checkpoint/receipt V5 path wrote a legacy delivery carrier"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_checkpoint_receipt_must_match_the_current_tool_call_before_persistence() {
+    let root = temp_root("runner-v5-checkpoint-correlation");
+    let socket = test_broker_socket();
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&spec, &socket);
+    let checkpoint =
+        v5_checkpoint_accept_receipt(&spec, valid_handoff(), "receipt-other-tool-call");
+    let commands = root.join("v5-checkpoint-correlation-commands.jsonl");
+    let setup = format!(
+        concat!(
+            "contextPercent=86; let stateSessionIdOverride; const commandLog={commands:?}; const checkpointReceipt={checkpoint}; ",
+            "function beforeCommand(cmd) {{ appendFileSync(commandLog, JSON.stringify({{type:cmd.type}})+'\\n'); }} ",
+            "function afterCompact(cmd) {{ stateSessionIdOverride='mutation-sentinel-session'; }} ",
+            "function afterSteer(cmd) {{ const details=checkpointReceipt; const callId='current-execution-call'; ",
+            "send({{type:'tool_execution_end',toolCallId:callId,toolName:'autopilot_checkpoint',result:{{content:[],details,terminate:true}},isError:false}}); ",
+            "send({{type:'message_end',message:{{role:'toolResult',toolCallId:callId,toolName:'autopilot_checkpoint',content:[],details,isError:false}}}}); ",
+            "send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}}); }}"
+        ),
+        commands = commands,
+        checkpoint = serde_json::to_string(&checkpoint).expect("checkpoint receipt JSON"),
+    );
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            &setup,
+            "if (promptCount === 1) { send({type:'agent_start'}); emitReadTool(); } else { process.exit(105); }",
+        )
+        .replace("fake-pi-v2", "0.84.1"),
+    );
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("checkpoint receipt aliasing is forbidden");
+    assert!(
+        error.contains("checkpoint receipt identity drift"),
+        "{error}"
+    );
+    let log = fs::read_to_string(commands).expect("checkpoint correlation command log");
+    assert!(!log.contains("\"type\":\"compact\""), "{log}");
+    let fresh: kernel::generated::AgentRunSpecV5 =
+        serde_json::from_slice(&fs::read(&spec).expect("V5 spec bytes")).expect("V5 spec JSON");
+    let checkpoint_path = fs::canonicalize(&fresh.session_dir.0)
+        .expect("canonical session dir")
+        .parent()
+        .expect("run root")
+        .join("checkpoints/019fa883-1eaf-75f9-99af-6aa246736f74.json");
+    assert!(
+        !checkpoint_path.exists(),
+        "uncorrelated checkpoint became durable"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_rejects_checkpoint_accept_before_a_parent_observed_request() {
+    let root = temp_root("runner-v5-unrequested-checkpoint");
+    let socket = test_broker_socket();
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&spec, &socket);
+    let checkpoint_call = "call-v5-unrequested-checkpoint";
+    let checkpoint = v5_checkpoint_accept_receipt(&spec, valid_handoff(), checkpoint_call);
+    let commands = root.join("v5-unrequested-checkpoint-commands.jsonl");
+    let setup = format!(
+        "contextPercent=50; const commandLog={commands:?}; function beforeCommand(cmd) {{ appendFileSync(commandLog, JSON.stringify({{type:cmd.type}})+'\\n'); }}",
+        commands = commands,
+    );
+    let on_prompt = format!(
+        concat!(
+            "send({{type:'agent_start'}}); const details={checkpoint}; const callId={checkpoint_call:?}; ",
+            "send({{type:'tool_execution_end',toolCallId:callId,toolName:'autopilot_checkpoint',result:{{content:[],details,terminate:true}},isError:false}}); ",
+            "send({{type:'message_end',message:{{role:'toolResult',toolCallId:callId,toolName:'autopilot_checkpoint',content:[],details,isError:false}}}}); ",
+            "send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}});"
+        ),
+        checkpoint = serde_json::to_string(&checkpoint).expect("checkpoint receipt JSON"),
+        checkpoint_call = checkpoint_call,
+    );
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(&setup, &on_prompt).replace("fake-pi-v2", "0.84.1"),
+    );
+
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("checkpoint ACCEPT before parent-observed threshold authority must fail");
+    assert!(
+        error.contains("checkpoint ACCEPT before a parent-observed checkpoint request"),
+        "{error}"
+    );
+    let log = fs::read_to_string(commands).expect("unrequested checkpoint command log");
+    assert!(!log.contains("\"type\":\"compact\""), "{log}");
+    let fresh: kernel::generated::AgentRunSpecV5 =
+        serde_json::from_slice(&fs::read(&spec).expect("V5 spec bytes")).expect("V5 spec JSON");
+    let checkpoint_path = fs::canonicalize(&fresh.session_dir.0)
+        .expect("canonical session dir")
+        .parent()
+        .expect("run root")
+        .join("checkpoints/019fa883-1eaf-75f9-99af-6aa246736f74.json");
+    assert!(
+        !checkpoint_path.exists(),
+        "unrequested checkpoint became durable"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_terminal_tool_result_requires_exact_tool_name_and_nonerror_status() {
+    for (label, result_tool, result_is_error, expected) in [
+        ("wrong-name", "read", false, "identity/error drift"),
+        (
+            "error-status",
+            "autopilot_submit_atoms",
+            true,
+            "identity/error drift",
+        ),
+    ] {
+        let root = temp_root(&format!("runner-v5-tool-result-{label}"));
+        let socket = test_broker_socket();
+        let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+        upgrade_to_v5_spec(&spec, &socket);
+        let submit = v5_submit_accept_receipt(&spec);
+        let setup = format!(
+            "const submitReceipt={};",
+            serde_json::to_string(&submit).expect("submit receipt JSON")
+        );
+        let on_prompt = format!(
+            concat!(
+                "send({{type:'agent_start'}}); const details=submitReceipt; const callId='call-v5-result-correlation'; ",
+                "send({{type:'tool_execution_end',toolCallId:callId,toolName:'autopilot_submit_atoms',result:{{content:[],details,terminate:true}},isError:false}}); ",
+                "send({{type:'message_end',message:{{role:'toolResult',toolCallId:callId,toolName:{result_tool:?},content:[],details,isError:{result_is_error}}}}}); ",
+                "send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}});"
+            ),
+            result_tool = result_tool,
+            result_is_error = result_is_error
+        );
+        write_fake_pi(
+            &root,
+            &rpc_fake_pi(&setup, &on_prompt).replace("fake-pi-v2", "0.84.1"),
+        );
+        let error = with_fake_path(&root, || {
+            child::main(&["--spec".to_owned(), spec.display().to_string()])
+        })
+        .expect_err("toolResult identity/error drift must reject terminal authority");
+        assert!(error.contains(expected), "{label}: {error}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_unknown_terminating_tool_is_rejected_globally() {
+    let root = temp_root("runner-v5-unknown-terminating-tool");
+    let socket = test_broker_socket();
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&spec, &socket);
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            "",
+            "if (promptCount === 1) { send({type:'agent_start'}); send({type:'tool_execution_end',toolCallId:'unknown-terminal',toolName:'read',result:{content:[],terminate:true},isError:false}); send({type:'agent_end',willRetry:false}); send({type:'agent_settled'}); } else { process.exit(117); }",
+        )
+        .replace("fake-pi-v2", "0.84.1"),
+    );
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("non-control terminate:true must fail globally");
+    assert!(
+        error.contains("non-control tool read attempted terminating authority"),
+        "{error}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_ordinary_tool_after_checkpoint_accept_is_rejected_before_persistence() {
+    let root = temp_root("runner-v5-work-after-checkpoint-accept");
+    let socket = test_broker_socket();
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&spec, &socket);
+    let checkpoint_call = "call-v5-before-ordinary-tool";
+    let checkpoint = v5_checkpoint_accept_receipt(&spec, valid_handoff(), checkpoint_call);
+    let setup = format!(
+        concat!(
+            "contextPercent=86; const checkpointReceipt={checkpoint}; function afterSteer(cmd) {{ const details=checkpointReceipt; const callId={checkpoint_call:?}; ",
+            "send({{type:'tool_execution_end',toolCallId:callId,toolName:'autopilot_checkpoint',result:{{content:[],details,terminate:true}},isError:false}}); ",
+            "send({{type:'message_end',message:{{role:'toolResult',toolCallId:callId,toolName:'autopilot_checkpoint',content:[],details,isError:false}}}}); emitReadTool(); }}"
+        ),
+        checkpoint = serde_json::to_string(&checkpoint).expect("checkpoint receipt JSON"),
+        checkpoint_call = checkpoint_call,
+    );
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(&setup, "send({type:'agent_start'}); emitReadTool();")
+            .replace("fake-pi-v2", "0.84.1"),
+    );
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("ordinary work after checkpoint ACCEPT must invalidate that checkpoint");
+    assert!(
+        error.contains("ordinary tool read completed after a pending ACCEPT"),
+        "{error}"
+    );
+    let fresh: kernel::generated::AgentRunSpecV5 =
+        serde_json::from_slice(&fs::read(&spec).expect("V5 spec bytes")).expect("V5 spec JSON");
+    assert!(
+        !fs::canonicalize(&fresh.session_dir.0)
+            .expect("session dir")
+            .parent()
+            .expect("run root")
+            .join("checkpoints")
+            .exists()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_malformed_stdout_after_settlement_invalidates_accept() {
+    let root = temp_root("runner-v5-post-settlement-malformed");
+    let socket = test_broker_socket();
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&spec, &socket);
+    let submit = v5_submit_accept_receipt(&spec);
+    let accepted = v5_accept_events(
+        &submit,
+        "autopilot_submit_atoms",
+        "call-v5-before-trailing-malformed",
+        "call-v5-before-trailing-malformed",
+        true,
+    );
+    let on_prompt = format!("{accepted} process.stdout.write('{{malformed-after-settlement\\n');");
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi("", &on_prompt).replace("fake-pi-v2", "0.84.1"),
+    );
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("post-settlement malformed stdout must invalidate pending ACCEPT");
+    assert!(
+        error.contains("terminal protocol EOF validation failed"),
+        "{error}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_submit_accept_precedes_an_observed_checkpoint_request() {
+    let root = temp_root("runner-v5-submit-precedes-checkpoint");
+    let socket = test_broker_socket();
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&spec, &socket);
+    let submit = v5_submit_accept_receipt(&spec);
+    let commands = root.join("v5-submit-precedes-checkpoint-commands.jsonl");
+    let setup = format!(
+        concat!(
+            "contextPercent=86; let steerCount=0; const commandLog={commands:?}; const submitReceipt={submit}; ",
+            "function beforeCommand(cmd) {{ appendFileSync(commandLog, JSON.stringify({{type:cmd.type}})+'\\n'); }} ",
+            "function afterSteer(cmd) {{ if (++steerCount !== 1) process.exit(106); const details=submitReceipt; const callId='call-v5-submit-precedes-checkpoint'; ",
+            "send({{type:'tool_execution_end',toolCallId:callId,toolName:'autopilot_submit_atoms',result:{{content:[],details,terminate:true}},isError:false}}); ",
+            "send({{type:'message_end',message:{{role:'toolResult',toolCallId:callId,toolName:'autopilot_submit_atoms',content:[],details,isError:false}}}}); ",
+            "send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}}); }}"
+        ),
+        commands = commands,
+        submit = serde_json::to_string(&submit).expect("submit receipt JSON"),
+    );
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            &setup,
+            "if (promptCount === 1) { send({type:'agent_start'}); emitReadTool(); } else { process.exit(107); }",
+        )
+        .replace("fake-pi-v2", "0.84.1"),
+    );
+
+    with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect(
+        "generated submit ACCEPT must terminalize even after the checkpoint threshold is observed",
+    );
+    let log = fs::read_to_string(commands).expect("submit precedence command log");
+    assert_eq!(log.matches("\"type\":\"steer\"").count(), 1, "{log}");
+    assert!(!log.contains("\"type\":\"compact\""), "{log}");
+    let fresh: kernel::generated::AgentRunSpecV5 =
+        serde_json::from_slice(&fs::read(&spec).expect("V5 spec bytes")).expect("V5 spec JSON");
+    let checkpoint_root = fs::canonicalize(&fresh.session_dir.0)
+        .expect("canonical session dir")
+        .parent()
+        .expect("run root")
+        .join("checkpoints");
+    assert!(
+        !checkpoint_root.exists(),
+        "submit precedence persisted a checkpoint"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_does_not_queue_a_checkpoint_steer_after_agent_end() {
+    let root = temp_root("runner-v5-checkpoint-after-agent-end");
+    let socket = test_broker_socket();
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&spec, &socket);
+    let submit = v5_submit_accept_receipt(&spec);
+    let commands = root.join("v5-checkpoint-after-agent-end-commands.jsonl");
+    let accepted = v5_accept_events(
+        &submit,
+        "autopilot_submit_atoms",
+        "call-v5-submit-after-agent-end",
+        "call-v5-submit-after-agent-end",
+        true,
+    );
+    let setup = format!(
+        concat!(
+            "contextPercent=86; const commandLog={commands:?}; let settleOnStats=false; ",
+            "function beforeCommand(cmd) {{ appendFileSync(commandLog, JSON.stringify({{type:cmd.type,message:cmd.message}})+'\\n'); }} ",
+            "function afterStats(cmd) {{ if (!settleOnStats) return; settleOnStats=false; send({{type:'agent_settled'}}); }} ",
+            "function afterSteer(cmd) {{ process.exit(96); }}"
+        ),
+        commands = commands,
+    );
+    let on_prompt = format!(
+        "if (promptCount === 1) {{ send({{type:'agent_start'}}); emitReadTool(); send({{type:'agent_end',willRetry:false}}); settleOnStats=true; }} else if (promptCount === 2) {{ {accepted} }} else {{ process.exit(97); }}"
+    );
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(&setup, &on_prompt).replace("fake-pi-v2", "0.84.1"),
+    );
+
+    with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect("post-agent-end telemetry must become a settled checkpoint prompt, not a queued steer");
+
+    let rows = fs::read_to_string(commands)
+        .expect("post-agent-end command log")
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("command row"))
+        .collect::<Vec<_>>();
+    assert_eq!(rows.iter().filter(|row| row["type"] == "steer").count(), 0);
+    let prompts = rows
+        .iter()
+        .filter(|row| row["type"] == "prompt")
+        .collect::<Vec<_>>();
+    assert_eq!(prompts.len(), 2);
+    assert!(
+        prompts[1]["message"]
+            .as_str()
+            .is_some_and(|text| text.contains("autopilot_checkpoint"))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_refuses_a_retained_checkpoint_steer_before_persistence_or_compaction() {
+    let root = temp_root("runner-v5-retained-checkpoint-steer");
+    let socket = test_broker_socket();
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&spec, &socket);
+    let checkpoint_call = "call-v5-retained-checkpoint-steer";
+    let checkpoint = v5_checkpoint_accept_receipt(&spec, valid_handoff(), checkpoint_call);
+    let commands = root.join("v5-retained-checkpoint-steer-commands.jsonl");
+    let setup = format!(
+        concat!(
+            "contextPercent=86; let pendingMessageCountOverride=0; const commandLog={commands:?}; const checkpointReceipt={checkpoint}; ",
+            "function beforeCommand(cmd) {{ appendFileSync(commandLog, JSON.stringify({{type:cmd.type}})+'\\n'); }} ",
+            "function afterSteer(cmd) {{ pendingMessageCountOverride=1; const details=checkpointReceipt; const callId={checkpoint_call:?}; ",
+            "send({{type:'tool_execution_end',toolCallId:callId,toolName:'autopilot_checkpoint',result:{{content:[],details,terminate:true}},isError:false}}); ",
+            "send({{type:'message_end',message:{{role:'toolResult',toolCallId:callId,toolName:'autopilot_checkpoint',content:[],details,isError:false}}}}); ",
+            "send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}}); }}"
+        ),
+        commands = commands,
+        checkpoint = serde_json::to_string(&checkpoint).expect("checkpoint receipt JSON"),
+        checkpoint_call = checkpoint_call,
+    );
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(&setup, "send({type:'agent_start'}); emitReadTool();")
+            .replace("fake-pi-v2", "0.84.1"),
+    );
+
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("a retained queued steer must block checkpoint durability and compaction");
+    assert!(
+        error.contains("settled queue verification failed"),
+        "{error}"
+    );
+    assert!(error.contains("retained 1 queued message"), "{error}");
+    let log = fs::read_to_string(commands).expect("retained checkpoint steer command log");
+    assert!(!log.contains("\"type\":\"abort\""), "{log}");
+    assert!(!log.contains("\"type\":\"compact\""), "{log}");
+    let fresh: kernel::generated::AgentRunSpecV5 =
+        serde_json::from_slice(&fs::read(&spec).expect("V5 spec bytes")).expect("V5 spec JSON");
+    let checkpoint_path = fs::canonicalize(&fresh.session_dir.0)
+        .expect("canonical session dir")
+        .parent()
+        .expect("run root")
+        .join("checkpoints/019fa883-1eaf-75f9-99af-6aa246736f74.json");
+    assert!(
+        !checkpoint_path.exists(),
+        "queued checkpoint became durable"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_supports_repeated_checkpoint_epochs_without_replacing_the_session() {
+    let root = temp_root("runner-v5-repeated-checkpoints");
+    let socket = test_broker_socket();
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&spec, &socket);
+    let first = v5_checkpoint_accept_receipt(&spec, valid_handoff(), "call-v5-checkpoint-1");
+    let mut second = v5_checkpoint_accept_receipt(&spec, valid_handoff(), "call-v5-checkpoint-2");
+    second["receipt"]["receipt_id"] = json!("019fa883-1eaf-75f9-99af-6aa246736f75");
+    let submit = v5_submit_accept_receipt(&spec);
+    let commands = root.join("v5-repeated-checkpoint-commands.jsonl");
+    let pid_path = root.join("v5-repeated-checkpoint-pid.txt");
+    let submit_events = v5_accept_events(
+        &submit,
+        "autopilot_submit_atoms",
+        "call-v5-submit-after-two-checkpoints",
+        "call-v5-submit-after-two-checkpoints",
+        true,
+    );
+    let setup = format!(
+        concat!(
+            "contextPercent=86; writeFileSync({pid_path:?}, String(process.pid)); const commandLog={commands:?}; ",
+            "const checkpointReceipts=[{first},{second}]; let checkpointIndex=0; ",
+            "function beforeCommand(cmd) {{ appendFileSync(commandLog, JSON.stringify({{type:cmd.type,message:cmd.message}})+'\\n'); }} ",
+            "function afterSteer(cmd) {{ const details=checkpointReceipts[checkpointIndex++]; if (!details) process.exit(94); const callId=details.receipt.tool_call_id; ",
+            "send({{type:'tool_execution_end',toolCallId:callId,toolName:'autopilot_checkpoint',result:{{content:[],details,terminate:true}},isError:false}}); ",
+            "send({{type:'message_end',message:{{role:'toolResult',toolCallId:callId,toolName:'autopilot_checkpoint',content:[],details,isError:false}}}}); ",
+            "send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}}); }}"
+        ),
+        pid_path = pid_path,
+        commands = commands,
+        first = serde_json::to_string(&first).expect("first checkpoint JSON"),
+        second = serde_json::to_string(&second).expect("second checkpoint JSON"),
+    );
+    let on_prompt = format!(
+        "if (promptCount <= 2) {{ contextPercent=86; send({{type:'agent_start'}}); emitReadTool(); }} else if (promptCount === 3) {{ {submit_events} }} else {{ process.exit(95); }}"
+    );
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(&setup, &on_prompt).replace("fake-pi-v2", "0.84.1"),
+    );
+    with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect("two checkpoint epochs must retain one session and reach submit ACCEPT");
+    let log = fs::read_to_string(commands).expect("repeated checkpoint command log");
+    assert_eq!(log.matches("\"type\":\"steer\"").count(), 2, "{log}");
+    assert_eq!(log.matches("\"type\":\"compact\"").count(), 2, "{log}");
+    assert_eq!(log.matches("\"type\":\"prompt\"").count(), 3, "{log}");
+    let fresh: kernel::generated::AgentRunSpecV5 =
+        serde_json::from_slice(&fs::read(&spec).expect("V5 spec bytes")).expect("V5 spec JSON");
+    let checkpoint_root = fs::canonicalize(&fresh.session_dir.0)
+        .expect("canonical session dir")
+        .parent()
+        .expect("run root")
+        .join("checkpoints");
+    assert!(
+        checkpoint_root
+            .join("019fa883-1eaf-75f9-99af-6aa246736f74.json")
+            .is_file()
+    );
+    assert!(
+        checkpoint_root
+            .join("019fa883-1eaf-75f9-99af-6aa246736f75.json")
+            .is_file()
+    );
+    assert!(!fs::read_to_string(pid_path).expect("one Pi pid").is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_rejects_post_compaction_session_identity_drift_before_resume() {
+    let root = temp_root("runner-v5-post-compact-session-drift");
+    let socket = test_broker_socket();
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&spec, &socket);
+    let checkpoint_call = "call-v5-checkpoint-session-drift";
+    let checkpoint = v5_checkpoint_accept_receipt(&spec, valid_handoff(), checkpoint_call);
+    let setup = format!(
+        concat!(
+            "contextPercent=86; let stateSessionIdOverride; const checkpointReceipt={checkpoint}; ",
+            "function afterCompact(cmd) {{ stateSessionIdOverride='different-session'; }} ",
+            "function afterSteer(cmd) {{ const details=checkpointReceipt; const callId={checkpoint_call:?}; ",
+            "send({{type:'tool_execution_end',toolCallId:callId,toolName:'autopilot_checkpoint',result:{{content:[],details,terminate:true}},isError:false}}); ",
+            "send({{type:'message_end',message:{{role:'toolResult',toolCallId:callId,toolName:'autopilot_checkpoint',content:[],details,isError:false}}}}); ",
+            "send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}}); }}"
+        ),
+        checkpoint = serde_json::to_string(&checkpoint).expect("checkpoint receipt JSON"),
+        checkpoint_call = checkpoint_call,
+    );
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(&setup, "send({type:'agent_start'}); emitReadTool();")
+            .replace("fake-pi-v2", "0.84.1"),
+    );
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("same-session identity drift must block resume");
+    assert!(
+        error.contains("post-compaction verification failed"),
+        "{error}"
+    );
+    assert!(error.contains("get_state identity drift"), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_rejects_a_post_compaction_queued_message_before_resume() {
+    let root = temp_root("runner-v5-post-compact-queued-message");
+    let socket = test_broker_socket();
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&spec, &socket);
+    let checkpoint_call = "call-v5-checkpoint-post-compact-queue";
+    let checkpoint = v5_checkpoint_accept_receipt(&spec, valid_handoff(), checkpoint_call);
+    let commands = root.join("v5-post-compact-queue-commands.jsonl");
+    let setup = format!(
+        concat!(
+            "contextPercent=86; let pendingMessageCountOverride=0; const commandLog={commands:?}; const checkpointReceipt={checkpoint}; ",
+            "function beforeCommand(cmd) {{ appendFileSync(commandLog, JSON.stringify({{type:cmd.type}})+'\\n'); }} ",
+            "function afterCompact(cmd) {{ pendingMessageCountOverride=1; }} ",
+            "function afterSteer(cmd) {{ const details=checkpointReceipt; const callId={checkpoint_call:?}; ",
+            "send({{type:'tool_execution_end',toolCallId:callId,toolName:'autopilot_checkpoint',result:{{content:[],details,terminate:true}},isError:false}}); ",
+            "send({{type:'message_end',message:{{role:'toolResult',toolCallId:callId,toolName:'autopilot_checkpoint',content:[],details,isError:false}}}}); ",
+            "send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}}); }}"
+        ),
+        commands = commands,
+        checkpoint = serde_json::to_string(&checkpoint).expect("checkpoint receipt JSON"),
+        checkpoint_call = checkpoint_call,
+    );
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(&setup, "if (promptCount === 1) { send({type:'agent_start'}); emitReadTool(); } else { process.exit(100); }")
+            .replace("fake-pi-v2", "0.84.1"),
+    );
+
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("a message queued during manual compaction must block resume");
+    assert!(
+        error.contains("post-compaction verification failed"),
+        "{error}"
+    );
+    assert!(error.contains("retained 1 queued message"), "{error}");
+    let log = fs::read_to_string(commands).expect("post-compaction queue command log");
+    assert_eq!(log.matches("\"type\":\"compact\"").count(), 1, "{log}");
+    assert_eq!(log.matches("\"type\":\"prompt\"").count(), 1, "{log}");
+    let fresh: kernel::generated::AgentRunSpecV5 =
+        serde_json::from_slice(&fs::read(&spec).expect("V5 spec bytes")).expect("V5 spec JSON");
+    let checkpoint_path = fs::canonicalize(&fresh.session_dir.0)
+        .expect("canonical session dir")
+        .parent()
+        .expect("run root")
+        .join("checkpoints/019fa883-1eaf-75f9-99af-6aa246736f74.json");
+    assert!(
+        checkpoint_path.is_file(),
+        "accepted checkpoint was not durable"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_compaction_failure_preserves_the_canonical_checkpoint_without_resume() {
+    let root = temp_root("runner-v5-compaction-failure");
+    let socket = test_broker_socket();
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&spec, &socket);
+    let checkpoint_call = "call-v5-checkpoint-before-abort";
+    let checkpoint = v5_checkpoint_accept_receipt(&spec, valid_handoff(), checkpoint_call);
+    let commands = root.join("v5-compaction-failure-commands.jsonl");
+    let setup = format!(
+        concat!(
+            "contextPercent=86; const forceCompactionAbort=true; const commandLog={commands:?}; const checkpointReceipt={checkpoint}; ",
+            "function beforeCommand(cmd) {{ appendFileSync(commandLog, JSON.stringify({{type:cmd.type,message:cmd.message}})+'\\n'); }} ",
+            "function afterSteer(cmd) {{ const details=checkpointReceipt; const callId={checkpoint_call:?}; ",
+            "send({{type:'tool_execution_end',toolCallId:callId,toolName:'autopilot_checkpoint',result:{{content:[],details,terminate:true}},isError:false}}); ",
+            "send({{type:'message_end',message:{{role:'toolResult',toolCallId:callId,toolName:'autopilot_checkpoint',content:[],details,isError:false}}}}); ",
+            "send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}}); }}"
+        ),
+        commands = commands,
+        checkpoint = serde_json::to_string(&checkpoint).expect("checkpoint receipt JSON"),
+        checkpoint_call = checkpoint_call,
+    );
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(&setup, "send({type:'agent_start'}); emitReadTool();")
+            .replace("fake-pi-v2", "0.84.1"),
+    );
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("aborted compaction must fail without a replacement prompt");
+    assert!(error.contains("manual compaction aborted"), "{error}");
+    let fresh: kernel::generated::AgentRunSpecV5 =
+        serde_json::from_slice(&fs::read(&spec).expect("V5 spec bytes")).expect("V5 spec JSON");
+    let checkpoint_path = fs::canonicalize(&fresh.session_dir.0)
+        .expect("canonical session dir")
+        .parent()
+        .expect("run root")
+        .join("checkpoints/019fa883-1eaf-75f9-99af-6aa246736f74.json");
+    assert_eq!(
+        fs::read(&checkpoint_path).expect("preserved checkpoint"),
+        drivers::evidence::canonical_json(&checkpoint["receipt"])
+            .expect("canonical checkpoint receipt")
+    );
+    let log = fs::read_to_string(commands).expect("compaction failure command log");
+    assert_eq!(log.matches("\"type\":\"prompt\"").count(), 1, "{log}");
+    assert_eq!(log.matches("\"type\":\"compact\"").count(), 1, "{log}");
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_provider_compaction_failure_preserves_checkpoint_without_resume() {
+    let root = temp_root("runner-v5-provider-compaction-failure");
+    let socket = test_broker_socket();
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&spec, &socket);
+    let checkpoint_call = "call-v5-checkpoint-before-provider-failure";
+    let checkpoint = v5_checkpoint_accept_receipt(&spec, valid_handoff(), checkpoint_call);
+    let commands = root.join("v5-provider-compaction-failure-commands.jsonl");
+    let setup = format!(
+        concat!(
+            "contextPercent=86; const forceCompactionFailure=true; const commandLog={commands:?}; const checkpointReceipt={checkpoint}; ",
+            "function beforeCommand(cmd) {{ appendFileSync(commandLog, JSON.stringify({{type:cmd.type,message:cmd.message}})+'\\n'); }} ",
+            "function afterSteer(cmd) {{ const details=checkpointReceipt; const callId={checkpoint_call:?}; ",
+            "send({{type:'tool_execution_end',toolCallId:callId,toolName:'autopilot_checkpoint',result:{{content:[],details,terminate:true}},isError:false}}); ",
+            "send({{type:'message_end',message:{{role:'toolResult',toolCallId:callId,toolName:'autopilot_checkpoint',content:[],details,isError:false}}}}); ",
+            "send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}}); }}"
+        ),
+        commands = commands,
+        checkpoint = serde_json::to_string(&checkpoint).expect("checkpoint receipt JSON"),
+        checkpoint_call = checkpoint_call,
+    );
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(&setup, "send({type:'agent_start'}); emitReadTool();")
+            .replace("fake-pi-v2", "0.84.1"),
+    );
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("a non-aborted provider compaction failure must remain fatal");
+    assert!(error.contains("manual compaction stream failed"), "{error}");
+    assert!(
+        error.contains("forced provider compaction failure"),
+        "{error}"
+    );
+    let fresh: kernel::generated::AgentRunSpecV5 =
+        serde_json::from_slice(&fs::read(&spec).expect("V5 spec bytes")).expect("V5 spec JSON");
+    let checkpoint_path = fs::canonicalize(&fresh.session_dir.0)
+        .expect("canonical session dir")
+        .parent()
+        .expect("run root")
+        .join("checkpoints/019fa883-1eaf-75f9-99af-6aa246736f74.json");
+    assert_eq!(
+        fs::read(&checkpoint_path).expect("preserved checkpoint"),
+        drivers::evidence::canonical_json(&checkpoint["receipt"])
+            .expect("canonical checkpoint receipt")
+    );
+    let log = fs::read_to_string(commands).expect("provider compaction failure command log");
+    assert_eq!(log.matches("\"type\":\"prompt\"").count(), 1, "{log}");
+    assert_eq!(log.matches("\"type\":\"compact\"").count(), 1, "{log}");
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_rejects_unproven_manual_compaction_before_resume() {
+    let root = temp_root("runner-v5-unproven-compaction");
+    let socket = test_broker_socket();
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&spec, &socket);
+    let checkpoint_call = "call-v5-checkpoint-before-unproven-compaction";
+    let checkpoint = v5_checkpoint_accept_receipt(&spec, valid_handoff(), checkpoint_call);
+    let commands = root.join("v5-unproven-compaction-commands.jsonl");
+    let setup = format!(
+        concat!(
+            "contextPercent=86; const forceCompactionResultDrift=true; const commandLog={commands:?}; const checkpointReceipt={checkpoint}; ",
+            "function beforeCommand(cmd) {{ appendFileSync(commandLog, JSON.stringify({{type:cmd.type}})+'\\n'); }} ",
+            "function afterSteer(cmd) {{ const details=checkpointReceipt; const callId={checkpoint_call:?}; ",
+            "send({{type:'tool_execution_end',toolCallId:callId,toolName:'autopilot_checkpoint',result:{{content:[],details,terminate:true}},isError:false}}); ",
+            "send({{type:'message_end',message:{{role:'toolResult',toolCallId:callId,toolName:'autopilot_checkpoint',content:[],details,isError:false}}}}); ",
+            "send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}}); }}"
+        ),
+        commands = commands,
+        checkpoint = serde_json::to_string(&checkpoint).expect("checkpoint receipt JSON"),
+        checkpoint_call = checkpoint_call,
+    );
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            &setup,
+            "if (promptCount === 1) { send({type:'agent_start'}); emitReadTool(); } else { process.exit(110); }",
+        )
+        .replace("fake-pi-v2", "0.84.1"),
+    );
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("manual compaction must prove a bounded context reduction before resume");
+    assert!(error.contains("missing firstKeptEntryId"), "{error}");
+    let fresh: kernel::generated::AgentRunSpecV5 =
+        serde_json::from_slice(&fs::read(&spec).expect("V5 spec bytes")).expect("V5 spec JSON");
+    let checkpoint_path = fs::canonicalize(&fresh.session_dir.0)
+        .expect("canonical session dir")
+        .parent()
+        .expect("run root")
+        .join("checkpoints/019fa883-1eaf-75f9-99af-6aa246736f74.json");
+    assert!(
+        checkpoint_path.is_file(),
+        "accepted checkpoint was not durable"
+    );
+    let log = fs::read_to_string(commands).expect("unproven compaction command log");
+    assert_eq!(log.matches("\"type\":\"prompt\"").count(), 1, "{log}");
+    assert_eq!(log.matches("\"type\":\"compact\"").count(), 1, "{log}");
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_rejects_a_later_malformed_terminal_candidate_after_pending_accept() {
+    let root = temp_root("runner-v5-later-terminal-candidate");
+    let socket = test_broker_socket();
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&spec, &socket);
+    let receipt = serde_json::to_string(&v5_submit_accept_receipt(&spec)).expect("receipt JSON");
+    let on_prompt = format!(
+        concat!(
+            "const details={receipt}; send({{type:'agent_start'}}); ",
+            "send({{type:'tool_execution_end',toolCallId:'accepted-call',toolName:'autopilot_submit_atoms',result:{{content:[],details,terminate:true}},isError:false}}); ",
+            "send({{type:'tool_execution_end',toolCallId:'later-call',toolName:'autopilot_submit_atoms',result:{{content:[],terminate:false}},isError:false}}); ",
+            "send({{type:'message_end',message:{{role:'toolResult',toolCallId:'accepted-call',toolName:'autopilot_submit_atoms',content:[],details,isError:false}}}}); ",
+            "send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}});"
+        ),
+        receipt = receipt,
+    );
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi("", &on_prompt).replace("fake-pi-v2", "0.84.1"),
+    );
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("later malformed terminal candidate must remain loud");
+    assert!(error.contains("multiple terminal candidates"), "{error}");
+    assert!(
+        !error.contains("later-call"),
+        "tool id need not leak into bounded error"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_bootstrap_rejection_cleans_up_the_spawned_process_group() {
+    let root = temp_root("runner-v5-bootstrap-cleanup");
+    let socket = test_broker_socket();
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&spec, &socket);
+    let signal_marker = root.join("bootstrap-cleanup-signal.txt");
+    let pid_path = root.join("bootstrap-cleanup-pid.txt");
+    let setup = format!(
+        concat!(
+            "const suppressReceipt=true; writeFileSync({pid_path:?}, String(process.pid)); ",
+            "const bootstrapKeepalive=setInterval(() => {{}}, 1000); ",
+            "process.on('SIGTERM', () => {{ writeFileSync({signal_marker:?}, 'SIGTERM'); clearInterval(bootstrapKeepalive); process.exit(143); }});"
+        ),
+        pid_path = pid_path,
+        signal_marker = signal_marker,
+    );
+    let fake = replace_fake_stdin_end(
+        rpc_fake_pi(&setup, "").replace("fake-pi-v2", "0.84.1"),
+        "process.stdin.on('end', () => {});",
+    );
+    write_fake_pi(&root, &fake);
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("bootstrap receipt rejection must clean up Pi");
+    assert!(
+        error.contains("registration receipt count was 0"),
+        "{error}"
+    );
+    assert_eq!(
+        fs::read_to_string(&signal_marker).expect("bootstrap cleanup signal"),
+        "SIGTERM"
+    );
+    assert_recorded_pid_gone(&pid_path);
 }
 
 #[cfg(unix)]
@@ -260,7 +1643,7 @@ fn fresh_v5_submit_accept_survives_successful_escalated_shutdown() {
         "autopilot_submit_atoms",
         "call-v5-submit-cleanup",
         "call-v5-submit-cleanup",
-        false,
+        true,
     );
     let signal_marker = root.join("cleanup-signal.txt");
     let pid_path = root.join("cleanup-pid.txt");
@@ -309,7 +1692,7 @@ fn fresh_v5_blocked_accept_survives_escalation_after_observation() {
         "autopilot_report_blocked",
         "call-v5-blocked-cleanup",
         "call-v5-blocked-cleanup",
-        false,
+        true,
     );
     let signal_marker = root.join("cleanup-signal.txt");
     let pid_path = root.join("cleanup-pid.txt");
@@ -348,7 +1731,7 @@ fn fresh_v5_accept_still_rejects_graceful_nonzero_exit() {
         "autopilot_submit_atoms",
         "call-v5-graceful-nonzero",
         "call-v5-graceful-nonzero",
-        false,
+        true,
     );
     let fake = replace_fake_stdin_end(
         rpc_fake_pi("", &on_prompt).replace("fake-pi-v2", "0.84.1"),
@@ -390,7 +1773,7 @@ fn fresh_v5_uncorrelated_result_cannot_gain_escalation_success() {
     })
     .expect_err("uncorrelated receipt details must remain fatal before cleanup");
     assert!(
-        error.contains("terminating tool missing correlated toolResult details"),
+        error.contains("unrelated toolResult autopilot_submit_atoms/call-v5-uncorrelated-message followed a pending ACCEPT"),
         "{error}"
     );
     assert_eq!(
@@ -413,7 +1796,7 @@ fn fresh_v5_accept_does_not_swallow_shutdown_stderr_overflow() {
         "autopilot_submit_atoms",
         "call-v5-stderr-overflow",
         "call-v5-stderr-overflow",
-        false,
+        true,
     );
     let fake = replace_fake_stdin_end(
         rpc_fake_pi("", &on_prompt).replace("fake-pi-v2", "0.84.1"),
@@ -450,13 +1833,19 @@ fn reader_only_specs_fail_before_pi_spawn() {
     .expect_err("no-field spec must be reader-only");
     assert!(no_field.contains("migration-required"), "{no_field}");
     assert!(!spawned.exists(), "no-field spec spawned Pi");
-    assert!(!carrier_path(&root).exists(), "no-field spec wrote a carrier");
+    assert!(
+        !carrier_path(&root).exists(),
+        "no-field spec wrote a carrier"
+    );
 
     let mut replay: Value =
         serde_json::from_slice(&fs::read(&spec).expect("legacy spec bytes")).expect("legacy JSON");
     replay["admission_mode"] = json!("replay_v0");
-    fs::write(&spec, serde_json::to_vec_pretty(&replay).expect("replay spec bytes"))
-        .expect("write replay_v0 spec");
+    fs::write(
+        &spec,
+        serde_json::to_vec_pretty(&replay).expect("replay spec bytes"),
+    )
+    .expect("write replay_v0 spec");
     let explicit_replay = with_fake_path(&root, || {
         child::main(&["--spec".to_owned(), spec.display().to_string()])
     })
@@ -3913,6 +5302,17 @@ fn upgrade_to_v5_spec(spec_path: &Path, socket: &Path) {
     spec["child_control_token"] = json!(token);
     spec["child_control_token_digest"] = json!(sha256_hex(token.as_bytes()));
     spec["attempt"] = json!(1);
+    let allowed = spec["allowed_tools"]
+        .as_array_mut()
+        .expect("V5 allowed tools");
+    for (_, tool_name, _, _, _, _) in kernel::generated::UNIVERSAL_CHILD_TOOLS {
+        if !allowed
+            .iter()
+            .any(|value| value.as_str() == Some(tool_name))
+        {
+            allowed.push(json!(tool_name));
+        }
+    }
     fs::write(
         spec_path,
         serde_json::to_vec_pretty(&spec).expect("V5 spec JSON"),
@@ -4338,6 +5738,25 @@ fn valid_handoff() -> Value {
     })
 }
 
+fn valid_delivery_handoff() -> Value {
+    json!({
+        "schema":"autopilot.agent-handoff.v1",
+        "completed":["implemented the first approved criterion"],
+        "remaining":["run the approved focused check", "submit delivery"],
+        "critical_state":{
+            "worktree_identity":"assignment-main-L1 lane L1 attempt 1 on the issued sparse worktree",
+            "scope_boundaries":["owned: src/lib.rs", "untouchable: all undeclared paths"],
+            "edit_ledger":["src/lib.rs: approved in-scope edit"],
+            "tdd_command_ledger":["criterion 1 red recorded; green pending"],
+            "evidence_refs":["assignment://criterion-1"],
+            "boundary_violations":["none"],
+            "repair_decisions":["none; ordinary implementation"],
+            "draft_delivery_status":"in progress; not delivered"
+        },
+        "next_action":"run the approved focused check, then submit through the generated delivery tool"
+    })
+}
+
 #[cfg(unix)]
 fn v5_submit_accept_receipt(spec_path: &Path) -> Value {
     let spec_bytes = fs::read(spec_path).expect("V5 spec bytes");
@@ -4348,8 +5767,8 @@ fn v5_submit_accept_receipt(spec_path: &Path) -> Value {
         kernel::generated::TERMINAL_PROFILES
             .iter()
             .copied()
-            .find(|profile| profile.0 == "planning.task-atoms.v1:autopilot_submit_atoms")
-            .expect("task-atoms terminal profile");
+            .find(|profile| fresh.terminal_profile_id.as_deref() == Some(profile.0))
+            .expect("selected V5 terminal profile");
     let transition_ref = format!("{}/.pi/test-submit-transition.json", facade.cwd.0);
     json!({
         "kind":"submit",
@@ -4398,10 +5817,46 @@ fn v5_submit_accept_receipt(spec_path: &Path) -> Value {
 }
 
 #[cfg(unix)]
+fn v5_checkpoint_accept_receipt(spec_path: &Path, handoff: Value, tool_call_id: &str) -> Value {
+    let fresh: kernel::generated::AgentRunSpecV5 =
+        serde_json::from_slice(&fs::read(spec_path).expect("V5 spec bytes")).expect("V5 spec JSON");
+    let checkpoint = kernel::generated::UNIVERSAL_CHILD_TOOLS
+        .iter()
+        .copied()
+        .find(|row| row.0 == "autopilot.agent-handoff.v1:autopilot_checkpoint")
+        .expect("checkpoint universal metadata");
+    let handoff_bytes = drivers::evidence::canonical_json(&handoff).expect("canonical handoff");
+    json!({
+        "kind":"checkpoint",
+        "schema":"autopilot.child_control_accept_receipt.v1",
+        "receipt":{
+            "schema":"autopilot.checkpoint_receipt.v1",
+            "receipt_id":"019fa883-1eaf-75f9-99af-6aa246736f74",
+            "run_id":fresh.run_id.0,
+            "run_revision":fresh.run_revision,
+            "assignment_id":fresh.assignment_id.0,
+            "attempt":fresh.attempt.expect("V5 attempt"),
+            "role_id":fresh.role_id.0,
+            "mode":fresh.mode.0,
+            "session_id":fresh.session_id.0,
+            "profile_id":checkpoint.0,
+            "tool_name":checkpoint.1,
+            "tool_call_id":tool_call_id,
+            "handoff_digest":sha256_hex(&handoff_bytes),
+            "handoff":handoff
+        }
+    })
+}
+
+#[cfg(unix)]
 fn v5_blocked_accept_receipt(spec_path: &Path) -> Value {
     let fresh: kernel::generated::AgentRunSpecV5 =
         serde_json::from_slice(&fs::read(spec_path).expect("V5 spec bytes")).expect("V5 spec JSON");
-    let blocked = kernel::generated::UNIVERSAL_CHILD_TOOLS[0];
+    let blocked = kernel::generated::UNIVERSAL_CHILD_TOOLS
+        .iter()
+        .copied()
+        .find(|row| row.0 == "autopilot.blocked_report.v1:autopilot_report_blocked")
+        .expect("blocked universal metadata");
     json!({
         "kind":"blocked",
         "schema":"autopilot.child_control_accept_receipt.v1",
@@ -4638,15 +6093,16 @@ let buffer = '';
 process.stdin.on('data', chunk => {{ buffer += chunk; let lines = buffer.split('\n'); buffer = lines.pop(); for (const line of lines) {{ if (line.trim()) handle(JSON.parse(line)); }} }});
 process.stdin.on('end', () => process.exit(0));
 function handle(cmd) {{
+  if (typeof beforeCommand === 'function') beforeCommand(cmd);
   if (cmd.type === 'set_auto_compaction') return send({{id:cmd.id,type:'response',command:'set_auto_compaction',success:true}});
-  if (cmd.type === 'get_state') return send({{id:cmd.id,type:'response',command:'get_state',success:true,data:{{model:{{id:observedModel,provider:observedProvider}},thinkingLevel:observedThinking,sessionId,autoCompactionEnabled:false,messageCount:storedMessages.length,pendingMessageCount:0}}}});
-  if (cmd.type === 'get_session_stats') return send({{id:cmd.id,type:'response',command:'get_session_stats',success:true,data:statsData()}});
+  if (cmd.type === 'get_state') return send({{id:cmd.id,type:'response',command:'get_state',success:true,data:{{model:{{id:observedModel,provider:observedProvider}},thinkingLevel:observedThinking,sessionId:typeof stateSessionIdOverride === 'string' ? stateSessionIdOverride : sessionId,autoCompactionEnabled:typeof autoCompactionEnabledOverride === 'boolean' ? autoCompactionEnabledOverride : false,isStreaming:typeof isStreamingOverride === 'boolean' ? isStreamingOverride : false,isCompacting:typeof isCompactingOverride === 'boolean' ? isCompactingOverride : false,messageCount:storedMessages.length,pendingMessageCount:typeof pendingMessageCountOverride === 'number' ? pendingMessageCountOverride : 0}}}});
+  if (cmd.type === 'get_session_stats') {{ if (typeof handleStats === 'function' && handleStats(cmd)) return; send({{id:cmd.id,type:'response',command:'get_session_stats',success:true,data:statsData()}}); if (typeof afterStats === 'function') afterStats(cmd); return; }}
   if (cmd.type === 'get_entries') {{
     const entries = addonPath === undefined || (typeof suppressReceipt !== 'undefined' && suppressReceipt) || (typeof suppressDurableReceipt !== 'undefined' && suppressDurableReceipt) ? [] : [durableReceipt];
     return send({{id:cmd.id,type:'response',command:'get_entries',success:true,data:{{entries,leafId:entries[0]?.id ?? null}}}});
   }}
   if (cmd.type === 'abort') return send({{id:cmd.id,type:'response',command:'abort',success:true}});
-  if (cmd.type === 'compact') {{ send({{type:'compaction_start',reason:'manual'}}); send({{type:'compaction_end',reason:'manual',aborted:false,willRetry:false}}); send({{id:cmd.id,type:'response',command:'compact',success:true,data:{{summary:'ok'}}}}); if (typeof afterCompact === 'function') afterCompact(cmd); return; }}
+  if (cmd.type === 'compact') {{ if (typeof forceCompactionAbort !== 'undefined' && forceCompactionAbort) {{ send({{type:'compaction_start',reason:'manual'}}); send({{type:'compaction_end',reason:'manual',aborted:true,willRetry:false}}); send({{id:cmd.id,type:'response',command:'compact',success:true,data:{{summary:'aborted'}}}}); return; }} if (typeof forceCompactionFailure !== 'undefined' && forceCompactionFailure) {{ send({{type:'compaction_start',reason:'manual'}}); send({{type:'compaction_end',reason:'manual',aborted:false,willRetry:false,errorMessage:'Compaction failed: forced provider failure'}}); send({{id:cmd.id,type:'response',command:'compact',success:false,error:'forced provider compaction failure'}}); return; }} if (typeof forceCompactionResultDrift !== 'undefined' && forceCompactionResultDrift) {{ send({{type:'compaction_start',reason:'manual'}}); send({{type:'compaction_end',reason:'manual',aborted:false,willRetry:false}}); send({{id:cmd.id,type:'response',command:'compact',success:true,data:{{summary:'not enough proof'}}}}); return; }} send({{type:'compaction_start',reason:'manual'}}); send({{type:'compaction_end',reason:'manual',aborted:false,willRetry:false}}); send({{id:cmd.id,type:'response',command:'compact',success:true,data:{{summary:'verified manual summary',firstKeptEntryId:'entry-kept-1',tokensBefore:90000,estimatedTokensAfter:12000}}}}); if (typeof afterCompact === 'function') afterCompact(cmd); return; }}
   if (cmd.type === 'steer') {{ send({{id:cmd.id,type:'response',command:'steer',success:true}}); if (!(typeof suppressSteerQueue !== 'undefined' && suppressSteerQueue)) send({{type:'queue_update',steering:[cmd.message],followUp:[]}}); if (typeof afterSteer === 'function') afterSteer(cmd); return; }}
   if (cmd.type === 'prompt') {{ promptCount++; persist({{role:'user', content:cmd.message}}); send({{id:cmd.id,type:'response',command:'prompt',success:true}}); {on_prompt}; return; }}
   send({{id:cmd.id,type:'response',command:cmd.type,success:false,error:'unexpected command'}});

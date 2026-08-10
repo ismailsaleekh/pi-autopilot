@@ -178,15 +178,25 @@ fn validate_child_control_tools(contracts: &Contracts) -> Result<()> {
         .filter(|(_, tool)| tool.universal)
         .collect::<Vec<_>>();
     require(
-        universal.len() == 1,
-        "universal child tool count drift; expected one blocked tool",
+        universal.len() == 2,
+        "universal child tool count drift; expected checkpoint and blocked tools",
     )?;
-    let (artifact, tool) = universal[0];
+    let checkpoint = universal.iter().find(|(artifact, tool)| {
+        artifact.schema == "autopilot.agent-handoff.v1" && tool.name == "autopilot_checkpoint"
+    });
+    let blocked = universal.iter().find(|(artifact, tool)| {
+        artifact.schema == "autopilot.blocked_report.v1" && tool.name == "autopilot_report_blocked"
+    });
     require(
-        artifact.schema == "autopilot.blocked_report.v1"
-            && tool.name == "autopilot_report_blocked"
-            && tool.closed
-            && tool.description.as_deref().is_some_and(|text| !text.is_empty()),
+        checkpoint.is_some_and(|(_, tool)| {
+            !tool.closed && tool.description.as_deref().is_some_and(|text| !text.is_empty())
+        }),
+        "universal checkpoint tool contract drift",
+    )?;
+    require(
+        blocked.is_some_and(|(_, tool)| {
+            tool.closed && tool.description.as_deref().is_some_and(|text| !text.is_empty())
+        }),
         "universal blocked tool contract drift",
     )
 }

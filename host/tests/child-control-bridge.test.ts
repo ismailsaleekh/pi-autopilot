@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, mkdirSync, rmSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { join } from "node:path";
@@ -27,6 +27,7 @@ const evidence = {
 
 const UUID_V7 = "018f0f00-0000-7000-8000-000000000001";
 const DIGEST = "a".repeat(64);
+const SUBMIT_METADATA = CHILD_CONTROL_TOOL_METADATA.filter((tool) => tool.kind === "submit");
 
 function backgroundAction() {
   return {
@@ -63,7 +64,30 @@ function blockedReceipt() {
   };
 }
 
-function accept(requestId: string, kind: "submit" | "blocked" = "submit") {
+function checkpointHandoff() {
+  return {
+    schema: "autopilot.agent-handoff.v1",
+    completed: ["completed-a"],
+    remaining: ["remaining-b"],
+    critical_state: { ledger: ["kept"] },
+    next_action: "continue remaining-b",
+    ["\u{10000}"]: "supplementary-key",
+    ["\u{e000}"]: "bmp-private-use-key",
+  };
+}
+
+function checkpointReceipt() {
+  const handoff = checkpointHandoff();
+  return {
+    schema: "autopilot.checkpoint_receipt.v1", receipt_id: UUID_V7, run_id: "run-1", run_revision: 1,
+    assignment_id: "assignment-1", attempt: 1, role_id: "task-extractor", mode: "inventory",
+    session_id: "session-1", profile_id: "autopilot.agent-handoff.v1:autopilot_checkpoint",
+    tool_name: "autopilot_checkpoint", tool_call_id: "call-1",
+    handoff_digest: createHash("sha256").update(canonicalJson(handoff), "utf8").digest("hex"), handoff,
+  };
+}
+
+function accept(requestId: string, kind: "submit" | "blocked" | "checkpoint" = "submit") {
   return {
     schema: "autopilot.child_control_response.v1",
     request_id: requestId,
@@ -71,7 +95,7 @@ function accept(requestId: string, kind: "submit" | "blocked" = "submit") {
     receipt: {
       kind,
       schema: "autopilot.child_control_accept_receipt.v1",
-      receipt: kind === "submit" ? submitReceipt() : blockedReceipt(),
+      receipt: kind === "submit" ? submitReceipt() : kind === "blocked" ? blockedReceipt() : checkpointReceipt(),
     },
   };
 }
@@ -90,7 +114,7 @@ function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   if (value !== null && typeof value === "object") {
     const record = value as Record<string, unknown>;
-    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
+    return `{${Object.keys(record).sort((left, right) => Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"))).map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
   }
   return JSON.stringify(value)!;
 }
@@ -129,12 +153,14 @@ function injectedBridge(requests: unknown[]) {
 }
 
 test("generated bridge preserves every profile raw tree and correlates reversed calls by nonce", async () => {
-  assert.equal(CHILD_CONTROL_TOOL_METADATA.length, 15);
+  assert.equal(CHILD_CONTROL_TOOL_METADATA.length, 16);
   assert.equal(CHILD_CONTROL_TOOL_METADATA.filter((tool) => tool.kind === "submit").length, 14);
+  assert.equal(CHILD_CONTROL_TOOL_METADATA.filter((tool) => tool.kind === "checkpoint").length, 1);
+  assert.equal(CHILD_CONTROL_TOOL_METADATA.filter((tool) => tool.kind === "blocked").length, 1);
   const requests: Array<Record<string, unknown>> = [];
   const bridge = injectedBridge(requests);
-  const first = CHILD_CONTROL_TOOL_METADATA[1]!;
-  const second = CHILD_CONTROL_TOOL_METADATA[2]!;
+  const first = SUBMIT_METADATA[0]!;
+  const second = SUBMIT_METADATA[1]!;
   const rawFirst = { null_value: null, nested: [{ value: "first" }] };
   const rawSecond = ["malformed-top-level", { value: "second" }];
   const firstPlaceholder = structuredClone(bridge.prepareArguments(first.profile_id, rawFirst));
@@ -152,8 +178,19 @@ test("generated bridge preserves every profile raw tree and correlates reversed 
   assert.deepEqual(requests.map((request) => request.runtime_evidence), [evidence, evidence]);
 });
 
+test("generated bridge accepts a checkpoint receipt with Rust-compatible canonical Unicode key order", async () => {
+  const requests: Array<Record<string, unknown>> = [];
+  const bridge = injectedBridge(requests);
+  const metadata = CHILD_CONTROL_TOOL_METADATA.find((tool) => tool.kind === "checkpoint")!;
+  const handoff = checkpointHandoff();
+  const placeholder = structuredClone(bridge.prepareArguments(metadata.profile_id, handoff));
+  const receipt = await bridge.execute("checkpoint-unicode", placeholder, evidence);
+  assert.equal(receipt.kind, "checkpoint");
+  assert.deepEqual(requests[0]?.raw_payload, handoff);
+});
+
 test("generated bridge returns distinct secret-free RETRY diagnostics for correlation faults", async () => {
-  const metadata = CHILD_CONTROL_TOOL_METADATA[1]!;
+  const metadata = SUBMIT_METADATA[0]!;
   {
     const requests: unknown[] = [];
     const bridge = injectedBridge(requests);
@@ -204,7 +241,7 @@ test("generated bridge returns distinct secret-free RETRY diagnostics for correl
 });
 
 test("generated bridge rejects NaN and infinities before transport serialization", async () => {
-  const metadata = CHILD_CONTROL_TOOL_METADATA[1]!;
+  const metadata = SUBMIT_METADATA[0]!;
   for (const value of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
     const requests: unknown[] = [];
     const bridge = injectedBridge(requests);
@@ -230,7 +267,7 @@ test("generated bridge throws the canonical Core RETRY diagnostic unchanged", as
       return { schema: "autopilot.child_control_response.v1", request_id: request.request_id, outcome: "RETRY", diagnostic };
     },
   });
-  const placeholder = bridge.prepareArguments(CHILD_CONTROL_TOOL_METADATA[1]!.profile_id, {});
+  const placeholder = bridge.prepareArguments(SUBMIT_METADATA[0]!.profile_id, {});
   await assert.rejects(bridge.execute("core-retry", placeholder, evidence), (error) => {
     assert(error instanceof Error);
     assert.equal(error.message, canonicalJson(diagnostic));
@@ -265,6 +302,16 @@ test("generated bridge rejects malformed ACCEPT leaves and noncanonical RETRY le
       return response;
     },
     (requestId) => {
+      const response = accept(requestId, "checkpoint");
+      (response.receipt.receipt as Record<string, unknown>).handoff_digest = DIGEST;
+      return response;
+    },
+    (requestId) => {
+      const response = accept(requestId, "checkpoint");
+      delete ((response.receipt.receipt as Record<string, unknown>).handoff as Record<string, unknown>).next_action;
+      return response;
+    },
+    (requestId) => {
       const response = accept(requestId);
       submitIssuedAction(response).kind = "not-an-action-kind";
       return response;
@@ -294,7 +341,7 @@ test("generated bridge rejects malformed ACCEPT leaves and noncanonical RETRY le
   ];
   for (const response of cases) {
     const bridge = createChildControlBridge({ token: "a".repeat(64), run_id: "run-1", assignment_id: "assignment-1", attempt: 1 }, { async request(request) { return response(request.request_id) as never; } });
-    const placeholder = bridge.prepareArguments(CHILD_CONTROL_TOOL_METADATA[1]!.profile_id, {});
+    const placeholder = bridge.prepareArguments(SUBMIT_METADATA[0]!.profile_id, {});
     await assert.rejects(bridge.execute("malformed-leaf", placeholder, evidence), (error) => {
       fixedRetry(error, "protocol"); return true;
     });
@@ -318,7 +365,7 @@ test("generated environment reader rejects absent, partial, empty, and malformed
   ]) {
     await withPatchedControlEnvironment(patch, async () => {
       const bridge = createEnvironmentChildControlBridge();
-      const placeholder = bridge.prepareArguments(CHILD_CONTROL_TOOL_METADATA[1]!.profile_id, {});
+      const placeholder = bridge.prepareArguments(SUBMIT_METADATA[0]!.profile_id, {});
       await assert.rejects(bridge.execute("invalid-binding", placeholder, evidence), (error) => {
         fixedRetry(error, "transport"); return true;
       });
@@ -339,7 +386,7 @@ test("generated AF_UNIX client sends separate runtime evidence and receives rece
   });
   await withControlEnvironment(broker.socketPath, async () => {
     const bridge = createEnvironmentChildControlBridge();
-    const placeholder = bridge.prepareArguments(CHILD_CONTROL_TOOL_METADATA[1]!.profile_id, { raw: null });
+    const placeholder = bridge.prepareArguments(SUBMIT_METADATA[0]!.profile_id, { raw: null });
     const receipt = await bridge.execute("socket-accept", placeholder, evidence);
     assert.deepEqual(receipt, { kind: "submit", schema: "autopilot.child_control_accept_receipt.v1", receipt: submitReceipt() });
   });
@@ -356,7 +403,7 @@ test("generated AF_UNIX client rejects unavailable, truncated, extra, malformed,
   const unavailable = "/tmp/.pi-ap/0000000000/s";
   await withControlEnvironment(unavailable, async () => {
     const bridge = createEnvironmentChildControlBridge();
-    const placeholder = bridge.prepareArguments(CHILD_CONTROL_TOOL_METADATA[1]!.profile_id, {});
+    const placeholder = bridge.prepareArguments(SUBMIT_METADATA[0]!.profile_id, {});
     await assert.rejects(bridge.execute("unavailable", placeholder, evidence), (error) => {
       fixedRetry(error, "transport"); return true;
     });
@@ -372,7 +419,7 @@ test("generated AF_UNIX client rejects unavailable, truncated, extra, malformed,
     try {
       await withControlEnvironment(socket.path, async () => {
         const bridge = createEnvironmentChildControlBridge();
-        const placeholder = bridge.prepareArguments(CHILD_CONTROL_TOOL_METADATA[1]!.profile_id, {});
+        const placeholder = bridge.prepareArguments(SUBMIT_METADATA[0]!.profile_id, {});
         await assert.rejects(bridge.execute(`socket-${label}`, placeholder, evidence), (error) => {
           fixedRetry(error, "protocol"); return true;
         });

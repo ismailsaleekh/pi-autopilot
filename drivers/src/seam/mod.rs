@@ -10,7 +10,7 @@ use kernel::boundary::Rejection;
 use kernel::generated::{
     AllocationLaneProposal, AutopilotEventRef, BackgroundAction, BlockedCancellationRecord,
     BlockedLatch, BlockedLatchEventRef, BlockedReceipt, BlockedReconcileRecord,
-    BlockedResultObservedAckStatus, CONTRACT_VERSION, ChildControlAcceptReceipt,
+    BlockedResultObservedAckStatus, CONTRACT_VERSION, CheckpointReceipt, ChildControlAcceptReceipt,
     ChildControlBlockedCancellation, ChildControlBlockedGate, ChildControlRequest,
     ChildControlRequestKind, ChildControlResponse, ChildControlRuntimeEvidence,
     CoreToHostBlockedReconcilePayload, CoreToHostBlockedResultObservedPayload,
@@ -55,6 +55,8 @@ const COMMAND_BOUNDARY_ID: &str = "seam.operator-command.v1";
 const COMMANDS_KDL: &str = include_str!("../../../data/commands.kdl");
 const BLOCKED_PROFILE_ID: &str = "autopilot.blocked_report.v1:autopilot_report_blocked";
 const BLOCKED_TOOL_NAME: &str = "autopilot_report_blocked";
+const CHECKPOINT_PROFILE_ID: &str = "autopilot.agent-handoff.v1:autopilot_checkpoint";
+const CHECKPOINT_TOOL_NAME: &str = "autopilot_checkpoint";
 const BLOCKED_ARTIFACT_MAX_BYTES: usize = 2 << 20;
 const BLOCKED_PROJECTION_UNAVAILABLE: &str = "blocked-projection-unavailable";
 type AnyError = Box<dyn std::error::Error>;
@@ -354,6 +356,9 @@ fn route_child_control(
         Ok(ChildControlAdmission::Blocked { receipt, latch }) => {
             child_control_accept_blocked(id, request_id, receipt, latch)
         }
+        Ok(ChildControlAdmission::Checkpoint { receipt }) => {
+            child_control_accept_checkpoint(id, request_id, receipt)
+        }
         Ok(ChildControlAdmission::Replay { receipt, binding }) => {
             match root_or_verify_submit_receipt(state, &receipt, &binding) {
                 Ok(()) => child_control_accept(id, request_id, receipt),
@@ -387,6 +392,9 @@ enum ChildControlAdmission {
     Blocked {
         receipt: BlockedReceipt,
         latch: BlockedLatch,
+    },
+    Checkpoint {
+        receipt: CheckpointReceipt,
     },
     Replay {
         receipt: SubmitReceipt,
@@ -594,6 +602,10 @@ fn admit_child_control_request(
             ChildControlRequestKind::Blocked => {
                 request.profile_id == BLOCKED_PROFILE_ID && request.tool_name.0 == BLOCKED_TOOL_NAME
             }
+            ChildControlRequestKind::Checkpoint => {
+                request.profile_id == CHECKPOINT_PROFILE_ID
+                    && request.tool_name.0 == CHECKPOINT_TOOL_NAME
+            }
         };
     if !request_identity_matches {
         return Err(child_control_diagnostic(
@@ -612,6 +624,73 @@ fn admit_child_control_request(
     }
     validate_child_control_runtime_evidence(request, &facade)?;
     match request.kind {
+        ChildControlRequestKind::Checkpoint => {
+            let raw = crate::evidence::canonical_json(&request.raw_payload).map_err(|error| {
+                child_control_diagnostic(
+                    "checkpoint.canonical_json",
+                    "/raw_payload",
+                    "canonical JSON handoff bytes",
+                    &serde_json::json!(error.to_string()),
+                    "Resubmit a JSON-compatible checkpoint handoff.",
+                )
+            })?;
+            let text = std::str::from_utf8(&raw).map_err(|error| {
+                child_control_diagnostic(
+                    "checkpoint.utf8",
+                    "/raw_payload",
+                    "UTF-8 checkpoint handoff bytes",
+                    &serde_json::json!(error.to_string()),
+                    "Resubmit the generated checkpoint payload.",
+                )
+            })?;
+            let policy = crate::checkpoint::CheckpointPolicy::parse().map_err(|error| {
+                child_control_diagnostic(
+                    "checkpoint.policy",
+                    "",
+                    "the package checkpoint policy",
+                    &serde_json::json!(error),
+                    "Retry after the package checkpoint policy is repaired.",
+                )
+            })?;
+            policy
+                .validate_handoff_text(&facade.role_id.0, text)
+                .map_err(|error| {
+                    child_control_diagnostic(
+                        "checkpoint.handoff",
+                        "/raw_payload",
+                        "a bounded role-complete autopilot.agent-handoff.v1 payload",
+                        &serde_json::json!(error),
+                        "Correct the checkpoint handoff and call autopilot_checkpoint again.",
+                    )
+                })?;
+            let receipt_id = crate::state_root::fresh_uuid_v7().map_err(|error| {
+                child_control_diagnostic(
+                    "checkpoint.receipt_id",
+                    "",
+                    "a fresh Core-generated UUIDv7",
+                    &serde_json::json!(error.to_string()),
+                    "Retry the same checkpoint tool call.",
+                )
+            })?;
+            Ok(ChildControlAdmission::Checkpoint {
+                receipt: CheckpointReceipt {
+                    schema: SchemaId("autopilot.checkpoint_receipt.v1".to_owned()),
+                    receipt_id,
+                    run_id: request.run_id.clone(),
+                    run_revision: facade.run_revision,
+                    assignment_id: request.assignment_id.clone(),
+                    attempt: request.attempt,
+                    role_id: facade.role_id.clone(),
+                    mode: facade.mode.clone(),
+                    session_id: facade.session_id.clone(),
+                    profile_id: CHECKPOINT_PROFILE_ID.to_owned(),
+                    tool_name: kernel::generated::ToolName(CHECKPOINT_TOOL_NAME.to_owned()),
+                    tool_call_id: request.tool_call_id.clone(),
+                    handoff_digest: Digest(sha256_hex_local(&raw)),
+                    handoff: request.raw_payload.clone(),
+                },
+            })
+        }
         ChildControlRequestKind::Blocked => {
             let raw = crate::evidence::canonical_json(&request.raw_payload).map_err(|error| {
                 child_control_diagnostic(
@@ -7238,6 +7317,29 @@ fn child_control_accept(
                 schema: SchemaId("autopilot.child_control_response.v1".to_owned()),
                 request_id,
                 receipt: ChildControlAcceptReceipt::Submit {
+                    schema: SchemaId("autopilot.child_control_accept_receipt.v1".to_owned()),
+                    receipt,
+                },
+            },
+            blocked_gate: Nullable(None),
+        })?,
+    })
+}
+
+fn child_control_accept_checkpoint(
+    id: u64,
+    request_id: Id,
+    receipt: CheckpointReceipt,
+) -> Result<SeamEnvelope, AnyError> {
+    Ok(SeamEnvelope {
+        v: CONTRACT_VERSION as u32,
+        id,
+        kind: "child-control".to_owned(),
+        payload: serde_json::to_value(CoreToHostChildControlPayload {
+            response: ChildControlResponse::Accept {
+                schema: SchemaId("autopilot.child_control_response.v1".to_owned()),
+                request_id,
+                receipt: ChildControlAcceptReceipt::Checkpoint {
                     schema: SchemaId("autopilot.child_control_accept_receipt.v1".to_owned()),
                     receipt,
                 },

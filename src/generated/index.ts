@@ -46,7 +46,7 @@ export type BlockedReasonCode = "missing-authority" | "external-dependency" | "i
 export type BlockedResultObservedAckStatus = "acknowledged";
 export type CandidateState = "queued" | "preparing" | "conflicted" | "resolving" | "focused-checking" | "ready-to-commit" | "committed" | "needs-fix" | "failed" | "superseded";
 export type ChildControlOutcome = "ACCEPT" | "RETRY";
-export type ChildControlRequestKind = "submit" | "blocked";
+export type ChildControlRequestKind = "submit" | "blocked" | "checkpoint";
 export type ClosureVerdict = "PASS" | "NEEDS_FIX" | "BLOCKED";
 export type CommandEffect = "no-effect" | "declared-predictable" | "unknown-generated";
 export type CommandEffectHandling = "none" | "run-isolated" | "exact-cleanup-before-scope-gate" | "block-if-created";
@@ -597,6 +597,23 @@ export interface BlockedEvidence {
   value: string;
 }
 
+export interface CheckpointReceipt {
+  schema: SchemaId;
+  receipt_id: Uuidv7;
+  run_id: Id;
+  run_revision: number;
+  assignment_id: Id;
+  attempt: number;
+  role_id: Id;
+  mode: ModeId;
+  session_id: Id;
+  profile_id: string;
+  tool_name: ToolName;
+  tool_call_id: string;
+  handoff_digest: Digest;
+  handoff: unknown;
+}
+
 export type ChildControlAcceptReceipt =
   | {
     kind: "submit";
@@ -607,6 +624,11 @@ export type ChildControlAcceptReceipt =
     kind: "blocked";
       schema: SchemaId;
       receipt: BlockedReceipt;
+  }
+  | {
+    kind: "checkpoint";
+      schema: SchemaId;
+      receipt: CheckpointReceipt;
   }
 ;
 

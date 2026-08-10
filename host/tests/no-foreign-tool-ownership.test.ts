@@ -116,7 +116,15 @@ test("BUG-184: packaged parent owns no terminal tools before or after activation
 
   try {
     extensionEntrypoint(pi as never, {
-      transport: { async request() { return { v: 1, id: 1, kind: "done", payload: { status: "ok" } }; }, close() {} },
+      transport: {
+        async request(kind: string) {
+          if (kind === "blocked-reconcile") {
+            return { v: 1, id: 1, kind: "blocked-reconcile", payload: { schema: "autopilot.blocked_reconcile_response.v1", records: [] } };
+          }
+          return { v: 1, id: 1, kind: "done", payload: { status: "ok" } };
+        },
+        close() {},
+      },
       backgroundTasks: {
         async capabilities() { return { api_version: 1, run: true, run_is_agent: true, run_completion_trigger: true, status: true, logs: true, logs_bounded: true, kill: true }; },
         async run() { return { id: "t1", command: "c", status: "running", outputPath: "/tmp/o" }; },

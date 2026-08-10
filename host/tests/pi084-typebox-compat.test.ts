@@ -11,9 +11,9 @@ import {
   createReplayV0ValidationRawCapture,
 } from "../../src/generated/child-control-bridge.ts";
 import {
-  BLOCKED_REPORT_TOOL,
   SUBMIT_TOOLS,
   TERMINAL_TOOL_SCHEMAS,
+  UNIVERSAL_CHILD_TOOLS,
 } from "../../src/generated/tool-schemas.ts";
 
 const root = new URL("../../", import.meta.url);
@@ -300,14 +300,14 @@ test("Pi 0.84 Bash adapter preserves the hidden-shell no-session-environment bou
   }
 });
 
-test("Pi 0.84 real validation clone preserves raw correlation for all submit and BLOCKED profiles", async () => {
+test("Pi 0.84 real validation clone preserves raw correlation for all submit and universal control profiles", async () => {
   const validateToolArguments = await loadPi084ValidateToolArguments();
-  const descriptors = [...SUBMIT_TOOLS, BLOCKED_REPORT_TOOL];
-  assert.equal(descriptors.length, 15);
+  const descriptors = [...SUBMIT_TOOLS, ...UNIVERSAL_CHILD_TOOLS];
+  assert.equal(descriptors.length, 16);
   assert.deepEqual(
     new Set(descriptors.map((descriptor) => descriptor.profile_id)),
     new Set(CHILD_CONTROL_TOOL_METADATA.map((metadata) => metadata.profile_id)),
-    "the real lifecycle proof must cover all 14 submit profiles plus universal BLOCKED",
+    "the real lifecycle proof must cover all 14 submit profiles plus checkpoint and BLOCKED",
   );
 
   const requests: Array<Record<string, unknown>> = [];

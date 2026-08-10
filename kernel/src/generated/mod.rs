@@ -283,6 +283,8 @@ pub enum ChildControlOutcome {
 pub enum ChildControlRequestKind {
     #[serde(rename = "blocked")]
     Blocked,
+    #[serde(rename = "checkpoint")]
+    Checkpoint,
     #[serde(rename = "submit")]
     Submit,
 }
@@ -2006,7 +2008,42 @@ pub struct BlockedEvidence {
     pub value: String,
 }
 
-/// Typed receipt envelope returned only for an accepted child-control request.
+/// Core-generated acceptance receipt for one bounded model handoff. It pauses one prompt for parent-controlled same-session compaction and never completes the assignment.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckpointReceipt {
+    #[serde(rename = "schema")]
+    pub schema: SchemaId,
+    #[serde(rename = "receipt_id")]
+    pub receipt_id: Uuidv7,
+    #[serde(rename = "run_id")]
+    pub run_id: Id,
+    #[serde(rename = "run_revision")]
+    pub run_revision: u64,
+    #[serde(rename = "assignment_id")]
+    pub assignment_id: Id,
+    #[serde(rename = "attempt")]
+    pub attempt: u32,
+    #[serde(rename = "role_id")]
+    pub role_id: Id,
+    #[serde(rename = "mode")]
+    pub mode: ModeId,
+    #[serde(rename = "session_id")]
+    pub session_id: Id,
+    #[serde(rename = "profile_id")]
+    pub profile_id: String,
+    #[serde(rename = "tool_name")]
+    pub tool_name: ToolName,
+    #[serde(rename = "tool_call_id")]
+    pub tool_call_id: String,
+    #[serde(rename = "handoff_digest")]
+    pub handoff_digest: Digest,
+    /// Exact accepted autopilot.agent-handoff.v1 JSON tree, including bounded unknown top-level fields preserved by checkpoint policy.
+    #[serde(rename = "handoff")]
+    pub handoff: serde_json::Value,
+}
+
+/// Typed receipt envelope returned only for an accepted child-control request. Checkpoint ACCEPT pauses one prompt but is not assignment completion.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum ChildControlAcceptReceipt {
@@ -2023,6 +2060,13 @@ pub enum ChildControlAcceptReceipt {
         schema: SchemaId,
         #[serde(rename = "receipt")]
         receipt: BlockedReceipt,
+    },
+    #[serde(rename = "checkpoint")]
+    Checkpoint {
+        #[serde(rename = "schema")]
+        schema: SchemaId,
+        #[serde(rename = "receipt")]
+        receipt: CheckpointReceipt,
     },
 }
 
@@ -4850,11 +4894,11 @@ pub struct HostToCoreTaskCompletedPayload {
 pub const CONTRACT_SCHEMA: &str = "autopilot.contracts.v1";
 pub const CONTRACT_VERSION: u64 = 1;
 pub const CHILD_ADDON_DIGEST: &str =
-    "771743bd3ee2825e68c0e03cbc9b939b4e3da309a937f43f84a67b41a37b7d08";
+    "12a7a176e69eccf5912c1ad8f652cd085c2f1eaaa374f232b7ac8b913cdc3bc9";
 
 pub const CHILD_RUNTIME_ENTRY: &str = "child-runtime/child-extension-runtime.ts";
 
-pub const AGENT_HANDOFF_ADMITS: &str = "When checkpointed, return one autopilot.agent-handoff.v1 object with exactly these required fields: schema, completed, remaining, critical_state, and next_action. Put finished obligations in completed, unfinished obligations in remaining, role-required scalar or array-of-scalar slots in critical_state, and the immediate resume instruction in next_action; do not invent completion.";
+pub const AGENT_HANDOFF_ADMITS: &str = "When the parent requests a context checkpoint, call autopilot_checkpoint with one autopilot.agent-handoff.v1 object containing exactly these required fields: schema, completed, remaining, critical_state, and next_action. Put finished obligations in completed, unfinished obligations in remaining, role-required scalar or array-of-scalar slots in critical_state, and the immediate resume instruction in next_action; do not invent completion. A checkpoint never completes the assignment. If the tool returns RETRY, correct the handoff and call it again in this same session.";
 pub const ALLOCATION_LANE_PROPOSAL_ADMITS: &str = "Return a lane proposal that groups only approved plan units. Preserve every unit id, dependency, predecessor forward criterion, downstream release edge, and verification obligation exactly as supplied. Do not invent file ownership or modify plan authority. Include ordered unit ids, one delivery boundary, context family id and estimate, focused tests, and launch wave.";
 pub const BLOCKED_REPORT_ADMITS: &str = "Use autopilot_report_blocked only when genuinely stuck and no further work is possible. It is never an ordinary submit retry.";
 pub const DELIVERY_RESULT_ADMITS: &str = "Call autopilot_emit_status when the payload is ready. If it returns RETRY, correct the reported diagnostic and call autopilot_emit_status again in this same session. Only ACCEPT terminalizes. Do not return the payload as assistant prose or markdown. Submit the delivery carrier for your assigned role, mode, assignment, attempt, and run revision. Report the exact base, worktree, actual changed paths, execution audit reference, and required focused evidence. Do not claim validation, merge, package commit/tree, package state mutation, or success hidden behind missing evidence. The runtime establishes package commit/tree after accepting this carrier. If any hard boundary was violated or required evidence is missing, say so instead of reporting DONE.";
@@ -4883,7 +4927,7 @@ pub const ADMISSION_CONTRACTS: [(&str, &str, &str); 16] = [
     (
         "agent_handoff",
         "autopilot.agent-handoff.v1",
-        "When checkpointed, return one autopilot.agent-handoff.v1 object with exactly these required fields: schema, completed, remaining, critical_state, and next_action. Put finished obligations in completed, unfinished obligations in remaining, role-required scalar or array-of-scalar slots in critical_state, and the immediate resume instruction in next_action; do not invent completion.",
+        "When the parent requests a context checkpoint, call autopilot_checkpoint with one autopilot.agent-handoff.v1 object containing exactly these required fields: schema, completed, remaining, critical_state, and next_action. Put finished obligations in completed, unfinished obligations in remaining, role-required scalar or array-of-scalar slots in critical_state, and the immediate resume instruction in next_action; do not invent completion. A checkpoint never completes the assignment. If the tool returns RETRY, correct the handoff and call it again in this same session.",
     ),
     (
         "allocation_lane_proposal",
@@ -5121,7 +5165,15 @@ pub const TERMINAL_PROFILES: [(&str, &str, &str, &str, &str); 14] = [
     ),
 ];
 
-pub const UNIVERSAL_CHILD_TOOLS: [(&str, &str, &str, &str, &str, &str); 1] = [
+pub const UNIVERSAL_CHILD_TOOLS: [(&str, &str, &str, &str, &str, &str); 2] = [
+    (
+        "autopilot.agent-handoff.v1:autopilot_checkpoint",
+        "autopilot_checkpoint",
+        "autopilot.agent-handoff.v1",
+        "autopilot.agent-handoff.v1",
+        "755c5d282fc7c1b1dcbec38f68a0b6096879b142c33e41375673b8d5f116245a",
+        "Use only after the parent runner requests a context checkpoint. Finish the nearest atomic action, then submit the bounded handoff. ACCEPT pauses this prompt for same-session manual compaction and does not complete, validate, integrate, or close the assignment. RETRY means correct the handoff and call this tool again in the same session.",
+    ),
     (
         "autopilot.blocked_report.v1:autopilot_report_blocked",
         "autopilot_report_blocked",
