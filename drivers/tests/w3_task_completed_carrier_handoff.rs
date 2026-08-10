@@ -260,6 +260,277 @@ fn fresh_planning_projection_rejects_malformed_task_and_transition_refs() {
 }
 
 #[test]
+fn rooted_parallel_planning_receipts_close_one_wave_under_either_completion_order() {
+    let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+    for (label, completion_order) in [("a-then-b", ["a", "b"]), ("b-then-a", ["b", "a"])] {
+        let fixture = Fixture::new(&format!("parallel-{label}"));
+        fixture.install_transport_with_nonexistent_command_names();
+        fixture.write_parallel_manifest();
+        let event_path = fixture.root.join("events.jsonl");
+        let mut state = CoreState::open(Some(event_path.clone())).unwrap();
+        let a = fixture.seed_receipt_planning_binding(
+            &mut state,
+            "planning-ws-task-extractor-01",
+            "TE01-",
+        );
+        let b = fixture.seed_receipt_planning_binding(
+            &mut state,
+            "planning-ws-task-extractor-02",
+            "TE02-",
+        );
+
+        // Both siblings become fully rooted semantic ACCEPT authority before
+        // either Host task-completed route arrives. A is waiting; B closes
+        // P1 and stores the only P2 action set in its immutable receipt.
+        let accepted_a =
+            fixture.submit_receipt(&mut state, &a, "parallel-a", &task_atoms("TE01-A"));
+        assert_eq!(
+            accepted_a.payload["response"]["outcome"], "ACCEPT",
+            "{label}: {accepted_a:?}"
+        );
+        let receipt_a = accepted_a.payload["response"]["receipt"]["receipt"].clone();
+        let accepted_b =
+            fixture.submit_receipt(&mut state, &b, "parallel-b", &task_atoms("TE02-B"));
+        assert_eq!(
+            accepted_b.payload["response"]["outcome"], "ACCEPT",
+            "{label}: {accepted_b:?}"
+        );
+        let receipt_b = accepted_b.payload["response"]["receipt"]["receipt"].clone();
+        assert!(
+            receipt_a["prepared_transition"]["issued_actions"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let stored_actions = receipt_b["prepared_transition"]["issued_actions"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(stored_actions.len(), 1, "{label}: {receipt_b:?}");
+        assert_eq!(
+            stored_actions[0]["action"]["action_id"],
+            "action-planning-ws-repository-scout-01"
+        );
+        assert_eq!(
+            stored_actions[0]["action"]["assignment_id"],
+            "planning-ws-repository-scout-01"
+        );
+        let registry = receipt_b["prepared_transition"]["artifact_refs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|artifact| artifact["artifact_schema"] == "autopilot.planning_atom_registry.v1")
+            .expect("closing receipt stages an atom registry from both rooted carriers");
+        let registry_bytes = fs::read(registry["artifact_ref"].as_str().unwrap()).unwrap();
+        let registry_json: serde_json::Value = serde_json::from_slice(&registry_bytes).unwrap();
+        assert_eq!(
+            registry_json["producer_assignment_ids"],
+            json!([
+                "planning-ws-task-extractor-01",
+                "planning-ws-task-extractor-02"
+            ])
+        );
+        let atom_ids = registry_json["atoms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|atom| atom["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(atom_ids, vec!["TE01-A", "TE02-B"]);
+
+        // Exact response-loss replay preserves the original receipt. Restart
+        // after both roots, then add an unrelated durable row before either
+        // completion; neither completion may compare against that row's
+        // revision or recompute scheduling.
+        let replay_a =
+            fixture.submit_receipt(&mut state, &a, "parallel-a-replay", &task_atoms("TE01-A"));
+        assert_eq!(replay_a.payload["response"]["outcome"], "ACCEPT");
+        assert_eq!(
+            replay_a.payload["response"]["receipt"]["receipt"],
+            receipt_a
+        );
+        drop(state);
+        let mut state = CoreState::open(Some(event_path.clone())).unwrap();
+        append_ref(&mut state, &Ref(format!("unrelated-durable:{label}")));
+
+        let mut completions = std::collections::BTreeMap::new();
+        for sibling in completion_order {
+            let issue = if sibling == "a" { &a } else { &b };
+            let completed =
+                fixture.task_completed(&mut state, issue, &format!("task-{label}-{sibling}"));
+            assert!(
+                !completed
+                    .payload
+                    .get("status")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|status| status.starts_with("rejection:")),
+                "{label}/{sibling}: {completed:?}"
+            );
+            completions.insert(sibling, completed);
+        }
+        let spawned = completions
+            .values()
+            .filter(|response| !spawned_assignment_ids(response).is_empty())
+            .collect::<Vec<_>>();
+        assert_eq!(spawned.len(), 1, "{label}: {completions:?}");
+        assert_eq!(
+            spawned_assignment_ids(spawned[0]),
+            vec!["planning-ws-repository-scout-01"]
+        );
+        let emitted_actions = spawned[0].payload["actions"].as_array().unwrap();
+        assert_eq!(
+            emitted_actions,
+            &stored_actions
+                .iter()
+                .map(|stored| stored["action"].clone())
+                .collect::<Vec<_>>()
+        );
+
+        // Completion replay returns only the stored effect. It does not stage
+        // a second wave or mutate the selected action/binding revision.
+        let replay_b = fixture.task_completed(&mut state, &b, &format!("task-{label}-b-replay"));
+        assert_eq!(
+            spawned_assignment_ids(&replay_b),
+            vec!["planning-ws-repository-scout-01"]
+        );
+
+        let rows = fs::read_to_string(&event_path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<EventRow>(line).unwrap())
+            .collect::<Vec<_>>();
+        let consumed = rows
+            .iter()
+            .filter(|row| row.kind.0 == "submit:receipt-consumed")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            consumed.len(),
+            2,
+            "{label}: exactly the two sibling receipts consume"
+        );
+        let action = &stored_actions[0]["action"];
+        let action_id = action["action_id"].as_str().unwrap();
+        let assignment_id = action["assignment_id"].as_str().unwrap();
+        let selected_revision = action["run_revision"].as_u64().unwrap();
+        let b_consume = consumed
+            .iter()
+            .find(|row| {
+                row.artifact_refs.iter().any(|reference| {
+                    reference.0
+                        == format!(
+                            "submit-receipt-consumed:{}",
+                            receipt_b["receipt_id"].as_str().unwrap()
+                        )
+                })
+            })
+            .unwrap();
+        assert!(
+            b_consume.previous_revision > selected_revision,
+            "{label}: unrelated rows and/or sibling completion must not invalidate the staged revision"
+        );
+        let published = consumed
+            .iter()
+            .flat_map(|row| row.artifact_refs.iter())
+            .filter_map(|reference| runner::decode_versioned_binding_ref(&reference.0).ok())
+            .filter_map(|binding| match binding {
+                runner::VersionedRunnerBinding::ReceiptV1(binding)
+                    if binding.action_id.0 == action_id
+                        && binding.assignment_id.0 == assignment_id
+                        && binding.run_revision == selected_revision =>
+                {
+                    Some(binding)
+                }
+                runner::VersionedRunnerBinding::ReplayV0(_)
+                | runner::VersionedRunnerBinding::ReceiptV1(_) => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(published.len(), 1, "{label}: one next-wave binding only");
+    }
+}
+
+#[test]
+fn malformed_prior_rooted_receipt_authority_fails_before_a_parallel_accept() {
+    let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+    for corruption in ["receipt", "transition", "root"] {
+        let fixture = Fixture::new(&format!("parallel-corrupt-{corruption}"));
+        fixture.install_transport_with_nonexistent_command_names();
+        fixture.write_parallel_manifest();
+        let event_path = fixture.root.join("events.jsonl");
+        let mut state = CoreState::open(Some(event_path.clone())).unwrap();
+        let a = fixture.seed_receipt_planning_binding(
+            &mut state,
+            "planning-ws-task-extractor-01",
+            "TE01-",
+        );
+        let b = fixture.seed_receipt_planning_binding(
+            &mut state,
+            "planning-ws-task-extractor-02",
+            "TE02-",
+        );
+        let accepted_a = fixture.submit_receipt(&mut state, &a, "corrupt-a", &task_atoms("TE01-A"));
+        assert_eq!(accepted_a.payload["response"]["outcome"], "ACCEPT");
+        let receipt_a = accepted_a.payload["response"]["receipt"]["receipt"].clone();
+        match corruption {
+            "receipt" => fs::write(fixture.submit_receipt_file(&a), b"{}").unwrap(),
+            "transition" => {
+                let sidecar = receipt_a["prepared_transition"]["artifact_refs"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|artifact| {
+                        artifact["artifact_schema"] == "autopilot.prepared_planning_transition.v1"
+                    })
+                    .unwrap();
+                fs::write(sidecar["artifact_ref"].as_str().unwrap(), b"{}").unwrap();
+            }
+            "root" => {
+                let mut rows = fs::read_to_string(&event_path)
+                    .unwrap()
+                    .lines()
+                    .map(|line| serde_json::from_str::<EventRow>(line).unwrap())
+                    .collect::<Vec<_>>();
+                let accepted = rows
+                    .iter_mut()
+                    .find(|row| row.kind.0 == "submit:accepted")
+                    .unwrap();
+                accepted.artifact_refs[0] = Ref("submit-receipt-root:{not-json}".to_owned());
+                fs::write(
+                    &event_path,
+                    format!(
+                        "{}\n",
+                        rows.iter()
+                            .map(serde_json::to_string)
+                            .collect::<Result<Vec<_>, _>>()
+                            .unwrap()
+                            .join("\n")
+                    ),
+                )
+                .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        drop(state);
+        let mut restarted = CoreState::open(Some(event_path.clone())).unwrap();
+        let rejected =
+            fixture.submit_receipt(&mut restarted, &b, "corrupt-b", &task_atoms("TE02-B"));
+        assert_eq!(
+            rejected.payload["response"]["outcome"], "RETRY",
+            "{corruption}: {rejected:?}"
+        );
+        let accepted_rows = fs::read_to_string(&event_path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<EventRow>(line).unwrap())
+            .filter(|row| row.kind.0 == "submit:accepted")
+            .count();
+        assert_eq!(
+            accepted_rows, 1,
+            "{corruption}: malformed prior authority must precede new ACCEPT"
+        );
+    }
+}
+
+#[test]
 fn receipt_v1_missing_receipt_never_falls_back_to_legacy_carrier() {
     let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
     let fixture = Fixture::new("receipt-missing-no-legacy");
@@ -454,6 +725,91 @@ impl Fixture {
         })).unwrap()).unwrap();
     }
 
+    fn write_parallel_manifest(&self) {
+        fs::create_dir_all(self.root.join(".pi/autopilot/ws")).unwrap();
+        let authority = runner_doc_json("task.md", "authority", "auth", "Do the work");
+        let context = runner_doc_json(
+            "context.md",
+            "context/non-authority",
+            "auth",
+            "Repo context",
+        );
+        fs::write(self.root.join(".pi/autopilot/ws/planning-manifest.json"), serde_json::to_vec_pretty(&json!({
+            "workstream":"ws","authority_set_id":"auth","authority_documents":[authority],"context_documents":[context],"context_document":context,
+            "assignments":[
+                {"assignment_id":"planning-ws-task-extractor-01","role":"task-extractor","mode":"inventory","boundary_id":"planning.task-atoms.v1","ordinal":1,"atom_id_prefix":"TE01-"},
+                {"assignment_id":"planning-ws-task-extractor-02","role":"task-extractor","mode":"inventory","boundary_id":"planning.task-atoms.v1","ordinal":2,"atom_id_prefix":"TE02-"},
+                {"assignment_id":"planning-ws-repository-scout-01","role":"repository-scout","mode":"initial-grounding","boundary_id":"planning.scout-dossier.v1","ordinal":3,"atom_id_prefix":null}
+            ],
+            "planning_wave_cap":7,"planning_max_attempts":2,
+            "planning_waves":[
+                {"id":"P1.extract","role":"task-extractor","dependencies":[],"ordinals":null,"activation_ref":null,"canonical_output":false},
+                {"id":"P2.scout","role":"repository-scout","dependencies":["P1.extract"],"ordinals":null,"activation_ref":null,"canonical_output":false}
+            ]
+        })).unwrap()).unwrap();
+    }
+
+    fn submit_receipt_file(&self, issue: &runner::IssuedRunnerAction) -> PathBuf {
+        let root = Path::new(&issue.binding.carrier_path)
+            .parent()
+            .and_then(Path::parent)
+            .unwrap();
+        let mut receipts = fs::read_dir(root.join("submit-receipts"))
+            .unwrap()
+            .map(Result::unwrap)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        name.ends_with(".json")
+                            && !name.ends_with(".transition.json")
+                            && !name.ends_with(".planning-transition.json")
+                    })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            receipts.len(),
+            1,
+            "exactly one receipt file for fixture issue"
+        );
+        receipts.remove(0)
+    }
+
+    fn submit_receipt(
+        &self,
+        state: &mut CoreState,
+        issue: &runner::IssuedRunnerAction,
+        request_suffix: &str,
+        raw: &str,
+    ) -> SeamEnvelope {
+        let spec: kernel::generated::AgentRunSpecV5 =
+            serde_json::from_slice(&fs::read(&issue.binding.spec_path).unwrap()).unwrap();
+        let frame = json!({"v":1,"id":91,"kind":"child-control","payload":{"broker_capability":self.broker_capability(),"request":{
+            "schema":"autopilot.child_control_request.v1","request_id":format!("request-{request_suffix}"),
+            "token":spec.child_control_token,"run_id":issue.receipt_binding.run_id,
+            "assignment_id":issue.receipt_binding.assignment_id,"attempt":issue.receipt_binding.attempt,
+            "tool_call_id":format!("tool-{request_suffix}"),"kind":"submit",
+            "tool_name":issue.receipt_binding.tool_name,"profile_id":issue.receipt_binding.profile_id,
+            "raw_payload":serde_json::from_str::<serde_json::Value>(raw).unwrap(),
+            "runtime_evidence":{"schema":"autopilot.child_control_runtime_evidence.v1","delivery_policy_denials":null,"approved_command_executions":null}
+        }}});
+        seam::handle_line(&frame.to_string(), state).unwrap()
+    }
+
+    fn task_completed(
+        &self,
+        state: &mut CoreState,
+        issue: &runner::IssuedRunnerAction,
+        task_id: &str,
+    ) -> SeamEnvelope {
+        let frame = json!({"v":1,"id":92,"kind":"task-completed","payload":{
+            "task_id":task_id,"action_id":issue.receipt_binding.action_id,
+            "assignment_id":issue.receipt_binding.assignment_id,"status":"completed"
+        }});
+        seam::handle_line(&frame.to_string(), state).unwrap()
+    }
+
     fn seed_receipt_planning_binding(
         &self,
         state: &mut CoreState,
@@ -483,7 +839,7 @@ impl Fixture {
             role_id: Id("task-extractor".to_owned()),
             mode: ModeId("inventory".to_owned()),
             boundary_id: ContractId("planning.task-atoms.v1".to_owned()),
-            attempt: 1,
+            attempt: if assignment_id.ends_with("-02") { 2 } else { 1 },
             run_revision: 1,
             authority_set_id: "auth".to_owned(),
             authority_documents: vec![runner_doc("task.md", "authority", "auth", "Do the work")],

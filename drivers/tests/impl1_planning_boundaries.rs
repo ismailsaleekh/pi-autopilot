@@ -199,7 +199,7 @@ fn accepted_registry_rejects_cross_extractor_duplicate_and_is_resume_stable() {
     ]);
     let event_log = stable.root.join("events.jsonl");
     let mut state = CoreState::open(Some(event_log.clone())).unwrap();
-    let a = stable.seed_planning_binding(
+    let a = stable.seed_receipt_planning_binding(
         &mut state,
         PlanningIssueSpec::new(
             "task-extractor",
@@ -208,9 +208,12 @@ fn accepted_registry_rejects_cross_extractor_duplicate_and_is_resume_stable() {
             "planning-ws-task-extractor-01",
         )
         .prefix("TE01-"),
+    );
+    let next = stable.agent_response_from_spec(
+        &mut state,
+        &PathBuf::from(&a.binding.spec_path),
         task_atoms("TE01-A"),
     );
-    let next = stable.agent_response(&mut state, &a, task_atoms("TE01-A"));
     assert_spawn_assignment(&next, "planning-ws-task-extractor-02");
     let next = stable.agent_response_from_spec(
         &mut state,
@@ -1240,6 +1243,24 @@ else:
         self.append_ref(state, &runner::binding_ref(&issue.binding).unwrap());
         self.append_ref(state, &Ref(assignment_id));
         issue.binding
+    }
+
+    fn seed_receipt_planning_binding(
+        &self,
+        state: &mut CoreState,
+        spec: PlanningIssueSpec<'_>,
+    ) -> runner::IssuedRunnerAction {
+        let assignment_id = spec.assignment_id.to_owned();
+        let issue = self.issue_planning_from_spec(spec);
+        for source in self.v2_subject_bindings.borrow().iter() {
+            self.append_ref(state, &runner::binding_ref(source).unwrap());
+        }
+        self.append_ref(
+            state,
+            &runner::receipt_binding_ref(&issue.receipt_binding).unwrap(),
+        );
+        self.append_ref(state, &Ref(assignment_id));
+        issue
     }
 
     fn issue_planning_with_assignment(

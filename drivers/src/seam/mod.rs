@@ -679,7 +679,7 @@ const SUBMIT_RECEIPT_EVENT_REF_PREFIX: &str = "submit-receipt-event:";
 const SUBMIT_RECEIPT_CONSUMED_PREFIX: &str = "submit-receipt-consumed:";
 const SUBMIT_RECEIPT_MAX_BYTES: usize = 2 << 20;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct SubmitReceiptRootV1 {
     schema: String,
@@ -1587,9 +1587,11 @@ fn staged_planning_effect(
         events: state.events.clone(),
         event_bytes: state.event_bytes.clone(),
     };
-    // Receipt V1 always roots acceptance before task completion. Project the
-    // two exact root kinds first; the state after the second root is exactly
-    // the state immediately before the consume row that publishes bindings.
+    // The selected run revision is the revision of this receipt's second
+    // root (`submit:accepted-event-ref`).  It is selected while staging, then
+    // carried verbatim by the immutable action/binding.  Private projections
+    // below deliberately do not affect it: they are semantic acceptance
+    // facts, not durable rows that happened before this root pair.
     projected
         .append(EventKind("submit:accepted".to_owned()), Vec::new())
         .map_err(|error| error.to_string())?;
@@ -1599,7 +1601,15 @@ fn staged_planning_effect(
             Vec::new(),
         )
         .map_err(|error| error.to_string())?;
-    let pre_consume_revision = projected.state.revision;
+    let staged_revision = projected.state.revision;
+
+    // An accepted receipt is planning authority before its Host completion.
+    // Project every earlier fully rooted receipt through its own sealed
+    // transition, rather than treating an unconsumed sibling as in-flight.
+    // Discovery starts exclusively from exact accepted-root refs/events.
+    let rooted_receipts = rooted_planning_receipts(state)?;
+    project_unconsumed_rooted_planning_receipts(&mut projected, &rooted_receipts)?;
+
     let mut projection_refs = vec![
         // The receipt id is minted after staging, so this in-memory row uses
         // only a nonpersisted structural sentinel. It is never an authority
@@ -1613,10 +1623,9 @@ fn staged_planning_effect(
         planning_transition_kind_ref(semantic_event_kind)?,
     ];
     projection_refs.extend(semantic_refs.iter().cloned());
-    // This is an in-memory projection of precisely the one eventual receipt
-    // consumption row. It is never persisted and never substitutes a legacy
-    // planning event. Its post-consume revision is intentionally never used
-    // for the newly issued actions: their bindings are stored on this row.
+    // This is the current receipt's private, eventual consumption row. Its
+    // action revision remains `staged_revision`, not this synthetic row's
+    // revision and never a later live-state revision.
     projected
         .append(
             EventKind("submit:receipt-consumed".to_owned()),
@@ -1641,19 +1650,12 @@ fn staged_planning_effect(
     match next_planning_outcome(&binding.workstream.0, &projected)? {
         planning::PlanningWaveOutcome::Launch { assignments, .. } => {
             let input_set = read_planning_input_set(&binding.workstream.0)?;
-            let mut accepted = accepted_planning_artifacts_for_issue(&binding.workstream.0, state)
-                .map_err(|error| error.to_string())?;
-            let staged_accepted =
-                staged_accepted_planning_artifacts(binding, staged_carrier_bytes)?;
-            // A newly accepted canonical synthesis/review is the sole current
-            // category authority for the next issuer. Never leave two
-            // shape-compatible synthesized subjects for recovery/review.
-            for artifact in staged_accepted {
-                if artifact.category_id == "synthesized-work-map" {
-                    accepted.retain(|existing| existing.category_id != "synthesized-work-map");
-                }
-                accepted.push(artifact);
-            }
+            let accepted = projected_accepted_planning_artifacts(
+                &binding.workstream.0,
+                &rooted_receipts,
+                binding,
+                staged_carrier_bytes,
+            )?;
             let needs_atom_registry =
                 assignments.iter().any(|assignment| {
                     matches!(
@@ -1662,10 +1664,11 @@ fn staged_planning_effect(
                     )
                 }) || planning_task_extractors_complete(&binding.workstream.0, &projected)?;
             let (atom_registry, artifacts) = if needs_atom_registry {
-                let (path, digest, bytes) = stage_atom_registry(
+                let (path, digest, bytes) = stage_atom_registry_from_rooted_receipts(
                     &binding.workstream.0,
-                    state,
-                    Some((binding, staged_carrier)),
+                    &rooted_receipts,
+                    binding,
+                    staged_carrier,
                 )?;
                 (
                     Some((path.clone(), digest)),
@@ -1690,7 +1693,7 @@ fn staged_planning_effect(
                     planning_bg_action(
                         &binding.workstream.0,
                         assignment,
-                        pre_consume_revision,
+                        staged_revision,
                         &input_set,
                         registry,
                         accepted.clone(),
@@ -1734,6 +1737,423 @@ fn staged_planning_effect(
             Err(format!("planning capacity unknown: {detail}"))
         }
     }
+}
+
+/// Fully-rooted receipt authority used only inside a serialized staging turn.
+/// It carries no model/source input: every carrier and transition was verified
+/// against the receipt root before this structure is constructed.
+struct RootedPlanningReceipt {
+    receipt: SubmitReceipt,
+    binding: runner::ReceiptV1RunnerBinding,
+    facade: runner::IssuedRunnerBinding,
+    rooted: SubmitReceiptEventRef,
+    transition: PreparedPlanningTransitionV1,
+    carrier: AgentCarrier,
+    consumed: bool,
+}
+
+fn receipt_binding_for_rooted_receipt(
+    state: &CoreState,
+    receipt: &SubmitReceipt,
+) -> Result<runner::ReceiptV1RunnerBinding, String> {
+    let mut matches = strict_versioned_runner_bindings(state)?
+        .into_iter()
+        .filter_map(|binding| match binding {
+            VersionedRunnerBinding::ReceiptV1(binding)
+                if receipt_matches_binding(receipt, &binding) =>
+            {
+                Some(binding)
+            }
+            VersionedRunnerBinding::ReplayV0(_) | VersionedRunnerBinding::ReceiptV1(_) => None,
+        })
+        .collect::<Vec<_>>();
+    match matches.len() {
+        1 => Ok(matches.remove(0)),
+        0 => Err("rooted receipt lacks its exact receipt_v1 binding".to_owned()),
+        count => Err(format!(
+            "rooted receipt has ambiguous receipt_v1 bindings:{count}"
+        )),
+    }
+}
+
+fn rooted_planning_carrier(
+    receipt: &SubmitReceipt,
+    facade: &runner::IssuedRunnerBinding,
+) -> Result<AgentCarrier, String> {
+    let artifact = &receipt.prepared_transition.carrier;
+    verify_prepared_artifact(artifact, MAX_TERMINAL_CARRIER_BYTES)?;
+    let bytes = runner::read_bounded_authority_file(
+        Path::new(&artifact.artifact_ref.0),
+        MAX_TERMINAL_CARRIER_BYTES,
+    )
+    .map_err(|error| format!("rooted planning carrier read: {error}"))?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("rooted planning carrier JSON: {error}"))?;
+    let canonical = crate::evidence::canonical_json(&value)
+        .map_err(|error| format!("rooted planning carrier canonical JSON: {error}"))?;
+    if canonical != bytes {
+        return Err("rooted planning carrier canonical bytes drift".to_owned());
+    }
+    let carrier: AgentCarrier = serde_json::from_value(value)
+        .map_err(|error| format!("rooted planning carrier shape: {error}"))?;
+    validate_planning_binding(&carrier, facade)
+        .map_err(|error| format!("rooted planning carrier binding: {error}"))?;
+    if facade.boundary_id.0 == "planning.work-map.v2"
+        && carrier.pi_version.as_deref() != Some(runner::REQUIRED_PI_VERSION)
+    {
+        return Err("rooted planning carrier Pi-version authority drift".to_owned());
+    }
+    Ok(carrier)
+}
+
+/// Discover receipt authority only from exact accepted-root events.  There is
+/// intentionally no directory scan, state-ref inventory, carrier fallback, or
+/// model/source reread here.
+fn rooted_planning_receipts(state: &CoreState) -> Result<Vec<RootedPlanningReceipt>, String> {
+    let mut rooted = Vec::new();
+    for event in &state.events {
+        if event.kind.0 != "submit:accepted" {
+            continue;
+        }
+        if event
+            .artifact_refs
+            .iter()
+            .any(|reference| reference.0.starts_with(SUBMIT_RECEIPT_EVENT_REF_PREFIX))
+        {
+            return Err("accepted event contains circular event reference".to_owned());
+        }
+        let mut roots = Vec::new();
+        for reference in &event.artifact_refs {
+            if let Some(root) = decode_submit_receipt_root(reference)? {
+                roots.push(root);
+            }
+        }
+        if roots.is_empty() {
+            continue;
+        }
+        if roots.len() != 1 {
+            return Err("accepted receipt event has duplicate root refs".to_owned());
+        }
+        let root = roots.remove(0);
+        let receipt = read_submit_receipt_at(Path::new(&root.receipt_ref.0))?
+            .ok_or_else(|| "accepted receipt root references a missing receipt".to_owned())?;
+        if receipt_root(&receipt)? != root {
+            return Err("accepted receipt root/receipt identity drift".to_owned());
+        }
+        verify_durable_submit_receipt_transaction(&receipt)?;
+        let binding = receipt_binding_for_rooted_receipt(state, &receipt)?;
+        if receipt.prepared_transition.carrier.artifact_ref.0 != binding.carrier_path {
+            return Err("rooted receipt carrier/binding identity drift".to_owned());
+        }
+        let rooted_event = verify_rooted_submit_receipt(state, &receipt)?;
+        verify_receipt_issued_actions_at_staged_revision(state, &receipt)?;
+        if !binding.result_contract.0.starts_with("planning.") {
+            continue;
+        }
+        let transition = prepared_planning_transition_from_receipt(&receipt)?;
+        let facade = runner::receipt_v1_validator_facade(&binding);
+        let carrier = rooted_planning_carrier(&receipt, &facade)?;
+        let consumed =
+            receipt_is_exactly_consumed(state, &receipt, &binding, &rooted_event, &transition)?;
+        rooted.push(RootedPlanningReceipt {
+            receipt,
+            binding,
+            facade,
+            rooted: rooted_event,
+            transition,
+            carrier,
+            consumed,
+        });
+    }
+    Ok(rooted)
+}
+
+fn receipt_consumption_refs(
+    receipt: &SubmitReceipt,
+    binding: &runner::ReceiptV1RunnerBinding,
+    rooted: &SubmitReceiptEventRef,
+    transition: &PreparedPlanningTransitionV1,
+) -> Result<Vec<Ref>, String> {
+    if !receipt_matches_binding(receipt, binding) {
+        return Err("receipt consumption binding identity drift".to_owned());
+    }
+    let facade = runner::receipt_v1_validator_facade(binding);
+    let mut refs = vec![
+        Ref(format!(
+            "{SUBMIT_RECEIPT_CONSUMED_PREFIX}{}",
+            receipt.receipt_id.0
+        )),
+        terminal_consumed_ref(&facade),
+        receipt.prepared_transition.transition_ref.clone(),
+        receipt.prepared_transition.carrier.artifact_ref.clone(),
+        encode_submit_receipt_event_ref(rooted)?,
+        runner::receipt_binding_ref(binding).map_err(|error| error.to_string())?,
+        planning_result_consumed_ref(&facade),
+        planning_transition_kind_ref(&transition.event_kind)?,
+    ];
+    refs.extend(transition.refs.iter().cloned());
+    refs.extend(
+        receipt
+            .prepared_transition
+            .artifact_refs
+            .iter()
+            .map(|artifact| artifact.artifact_ref.clone()),
+    );
+    for issued in &receipt.prepared_transition.issued_actions {
+        verify_issued_action(issued)?;
+        refs.push(issued.action_ref.clone());
+        refs.push(issued.binding_ref.clone());
+    }
+    Ok(refs)
+}
+
+/// A ref in aggregate state is not enough to suppress a projection: it must
+/// be backed by exactly one complete receipt-consumed row. This prevents a
+/// loose namespaced ref from hiding prior accepted planning authority.
+fn receipt_is_exactly_consumed(
+    state: &CoreState,
+    receipt: &SubmitReceipt,
+    binding: &runner::ReceiptV1RunnerBinding,
+    rooted: &SubmitReceiptEventRef,
+    transition: &PreparedPlanningTransitionV1,
+) -> Result<bool, String> {
+    let consumed_ref = Ref(format!(
+        "{SUBMIT_RECEIPT_CONSUMED_PREFIX}{}",
+        receipt.receipt_id.0
+    ));
+    let rows = state
+        .events
+        .iter()
+        .filter(|event| {
+            event.kind.0 == "submit:receipt-consumed"
+                && event
+                    .artifact_refs
+                    .iter()
+                    .any(|reference| *reference == consumed_ref)
+        })
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
+        if state.state.refs.contains_key(&consumed_ref) {
+            return Err("receipt-consumed ref lacks its exact durable row".to_owned());
+        }
+        return Ok(false);
+    }
+    if rows.len() != 1 {
+        return Err("receipt has duplicate durable consume rows".to_owned());
+    }
+    let expected = receipt_consumption_refs(receipt, binding, rooted, transition)?;
+    if rows[0].artifact_refs != expected || !state.state.refs.contains_key(&consumed_ref) {
+        return Err("receipt durable consume row identity drift".to_owned());
+    }
+    Ok(true)
+}
+
+fn project_unconsumed_rooted_planning_receipts(
+    projected: &mut CoreState,
+    rooted_receipts: &[RootedPlanningReceipt],
+) -> Result<(), String> {
+    for prior in rooted_receipts.iter().filter(|receipt| !receipt.consumed) {
+        let refs = receipt_consumption_refs(
+            &prior.receipt,
+            &prior.binding,
+            &prior.rooted,
+            &prior.transition,
+        )?;
+        projected
+            .append(EventKind("submit:receipt-consumed".to_owned()), refs)
+            .map_err(|error| format!("rooted receipt projection append: {error}"))?;
+    }
+    Ok(())
+}
+
+fn projected_accepted_planning_artifacts(
+    workstream: &str,
+    rooted_receipts: &[RootedPlanningReceipt],
+    current_binding: &runner::IssuedRunnerBinding,
+    current_carrier_bytes: &[u8],
+) -> Result<Vec<runner::AcceptedPlanningArtifactBinding>, String> {
+    let manifest = read_planning_schedule_manifest(workstream)?;
+    let assignments = manifest
+        .assignments
+        .iter()
+        .enumerate()
+        .map(|(order, assignment)| (assignment.assignment_id.as_str(), (order, assignment)))
+        .collect::<BTreeMap<_, _>>();
+    let mut rows = Vec::<(String, usize, runner::AcceptedPlanningArtifactBinding)>::new();
+    let mut append = |binding: &runner::IssuedRunnerBinding, path: &str, digest: &str| {
+        if binding.workstream.0 != workstream {
+            return Ok(());
+        }
+        let Some((order, assignment)) = assignments.get(binding.assignment_id.0.as_str()) else {
+            return Err(format!(
+                "rooted accepted artifact has unknown assignment {}",
+                binding.assignment_id.0
+            ));
+        };
+        let expected = assignment.boundary_id.as_deref().ok_or_else(|| {
+            format!(
+                "rooted accepted artifact assignment {} lacks boundary authority",
+                binding.assignment_id.0
+            )
+        })?;
+        if binding.boundary_id.0 != expected || binding.result_contract.0 != expected {
+            return Err(format!(
+                "rooted accepted artifact boundary drift {}",
+                binding.assignment_id.0
+            ));
+        }
+        for category_id in accepted_artifact_categories_for_role(&assignment.role, expected)
+            .map_err(|error| error.to_string())?
+        {
+            rows.push((
+                (*category_id).to_owned(),
+                *order,
+                runner::AcceptedPlanningArtifactBinding {
+                    category_id: (*category_id).to_owned(),
+                    assignment_id: binding.assignment_id.clone(),
+                    role_id: binding.role_id.clone(),
+                    boundary_id: binding.result_contract.clone(),
+                    terminal_route: binding.terminal_route.clone(),
+                    path: path.to_owned(),
+                    digest: digest.to_owned(),
+                },
+            ));
+        }
+        Ok(())
+    };
+    for prior in rooted_receipts {
+        append(
+            &prior.facade,
+            &prior.receipt.prepared_transition.carrier.artifact_ref.0,
+            &prior.receipt.prepared_transition.carrier.sha256.0,
+        )?;
+    }
+    append(
+        current_binding,
+        &current_binding.carrier_path,
+        &sha256_hex_local(current_carrier_bytes),
+    )?;
+    rows.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+    let latest_synthesized = rows
+        .iter()
+        .filter(|(category, _, _)| category == "synthesized-work-map")
+        .map(|(_, order, _)| *order)
+        .max();
+    rows.retain(|(category, order, _)| {
+        category != "synthesized-work-map" || Some(*order) == latest_synthesized
+    });
+    Ok(rows.into_iter().map(|(_, _, artifact)| artifact).collect())
+}
+
+fn stage_atom_registry_from_rooted_receipts(
+    workstream: &str,
+    rooted_receipts: &[RootedPlanningReceipt],
+    current_binding: &runner::IssuedRunnerBinding,
+    current_carrier: &AgentCarrier,
+) -> Result<(String, String, Vec<u8>), String> {
+    let manifest = read_planning_manifest_value(workstream)
+        .map_err(|error| format!("CONTEXT_GAP:planning-manifest:{error}"))?;
+    let authority_set_id = manifest["authority_set_id"]
+        .as_str()
+        .ok_or("CONTEXT_GAP:planning-manifest:missing authority_set_id")?
+        .to_owned();
+    let assignments = manifest_assignments(workstream)
+        .map_err(|error| format!("CONTEXT_GAP:planning-manifest:{error}"))?;
+    let mut carriers = BTreeMap::<String, (&runner::IssuedRunnerBinding, &AgentCarrier)>::new();
+    for prior in rooted_receipts {
+        if prior.facade.workstream.0 == workstream && prior.facade.role_id.0 == "task-extractor" {
+            if carriers
+                .insert(
+                    prior.facade.assignment_id.0.clone(),
+                    (&prior.facade, &prior.carrier),
+                )
+                .is_some()
+            {
+                return Err(format!(
+                    "CONTEXT_GAP:atom-registry:ambiguous rooted extractor {}",
+                    prior.facade.assignment_id.0
+                ));
+            }
+        }
+    }
+    if current_binding.workstream.0 == workstream && current_binding.role_id.0 == "task-extractor" {
+        if carriers
+            .insert(
+                current_binding.assignment_id.0.clone(),
+                (current_binding, current_carrier),
+            )
+            .is_some()
+        {
+            return Err(format!(
+                "CONTEXT_GAP:atom-registry:ambiguous staged extractor {}",
+                current_binding.assignment_id.0
+            ));
+        }
+    }
+    let mut records = Vec::new();
+    let mut producer_ids = Vec::new();
+    for (assignment_order, assignment) in assignments
+        .iter()
+        .enumerate()
+        .filter(|(_, assignment)| assignment.role == "task-extractor")
+    {
+        let (binding, carrier) = carriers.remove(&assignment.assignment_id).ok_or_else(|| {
+            format!(
+                "CONTEXT_GAP:atom-registry:unaccepted {}",
+                assignment.assignment_id
+            )
+        })?;
+        let expected = assignment.boundary_id.as_deref().ok_or_else(|| {
+            format!(
+                "CONTEXT_GAP:atom-registry:missing boundary {}",
+                assignment.assignment_id
+            )
+        })?;
+        if binding.assignment_id.0 != assignment.assignment_id
+            || binding.role_id.0 != assignment.role
+            || binding.boundary_id.0 != expected
+            || binding.result_contract.0 != expected
+        {
+            return Err(format!(
+                "CONTEXT_GAP:atom-registry:rooted binding drift {}",
+                assignment.assignment_id
+            ));
+        }
+        if assignment.atom_id_prefix.is_none() {
+            return Err(format!(
+                "CONTEXT_GAP:atom-registry-prefix:{}",
+                binding.assignment_id.0
+            ));
+        }
+        // The exact carrier was already value-admitted before its receipt was
+        // rooted. Re-parse only its immutable receipt artifact here; do not
+        // reopen task/source authority while projecting this parallel wave.
+        let atoms: kernel::generated::TaskAtoms = serde_json::from_str(&carrier.raw_output)
+            .map_err(|error| {
+                format!(
+                    "CONTEXT_GAP:atom-registry-atoms:{}:{error}",
+                    binding.assignment_id.0
+                )
+            })?;
+        producer_ids.push(binding.assignment_id.clone());
+        records.push((
+            assignment_order,
+            0usize,
+            binding.assignment_id.clone(),
+            atoms,
+        ));
+    }
+    if !carriers.is_empty() {
+        return Err("CONTEXT_GAP:atom-registry:rooted extractor assignment drift".to_owned());
+    }
+    let atoms = planning::sorted_registry_atoms(records)
+        .map_err(|error| context_status("atom-registry", error))?;
+    let bytes = planning::atom_registry_bytes(workstream, &authority_set_id, producer_ids, atoms)
+        .map_err(|error| context_status("atom-registry", error))?;
+    let path = std::env::current_dir()
+        .map_err(|error| error.to_string())?
+        .join(atom_registry_path(workstream));
+    Ok((path.display().to_string(), sha256_hex_local(&bytes), bytes))
 }
 
 fn submit_receipt_path_from_receipt(receipt: &SubmitReceipt) -> Result<PathBuf, String> {
@@ -1899,12 +2319,13 @@ fn verify_issued_action(issued: &PreparedSubmitIssuedAction) -> Result<(), Strin
     Ok(())
 }
 
-/// Fresh bindings are persisted on the receipt-consumed row rather than a
-/// later legacy spawn row. Their revision must therefore equal the durable
-/// state revision immediately before that row is appended.
-fn verify_issued_action_at_preconsume_revision(
+/// The run revision is selected by the receipt's accepted-event-ref root at
+/// staging time. It is immutable action/binding identity, never a claim about
+/// whichever durable revision happens to exist when Host later reports a task
+/// completion.
+fn verify_issued_action_at_staged_revision(
     issued: &PreparedSubmitIssuedAction,
-    preconsume_revision: u64,
+    staged_revision: u64,
 ) -> Result<(), String> {
     verify_issued_action(issued)?;
     let versioned = runner::decode_versioned_binding_ref(&issued.binding_ref.0)
@@ -1912,11 +2333,9 @@ fn verify_issued_action_at_preconsume_revision(
     let VersionedRunnerBinding::ReceiptV1(binding) = versioned else {
         return Err("issued action binding is not receipt_v1".to_owned());
     };
-    if issued.action.run_revision != preconsume_revision
-        || binding.run_revision != preconsume_revision
-    {
+    if issued.action.run_revision != staged_revision || binding.run_revision != staged_revision {
         return Err(format!(
-            "issued action/binding revision drift before receipt consume: expected={preconsume_revision};action={};binding={}",
+            "issued action/binding staged revision drift: expected={staged_revision};action={};binding={}",
             issued.action.run_revision, binding.run_revision
         ));
     }
@@ -2173,6 +2592,39 @@ fn verify_rooted_submit_receipt(
         .ok_or_else(|| "accepted receipt event hash reference is absent".to_owned())
 }
 
+/// The stable selected revision is the accepted-root revision plus one: the
+/// deterministic slot reserved for its required non-circular event-ref.  It
+/// remains stable if response-loss recovery appends that event-ref after other
+/// durable rows, and is never inferred from a later task-completed turn.
+fn rooted_receipt_staged_revision(
+    state: &CoreState,
+    receipt: &SubmitReceipt,
+) -> Result<u64, String> {
+    let root = receipt_root(receipt)?;
+    let index = accepted_root_index(state, &root)?
+        .ok_or_else(|| "accepted receipt event root is absent".to_owned())?;
+    receipt_event_ref_for_root(state, &root, index)?
+        .ok_or_else(|| "accepted receipt event hash reference is absent".to_owned())?;
+    state.events[index]
+        .new_revision
+        .checked_add(1)
+        .ok_or_else(|| "accepted receipt staged revision overflow".to_owned())
+}
+
+fn verify_receipt_issued_actions_at_staged_revision(
+    state: &CoreState,
+    receipt: &SubmitReceipt,
+) -> Result<(), String> {
+    if !receipt.result_contract.0.starts_with("planning.") {
+        return Ok(());
+    }
+    let staged_revision = rooted_receipt_staged_revision(state, receipt)?;
+    for issued in &receipt.prepared_transition.issued_actions {
+        verify_issued_action_at_staged_revision(issued, staged_revision)?;
+    }
+    Ok(())
+}
+
 fn root_or_verify_submit_receipt(
     state: &mut CoreState,
     receipt: &SubmitReceipt,
@@ -2183,25 +2635,26 @@ fn root_or_verify_submit_receipt(
         if receipt_event_ref_for_root(state, &root, index)?.is_none() {
             append_receipt_event_ref(state, &root, index)?;
         }
-        return Ok(());
+    } else {
+        let root_ref = encode_submit_receipt_root(&root)?;
+        state
+            .append(
+                EventKind("submit:accepted".to_owned()),
+                vec![
+                    root_ref,
+                    root.receipt_ref.clone(),
+                    root.transition_ref.clone(),
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        let index = state
+            .events
+            .len()
+            .checked_sub(1)
+            .ok_or_else(|| "accepted event append lost its row".to_owned())?;
+        append_receipt_event_ref(state, &root, index)?;
     }
-    let root_ref = encode_submit_receipt_root(&root)?;
-    state
-        .append(
-            EventKind("submit:accepted".to_owned()),
-            vec![
-                root_ref,
-                root.receipt_ref.clone(),
-                root.transition_ref.clone(),
-            ],
-        )
-        .map_err(|error| error.to_string())?;
-    let index = state
-        .events
-        .len()
-        .checked_sub(1)
-        .ok_or_else(|| "accepted event append lost its row".to_owned())?;
-    append_receipt_event_ref(state, &root, index)
+    verify_receipt_issued_actions_at_staged_revision(state, receipt)
 }
 
 fn child_control_accept(
@@ -3913,53 +4366,65 @@ fn route_receipt_v1_task_completed(
         Ok(reference) => reference,
         Err(error) => return done(id, rejection("submit-receipt", &error)),
     };
+    if let Err(error) = verify_receipt_issued_actions_at_staged_revision(state, &receipt) {
+        return done(id, rejection("submit-receipt", &error));
+    }
     let consumed_ref = Ref(format!(
         "{SUBMIT_RECEIPT_CONSUMED_PREFIX}{}",
         receipt.receipt_id.0
     ));
-    if state.state.refs.contains_key(&consumed_ref) {
+    let consumed = match planning_transition.as_ref() {
+        Some(transition) => {
+            match receipt_is_exactly_consumed(state, &receipt, &binding, &rooted, transition) {
+                Ok(consumed) => consumed,
+                Err(error) => return done(id, rejection("submit-receipt", &error)),
+            }
+        }
+        None => state.state.refs.contains_key(&consumed_ref),
+    };
+    if consumed {
         return deferred_effect_envelope(id, &receipt.prepared_transition.deferred_host_effect);
     }
-    let rooted_ref = match encode_submit_receipt_event_ref(&rooted) {
-        Ok(reference) => reference,
-        Err(error) => return done(id, rejection("submit-receipt", &error)),
-    };
-    let facade = runner::receipt_v1_validator_facade(&binding);
-    let mut refs = vec![
-        consumed_ref,
-        Ref(format!(
-            "terminal-consumed:{}:{}:{}",
-            binding.action_id.0, binding.assignment_id.0, binding.run_revision
-        )),
-        receipt.prepared_transition.transition_ref.clone(),
-        receipt.prepared_transition.carrier.artifact_ref.clone(),
-        rooted_ref,
-        runner::receipt_binding_ref(&binding)?,
-    ];
-    if let Some(transition) = planning_transition.as_ref() {
-        refs.push(planning_result_consumed_ref(&facade));
-        refs.push(match planning_transition_kind_ref(&transition.event_kind) {
+    let refs = if let Some(transition) = planning_transition.as_ref() {
+        match receipt_consumption_refs(&receipt, &binding, &rooted, transition) {
+            Ok(refs) => refs,
+            Err(error) => return done(id, rejection("submit-receipt", &error)),
+        }
+    } else {
+        // Receipt V1 planning is the only staged parent transition in this
+        // wave. Retain the closed generic shape for future non-planning
+        // stages without granting it planning sidecar semantics.
+        let rooted_ref = match encode_submit_receipt_event_ref(&rooted) {
             Ok(reference) => reference,
             Err(error) => return done(id, rejection("submit-receipt", &error)),
-        });
-        refs.extend(transition.refs.iter().cloned());
-    }
-    refs.extend(
-        receipt
-            .prepared_transition
-            .artifact_refs
-            .iter()
-            .map(|artifact| artifact.artifact_ref.clone()),
-    );
-    for issued in &receipt.prepared_transition.issued_actions {
-        if let Err(error) =
-            verify_issued_action_at_preconsume_revision(issued, state.state.revision)
-        {
-            return done(id, rejection("submit-receipt", &error));
+        };
+        let mut refs = vec![
+            consumed_ref,
+            Ref(format!(
+                "terminal-consumed:{}:{}:{}",
+                binding.action_id.0, binding.assignment_id.0, binding.run_revision
+            )),
+            receipt.prepared_transition.transition_ref.clone(),
+            receipt.prepared_transition.carrier.artifact_ref.clone(),
+            rooted_ref,
+            runner::receipt_binding_ref(&binding)?,
+        ];
+        refs.extend(
+            receipt
+                .prepared_transition
+                .artifact_refs
+                .iter()
+                .map(|artifact| artifact.artifact_ref.clone()),
+        );
+        for issued in &receipt.prepared_transition.issued_actions {
+            if let Err(error) = verify_issued_action(issued) {
+                return done(id, rejection("submit-receipt", &error));
+            }
+            refs.push(issued.action_ref.clone());
+            refs.push(issued.binding_ref.clone());
         }
-        refs.push(issued.action_ref.clone());
-        refs.push(issued.binding_ref.clone());
-    }
+        refs
+    };
     state.append(EventKind("submit:receipt-consumed".to_owned()), refs)?;
     // Core intentionally preserves this exact deferred envelope across a
     // crash-after-consume/response. Final Host integration must dedupe by the

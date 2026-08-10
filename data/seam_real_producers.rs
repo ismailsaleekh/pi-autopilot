@@ -745,26 +745,6 @@ fn accepted_planning_artifacts_for_issue(workstream: &str, state: &CoreState) ->
     Ok(rows.into_iter().map(|(_, _, artifact)| artifact).collect())
 }
 
-/// Add the current in-memory accepted carrier to next-wave context before its
-/// receipt is consumed. The digest is over exact staged carrier bytes; no
-/// temporary carrier read or repository inference is involved.
-fn staged_accepted_planning_artifacts(
-    binding: &runner::IssuedRunnerBinding,
-    carrier_bytes: &[u8],
-) -> Result<Vec<runner::AcceptedPlanningArtifactBinding>, String> {
-    let categories = accepted_artifact_categories_for_role(&binding.role_id.0, &binding.result_contract.0)
-        .map_err(|error| error.to_string())?;
-    Ok(categories.iter().map(|category_id| runner::AcceptedPlanningArtifactBinding {
-        category_id: (*category_id).to_owned(),
-        assignment_id: binding.assignment_id.clone(),
-        role_id: binding.role_id.clone(),
-        boundary_id: binding.result_contract.clone(),
-        terminal_route: binding.terminal_route.clone(),
-        path: binding.carrier_path.clone(),
-        digest: sha256_hex_local(carrier_bytes),
-    }).collect())
-}
-
 fn accepted_artifact_categories_for_role(role: &str, boundary_id: &str) -> Result<&'static [&'static str], AnyError> {
     let categories = match (role, boundary_id) {
         ("task-extractor", "planning.task-atoms.v1") => &["task-atoms"][..],
