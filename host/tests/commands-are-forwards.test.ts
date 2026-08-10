@@ -232,6 +232,85 @@ test("terminal failure machine detail is deterministically bounded", async () =>
   assert.ok(status.endsWith("…"));
 });
 
+test("extension dedupes concurrent receipt-replayed action ids, preserves their launch acknowledgments, and binds one task", async () => {
+  const pi = fakePi();
+  const action = terminalAction("action-replayed", "assignment-replayed", "one exact task", "node one");
+  const pending: Array<(task: unknown) => void> = [];
+  const transport = {
+    calls: [],
+    async request(kind, payload) {
+      this.calls.push({ kind, payload });
+      if (kind === "command") return { v: 1, id: this.calls.length, kind: "spawn-wave", payload: { actions: [action] } };
+      return { v: 1, id: this.calls.length, kind: "done", payload: { status: "ok" } };
+    },
+    close() {},
+  };
+  let terminalHandler;
+  let runs = 0;
+  const task = taskFromDescriptor(action.bg_run, "task-replayed", "running");
+  const backgroundTasks = {
+    async capabilities() { return completeCapabilities(); },
+    run() {
+      runs += 1;
+      return new Promise((resolve) => pending.push(resolve));
+    },
+    onTerminal(handler) { terminalHandler = handler; return () => {}; },
+    async close() {},
+  };
+
+  autopilotExtension(pi, extensionOptions({ transport, backgroundTasks }));
+  await pi.events.get("session_start")({ reason: "startup" }, fakeCtx());
+  const first = pi.registrations.get("autopilot-plan").handler("main TASK-A.md TASK-B.md TASK-C.md CONTEXT.md", fakeCtx());
+  const second = pi.registrations.get("autopilot-plan").handler("main TASK-A.md TASK-B.md TASK-C.md CONTEXT.md", fakeCtx());
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(runs, 1, "the same action id shares exactly one in-flight background launch");
+  assert.equal(pending.length, 1);
+  pending[0](task);
+  await Promise.all([first, second]);
+
+  const launchAcks = transport.calls.filter((call) => call.kind === "spawn-result");
+  assert.equal(launchAcks.length, 2, "each replay receives the same task launch acknowledgment");
+  assert.deepEqual(launchAcks.map((call) => call.payload), [
+    { action_id: action.action_id, assignment_id: action.assignment_id, status: "launched", task_id: "task-replayed" },
+    { action_id: action.action_id, assignment_id: action.assignment_id, status: "launched", task_id: "task-replayed" },
+  ]);
+  await terminalHandler({ ...task, status: "completed" });
+  assert.equal(transport.calls.filter((call) => call.kind === "task-completed").length, 1, "only the first successful launch owns terminal correlation");
+});
+
+test("extension fails closed when the same action id drifts its exact descriptor", async () => {
+  const pi = fakePi();
+  const stable = terminalAction("action-drift", "assignment-drift", "stable task", "node stable");
+  const drifted = { ...stable, bg_run: { ...stable.bg_run, command: "node drifted" } };
+  let commandCount = 0;
+  let runs = 0;
+  const transport = {
+    async request(kind) {
+      if (kind === "command") {
+        commandCount += 1;
+        return { v: 1, id: commandCount, kind: "spawn", payload: { action: commandCount === 1 ? stable : drifted } };
+      }
+      return { v: 1, id: 9, kind: "done", payload: { status: "ok" } };
+    },
+    close() {},
+  };
+  const backgroundTasks = {
+    async capabilities() { return completeCapabilities(); },
+    async run(descriptor) { runs += 1; return taskFromDescriptor(descriptor, "task-drift", "running"); },
+    onTerminal() { return () => {}; },
+    async close() {},
+  };
+
+  autopilotExtension(pi, extensionOptions({ transport, backgroundTasks }));
+  await pi.events.get("session_start")({ reason: "startup" }, fakeCtx());
+  await pi.registrations.get("autopilot-plan").handler("main TASK-A.md TASK-B.md TASK-C.md CONTEXT.md", fakeCtx());
+  await assert.rejects(
+    () => pi.registrations.get("autopilot-plan").handler("main TASK-A.md TASK-B.md TASK-C.md CONTEXT.md", fakeCtx()),
+    /action descriptor drift/u,
+  );
+  assert.equal(runs, 1);
+});
+
 test("extension buffers an immediate terminal task until its exact action binding is recorded", async () => {
   const pi = fakePi();
   const firstAction = terminalAction("action-1", "assignment-1", "first exact task", "node first");

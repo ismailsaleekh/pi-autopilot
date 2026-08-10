@@ -8,6 +8,7 @@ import type {
   ChildControlBlockedGate,
   ChildControlRequest,
   ChildControlResponse,
+  CoreToHostBlockedResultObservedPayload,
   CoreToHostChildControlPayload,
   CoreToHostFrame,
   HostToCoreBlockedResultObservedPayload,
@@ -19,6 +20,8 @@ import { validateCoreToHostFrame } from "./generated/frame-validation.ts";
 export const CHILD_CONTROL_BROKER_ROOT = "/tmp/.pi-ap";
 /** Matches the generated runner/RPC terminal frame ceiling. */
 export const CHILD_CONTROL_BROKER_MAX_FRAME_BYTES = 4 * 1024 * 1024;
+/** A bounded process-local hold for reporter-last observations. */
+export const CHILD_CONTROL_BROKER_MAX_PENDING_OBSERVATIONS = 100;
 
 export interface ChildControlBrokerLaunchFacts {
   readonly socketPath: string;
@@ -32,8 +35,19 @@ export interface ChildControlBrokerTransport {
 }
 
 export interface BlockedGateApplication {
+  /** The one already-validated Host-owned reporter from this Core gate. */
+  readonly reporterTaskId: string;
   /** Must run only after the accepted child response frame was written. */
   afterChildResponseWritten(): Promise<void>;
+  /** Must run only after the exact Core observation acknowledgment. */
+  afterBlockedResultAcknowledged(): Promise<void>;
+}
+
+export interface ChildControlBrokerDiagnostic {
+  /** Secret-free machine category; never a frame, token, or capability. */
+  readonly code: string;
+  /** Saturating count for this category in this broker lifetime. */
+  readonly count: number;
 }
 
 export interface ChildControlBrokerOptions {
@@ -43,6 +57,8 @@ export interface ChildControlBrokerOptions {
    * verifies Host task jurisdiction before the child receives ACCEPT.
    */
   readonly applyBlockedGate?: (gate: ChildControlBlockedGate) => Promise<BlockedGateApplication>;
+  /** Host-owned, bounded diagnostic state receives only secret-free codes. */
+  readonly onConnectionFailure?: (diagnostic: ChildControlBrokerDiagnostic) => void;
 }
 
 export interface ChildControlBroker {
@@ -70,9 +86,38 @@ export class ChildControlBrokerProtocolError extends ChildControlBrokerError {
   }
 }
 
+/** The nested child never has the Host/Core broker capability. */
+export type ChildBlockedResultObservedWire = Omit<HostToCoreBlockedResultObservedPayload, "broker_capability">;
 type WireRequest =
   | { readonly kind: "child-control"; readonly request: ChildControlRequest }
-  | { readonly kind: "blocked-result-observed"; readonly payload: HostToCoreBlockedResultObservedPayload };
+  | { readonly kind: "blocked-result-observed"; readonly observation: ChildBlockedResultObservedWire };
+
+interface InFlightCall {
+  fail(error: Error): void;
+}
+
+interface PendingBlockedObservation {
+  readonly key: string;
+  readonly receiptId: string;
+  readonly latchId: string;
+  readonly reporterTaskId: string;
+  readonly gate: ChildControlBlockedGate;
+  readonly application: BlockedGateApplication;
+  /** Exists before ACCEPT bytes so an immediate observation can wait safely. */
+  readonly nonReporterCancellation: Promise<void>;
+  startNonReporterCancellation(): void;
+  failNonReporterCancellation(error: unknown): void;
+  responseWriteFailed(): boolean;
+  reporterCancellation?: Promise<void>;
+}
+
+interface PendingBlockedAdmissions {
+  readonly pending: Promise<PendingBlockedObservation>;
+  readonly receiptId: string;
+  readonly latchId: string;
+  readonly reporterTaskId: string;
+  readonly gate: ChildControlBlockedGate;
+}
 
 /**
  * Starts one activation-scoped, private AF_UNIX broker. This function is never
@@ -80,24 +125,55 @@ type WireRequest =
  */
 export async function startChildControlBroker(options: ChildControlBrokerOptions): Promise<ChildControlBroker> {
   ensurePrivateDirectory(CHILD_CONTROL_BROKER_ROOT, true);
-  const directory = createFreshBrokerDirectory();
-  const socketPath = join(directory, "s");
-  assertAbsent(socketPath);
-  const launchFacts: ChildControlBrokerLaunchFacts = {
-    socketPath,
-    capability: randomBytes(32).toString("hex"),
-  };
+  let directory: string | undefined;
+  let socketPath: string | undefined;
+  let launchFacts: ChildControlBrokerLaunchFacts | undefined;
   const connections = new Set<Socket>();
   const inFlight = new Set<InFlightCall>();
+  const pendingObservations = new Map<string, PendingBlockedObservation>();
+  const pendingByReceipt = new Map<string, PendingBlockedObservation>();
+  const pendingAdmissions = new Map<string, PendingBlockedAdmissions>();
+  const diagnostics = new Map<string, number>();
+  const noteConnectionFailure = (error: unknown): void => {
+    const code = connectionFailureCode(error);
+    const next = Math.min(100, (diagnostics.get(code) ?? 0) + 1);
+    diagnostics.set(code, next);
+    options.onConnectionFailure?.({ code, count: next });
+  };
   let accepting = true;
   let stopPromise: Promise<void> | undefined;
   let server: Server | undefined;
 
   try {
+    directory = createFreshBrokerDirectory();
+    socketPath = join(directory, "s");
+    assertAbsent(socketPath);
+    launchFacts = {
+      socketPath,
+      capability: randomBytes(32).toString("hex"),
+    };
+    const brokerCapability = launchFacts.capability;
     server = createServer({ allowHalfOpen: true }, (socket) => {
       connections.add(socket);
       socket.unref();
-      handleConnection(socket, options, () => accepting, inFlight).finally(() => connections.delete(socket));
+      void handleConnection(
+        socket,
+        options,
+        brokerCapability,
+        () => accepting,
+        inFlight,
+        pendingObservations,
+        pendingByReceipt,
+        pendingAdmissions,
+        noteConnectionFailure,
+      ).then(
+        () => connections.delete(socket),
+        (error: unknown) => {
+          connections.delete(socket);
+          noteConnectionFailure(error);
+          socket.destroy();
+        },
+      );
     });
     server.unref();
     await listen(server, socketPath);
@@ -106,14 +182,20 @@ export async function startChildControlBroker(options: ChildControlBrokerOptions
     chmodSync(socketPath, 0o600);
     ensurePrivateSocket(socketPath);
   } catch (error) {
-    if (server !== undefined) await closeServer(server).catch(() => {});
-    try { cleanupOwnedBrokerDirectory(directory); } catch {}
-    throw brokerError("could not bind the required child-control AF_UNIX socket", error);
+    const listeningServer = server !== undefined && server.listening ? server : undefined;
+    const closeFailure = listeningServer === undefined ? undefined : await failureOf(() => closeServer(listeningServer));
+    const cleanupFailure = directory === undefined ? undefined : failureOfSync(() => cleanupOwnedBrokerDirectory(directory));
+    throw combinedBrokerError("could not bind the required child-control AF_UNIX socket", error, closeFailure, cleanupFailure);
   }
 
+  if (server === undefined || socketPath === undefined || launchFacts === undefined || directory === undefined) {
+    throw new ChildControlBrokerError("child-control broker startup completed without owned launch facts");
+  }
   const liveServer = server;
+  const liveSocketPath = socketPath;
+  const liveDirectory = directory;
   return {
-    socketPath,
+    socketPath: liveSocketPath,
     launchFacts,
     async reconcileBlockedGate(gate: ChildControlBlockedGate): Promise<void> {
       if (!accepting) throw new ChildControlBrokerError("child-control broker is stopped");
@@ -124,7 +206,7 @@ export async function startChildControlBroker(options: ChildControlBrokerOptions
     },
     stop(): Promise<void> {
       if (stopPromise === undefined) {
-        stopPromise = stopBroker(liveServer, connections, inFlight, socketPath, directory, () => { accepting = false; });
+        stopPromise = stopBroker(liveServer, connections, inFlight, liveSocketPath, liveDirectory, () => { accepting = false; });
       }
       return stopPromise;
     },
@@ -133,35 +215,43 @@ export async function startChildControlBroker(options: ChildControlBrokerOptions
 
 /** Idempotent convenience wrapper for lifecycle callers. */
 export async function stopChildControlBroker(broker: ChildControlBroker | undefined): Promise<void> {
-  await broker?.stop();
+  if (broker !== undefined) await broker.stop();
 }
 
 /**
- * The one submit bridge path. It validates the generated Core frame wrapper,
- * accepts no Core effect other than child-control, and does not admit or
- * normalize any child payload.
+ * The one submit bridge path. It accepts no Core effect other than
+ * child-control and does not admit or normalize any child payload.
  */
 export async function forwardToCore(
   transport: ChildControlBrokerTransport,
   request: ChildControlRequest,
+  brokerCapability: string,
 ): Promise<CoreToHostChildControlPayload> {
-  const frame = validateCoreToHostFrame(await transport.request("child-control", { request }));
+  const frame = validateCoreToHostFrame(await transport.request("child-control", {
+    broker_capability: brokerCapability,
+    request,
+  }));
   if (frame.kind !== "child-control") {
     throw new ChildControlBrokerProtocolError(`child-control request received Core effect ${frame.kind}`);
   }
   const payload = frame.payload;
-  if (!isRecord(payload.response) || payload.response.request_id !== request.request_id) {
-    throw new ChildControlBrokerProtocolError("child-control response request_id drift");
-  }
+  validateChildControlResponseCorrelation(payload.response, request);
   return payload;
 }
 
 async function handleConnection(
   socket: Socket,
   options: ChildControlBrokerOptions,
+  brokerCapability: string,
   accepting: () => boolean,
   inFlight: Set<InFlightCall>,
+  pendingObservations: Map<string, PendingBlockedObservation>,
+  pendingByReceipt: Map<string, PendingBlockedObservation>,
+  pendingAdmissions: Map<string, PendingBlockedAdmissions>,
+  noteConnectionFailure: (error: unknown) => void,
 ): Promise<void> {
+  let pending: PendingBlockedObservation | undefined;
+  let responseWritten = false;
   try {
     if (!accepting()) throw new ChildControlBrokerError("child-control broker is stopped");
     const wire = await readExactlyOneFrame(socket);
@@ -169,56 +259,280 @@ async function handleConnection(
     if (!accepting()) throw new ChildControlBrokerError("child-control broker is stopped");
 
     if (request.kind === "blocked-result-observed") {
-      await forwardBlockedResultObserved(options.transport, request.payload, inFlight, socket);
+      await forwardBlockedResultObserved(
+        options.transport,
+        request.observation,
+        brokerCapability,
+        inFlight,
+        socket,
+        pendingObservations,
+        pendingByReceipt,
+      );
       return;
     }
 
     const payload = await withInFlight(
       inFlight,
       socket,
-      () => forwardToCore(options.transport, request.request),
+      () => forwardToCore(options.transport, request.request, brokerCapability),
     );
     const response = payload.response;
     const gate = payload.blocked_gate;
-    let afterWrite: BlockedGateApplication | undefined;
     if (gate !== null) {
-      if (!isAcceptedBlockedResponse(response)) {
-        throw new ChildControlBrokerProtocolError("blocked_gate requires an accepted blocked child-control response");
-      }
-      const apply = options.applyBlockedGate;
-      if (apply === undefined) throw new ChildControlBrokerProtocolError("blocked_gate received without a Host gate hook");
-      afterWrite = await apply(gate);
+      const blocked = blockedResponseCorrelation(response, gate);
+      pending = await acquirePendingBlockedObservation(
+        blocked,
+        gate,
+        options.applyBlockedGate,
+        pendingObservations,
+        pendingByReceipt,
+        pendingAdmissions,
+      );
     }
 
     // The only bytes the nested child can observe are its generated response.
     await writeFrame(socket, response);
-    if (afterWrite !== undefined) await afterWrite.afterChildResponseWritten();
-  } catch {
-    // Socket protocol, Core-unavailable, and shutdown failures intentionally
-    // close the connection. The generated child maps this transport failure to
-    // RETRY; Host never manufactures an admission result.
+    responseWritten = true;
+    if (pending !== undefined) {
+      await startNonReporterCancellation(pending);
+    }
+  } catch (error) {
+    if (pending !== undefined && !responseWritten) {
+      pending.failNonReporterCancellation(error);
+      deletePendingObservation(pendingObservations, pendingByReceipt, pending);
+    }
+    // The generated client treats this close as RETRY. Keep only a bounded
+    // secret-free machine code on the Host; never turn an infrastructure fault
+    // into a child-visible admission response.
+    noteConnectionFailure(error);
     socket.destroy();
   }
 }
 
 async function forwardBlockedResultObserved(
   transport: ChildControlBrokerTransport,
-  payload: HostToCoreBlockedResultObservedPayload,
+  observation: ChildBlockedResultObservedWire,
+  brokerCapability: string,
   inFlight: Set<InFlightCall>,
   socket: Socket,
-): Promise<never> {
-  await withInFlight(inFlight, socket, () => transport.request("blocked-result-observed", payload));
-  // Wave 1 generated the request but no closed Core-to-Host acknowledgment
-  // payload for this route. A generic done status is not an authenticated
-  // blocked-result acknowledgment and must not be aliased to child ACCEPT.
-  throw new ChildControlBrokerProtocolError(
-    "blocked-result-observed has no generated closed acknowledgment contract",
-  );
+  pendingObservations: Map<string, PendingBlockedObservation>,
+  pendingByReceipt: Map<string, PendingBlockedObservation>,
+): Promise<void> {
+  const pending = pendingByReceipt.get(observation.receipt_id);
+  if (pending === undefined) throw new ChildControlBrokerProtocolError("blocked-result-observed receipt has no pending Host reporter");
+  const frame = validateCoreToHostFrame(await withInFlight(inFlight, socket, () => transport.request("blocked-result-observed", {
+    broker_capability: brokerCapability,
+    ...observation,
+  })));
+  const acknowledgment = validateBlockedResultObservedAcknowledgment(frame, pending);
+  await pending.nonReporterCancellation;
+  if (pending.responseWriteFailed()) {
+    throw new ChildControlBrokerProtocolError("blocked-result-observed follows a failed child response write");
+  }
+  if (pending.reporterCancellation === undefined) {
+    pending.reporterCancellation = pending.application.afterBlockedResultAcknowledged();
+  }
+  await pending.reporterCancellation;
+  deletePendingObservation(pendingObservations, pendingByReceipt, pending);
+  // This outer-runner observation has no nested-model response. A clean close
+  // is its only success signal; malformed/unavailable paths close identically.
+  await endSocket(socket);
+  void acknowledgment;
 }
 
-function isAcceptedBlockedResponse(response: ChildControlResponse): boolean {
-  if (response.outcome !== "ACCEPT") return false;
-  return response.receipt.kind === "blocked";
+function validateBlockedResultObservedAcknowledgment(
+  frame: CoreToHostFrame,
+  pending: PendingBlockedObservation,
+): CoreToHostBlockedResultObservedPayload {
+  if (frame.kind !== "blocked-result-observed") {
+    throw new ChildControlBrokerProtocolError(`blocked-result-observed received Core effect ${frame.kind}`);
+  }
+  const payload = frame.payload;
+  if (
+    payload.schema !== "autopilot.blocked_result_observed_ack.v1"
+    || payload.status !== "acknowledged"
+    || payload.receipt_id !== pending.receiptId
+    || payload.latch_id !== pending.latchId
+    || payload.reporter_task_id !== pending.reporterTaskId
+  ) {
+    throw new ChildControlBrokerProtocolError("blocked-result-observed acknowledgment correlation drift");
+  }
+  return payload;
+}
+
+function validateChildControlResponseCorrelation(response: ChildControlResponse, request: ChildControlRequest): void {
+  if (!isRecord(response) || response.schema !== "autopilot.child_control_response.v1" || response.request_id !== request.request_id) {
+    throw new ChildControlBrokerProtocolError("child-control response request/schema drift");
+  }
+  if (response.outcome === "RETRY") {
+    if (!isRecord(response.diagnostic) || response.diagnostic.schema !== "autopilot.submit_diagnostic.v1") {
+      throw new ChildControlBrokerProtocolError("child-control RETRY diagnostic schema drift");
+    }
+    return;
+  }
+  if (
+    response.outcome !== "ACCEPT"
+    || !isRecord(response.receipt)
+    || response.receipt.schema !== "autopilot.child_control_accept_receipt.v1"
+    || (response.receipt.kind !== "submit" && response.receipt.kind !== "blocked")
+    || !isRecord(response.receipt.receipt)
+  ) {
+    throw new ChildControlBrokerProtocolError("child-control response is not a generated ACCEPT or RETRY");
+  }
+  // Receipt fields retain the original accepted transport correlation on an
+  // idempotent replay. The response's request_id above is the current wire
+  // correlation; Host must not reject Core's receipt alias as a new admission.
+}
+
+function blockedResponseCorrelation(
+  response: ChildControlResponse,
+  gate: ChildControlBlockedGate,
+): { readonly receiptId: string; readonly latchId: string; readonly reporterTaskId: string } {
+
+  if (response.outcome !== "ACCEPT" || response.receipt.kind !== "blocked") {
+    throw new ChildControlBrokerProtocolError("blocked_gate requires an accepted blocked child-control response");
+  }
+  const receipt = response.receipt.receipt;
+  if (!isRecord(receipt) || typeof receipt.receipt_id !== "string" || receipt.receipt_id.length === 0) {
+    throw new ChildControlBrokerProtocolError("blocked_gate response has no blocked receipt id");
+  }
+  if (receipt.run_id !== gate.run_id) {
+    throw new ChildControlBrokerProtocolError("blocked_gate receipt/gate run correlation drift");
+  }
+  const reporters = gate.cancellations.filter((cancellation) => cancellation.reporter);
+  const reporter = reporters[0];
+  if (reporters.length !== 1 || reporter === undefined || typeof gate.latch_id !== "string" || gate.latch_id.length === 0) {
+    throw new ChildControlBrokerProtocolError("blocked_gate must identify one reporter and one latch");
+  }
+  return { receiptId: receipt.receipt_id, latchId: gate.latch_id, reporterTaskId: reporter.task_id };
+}
+
+async function acquirePendingBlockedObservation(
+  blocked: { readonly receiptId: string; readonly latchId: string; readonly reporterTaskId: string },
+  gate: ChildControlBlockedGate,
+  apply: ChildControlBrokerOptions["applyBlockedGate"],
+  pendingObservations: Map<string, PendingBlockedObservation>,
+  pendingByReceipt: Map<string, PendingBlockedObservation>,
+  pendingAdmissions: Map<string, PendingBlockedAdmissions>,
+): Promise<PendingBlockedObservation> {
+  const key = blockedObservationKey(blocked.receiptId, blocked.latchId);
+  const existing = pendingObservations.get(key);
+  if (existing !== undefined) {
+    assertSamePendingObservation(existing, blocked, gate);
+    return existing;
+  }
+  const receiptPending = pendingByReceipt.get(blocked.receiptId);
+  if (receiptPending !== undefined) {
+    throw new ChildControlBrokerProtocolError("blocked receipt is already paired with a different latch");
+  }
+  const admission = pendingAdmissions.get(key);
+  if (admission !== undefined) {
+    assertSamePendingAdmission(admission, blocked, gate);
+    return admission.pending;
+  }
+  for (const queued of pendingAdmissions.values()) {
+    if (queued.receiptId === blocked.receiptId) {
+      throw new ChildControlBrokerProtocolError("blocked receipt is already being paired with a different latch");
+    }
+  }
+  if (pendingObservations.size + pendingAdmissions.size >= CHILD_CONTROL_BROKER_MAX_PENDING_OBSERVATIONS) {
+    throw new ChildControlBrokerError("child-control pending blocked-observation capacity is exhausted");
+  }
+  if (apply === undefined) throw new ChildControlBrokerProtocolError("blocked_gate received without a Host gate hook");
+  const pendingPromise = (async (): Promise<PendingBlockedObservation> => {
+    const application = await apply(gate);
+    if (application.reporterTaskId !== blocked.reporterTaskId) {
+      throw new ChildControlBrokerProtocolError("blocked gate reporter is outside the exact Host-owned reporter binding");
+    }
+    const byReceipt = pendingByReceipt.get(blocked.receiptId);
+    if (byReceipt !== undefined) {
+      throw new ChildControlBrokerProtocolError("blocked receipt is already paired with a different latch");
+    }
+    let settled = false;
+    let responseWriteFailure: unknown | undefined;
+    let resolveNonreporters: (() => void) | undefined;
+    let rejectNonreporters: ((error: unknown) => void) | undefined;
+    const nonReporterCancellation = new Promise<void>((resolve, reject) => {
+      resolveNonreporters = resolve;
+      rejectNonreporters = reject;
+    });
+    const pending: PendingBlockedObservation = {
+      key,
+      ...blocked,
+      gate,
+      application,
+      nonReporterCancellation,
+      startNonReporterCancellation() {
+        if (settled) return;
+        settled = true;
+        void Promise.resolve().then(() => application.afterChildResponseWritten()).then(
+          () => resolveNonreporters?.(),
+          (error: unknown) => rejectNonreporters?.(error),
+        );
+      },
+      failNonReporterCancellation(error: unknown) {
+        if (settled) return;
+        settled = true;
+        responseWriteFailure = error;
+        resolveNonreporters?.();
+      },
+      responseWriteFailed() { return responseWriteFailure !== undefined; },
+    };
+    pendingObservations.set(key, pending);
+    pendingByReceipt.set(blocked.receiptId, pending);
+    return pending;
+  })();
+  pendingAdmissions.set(key, { pending: pendingPromise, ...blocked, gate });
+  try {
+    return await pendingPromise;
+  } finally {
+    pendingAdmissions.delete(key);
+  }
+}
+
+function assertSamePendingObservation(
+  pending: PendingBlockedObservation,
+  blocked: { readonly receiptId: string; readonly latchId: string; readonly reporterTaskId: string },
+  gate: ChildControlBlockedGate,
+): void {
+  if (pending.receiptId !== blocked.receiptId || pending.latchId !== blocked.latchId || pending.reporterTaskId !== blocked.reporterTaskId || !sameBlockedGate(pending.gate, gate)) {
+    throw new ChildControlBrokerProtocolError("blocked receipt/latch pending correlation drift");
+  }
+}
+
+function assertSamePendingAdmission(
+  pending: PendingBlockedAdmissions,
+  blocked: { readonly receiptId: string; readonly latchId: string; readonly reporterTaskId: string },
+  gate: ChildControlBlockedGate,
+): void {
+  if (pending.receiptId !== blocked.receiptId || pending.latchId !== blocked.latchId || pending.reporterTaskId !== blocked.reporterTaskId || !sameBlockedGate(pending.gate, gate)) {
+    throw new ChildControlBrokerProtocolError("blocked receipt/latch admission correlation drift");
+  }
+}
+
+function sameBlockedGate(left: ChildControlBlockedGate, right: ChildControlBlockedGate): boolean {
+  return left.schema === right.schema
+    && left.latch_id === right.latch_id
+    && left.run_id === right.run_id
+    && left.cancellations.length === right.cancellations.length
+    && left.cancellations.every((cancellation, index) => {
+      const other = right.cancellations[index];
+      return other !== undefined && other.task_id === cancellation.task_id && other.reporter === cancellation.reporter;
+    });
+}
+
+async function startNonReporterCancellation(pending: PendingBlockedObservation): Promise<void> {
+  pending.startNonReporterCancellation();
+  await pending.nonReporterCancellation;
+}
+
+function deletePendingObservation(
+  pendingObservations: Map<string, PendingBlockedObservation>,
+  pendingByReceipt: Map<string, PendingBlockedObservation>,
+  pending: PendingBlockedObservation,
+): void {
+  if (pendingObservations.get(pending.key) === pending) pendingObservations.delete(pending.key);
+  if (pendingByReceipt.get(pending.receiptId) === pending) pendingByReceipt.delete(pending.receiptId);
 }
 
 async function readExactlyOneFrame(socket: Socket): Promise<unknown> {
@@ -236,6 +550,10 @@ async function readExactlyOneFrame(socket: Socket): Promise<unknown> {
     socket.on("error", (error) => fail(new ChildControlBrokerError(`child-control socket error: ${error.message}`)));
     socket.on("data", (chunk: Buffer) => {
       if (settled) return;
+      if (total + chunk.length > CHILD_CONTROL_BROKER_MAX_FRAME_BYTES + 4) {
+        fail(new ChildControlBrokerProtocolError("child-control frame exceeds the hard ceiling"));
+        return;
+      }
       total += chunk.length;
       chunks.push(chunk);
       if (expected === undefined && total >= 4) {
@@ -276,16 +594,15 @@ function parseWireRequest(value: unknown): WireRequest {
     assertClosedRequired(record, [
       "schema", "request_id", "token", "run_id", "assignment_id", "attempt", "tool_call_id", "kind", "tool_name", "profile_id", "raw_payload",
     ], "child-control request");
-    // The generated Host-to-Core frame owns field/type/semantic admission. The
-    // broker deliberately checks only the closed wire envelope and forwards
-    // this exact parsed JSON tree unchanged as the typed generated payload.
+    // Core owns field/type/semantic admission. The broker deliberately checks
+    // only the closed wire envelope and forwards this parsed JSON tree exactly.
     return { kind: "child-control", request: record as unknown as ChildControlRequest };
   }
   if (schema === "autopilot.blocked_result_observed.v1") {
     assertClosedRequired(record, [
       "schema", "token", "run_id", "assignment_id", "attempt", "receipt_id", "tool_call_id",
     ], "blocked-result-observed request");
-    return { kind: "blocked-result-observed", payload: record as unknown as HostToCoreBlockedResultObservedPayload };
+    return { kind: "blocked-result-observed", observation: record as ChildBlockedResultObservedWire };
   }
   throw new ChildControlBrokerProtocolError("child-control request schema is unknown");
 }
@@ -297,16 +614,16 @@ async function writeFrame(socket: Socket, value: ChildControlResponse): Promise<
   }
   const header = Buffer.allocUnsafe(4);
   header.writeUInt32BE(json.length, 0);
-  await new Promise<void>((resolve, reject) => {
-    socket.end(Buffer.concat([header, json]), (error?: Error | null) => {
-      if (error == null) resolve();
-      else reject(new ChildControlBrokerError(`child-control response write failed: ${error.message}`));
-    });
-  });
+  await endSocket(socket, Buffer.concat([header, json]));
 }
 
-interface InFlightCall {
-  fail(error: Error): void;
+function endSocket(socket: Socket, bytes?: Buffer): Promise<void> {
+  return new Promise((resolve, reject) => {
+    socket.end(bytes, (error?: Error | null) => {
+      if (error == null) resolve();
+      else reject(new ChildControlBrokerError(`child-control socket write failed: ${error.message}`));
+    });
+  });
 }
 
 async function withInFlight<T>(
@@ -337,8 +654,11 @@ async function stopBroker(
   const unavailable = new ChildControlBrokerError("child-control broker stopped before Core response");
   for (const call of inFlight) call.fail(unavailable);
   for (const socket of connections) socket.destroy(unavailable);
-  await closeServer(server);
-  cleanupOwnedBrokerDirectory(directory, socketPath);
+  const closeFailure = await failureOf(() => closeServer(server));
+  const cleanupFailure = failureOfSync(() => cleanupOwnedBrokerDirectory(directory, socketPath));
+  if (closeFailure !== undefined || cleanupFailure !== undefined) {
+    throw combinedBrokerError("could not stop child-control AF_UNIX broker", closeFailure, cleanupFailure);
+  }
 }
 
 function ensurePrivateDirectory(path: string, create: boolean): void {
@@ -358,11 +678,17 @@ function ensurePrivateDirectory(path: string, create: boolean): void {
 function createFreshBrokerDirectory(): string {
   for (let attempt = 0; attempt < 32; attempt += 1) {
     const directory = join(CHILD_CONTROL_BROKER_ROOT, randomBytes(5).toString("hex"));
+    let created = false;
     try {
       mkdirSync(directory, { mode: 0o700 });
+      created = true;
       ensurePrivateDirectory(directory, false);
       return directory;
     } catch (error) {
+      if (created) {
+        const cleanupFailure = failureOfSync(() => cleanupOwnedBrokerDirectory(directory));
+        throw combinedBrokerError("could not create a private child-control directory", error, cleanupFailure);
+      }
       if (isCode(error, "EEXIST")) continue;
       throw brokerError("could not create a private child-control directory", error);
     }
@@ -381,20 +707,19 @@ function cleanupOwnedBrokerDirectory(directory: string, socketPath = join(direct
   try {
     ensurePrivateDirectory(CHILD_CONTROL_BROKER_ROOT, false);
   } catch (error) {
-    if (!isCode(error, "ENOENT")) throw error;
-    return;
+    if (isCode(error, "ENOENT")) return;
+    throw error;
   }
-  try {
+  const socketFailure = cleanupFailureOf(() => {
     ensurePrivateSocket(socketPath);
     unlinkSync(socketPath);
-  } catch (error) {
-    if (!isCode(error, "ENOENT")) throw error;
-  }
-  try {
+  });
+  const directoryFailure = cleanupFailureOf(() => {
     ensurePrivateDirectory(directory, false);
     rmdirSync(directory);
-  } catch (error) {
-    if (!isCode(error, "ENOENT")) throw error;
+  });
+  if (socketFailure !== undefined || directoryFailure !== undefined) {
+    throw combinedBrokerError("could not clean up child-control AF_UNIX broker", socketFailure, directoryFailure);
   }
 }
 
@@ -412,8 +737,6 @@ function lstatExact(path: string, label: string): Stats {
   try {
     return lstatSync(path);
   } catch (error) {
-    // Cleanup treats only ENOENT as harmless. Preserve its code rather than
-    // wrapping it into a generic Error that could be mistaken for success.
     if (isCode(error, "ENOENT")) throw error;
     throw brokerError(`child-control ${label} could not be lstat'd`, error);
   }
@@ -463,6 +786,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function blockedObservationKey(receiptId: string, latchId: string): string {
+  return `${receiptId}\u0000${latchId}`;
+}
+
+function connectionFailureCode(error: unknown): string {
+  if (error instanceof ChildControlBrokerProtocolError) return "child-control-protocol";
+  if (error instanceof ChildControlBrokerError) return "child-control-unavailable";
+  return "child-control-internal";
+}
+
 function effectiveUid(): number {
   if (typeof process.geteuid !== "function") throw new ChildControlBrokerError("child-control AF_UNIX broker requires an effective uid");
   return process.geteuid();
@@ -474,6 +807,34 @@ function isCode(error: unknown, code: string): boolean {
 
 function brokerError(prefix: string, error: unknown): ChildControlBrokerError {
   return new ChildControlBrokerError(`${prefix}: ${errorMessage(error)}`);
+}
+
+function combinedBrokerError(prefix: string, ...errors: readonly (unknown | undefined)[]): ChildControlBrokerError {
+  const details = errors.filter((error): error is unknown => error !== undefined).map(errorMessage);
+  return new ChildControlBrokerError(`${prefix}: ${details.join("; cleanup: ")}`);
+}
+
+async function failureOf(action: () => void | Promise<void>): Promise<unknown | undefined> {
+  try {
+    await action();
+    return undefined;
+  } catch (error) {
+    return error;
+  }
+}
+
+function failureOfSync(action: () => void): unknown | undefined {
+  try {
+    action();
+    return undefined;
+  } catch (error) {
+    return error;
+  }
+}
+
+function cleanupFailureOf(action: () => void): unknown | undefined {
+  const error = failureOfSync(action);
+  return isCode(error, "ENOENT") ? undefined : error;
 }
 
 function errorMessage(error: unknown): string {

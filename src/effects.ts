@@ -12,8 +12,11 @@ export type OperatorMessageSink = (message: string, level: OperatorMessageLevel)
 export type StatusEntrySink = (status: string) => unknown | Promise<unknown>;
 export type HostEffectContext = Pick<ExtensionContext, "ui" | "hasUI" | "mode">;
 export interface BackgroundLaunchGate { assertOpen(): void; }
-export interface HostEffectServices { readonly backgroundTasks: Pick<PiBackgroundTaskClient, "run">; readonly launchGate?: BackgroundLaunchGate; readonly operatorMessage: OperatorMessageSink; readonly statusEntry: StatusEntrySink; }
-export interface LaunchedBackgroundTask { readonly action: BackgroundAction; readonly task: BgTaskSnapshot; }
+export interface BackgroundActionLaunchDedupe {
+  launch(action: BackgroundAction, run: () => Promise<BgTaskSnapshot>): Promise<{ readonly task: BgTaskSnapshot; readonly firstLaunch: boolean }>;
+}
+export interface HostEffectServices { readonly backgroundTasks: Pick<PiBackgroundTaskClient, "run">; readonly launchGate?: BackgroundLaunchGate; readonly actionLaunchDedupe?: BackgroundActionLaunchDedupe; readonly operatorMessage: OperatorMessageSink; readonly statusEntry: StatusEntrySink; }
+export interface LaunchedBackgroundTask { readonly action: BackgroundAction; readonly task: BgTaskSnapshot; readonly firstLaunch: boolean; }
 export interface BackgroundLaunchFailure { readonly action: BackgroundAction; readonly diagnostic: string; }
 export type CoreEffectResult = { readonly kind: "spawn"; readonly acknowledge: boolean; readonly launched: readonly LaunchedBackgroundTask[]; readonly failures: readonly BackgroundLaunchFailure[] } | undefined;
 
@@ -25,7 +28,10 @@ export async function applyCoreEffect(frame: CoreToHostFrame, ctx: HostEffectCon
   const effect = effectFor(validFrame.kind);
   switch (validFrame.kind) {
     case "ui": await applyUiEffect(validFrame.payload, effect.operator_level_default, ctx, services); return undefined;
-    case "spawn": return { kind: "spawn", acknowledge: effect.acknowledge, launched: [{ action: validFrame.payload.action, task: await launchBackground(validFrame.payload.action, services) }], failures: [] };
+    case "spawn": {
+      const launched = await launchBackground(validFrame.payload.action, services);
+      return { kind: "spawn", acknowledge: effect.acknowledge, launched: [{ action: validFrame.payload.action, ...launched }], failures: [] };
+    }
     case "spawn-wave": return launchWave(validFrame.payload.actions, effect.acknowledge, services);
     case "session": await failClosed(ctx, services, `Autopilot requested unsupported Pi session effect ${validFrame.payload.session_action}. The installed Pi ExtensionCommandContext has only explicit session-control methods; Autopilot stopped instead of calling a fictional generic session API.`); return undefined;
     case "log": await emitOperatorMessage(ctx, services, `Autopilot log: ${validFrame.payload.line}`, effect.operator_level_default); return undefined;
@@ -48,17 +54,21 @@ async function launchWave(actions: readonly BackgroundAction[], acknowledge: boo
     const action = actions[index];
     const outcome = settled[index];
     if (action === undefined || outcome === undefined) throw new Error(`spawn-wave internal index drift at ${index}`);
-    if (outcome.status === "fulfilled") launched.push({ action, task: outcome.value });
+    if (outcome.status === "fulfilled") launched.push({ action, ...outcome.value });
     else failures.push({ action, diagnostic: boundedDiagnostic(outcome.reason) });
   }
   return { kind: "spawn", acknowledge, launched, failures };
 }
 
-function launchBackground(action: BackgroundAction, services: HostEffectServices): Promise<BgTaskSnapshot> {
-  // This is deliberately immediately adjacent to run(): no singular or wave
-  // launch can pass a Host-closed blocked gate between check and invocation.
-  services.launchGate?.assertOpen();
-  return services.backgroundTasks.run(action.bg_run);
+function launchBackground(action: BackgroundAction, services: HostEffectServices): Promise<{ readonly task: BgTaskSnapshot; readonly firstLaunch: boolean }> {
+  const run = (): Promise<BgTaskSnapshot> => {
+    // This is deliberately immediately adjacent to run(): no singular or wave
+    // launch can pass a Host-closed blocked gate between check and invocation.
+    services.launchGate?.assertOpen();
+    return services.backgroundTasks.run(action.bg_run);
+  };
+  if (services.actionLaunchDedupe !== undefined) return services.actionLaunchDedupe.launch(action, run);
+  return run().then((task) => ({ task, firstLaunch: true }));
 }
 
 async function applyUiEffect(payload: CoreToHostUiPayload, level: OperatorMessageLevel, ctx: HostEffectContext, services: HostEffectServices): Promise<void> {

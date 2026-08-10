@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { lstatSync } from "node:fs";
+import { lstatSync, mkdirSync, rmdirSync, unlinkSync } from "node:fs";
 import { createConnection } from "node:net";
 import { test } from "node:test";
 
@@ -84,7 +84,7 @@ test("ChildControlBroker creates one private fixed-root AF_UNIX socket and forwa
     const input = request();
     const reply = await exchange(broker.socketPath, framed(input));
     assert.equal(calls.length, 1);
-    assert.deepEqual(calls[0], { kind: "child-control", payload: { request: input } });
+    assert.deepEqual(calls[0], { kind: "child-control", payload: { broker_capability: broker.launchFacts.capability, request: input } });
     assert.equal(reply.readUInt32BE(0), reply.length - 4);
     assert.deepEqual(JSON.parse(reply.subarray(4).toString("utf8")), retryResponse(input.request_id));
   } finally {
@@ -112,7 +112,17 @@ test("ChildControlBroker rejects extra frames before Core and applies a blocked 
               schema: "autopilot.child_control_response.v1",
               request_id: child.request.request_id,
               outcome: "ACCEPT",
-              receipt: { kind: "blocked", schema: "autopilot.child_control_accept_receipt.v1", receipt: {} },
+              receipt: {
+                kind: "blocked",
+                schema: "autopilot.child_control_accept_receipt.v1",
+                receipt: {
+                  schema: "autopilot.blocked_receipt.v1",
+                  receipt_id: "receipt-1",
+                  run_id: "run-1",
+                  request_id: child.request.request_id,
+                  tool_call_id: "call-1",
+                },
+              },
             },
             blocked_gate: {
               schema: "autopilot.child_control_blocked_gate.v1",
@@ -126,7 +136,11 @@ test("ChildControlBroker rejects extra frames before Core and applies a blocked 
     } as never,
     async applyBlockedGate() {
       order.push("gate");
-      return { async afterChildResponseWritten() { order.push("after-write"); } };
+      return {
+        reporterTaskId: "task-reporter",
+        async afterChildResponseWritten() { order.push("after-write"); },
+        async afterBlockedResultAcknowledged() { order.push("reporter"); },
+      };
     },
   });
 
@@ -155,3 +169,177 @@ test("ChildControlBroker keeps the 4 MiB frame ceiling closed", async () => {
     await broker.stop();
   }
 });
+
+test("ChildControlBroker orders blocked ACCEPT, nonreporters, exact acknowledgment, then its one reporter", async () => {
+  const order: string[] = [];
+  let releaseNonreporters: (() => void) | undefined;
+  const nonreporters = new Promise<void>((resolve) => { releaseNonreporters = resolve; });
+  const child = { ...request("blocked-order"), kind: "blocked", tool_name: "autopilot_report_blocked", profile_id: "autopilot.blocked_report.v1:autopilot_report_blocked" };
+  const broker = await startChildControlBroker({
+    transport: {
+      async request(kind, payload) {
+        if (kind === "child-control") {
+          const forwarded = payload as { broker_capability: string; request: { request_id: string } };
+          assert.equal(forwarded.broker_capability, broker.launchFacts.capability);
+          return blockedFrame(forwarded.request.request_id);
+        }
+        order.push("core-observation");
+        const forwarded = payload as { broker_capability: string };
+        assert.deepEqual(forwarded, { broker_capability: broker.launchFacts.capability, ...blockedObservation() });
+        return observedAck("receipt-1", "latch-1", "task-reporter");
+      },
+    } as never,
+    async applyBlockedGate() {
+      order.push("gate");
+      return {
+        reporterTaskId: "task-reporter",
+        async afterChildResponseWritten() {
+          order.push("nonreporter-kill-start");
+          await nonreporters;
+          order.push("nonreporter-kill-done");
+        },
+        async afterBlockedResultAcknowledged() { order.push("reporter-kill"); },
+      };
+    },
+  });
+  try {
+    const reply = await exchange(broker.socketPath, framed(child));
+    assert.notEqual(reply.length, 0);
+    order.push("child-accept-observed");
+    assert.deepEqual(order, ["gate", "nonreporter-kill-start", "child-accept-observed"]);
+
+    const observation = exchange(broker.socketPath, framed(blockedObservation()));
+    await waitFor(() => order.includes("core-observation"));
+    assert.deepEqual(order, ["gate", "nonreporter-kill-start", "child-accept-observed", "core-observation"]);
+    assert.ok(releaseNonreporters !== undefined);
+    releaseNonreporters();
+    assert.equal((await observation).length, 0);
+    assert.deepEqual(order, ["gate", "nonreporter-kill-start", "child-accept-observed", "core-observation", "nonreporter-kill-done", "reporter-kill"]);
+  } finally {
+    await broker.stop();
+  }
+});
+
+test("ChildControlBroker refuses a wrong observation acknowledgment and keeps the reporter untouched", async () => {
+  const reporterKills: string[] = [];
+  const child = { ...request("blocked-wrong-ack"), kind: "blocked", tool_name: "autopilot_report_blocked", profile_id: "autopilot.blocked_report.v1:autopilot_report_blocked" };
+  const broker = await startChildControlBroker({
+    transport: {
+      async request(kind, payload) {
+        if (kind === "child-control") return blockedFrame((payload as { request: { request_id: string } }).request.request_id);
+        return observedAck("receipt-1", "latch-1", "foreign-task");
+      },
+    } as never,
+    async applyBlockedGate() {
+      return {
+        reporterTaskId: "task-reporter",
+        async afterChildResponseWritten() {},
+        async afterBlockedResultAcknowledged() { reporterKills.push("task-reporter"); },
+      };
+    },
+  });
+  try {
+    assert.notEqual((await exchange(broker.socketPath, framed(child))).length, 0);
+    assert.equal((await exchange(broker.socketPath, framed(blockedObservation()))).length, 0);
+    assert.deepEqual(reporterKills, []);
+  } finally {
+    await broker.stop();
+  }
+});
+
+test("ChildControlBroker closes malformed connections with only a bounded secret-free diagnostic", async () => {
+  const diagnostics: Array<{ code: string; count: number }> = [];
+  const broker = await startChildControlBroker({
+    transport: { async request() { throw new Error("must not forward"); } } as never,
+    onConnectionFailure(diagnostic) { diagnostics.push(diagnostic); },
+  });
+  try {
+    for (let index = 0; index < 101; index += 1) {
+      assert.equal((await exchange(broker.socketPath, framed({ ...request(`malformed-${index}`), broker_capability: "never-child-secret" }))).length, 0);
+    }
+    assert.deepEqual(diagnostics.at(-1), { code: "child-control-protocol", count: 100 });
+    assert.doesNotMatch(JSON.stringify(diagnostics), /never-child-secret|[a-f0-9]{64}/u);
+  } finally {
+    await broker.stop();
+  }
+});
+
+test("ChildControlBroker surfaces verified cleanup failure without a fallback", async () => {
+  const broker = await startChildControlBroker({ transport: { async request() { throw new Error("must not forward"); } } as never });
+  const directory = broker.socketPath.slice(0, -2);
+  unlinkSync(broker.socketPath);
+  mkdirSync(broker.socketPath, { mode: 0o700 });
+  await assert.rejects(broker.stop(), /socket path is not a socket/u);
+  rmdirSync(broker.socketPath);
+  rmdirSync(directory);
+});
+
+function blockedFrame(requestId: string) {
+  return {
+    v: 1,
+    id: 9,
+    kind: "child-control",
+    payload: {
+      response: {
+        schema: "autopilot.child_control_response.v1",
+        request_id: requestId,
+        outcome: "ACCEPT",
+        receipt: {
+          kind: "blocked",
+          schema: "autopilot.child_control_accept_receipt.v1",
+          receipt: {
+            schema: "autopilot.blocked_receipt.v1",
+            receipt_id: "receipt-1",
+            run_id: "run-1",
+            request_id: requestId,
+            tool_call_id: "call-1",
+          },
+        },
+      },
+      blocked_gate: {
+        schema: "autopilot.child_control_blocked_gate.v1",
+        latch_id: "latch-1",
+        run_id: "run-1",
+        cancellations: [
+          { task_id: "task-nonreporter", reporter: false },
+          { task_id: "task-reporter", reporter: true },
+        ],
+      },
+    },
+  };
+}
+
+function blockedObservation() {
+  return {
+    schema: "autopilot.blocked_result_observed.v1",
+    token: "child-token",
+    run_id: "run-1",
+    assignment_id: "assignment-1",
+    attempt: 1,
+    receipt_id: "receipt-1",
+    tool_call_id: "call-1",
+  };
+}
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  throw new Error("timed out waiting for broker operation");
+}
+
+function observedAck(receiptId: string, latchId: string, reporterTaskId: string) {
+  return {
+    v: 1,
+    id: 10,
+    kind: "blocked-result-observed",
+    payload: {
+      schema: "autopilot.blocked_result_observed_ack.v1",
+      receipt_id: receiptId,
+      latch_id: latchId,
+      reporter_task_id: reporterTaskId,
+      status: "acknowledged",
+    },
+  };
+}

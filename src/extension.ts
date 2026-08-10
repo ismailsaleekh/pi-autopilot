@@ -2,7 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 
 import { PiBackgroundTaskClient, type BgTaskSnapshot } from "./background-tasks.ts";
 import { registerAutopilotCommands, applyAndRecord, type RegisterCommandOptions } from "./commands.ts";
-import type { BackgroundLaunchGate, OperatorMessageLevel, OperatorMessageSink } from "./effects.ts";
+import type { BackgroundActionLaunchDedupe, BackgroundLaunchGate, OperatorMessageLevel, OperatorMessageSink } from "./effects.ts";
 import {
   AutopilotActivation,
   pruneActivationRecord,
@@ -17,6 +17,7 @@ import {
   stopChildControlBroker,
   type BlockedGateApplication,
   type ChildControlBroker,
+  type ChildControlBrokerDiagnostic,
 } from "./child-control-broker.ts";
 import type { BackgroundAction, ChildControlBlockedGate } from "./generated/index.ts";
 import { AUTOPILOT_STATUS_CUSTOM_TYPE, buildAutopilotStatusEntryData } from "./status-channel.ts";
@@ -54,6 +55,46 @@ class SessionLaunchGate implements BackgroundLaunchGate {
   }
 }
 
+interface ActionLaunchEntry {
+  readonly descriptor: string;
+  readonly launch: Promise<BgTaskSnapshot>;
+  task?: BgTaskSnapshot;
+}
+
+/**
+ * Host-process exact action-id dedupe. Entries survive Core restarts but only
+ * successful `backgroundTasks.run` results become append-only task ownership.
+ */
+class SessionActionLaunchDedupe implements BackgroundActionLaunchDedupe {
+  private readonly entries = new Map<string, ActionLaunchEntry>();
+
+  launch(action: BackgroundAction, run: () => Promise<BgTaskSnapshot>): Promise<{ readonly task: BgTaskSnapshot; readonly firstLaunch: boolean }> {
+    const descriptor = JSON.stringify(action);
+    if (descriptor === undefined) return Promise.reject(new Error(`Autopilot action descriptor is not serializable for action_id=${action.action_id}`));
+    const existing = this.entries.get(action.action_id);
+    if (existing !== undefined) {
+      if (existing.descriptor !== descriptor) {
+        return Promise.reject(new Error(`Autopilot action descriptor drift for action_id=${action.action_id}`));
+      }
+      if (existing.task !== undefined) return Promise.resolve({ task: existing.task, firstLaunch: false });
+      return existing.launch.then((task) => ({ task, firstLaunch: false }));
+    }
+    const launch = Promise.resolve().then(run);
+    const entry: ActionLaunchEntry = { descriptor, launch };
+    this.entries.set(action.action_id, entry);
+    return launch.then(
+      (task) => {
+        entry.task = task;
+        return { task, firstLaunch: true };
+      },
+      (error: unknown) => {
+        if (this.entries.get(action.action_id) === entry) this.entries.delete(action.action_id);
+        throw error;
+      },
+    );
+  }
+}
+
 export default function autopilotExtension(pi: ExtensionAPI, options: AutopilotExtensionOptions = {}): void {
   const operatorMessage = operatorMessageSink(pi);
   const statusEntry = async (status: string) => pi.appendEntry(AUTOPILOT_STATUS_CUSTOM_TYPE, buildAutopilotStatusEntryData(status));
@@ -69,6 +110,8 @@ export default function autopilotExtension(pi: ExtensionAPI, options: AutopilotE
    */
   const launchedTaskIds = new Set<string>();
   const droppedForeignTerminals: string[] = [];
+  const brokerConnectionDiagnostics = new Map<string, number>();
+  const actionLaunchDedupe = new SessionActionLaunchDedupe();
   let currentCtx: ExtensionContext | undefined;
   let unsubscribeTerminal: (() => void) | undefined;
   let broker: ChildControlBroker | undefined;
@@ -83,22 +126,28 @@ export default function autopilotExtension(pi: ExtensionAPI, options: AutopilotE
     const started = await startBroker({
       transport: services.transport,
       applyBlockedGate: async (gate) => applyBlockedGate(gate, services.backgroundTasks),
+      onConnectionFailure: noteBrokerConnectionFailure,
     });
     try {
-      // Do this before any command can cause Core launch. The current Core
-      // handshake deliberately fails loud on first launch rather than receive
-      // an unused broker capability.
+      // Broker facts are bound before any command can start Core. Core reuses
+      // this one activation-owned broker across its own child-process restarts.
       if (services.transport instanceof CoreTransport) services.transport.bindChildControlBroker(started.launchFacts);
-      broker = started;
       unsubscribeTerminal = services.backgroundTasks.onTerminal(handleTerminal);
       await options.onActivated?.();
+      broker = started;
     } catch (error) {
       unsubscribeTerminal?.();
       unsubscribeTerminal = undefined;
-      await stopChildControlBroker(started).catch(() => {});
+      const cleanupFailure = await stopFailure(started);
+      if (cleanupFailure !== undefined) throw combinedLifecycleFailure("Autopilot activation broker cleanup failed", error, cleanupFailure);
       throw error;
     }
   });
+
+  function noteBrokerConnectionFailure(diagnostic: ChildControlBrokerDiagnostic): void {
+    if (!brokerConnectionDiagnostics.has(diagnostic.code) && brokerConnectionDiagnostics.size >= 8) return;
+    brokerConnectionDiagnostics.set(diagnostic.code, Math.min(100, diagnostic.count));
+  }
 
   function commandOptions(services: ActivationServices): RegisterCommandOptions {
     return {
@@ -108,6 +157,7 @@ export default function autopilotExtension(pi: ExtensionAPI, options: AutopilotE
       statusEntry,
       onSpawn: rememberSpawn,
       launchGate,
+      actionLaunchDedupe,
     };
   }
 
@@ -130,6 +180,7 @@ export default function autopilotExtension(pi: ExtensionAPI, options: AutopilotE
     // the local process gate before looking at any task or issuing any kill.
     launchGate.close();
     const nonReporterTaskIds: string[] = [];
+    let reporterTaskId: string | undefined;
     let reporterCount = 0;
     const seen = new Set<string>();
     for (const cancellation of gate.cancellations) {
@@ -138,17 +189,30 @@ export default function autopilotExtension(pi: ExtensionAPI, options: AutopilotE
       if (!ownedTaskBindings.has(cancellation.task_id)) {
         throw new Error(`blocked gate named task outside Host Autopilot jurisdiction: ${cancellation.task_id}`);
       }
-      if (cancellation.reporter) reporterCount += 1;
-      else nonReporterTaskIds.push(cancellation.task_id);
+      if (cancellation.reporter) {
+        reporterCount += 1;
+        reporterTaskId = cancellation.task_id;
+      } else nonReporterTaskIds.push(cancellation.task_id);
     }
     if (reporterCount !== 1) throw new Error("blocked gate must identify exactly one reporter task");
 
+    if (reporterTaskId === undefined) throw new Error("blocked gate reporter task is absent");
+    const exactReporterTaskId = reporterTaskId;
     return {
+      reporterTaskId: exactReporterTaskId,
       async afterChildResponseWritten(): Promise<void> {
         // No status/enumeration/inference: only the exact Core-derived ids are
-        // sent through the existing correlated kill operation. Reporter-last
-        // remains pending for the generated blocked-result-observed handshake.
+        // sent through the existing correlated kill operation.
         await backgroundTasks.killMany(nonReporterTaskIds);
+      },
+      async afterBlockedResultAcknowledged(): Promise<void> {
+        // The broker has authenticated receipt/latch/reporter correlation. The
+        // Host still rechecks its append-only own-launch record before naming
+        // the reporter to EventBus; no foreign task can be canceled here.
+        if (!ownedTaskBindings.has(exactReporterTaskId)) {
+          throw new Error(`blocked reporter task left Host Autopilot jurisdiction: ${exactReporterTaskId}`);
+        }
+        await backgroundTasks.killMany([exactReporterTaskId]);
       },
     };
   }
@@ -394,6 +458,19 @@ function operatorMessageSink(pi: ExtensionAPI): OperatorMessageSink {
 function shutdownReason(event: unknown): string | undefined {
   const record = event as Record<string, unknown>;
   return typeof record["reason"] === "string" ? record["reason"] : undefined;
+}
+
+async function stopFailure(broker: ChildControlBroker): Promise<unknown | undefined> {
+  try {
+    await stopChildControlBroker(broker);
+    return undefined;
+  } catch (error) {
+    return error;
+  }
+}
+
+function combinedLifecycleFailure(prefix: string, primary: unknown, cleanup: unknown): Error {
+  return new Error(`${prefix}: ${boundedError(primary)}; cleanup: ${boundedError(cleanup)}`);
 }
 
 function boundedError(error: unknown): string {

@@ -4,16 +4,38 @@ import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import type { CoreToHostFrame, HostToCoreFrame } from "./generated/index.ts";
 import { validateCoreToHostFrame } from "./generated/frame-validation.ts";
 import { HOST_ENV_DENY } from "./generated/host-runtime-tables.ts";
-import { boundedDiagnostic, redactedEnv } from "./host-runtime.ts";
-import { resolveCoreBinary, resolveRunnerTransport } from "./resolve-core.ts";
+import { redactedEnv } from "./host-runtime.ts";
+import { resolveCoreBinary, resolveRunnerTransport, type RunnerResolution } from "./resolve-core.ts";
 
-export interface CoreTransportOptions { binaryPath?: string; packageJsonPath?: string; }
+export interface CoreTransportOptions {
+  binaryPath?: string;
+  packageJsonPath?: string;
+  /** Test-only inherited environment seam; production uses process.env. */
+  baseEnv?: NodeJS.ProcessEnv;
+}
 /** Host/Core-only broker facts; never include these in model-visible frames or diagnostics. */
 export interface ChildControlBrokerLaunchFacts { readonly socketPath: string; readonly capability: string; }
 interface PendingRequest { resolve: (frame: CoreToHostFrame) => void; reject: (error: Error) => void; timer?: NodeJS.Timeout; }
 export class CoreUnavailableError extends Error { constructor(message: string) { super(message); this.name = "CoreUnavailableError"; } }
 export class CoreTimeoutError extends Error { constructor(message: string) { super(message); this.name = "CoreTimeoutError"; } }
-export class CoreChildControlContractError extends CoreUnavailableError { constructor() { super("autopilot-core does not implement the required Host child-control broker launch facts; Core must authenticate broker socket/capability facts, issue them into fresh V5 runner specs, and configure RpcSpawnConfig child-control environment forwarding before this broker can launch Core."); this.name = "CoreChildControlContractError"; } }
+
+const CHILD_CONTROL_SOCKET_PATH = /^\/tmp\/\.pi-ap\/[a-f0-9]{10}\/s$/u;
+const LOWER_HEX_256 = /^[a-f0-9]{64}$/u;
+
+/** Builds the only permitted Core child environment without exposing a capability to diagnostics. */
+export function coreLaunchEnvironment(
+  runner: RunnerResolution,
+  broker: ChildControlBrokerLaunchFacts,
+  base: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  return redactedEnv(HOST_ENV_DENY, {
+    AUTOPILOT_NODE_EXECUTABLE: runner.nodeExecutable,
+    AUTOPILOT_AGENT_RUNNER_WRAPPER: runner.runnerWrapper,
+    AUTOPILOT_CHILD_ADDON_PATH: runner.childAddon,
+    AUTOPILOT_CHILD_CONTROL_SOCKET_PATH: broker.socketPath,
+    AUTOPILOT_CHILD_CONTROL_BROKER_CAPABILITY: broker.capability,
+  }, base);
+}
 
 export class CoreTransport {
   private child: ChildProcessWithoutNullStreams | undefined;
@@ -46,17 +68,18 @@ export class CoreTransport {
   }
 
   /**
-   * Called by activation before the first Core request. Current Core source at
-   * this wave has no matching RunnerTransportFacts/RpcSpawnConfig handshake,
-   * so ensureChild fails loud rather than exporting a secret Core ignores.
+   * Activation binds exactly one private broker before Core can start. The fact
+   * survives a Core child-process restart and is never included in diagnostics.
    */
   bindChildControlBroker(facts: ChildControlBrokerLaunchFacts): void {
-    if (!facts.socketPath.startsWith("/tmp/.pi-ap/") || !/^[a-f0-9]{64}$/u.test(facts.capability)) {
-      throw new CoreChildControlContractError();
+    if (!isExactChildControlBrokerFacts(facts)) {
+      throw new CoreUnavailableError("autopilot-core requires exact private child-control broker launch facts");
     }
-    if (this.hasLiveChild()) throw new CoreChildControlContractError();
+    if (this.hasLiveChild()) {
+      throw new CoreUnavailableError("autopilot-core broker launch facts must bind before the first Core spawn");
+    }
     if (this.childControlBroker !== undefined && (this.childControlBroker.socketPath !== facts.socketPath || this.childControlBroker.capability !== facts.capability)) {
-      throw new CoreChildControlContractError();
+      throw new CoreUnavailableError("autopilot-core broker launch facts cannot change during an active Host lifecycle");
     }
     this.childControlBroker = facts;
   }
@@ -67,15 +90,14 @@ export class CoreTransport {
 
   private ensureChild(): ChildProcessWithoutNullStreams {
     if (this.hasLiveChild() && this.child !== undefined) return this.child;
-    if (this.childControlBroker !== undefined) throw new CoreChildControlContractError();
+    const broker = this.childControlBroker;
+    if (broker === undefined) {
+      throw new CoreUnavailableError("autopilot-core cannot start before activation binds private child-control broker facts");
+    }
     const runner = resolveRunnerTransport({ packageJsonPath: this.options.packageJsonPath });
     const child = spawn(this.options.binaryPath ?? resolveCoreBinary({ packageJsonPath: this.options.packageJsonPath }), [], {
       stdio: "pipe",
-      env: redactedEnv(HOST_ENV_DENY, {
-        AUTOPILOT_NODE_EXECUTABLE: runner.nodeExecutable,
-        AUTOPILOT_AGENT_RUNNER_WRAPPER: runner.runnerWrapper,
-        AUTOPILOT_CHILD_ADDON_PATH: runner.childAddon,
-      }),
+      env: coreLaunchEnvironment(runner, broker, this.options.baseEnv),
     });
     this.child = child;
     this.stdout = "";
@@ -83,8 +105,14 @@ export class CoreTransport {
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => this.receive(chunk));
     child.stderr.on("data", (chunk: string) => this.noteDiagnostics(chunk));
-    child.on("error", (error) => this.failPending(new CoreUnavailableError(error.message)));
-    child.on("exit", (code, signal) => { this.child = undefined; this.failPending(new CoreUnavailableError(`autopilot-core exited code=${code ?? "null"} signal=${signal ?? "null"}; diagnostics=${this.lastDiagnostics()}`)); });
+    child.on("error", (error) => {
+      if (this.child === child) this.failPending(new CoreUnavailableError(error.message));
+    });
+    child.on("exit", (code, signal) => {
+      if (this.child !== child) return;
+      this.child = undefined;
+      this.failPending(new CoreUnavailableError(`autopilot-core exited code=${code ?? "null"} signal=${signal ?? "null"}; diagnostics=${this.lastDiagnostics()}`));
+    });
     return child;
   }
 
@@ -108,8 +136,18 @@ export class CoreTransport {
     pending.resolve(frame);
   }
 
-  private noteDiagnostics(chunk: string): void { this.diagnostics.push(boundedDiagnostic(chunk)); if (this.diagnostics.length > 20) this.diagnostics = this.diagnostics.slice(-20); }
+  private noteDiagnostics(_chunk: string): void {
+    // Core stderr can contain arbitrary child-process diagnostics. Keep a
+    // bounded machine code instead of retaining text that could include the
+    // Host/Core-only capability (including across arbitrary stream chunks).
+    this.diagnostics.push("core-stderr");
+    if (this.diagnostics.length > 20) this.diagnostics = this.diagnostics.slice(-20);
+  }
   private failPending(error: Error): void { for (const [id, pending] of this.pending) { this.pending.delete(id); if (pending.timer !== undefined) clearTimeout(pending.timer); pending.reject(error); } }
+}
+
+function isExactChildControlBrokerFacts(facts: ChildControlBrokerLaunchFacts): boolean {
+  return CHILD_CONTROL_SOCKET_PATH.test(facts.socketPath) && LOWER_HEX_256.test(facts.capability);
 }
 
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
