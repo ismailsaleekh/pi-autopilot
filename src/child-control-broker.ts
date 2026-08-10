@@ -592,7 +592,7 @@ function parseWireRequest(value: unknown): WireRequest {
   const schema = record.schema;
   if (schema === "autopilot.child_control_request.v1") {
     assertClosedRequired(record, [
-      "schema", "request_id", "token", "run_id", "assignment_id", "attempt", "tool_call_id", "kind", "tool_name", "profile_id", "raw_payload",
+      "schema", "request_id", "token", "run_id", "assignment_id", "attempt", "tool_call_id", "kind", "tool_name", "profile_id", "raw_payload", "runtime_evidence",
     ], "child-control request");
     // Core owns field/type/semantic admission. The broker deliberately checks
     // only the closed wire envelope and forwards this parsed JSON tree exactly.

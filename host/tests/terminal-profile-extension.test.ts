@@ -13,14 +13,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { Compile } from "typebox/compile";
-
 import childExtension from "../../src/generated/child-extension.ts";
 import { ValidationReadPolicy } from "../../child-runtime/child-extension-runtime.ts";
-import { SUBMIT_TOOLS } from "../../src/generated/tool-schemas.ts";
+import { BLOCKED_REPORT_TOOL, SUBMIT_TOOLS } from "../../src/generated/tool-schemas.ts";
+import { startChildControlBroker } from "../../src/child-control-broker.ts";
 
 interface RegisteredTool {
   name: string;
+  description?: string;
   parameters?: unknown;
   prepareArguments?: (params: unknown) => Record<string, unknown>;
   execute: (toolCallId: string, params: Record<string, unknown>) => Promise<{
@@ -105,6 +105,124 @@ test("terminal profiles carry the exact hard-coded descriptor tuples and schema 
   assert.equal((regular.parameters as Record<string, unknown>).additionalProperties, true);
   assert.equal((recovery.parameters as Record<string, unknown>).additionalProperties, false);
   assert.notEqual(recovery.schema_digest, regular.schema_digest);
+});
+
+test("fresh child-control registration exposes every submit profile plus the exact universal blocked description", { concurrency: false }, () => {
+  const prior = new Map([
+    ["AUTOPILOT_CONTROL_SOCK", process.env.AUTOPILOT_CONTROL_SOCK],
+    ["AUTOPILOT_CONTROL_TOKEN", process.env.AUTOPILOT_CONTROL_TOKEN],
+    ["AUTOPILOT_CONTROL_RUN_ID", process.env.AUTOPILOT_CONTROL_RUN_ID],
+    ["AUTOPILOT_CONTROL_ASSIGNMENT", process.env.AUTOPILOT_CONTROL_ASSIGNMENT],
+    ["AUTOPILOT_CONTROL_ATTEMPT", process.env.AUTOPILOT_CONTROL_ATTEMPT],
+    ["AUTOPILOT_TERMINAL_PROFILE", process.env.AUTOPILOT_TERMINAL_PROFILE],
+  ]);
+  try {
+    process.env.AUTOPILOT_CONTROL_SOCK = "/tmp/.pi-ap/0000000000/s";
+    process.env.AUTOPILOT_CONTROL_TOKEN = "a".repeat(64);
+    process.env.AUTOPILOT_CONTROL_RUN_ID = "run-1";
+    process.env.AUTOPILOT_CONTROL_ASSIGNMENT = "assignment-1";
+    process.env.AUTOPILOT_CONTROL_ATTEMPT = "1";
+    for (const descriptor of SUBMIT_TOOLS) {
+      process.env.AUTOPILOT_TERMINAL_PROFILE = descriptor.profile_id;
+      clearDeliveryPolicyEnv();
+      clearValidationPolicyEnv();
+      const delivery = descriptor.profile_id === "delivery-status.v2" ? installDeliveryPolicyEnv() : undefined;
+      const validation = descriptor.profile_id === "validation-status.v3" ? installValidationPolicyEnv() : undefined;
+      const tools: RegisteredTool[] = [];
+      const pi = { registerTool(tool: RegisteredTool) { tools.push(tool); }, on() {}, appendEntry() {}, getActiveTools() { return tools.map((tool) => tool.name); } };
+      const cwd = process.cwd();
+      if (delivery) process.chdir(delivery.worktree);
+      if (validation) process.chdir(validation.worktree);
+      try {
+        childExtension(pi as never);
+      } finally {
+        process.chdir(cwd);
+      }
+      const blocked = tools.find((tool) => tool.name === BLOCKED_REPORT_TOOL.name);
+      assert.equal(tools.some((tool) => tool.name === descriptor.name), true, descriptor.profile_id);
+      assert.equal(blocked?.description, BLOCKED_REPORT_TOOL.description, descriptor.profile_id);
+      assert.equal(tools.length, descriptor.profile_id === "delivery-status.v2" ? 5 : descriptor.profile_id === "validation-status.v3" ? 3 : 2);
+    }
+  } finally {
+    for (const [key, value] of prior) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    clearDeliveryPolicyEnv();
+    clearValidationPolicyEnv();
+  }
+});
+
+test("fresh delivery snapshots exact ledgers beside raw payload and blocked always carries explicit nulls", { concurrency: false }, async () => {
+  const prior = new Map([
+    ["AUTOPILOT_CONTROL_SOCK", process.env.AUTOPILOT_CONTROL_SOCK],
+    ["AUTOPILOT_CONTROL_TOKEN", process.env.AUTOPILOT_CONTROL_TOKEN],
+    ["AUTOPILOT_CONTROL_RUN_ID", process.env.AUTOPILOT_CONTROL_RUN_ID],
+    ["AUTOPILOT_CONTROL_ASSIGNMENT", process.env.AUTOPILOT_CONTROL_ASSIGNMENT],
+    ["AUTOPILOT_CONTROL_ATTEMPT", process.env.AUTOPILOT_CONTROL_ATTEMPT],
+    ["AUTOPILOT_TERMINAL_PROFILE", process.env.AUTOPILOT_TERMINAL_PROFILE],
+  ]);
+  const forwarded: Array<Record<string, unknown>> = [];
+  const broker = await startChildControlBroker({
+    transport: {
+      async request(_kind, payload) {
+        const request = (payload as { request: Record<string, unknown> }).request;
+        forwarded.push(request);
+        return {
+          v: 1, id: 1, kind: "child-control",
+          payload: {
+            response: {
+              schema: "autopilot.child_control_response.v1", request_id: request.request_id,
+              outcome: "ACCEPT", receipt: { kind: request.kind, schema: "autopilot.child_control_accept_receipt.v1", receipt: {} },
+            }, blocked_gate: null,
+          },
+        };
+      },
+    } as never,
+  });
+  try {
+    const delivery = installDeliveryPolicyEnv();
+    process.env.AUTOPILOT_CONTROL_SOCK = broker.socketPath;
+    process.env.AUTOPILOT_CONTROL_TOKEN = "a".repeat(64);
+    process.env.AUTOPILOT_CONTROL_RUN_ID = "run-1";
+    process.env.AUTOPILOT_CONTROL_ASSIGNMENT = "assignment-1";
+    process.env.AUTOPILOT_CONTROL_ATTEMPT = "1";
+    process.env.AUTOPILOT_TERMINAL_PROFILE = "delivery-status.v2";
+    const tools: RegisteredTool[] = [];
+    const pi = { registerTool(tool: RegisteredTool) { tools.push(tool); }, on() {}, appendEntry() {}, getActiveTools() { return tools.map((tool) => tool.name); } };
+    const cwd = process.cwd();
+    process.chdir(delivery.worktree);
+    try {
+      childExtension(pi as never);
+    } finally {
+      process.chdir(cwd);
+    }
+    const submit = tools.find((tool) => tool.name === "autopilot_emit_status")!;
+    const blocked = tools.find((tool) => tool.name === BLOCKED_REPORT_TOOL.name)!;
+    const submitRaw = { explicit: null };
+    const submitResult = await submit.execute("delivery-call", submit.prepareArguments!(submitRaw));
+    const blockedRaw = { schema: "autopilot.blocked_report.v1", reason_code: "infrastructure", summary: "blocked", evidence: [{ kind: "observation", value: "socket" }], last_attempted_action: "submit" };
+    const blockedResult = await blocked.execute("blocked-call", blocked.prepareArguments!(blockedRaw));
+    assert.deepEqual(submitResult.details, { kind: "submit", schema: "autopilot.child_control_accept_receipt.v1", receipt: {} });
+    assert.deepEqual(blockedResult.details, { kind: "blocked", schema: "autopilot.child_control_accept_receipt.v1", receipt: {} });
+    assert.deepEqual(forwarded[0]!.raw_payload, { explicit: null });
+    assert.deepEqual(forwarded[0]!.runtime_evidence, {
+      schema: "autopilot.child_control_runtime_evidence.v1",
+      delivery_policy_denials: { schema: "autopilot.delivery_policy_denials.v2", overflowed: false, entries: [] },
+      approved_command_executions: { schema: "autopilot.approved_command_executions.v1", overflowed: false, entries: [] },
+    });
+    assert.deepEqual(forwarded[1]!.raw_payload, blockedRaw);
+    assert.deepEqual(forwarded[1]!.runtime_evidence, {
+      schema: "autopilot.child_control_runtime_evidence.v1", delivery_policy_denials: null, approved_command_executions: null,
+    });
+  } finally {
+    await broker.stop();
+    for (const [key, value] of prior) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    clearDeliveryPolicyEnv();
+  }
 });
 
 test("no parent bulk planning terminal registration remains", () => {
@@ -357,7 +475,7 @@ test("selected terminal profile registers exactly one same-name schema", { concu
       }
       const rawPayload = {};
       const prepared = submitTool.prepareArguments?.(rawPayload) ?? rawPayload;
-      if (validationEnv) assert.equal(Compile(submitTool.parameters as never).Check(prepared), true);
+      if (validationEnv) assert.equal(submitTool.prepareArguments, undefined, "V4 has no handwritten V3 transport carrier");
       const result = await submitTool.execute("opaque-call", prepared);
       assert.equal(result.terminate, true);
       assert.equal(result.details?.profile_id, expected.profile_id);

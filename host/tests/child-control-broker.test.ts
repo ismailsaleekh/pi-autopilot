@@ -30,6 +30,11 @@ function request(requestId = "request-1") {
     tool_name: "autopilot_submit_atoms",
     profile_id: "planning.task-atoms.v1:autopilot_submit_atoms",
     raw_payload: { absent_is_not_null: null, nested: ["raw"] },
+    runtime_evidence: {
+      schema: "autopilot.child_control_runtime_evidence.v1",
+      delivery_policy_denials: null,
+      approved_command_executions: null,
+    },
   };
 }
 
@@ -147,6 +152,9 @@ test("ChildControlBroker rejects extra frames before Core and applies a blocked 
   try {
     const unknownField = await exchange(broker.socketPath, framed({ ...request("unknown"), unexpected: true }));
     assert.equal(unknownField.length, 0, "unknown wire fields close rather than reaching Core");
+    const missingEvidence = request("missing-evidence");
+    delete (missingEvidence as { runtime_evidence?: unknown }).runtime_evidence;
+    assert.equal((await exchange(broker.socketPath, framed(missingEvidence))).length, 0, "missing runtime_evidence closes rather than reaching Core");
     const malformed = await exchange(broker.socketPath, framed(request("extra"), Buffer.from("extra")));
     assert.equal(malformed.length, 0, "extra data closes rather than producing a retry alias");
     assert.deepEqual(order, [], "malformed data never reaches Core");

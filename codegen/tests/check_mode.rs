@@ -525,6 +525,10 @@ fn unified_submit_contracts_emit_closed_frames_and_non_fifo_placeholder_metadata
     assert!(bridge.contains("randomBytes(32)"));
     assert!(bridge.contains("new Map<string, PendingCall>()"));
     assert!(bridge.contains("PLACEHOLDER_TOKEN"));
+    assert!(bridge.contains("createConnection({ path: socketPath, allowHalfOpen: true })"));
+    assert!(bridge.contains("AUTOPILOT_CONTROL_ATTEMPT"));
+    assert!(bridge.contains("runtime_evidence: runtimeEvidence"));
+    assert!(bridge.contains("fixedRetry(category"));
     assert!(!bridge.contains("shift()"));
 
     let ts = fs::read_to_string(temp.path().join("src/generated/tool-schemas.ts"))

@@ -7,7 +7,9 @@ import { fileURLToPath } from "node:url";
 import { createBashTool, createEditTool, createLocalBashOperations, createReadTool, createWriteTool, defineTool, type BashOperations, type EditOperations, type ExtensionAPI, type ReadOperations, type WriteOperations } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-import type { SubmitToolDescriptor } from "../src/generated/tool-schemas.ts";
+import { childControlEnvironmentPresent, createEnvironmentChildControlBridge, type ChildControlBridge } from "../src/generated/child-control-bridge.ts";
+import type { ChildControlRuntimeEvidence } from "../src/generated/index.ts";
+import type { SubmitToolDescriptor, UniversalChildToolDescriptor } from "../src/generated/tool-schemas.ts";
 
 export const CHILD_RECEIPT_ENTRY = "pi-autopilot:child-tools"; export const DELIVERY_POLICY_VERSION = "autopilot.delivery_tool_policy.v4";
 export const DELIVERY_POLICY_V5_VERSION = "autopilot.delivery_tool_policy.v5"; export const APPROVED_COMMAND_TOOL = "autopilot_run_approved_command";
@@ -38,6 +40,8 @@ const MAX_VALIDATION_CONTEXT_BYTES = 1024 * 1024;
 const MAX_VALIDATION_EVIDENCE_BYTES = 2 * 1024 * 1024;
 
 type SubmitTools = readonly SubmitToolDescriptor[];
+type ChildControlTool =
+  | SubmitToolDescriptor | UniversalChildToolDescriptor;
 
 type DeliveryEnv = Record<(typeof DELIVERY_ENV_KEYS)[number], string>;
 type ValidationEnv = Record<(typeof VALIDATION_ENV_KEYS)[number], string>;
@@ -315,14 +319,17 @@ export class DeliveryPolicy {
 export function runAutopilotChild(
   pi: ExtensionAPI,
   tools: SubmitTools,
+  blockedTool: UniversalChildToolDescriptor,
   wrapperUrl: string,
 ): void {
   const tool = selectedTerminalTool(tools);
   const deliveryPolicy = loadDeliveryPolicyForProfile(tool.profile_id);
   const validationPolicy = loadValidationReadPolicy(tool.profile_id);
+  const bridge = childControlEnvironmentPresent() ? createEnvironmentChildControlBridge() : undefined;
   if (deliveryPolicy) registerDeliveryPolicyTools(pi, deliveryPolicy);
   if (validationPolicy) registerValidationReadOverride(pi, validationPolicy);
-  registerTool(pi, tool, deliveryPolicy);
+  registerTool(pi, tool, deliveryPolicy, bridge);
+  if (bridge) registerTool(pi, blockedTool, deliveryPolicy, bridge, blockedTool.description);
   pi.on("session_start", async () => {
     const receipt: Record<string, unknown> = {
       self_digest: selfDigest(wrapperUrl),
@@ -456,72 +463,66 @@ function selectedTerminalTool(tools: SubmitTools): SubmitToolDescriptor {
 
 function registerTool(
   pi: ExtensionAPI,
-  tool: SubmitToolDescriptor,
+  tool: ChildControlTool,
   deliveryPolicy?: DeliveryPolicy,
+  bridge?: ChildControlBridge,
+  exactDescription?: string,
 ): void {
   const computed = createHash("sha256").update(canonicalJson(tool.parameters)).digest("hex");
   if (computed !== tool.schema_digest) {
-    throw new Error(
-      `autopilot child tool ${tool.name} parameter digest drift: declared ${tool.schema_digest}, computed ${computed}`,
-    );
+    throw new Error(`autopilot child tool ${tool.name} parameter digest drift: declared ${tool.schema_digest}, computed ${computed}`);
   }
-  const description = `Submit the final ${tool.boundary_id} payload. Use this as the final action;`;
-  const transportRawV3 = tool.profile_id === VALIDATION_PROFILE_ID;
-  const rawV3Payloads: unknown[] = [];
+  const description = exactDescription
+    ?? `Submit the final ${tool.boundary_id} payload. Use this as the final action; assistant prose is not a carrier.`;
   pi.registerTool(defineTool({
     name: tool.name,
     label: tool.label,
-    description: `${description} assistant prose is not a carrier.`,
+    description,
     promptSnippet: `Submit ${tool.boundary_id} as a terminating typed Autopilot carrier`,
     promptGuidelines: [
       `Call ${tool.name} exactly once as the final action for ${tool.boundary_id}.`,
       "Do not return the payload as assistant prose or markdown.",
     ],
     parameters: tool.parameters,
-    ...(transportRawV3 ? {
-      prepareArguments(args: unknown) {
-        rawV3Payloads.push(structuredClone(args ?? null));
-        return {
-          schema: "autopilot.validation_submission.v3",
-          criterion_results: [{
-            criterion_id: "autopilot-raw-v3-transport",
-            verdict: "PASS",
-            citation_refs: ["autopilot-raw-v3-transport"],
-            finding_ids: [],
-          }],
-          findings: [],
-        };
-      },
-    } : {}),
-    async execute(_toolCallId, params) {
-      if (transportRawV3 && rawV3Payloads.length === 0) {
-        throw new Error("V3 terminal execution lacked prepareArguments raw transport");
-      }
-      const payload = transportRawV3 ? rawV3Payloads.shift() : params;
-      const terminalResult = () => ({
+    ...(bridge === undefined ? {} : { prepareArguments(args: unknown) { return bridge.prepareArguments(tool.profile_id, args); } }),
+    async execute(toolCallId, params) {
+      const legacyResult = () => ({
         content: [{ type: "text" as const, text: `Submitted ${tool.boundary_id}` }],
         details: {
-          profile_id: tool.profile_id,
-          tool_name: tool.name,
-          boundary_id: tool.boundary_id,
-          result_contract: tool.result_contract,
-          schema_digest: tool.schema_digest,
-          binding: process.env["AUTOPILOT_CARRIER_BINDING"] ?? "",
-          payload: payload as Record<string, unknown>,
-          ...(deliveryPolicy === undefined
-            ? {}
-            : {
-                delivery_policy_denials: deliveryPolicy.denialLedger(),
-                approved_command_executions: deliveryPolicy.executionLedger(),
-              }),
-        },
+          profile_id: tool.profile_id, tool_name: tool.name, boundary_id: tool.boundary_id,
+          result_contract: tool.result_contract, schema_digest: tool.schema_digest,
+          binding: process.env["AUTOPILOT_CARRIER_BINDING"] ?? "", payload: params as Record<string, unknown>,
+          ...(deliveryPolicy === undefined ? {} : {
+            delivery_policy_denials: deliveryPolicy.denialLedger(), approved_command_executions: deliveryPolicy.executionLedger(),
+          }),
+        }, terminate: true,
+      });
+      if (bridge === undefined) return deliveryPolicy === undefined ? legacyResult() : deliveryPolicy.queue.run(legacyResult);
+      const acceptedResult = async () => ({
+        content: [{ type: "text" as const, text: "Child-control ACCEPT." }],
+        details: await bridge.execute(
+          toolCallId,
+          params,
+          runtimeEvidence(tool.profile_id, deliveryPolicy),
+        ),
         terminate: true,
       });
-      return deliveryPolicy === undefined
-        ? terminalResult()
-        : deliveryPolicy.queue.run(terminalResult);
+      return tool.profile_id === DELIVERY_PROFILE_ID && deliveryPolicy !== undefined
+        ? deliveryPolicy.queue.run(acceptedResult) : acceptedResult();
     },
   }));
+}
+
+function runtimeEvidence(profileId: string, deliveryPolicy?: DeliveryPolicy): ChildControlRuntimeEvidence {
+  if (profileId !== DELIVERY_PROFILE_ID) {
+    return { schema: "autopilot.child_control_runtime_evidence.v1", delivery_policy_denials: null, approved_command_executions: null };
+  }
+  if (deliveryPolicy === undefined) throw new Error("autopilot delivery runtime evidence policy is absent");
+  return {
+    schema: "autopilot.child_control_runtime_evidence.v1",
+    delivery_policy_denials: deliveryPolicy.denialLedger(),
+    approved_command_executions: deliveryPolicy.executionLedger(),
+  };
 }
 
 function loadValidationReadPolicy(profileId: string): ValidationReadPolicy | undefined {
