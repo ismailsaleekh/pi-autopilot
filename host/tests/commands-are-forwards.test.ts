@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import autopilotExtension from "../src/extension.ts";
-import { AUTOPILOT_COMMANDS, AUTOPILOT_OPERATOR_ANSWER_COMMAND, fixedServiceResolver, registerAutopilotCommands } from "../src/commands.ts";
+import { AUTOPILOT_COMMANDS, AUTOPILOT_OPERATOR_ANSWER_COMMAND, applyAndRecord, fixedServiceResolver, registerAutopilotCommands } from "../src/commands.ts";
 import { parseCommandAdapterPayload } from "../src/host-runtime.ts";
 
 const D76_PUBLIC_COMMANDS = Object.freeze([
@@ -173,6 +173,7 @@ test("completed terminal sends only task-completed without Host carrier reads", 
       this.calls.push({ kind, payload });
       if (kind === "blocked-reconcile") return { v: 1, id: this.calls.length, kind: "blocked-reconcile", payload: { schema: "autopilot.blocked_reconcile_response.v1", records: [] } };
       if (kind === "command") return { v: 1, id: this.calls.length, kind: "spawn", payload: { action } };
+      if (kind === "spawn-result") return spawnAcknowledged(this.calls.length);
       return { v: 1, id: this.calls.length, kind: "done", payload: { status: "ok" } };
     },
     close() {},
@@ -243,6 +244,7 @@ test("extension dedupes concurrent receipt-replayed action ids, preserves their 
       this.calls.push({ kind, payload });
       if (kind === "blocked-reconcile") return { v: 1, id: this.calls.length, kind: "blocked-reconcile", payload: { schema: "autopilot.blocked_reconcile_response.v1", records: [] } };
       if (kind === "command") return { v: 1, id: this.calls.length, kind: "spawn-wave", payload: { actions: [action] } };
+      if (kind === "spawn-result") return spawnAcknowledged(this.calls.length);
       return { v: 1, id: this.calls.length, kind: "done", payload: { status: "ok" } };
     },
     close() {},
@@ -293,6 +295,7 @@ test("extension fails closed when the same action id drifts its exact descriptor
         commandCount += 1;
         return { v: 1, id: commandCount, kind: "spawn", payload: { action: commandCount === 1 ? stable : drifted } };
       }
+      if (kind === "spawn-result") return spawnAcknowledged(9);
       return { v: 1, id: 9, kind: "done", payload: { status: "ok" } };
     },
     close() {},
@@ -335,6 +338,7 @@ test("extension buffers an immediate terminal task until its exact action bindin
         });
         return { v: 1, id: this.calls.length, kind: "spawn", payload: { action: secondAction } };
       }
+      if (kind === "spawn-result") return spawnAcknowledged(this.calls.length);
       return { v: 1, id: this.calls.length, kind: "done", payload: { status: "ok" } };
     },
     close() { this.closed = true; },
@@ -361,6 +365,35 @@ test("extension buffers an immediate terminal task until its exact action bindin
   assert.deepEqual(transport.calls.map((call) => call.kind), ["blocked-reconcile", "command", "task-completed", "spawn-result", "spawn-result"]);
 });
 
+test("launch acknowledgement is journaled only after the exact Core spawn-result success shape", async () => {
+  const action = terminalAction("action-ack", "assignment-ack", "ack task", "node ack");
+  const success = { v: 1, id: 1, kind: "done", payload: { status: `state:sequence=1;revision=1;hash=${"a".repeat(64)}` } };
+  const cases = [
+    { label: "first acknowledgement", frame: success, accepted: true },
+    { label: "unknown binding", frame: { v: 1, id: 2, kind: "done", payload: { status: "rejection:spawn-result-binding:missing" } }, accepted: false },
+    { label: "conflicting task id", frame: { v: 1, id: 3, kind: "done", payload: { status: "rejection:spawn-result:acknowledged-task-id-conflict" } }, accepted: false },
+    { label: "wrong effect", frame: { v: 1, id: 4, kind: "spawn", payload: { action } }, accepted: false },
+    { label: "malformed done", frame: { v: 1, id: 5, kind: "done", payload: { status: "state:sequence=1;revision=1;hash=bad", extra: true } }, accepted: false },
+  ];
+  for (const item of cases) {
+    const acknowledged: string[] = [];
+    const operation = applyAndRecord(
+      { v: 1, id: 20, kind: "spawn", payload: { action } } as never,
+      fakeCtx() as never,
+      {
+        transport: { async request() { return item.frame; } } as never,
+        backgroundTasks: { async run(descriptor) { return taskFromDescriptor(descriptor, `task-${item.label}`, "running"); } },
+        operatorMessage: async () => {},
+        statusEntry: async () => {},
+        onLaunchAcknowledged: ({ task }) => { acknowledged.push(task.id); },
+      },
+    );
+    if (item.accepted) await operation;
+    else await assert.rejects(operation, /spawn-result acknowledgement|unknown key/u, item.label);
+    assert.deepEqual(acknowledged, item.accepted ? [`task-${item.label}`] : [], item.label);
+  }
+});
+
 async function terminalFailureHarness(failure, appendEntry) {
   const action = terminalAction("action-fail", "assignment-fail", "failing terminal", "node terminal-fail");
   const pi = fakePi();
@@ -369,7 +402,7 @@ async function terminalFailureHarness(failure, appendEntry) {
     async request(kind) {
       if (kind === "blocked-reconcile") return { v: 1, id: 0, kind: "blocked-reconcile", payload: { schema: "autopilot.blocked_reconcile_response.v1", records: [] } };
       if (kind === "command") return { v: 1, id: 1, kind: "spawn", payload: { action } };
-      if (kind === "spawn-result") return { v: 1, id: 2, kind: "done", payload: { status: "ok" } };
+      if (kind === "spawn-result") return spawnAcknowledged(2);
       throw failure;
     },
     close() {},
@@ -442,6 +475,7 @@ function fakeTransport(options = {}) {
       const call = timeoutMs === undefined ? { kind, payload } : { kind, payload, timeoutMs };
       calls.push(call);
       if (kind === "blocked-reconcile") return { v: 1, id: calls.length, kind: "blocked-reconcile", payload: { schema: "autopilot.blocked_reconcile_response.v1", records: [] } };
+      if (kind === "spawn-result") return spawnAcknowledged(calls.length);
       return { v: 1, id: calls.length, kind: "done", payload: { status: "ok" } };
     },
     close() {
@@ -469,6 +503,10 @@ function freshStateRoot() {
 
 function extensionOptions(overrides) {
   return { stateRoot: freshStateRoot(), processIdentity: "pid:test:started:1", ...overrides };
+}
+
+function spawnAcknowledged(id) {
+  return { v: 1, id, kind: "done", payload: { status: `state:sequence=${String(id)};revision=${String(id)};hash=${"a".repeat(64)}` } };
 }
 
 function terminalAction(actionId, assignmentId, name, command) {

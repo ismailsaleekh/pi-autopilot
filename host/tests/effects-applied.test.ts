@@ -30,6 +30,16 @@ test("routes generated Core effects through supported Pi Host APIs", async () =>
   ]);
 });
 
+test("generated singular spawn requires the same durable Core acknowledgement as spawn-wave", async () => {
+  const result = await applyCoreEffect(
+    { v: 1, id: 30, kind: "spawn", payload: { action: backgroundAction() } },
+    effectContext([], false),
+    effectServices([]),
+  );
+  assert.equal(result?.kind, "spawn");
+  assert.equal(result?.acknowledge, true);
+});
+
 test("uses ctx.ui.notify with generated default levels only when Pi reports UI availability", async () => {
   const calls = [];
   await applyCoreEffect(

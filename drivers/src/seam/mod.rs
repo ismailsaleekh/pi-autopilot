@@ -1533,6 +1533,87 @@ fn recover_pending_blocked_transaction(
     Ok(Some((transaction.receipt, transaction.latch)))
 }
 
+/// Host restart can lose the original child socket after Core has fsynced the
+/// prepared transaction but before publication. The prepared record is already
+/// Core-owned, canonical, and semantically admitted; reconciliation may finish
+/// only that immutable transaction without rereading a child payload, spec, or
+/// directory. It never derives a new cancellation snapshot.
+fn recover_prepared_blocked_transactions_for_reconcile(
+    state: &mut CoreState,
+) -> Result<(), String> {
+    for versioned in strict_versioned_runner_bindings(state)? {
+        let VersionedRunnerBinding::ReceiptV1(binding) = versioned else {
+            continue;
+        };
+        let prepared_path = blocked_prepared_transaction_path(&binding)?;
+        let receipt_path = blocked_receipt_path(&binding)?;
+        let latch_path = blocked_latch_path(&binding)?;
+        let prepared = read_blocked_prepared_transaction_at(&prepared_path)?;
+        let existing_receipt = read_blocked_receipt_at(&receipt_path)?;
+        let existing_latch = read_blocked_latch_at(&latch_path)?;
+        let rooted = blocked_root_for_binding(state, &binding)?;
+        let Some(transaction) = prepared else {
+            if rooted.is_none() && (existing_receipt.is_some() || existing_latch.is_some()) {
+                return Err(
+                    "blocked artifacts lack immutable prepared cancellation authority".to_owned(),
+                );
+            }
+            continue;
+        };
+        if transaction.schema != BLOCKED_PREPARED_TRANSACTION_SCHEMA
+            || transaction.receipt.schema.0 != "autopilot.blocked_receipt.v1"
+            || transaction.receipt.run_id != binding.run_id
+            || transaction.receipt.run_revision != binding.run_revision
+            || transaction.receipt.workstream != binding.workstream
+            || transaction.receipt.action_id != binding.action_id
+            || transaction.receipt.assignment_id != binding.assignment_id
+            || transaction.receipt.attempt != binding.attempt
+            || transaction.receipt.profile_id != BLOCKED_PROFILE_ID
+            || transaction.receipt.tool_name.0 != BLOCKED_TOOL_NAME
+            || !is_lower_hex_sha256(&transaction.receipt.report_digest.0)
+            || !is_lower_hex_sha256(&transaction.receipt.cancellation_set_digest.0)
+        {
+            return Err("blocked prepared transaction receipt identity drift".to_owned());
+        }
+        validate_blocked_latch(&transaction.receipt, &transaction.latch)?;
+        validate_blocked_latch_launch_scope(state, &transaction.receipt, &transaction.latch)?;
+        if let Some(receipt) = existing_receipt.as_ref()
+            && receipt != &transaction.receipt
+        {
+            return Err("blocked prepared receipt drift".to_owned());
+        }
+        if let Some(latch) = existing_latch.as_ref()
+            && latch != &transaction.latch
+        {
+            return Err("blocked prepared latch drift".to_owned());
+        }
+        if let Some(root) = rooted.as_ref() {
+            let expected = blocked_root(&transaction.receipt, &transaction.latch, &binding)?;
+            if root != &expected || existing_receipt.is_none() || existing_latch.is_none() {
+                return Err("rooted blocked prepared transaction artifact drift".to_owned());
+            }
+        }
+        let receipt_bytes = crate::evidence::canonical_json(&transaction.receipt)
+            .map_err(|error| format!("blocked prepared receipt canonical JSON: {error}"))?;
+        runner::write_bounded_file_create_once(
+            &receipt_path,
+            &receipt_bytes,
+            BLOCKED_ARTIFACT_MAX_BYTES,
+        )
+        .map_err(|error| error.to_string())?;
+        let latch_bytes = crate::evidence::canonical_json(&transaction.latch)
+            .map_err(|error| format!("blocked prepared latch canonical JSON: {error}"))?;
+        runner::write_bounded_file_create_once(
+            &latch_path,
+            &latch_bytes,
+            BLOCKED_ARTIFACT_MAX_BYTES,
+        )
+        .map_err(|error| error.to_string())?;
+        root_or_verify_blocked_latch(state, &transaction.receipt, &transaction.latch, &binding)?;
+    }
+    Ok(())
+}
+
 fn admit_or_replay_blocked_latch(
     state: &mut CoreState,
     request: &ChildControlRequest,
@@ -7321,6 +7402,7 @@ fn route_blocked_reconcile_inner(
     {
         return Err("rejection:blocked-reconcile:unauthenticated-or-malformed".into());
     }
+    recover_prepared_blocked_transactions_for_reconcile(state)?;
     state.rebuild_blocked_latches()?;
     let records = state
         .blocked_latches

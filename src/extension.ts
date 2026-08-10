@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import { PiBackgroundTaskClient, type BgTaskSnapshot } from "./background-tasks.ts";
-import { registerAutopilotCommands, applyAndRecord, type RegisterCommandOptions } from "./commands.ts";
+import { registerAutopilotCommands, applyAndRecord, validateSpawnResultAcknowledgement, type RegisterCommandOptions } from "./commands.ts";
 import type { BackgroundActionLaunchDedupe, OperatorMessageLevel, OperatorMessageSink } from "./effects.ts";
 import {
   AutopilotActivation,
@@ -20,7 +20,7 @@ import {
   type ChildControlBroker,
   type ChildControlBrokerDiagnostic,
 } from "./child-control-broker.ts";
-import type { BackgroundAction, BlockedReconcileRecord } from "./generated/index.ts";
+import type { BackgroundAction } from "./generated/index.ts";
 import { validateCoreToHostFrame } from "./generated/frame-validation.ts";
 import {
   HostOwnershipCoordinator,
@@ -153,19 +153,20 @@ export default function autopilotExtension(pi: ExtensionAPI, options: AutopilotE
       // Broker facts are bound before any Core request can start its child.
       if (services.transport instanceof CoreTransport) services.transport.bindChildControlBroker(started.launchFacts);
       unsubscribeTerminal = services.backgroundTasks.onTerminal(handleTerminal);
-      await replayPendingTerminals(services, requireOwnership());
       await replayPendingLaunchAcknowledgements(services, requireOwnership());
       const records = await reconcileBlocked(services, started);
-      requireOwnership().finishActivation(records.map((record) => ({
-        receiptId: record.blocked_receipt.receipt_id,
-        gate: record.blocked_gate,
-        reporterObserved: record.reporter_observed,
-      })));
+      requireOwnership().finishActivation(records);
+      // Only now can a restored terminal continuation safely run. An
+      // unblocked continuation may spawn; a permanent whole-process gate still
+      // rejects any launch while allowing its terminal observation to finish.
+      await replayPendingTerminals(services, requireOwnership());
       await options.onActivated?.();
       broker = started;
     } catch (error) {
-      // Preserve a durable fail-closed scheduling fact even when the failure
-      // happened before Core supplied a gate/reconciliation record.
+      // Preserve this activation's fail-closed scheduling hold even when the
+      // failure happened before Core supplied a gate/reconciliation record.
+      // A restart begins held and asks Core again; RETRY attempts create no
+      // durable journal rows.
       try { requireOwnership().retainFailClosedHold(); }
       catch (holdError) { throw combinedLifecycleFailure("Autopilot activation could not retain its fail-closed ownership hold", error, holdError); }
       unsubscribeTerminal?.();
@@ -221,7 +222,7 @@ export default function autopilotExtension(pi: ExtensionAPI, options: AutopilotE
         task_id: binding.task.id,
       }));
       // spawn-result is an acknowledgement route, never an activation effect.
-      if (frame.kind !== "done") throw new Error(`spawn-result replay received Core effect ${frame.kind}`);
+      validateSpawnResultAcknowledgement(frame);
       coordinator.markLaunchAcknowledged(binding.action, binding.task);
     }
   }
@@ -241,14 +242,24 @@ export default function autopilotExtension(pi: ExtensionAPI, options: AutopilotE
     }
   }
 
-  async function reconcileBlocked(services: ActivationServices, started: ChildControlBroker): Promise<BlockedReconcileRecord[]> {
+  async function reconcileBlocked(services: ActivationServices, started: ChildControlBroker): Promise<BlockedGateDirective[]> {
     const frame = validateCoreToHostFrame(await services.transport.request("blocked-reconcile", {
       schema: "autopilot.blocked_reconcile.v1",
       broker_capability: started.launchFacts.capability,
     }));
     if (frame.kind !== "blocked-reconcile" || frame.payload.schema !== "autopilot.blocked_reconcile_response.v1") throw new Error(`blocked reconciliation received Core effect ${frame.kind}`);
+    const directives = frame.payload.records.map((record) => ({
+      receiptId: record.blocked_receipt.receipt_id,
+      gate: record.blocked_gate,
+      reporterObserved: record.reporter_observed,
+    }));
+    const coordinator = requireOwnership();
+    coordinator.assertReconciliationCapacity(directives);
     for (const record of frame.payload.records) await started.reconcileBlockedGate(record);
-    return frame.payload.records;
+    // A stored arrived observation can receive its exact Core acknowledgement
+    // during this reconciliation. That is newer than the response snapshot,
+    // so carry the proven durable advancement into the activation invariant.
+    return directives.map((directive) => ({ ...directive, reporterObserved: directive.reporterObserved || coordinator.wasObserved(directive) }));
   }
 
   async function rememberSpawn({ action, task }: { readonly action: BackgroundAction; readonly task: BgTaskSnapshot }): Promise<void> {
@@ -314,6 +325,9 @@ export default function autopilotExtension(pi: ExtensionAPI, options: AutopilotE
       },
       async blockedObservationArrived(observation: BlockedObservationWire): Promise<void> {
         coordinator.recordObservationArrived(observation, directive);
+      },
+      restoredBlockedObservation(): BlockedObservationWire | undefined {
+        return coordinator.observationFor(directive);
       },
       async afterBlockedResultAcknowledged(): Promise<void> {
         // Persist Core's exact observed state before the reporter-last kill.

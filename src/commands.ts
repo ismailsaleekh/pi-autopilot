@@ -2,6 +2,7 @@ import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
 import type { BackgroundAction, CoreToHostFrame, HostToCoreCommandPayload, HostToCoreOperatorAnswerPayload, HostToCoreSpawnResultPayload } from "./generated/index.ts";
 import { ACTIVATING_COMMANDS, HOST_COMMANDS } from "./generated/host-runtime-tables.ts";
+import { validateCoreToHostFrame } from "./generated/frame-validation.ts";
 import { boundedDiagnostic, unavailableCapabilities, type BgTaskSnapshot, type PiBackgroundTaskClient } from "./background-tasks.ts";
 import { applyCoreEffect, type BackgroundActionLaunchDedupe, type BackgroundLaunchGate, type CoreEffectResult, type HostEffectContext, type HostEffectServices, type OperatorMessageSink, type StatusEntrySink } from "./effects.ts";
 import { parseCommandAdapterPayload } from "./host-runtime.ts";
@@ -79,12 +80,13 @@ async function forwardCommand(name: string, args: string, ctx: ExtensionCommandC
 export async function applyAndRecord(frame: CoreToHostFrame, ctx: HostEffectContext, options: Pick<RegisterCommandOptions, "transport" | "backgroundTasks" | "operatorMessage" | "statusEntry" | "onSpawn" | "onLaunchAcknowledged" | "launchGate" | "actionLaunchDedupe">): Promise<CoreEffectResult> {
   const services = { backgroundTasks: options.backgroundTasks, operatorMessage: options.operatorMessage, statusEntry: options.statusEntry, onSpawn: options.onSpawn, launchGate: options.launchGate, actionLaunchDedupe: options.actionLaunchDedupe } satisfies HostEffectServices;
   const result = await applyCoreEffect(frame, ctx, services);
-  if (result?.kind !== "spawn") return result;
+  if (result?.kind !== "spawn" || !result.acknowledge) return result;
   // onSpawn runs inside the sole run promise and has returned only after the
   // ownership journal fsync. Every successful Host run is then acknowledged
   // through the existing spawn-result route; Core accepts exact replays.
   for (const launched of result.launched) {
     const ack = await options.transport.request("spawn-result", { action_id: launched.action.action_id, assignment_id: launched.action.assignment_id, status: "launched", task_id: launched.task.id });
+    validateSpawnResultAcknowledgement(ack);
     await options.onLaunchAcknowledged?.({ action: launched.action, task: launched.task });
     await applyCoreEffect(ack, ctx, services);
   }
@@ -94,6 +96,18 @@ export async function applyAndRecord(frame: CoreToHostFrame, ctx: HostEffectCont
   }
   if (result.failures.length > 0) throw new Error(`spawn-wave launch failures: ${result.failures.map((failure) => `${failure.action.assignment_id}:${failure.diagnostic}`).join("; ")}`);
   return result;
+}
+
+/**
+ * Core's launched acknowledgement has one exact success shape. A generic
+ * `done` is not proof: rejection summaries and unrelated effects must leave
+ * the durable Host launch row pending for exact replay.
+ */
+export function validateSpawnResultAcknowledgement(frame: CoreToHostFrame): void {
+  const valid = validateCoreToHostFrame(frame);
+  if (valid.kind !== "done" || !/^state:sequence=[0-9]+;revision=[0-9]+;hash=[a-f0-9]{64}$/u.test(valid.payload.status)) {
+    throw new Error("spawn-result acknowledgement is not an exact Core success summary");
+  }
 }
 
 async function commandPayload(name: string, args: string, backgroundTasks: Pick<PiBackgroundTaskClient, "capabilities">): Promise<HostToCoreCommandPayload> {

@@ -139,6 +139,7 @@ test("ChildControlBroker rejects extra frames before Core and applies a blocked 
         reporterTaskId: "task-reporter",
         async afterChildResponseWritten() { order.push("after-write"); },
         async blockedObservationArrived() {},
+        restoredBlockedObservation() { return undefined; },
         async afterBlockedResultAcknowledged() { order.push("reporter"); },
       };
     },
@@ -178,8 +179,67 @@ test("ChildControlBroker acquires a scheduling hold before BLOCKED forwarding an
   try {
     const blocked = { ...request("blocked-retry"), kind: "blocked", tool_name: "autopilot_report_blocked", profile_id: "autopilot.blocked_report.v1:autopilot_report_blocked" };
     assert.notEqual((await exchange(broker.socketPath, framed(blocked))).length, 0);
-    assert.deepEqual(order, ["hold", "core:child-control", "release"]);
+    order.push("child-frame-complete");
+    assert.deepEqual(order, ["hold", "core:child-control", "release", "child-frame-complete"]);
   } finally { await broker.stop(); }
+});
+
+test("ChildControlBroker keeps an ambiguous BLOCKED RETRY held when its child response write fails", async () => {
+  const order: string[] = [];
+  let releaseCore: (() => void) | undefined;
+  const coreReady = new Promise<void>((resolve) => { releaseCore = resolve; });
+  const broker = await startChildControlBroker({
+    transport: {
+      async request(kind, payload) {
+        order.push(`core:${kind}`);
+        await coreReady;
+        return { v: 1, id: 1, kind: "child-control", payload: { response: retryResponse((payload as { request: { request_id: string } }).request.request_id), blocked_gate: null } };
+      },
+    } as never,
+    async beforeBlockedForward() { order.push("hold"); },
+    releaseBlockedHoldOnRetry() { order.push("release"); },
+  });
+  try {
+    const socket = createConnection(broker.socketPath);
+    const started = new Promise<void>((resolve, reject) => {
+      socket.once("error", reject);
+      socket.once("connect", () => {
+        socket.end(framed({ ...request("blocked-write-fault"), kind: "blocked", tool_name: "autopilot_report_blocked", profile_id: "autopilot.blocked_report.v1:autopilot_report_blocked" }));
+        resolve();
+      });
+    });
+    await started;
+    await waitFor(() => order.includes("core:child-control"));
+    socket.destroy();
+    releaseCore?.();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.deepEqual(order, ["hold", "core:child-control"], "only a complete RETRY frame may release the hold");
+  } finally { await broker.stop(); }
+});
+
+test("ChildControlBroker rejects every closed request/receipt/gate mismatch before child bytes", async () => {
+  const cases = [
+    {
+      request: { ...request("blocked-null-gate"), kind: "blocked", tool_name: "autopilot_report_blocked", profile_id: "autopilot.blocked_report.v1:autopilot_report_blocked" },
+      frame: (id: string) => ({ v: 1, id: 1, kind: "child-control", payload: { response: { ...blockedFrame(id).payload.response }, blocked_gate: null } }),
+    },
+    {
+      request: request("submit-blocked-gate"),
+      frame: (id: string) => blockedFrame(id),
+    },
+    {
+      request: request("retry-gate"),
+      frame: (id: string) => ({ v: 1, id: 1, kind: "child-control", payload: { response: retryResponse(id), blocked_gate: blockedFrame(id).payload.blocked_gate } }),
+    },
+  ];
+  for (const item of cases) {
+    const broker = await startChildControlBroker({
+      transport: { async request(_kind, payload) { return item.frame((payload as { request: { request_id: string } }).request.request_id); } } as never,
+      async applyBlockedGate() { throw new Error("mismatched response must not install a gate"); },
+    });
+    try { assert.equal((await exchange(broker.socketPath, framed(item.request))).length, 0); }
+    finally { await broker.stop(); }
+  }
 });
 
 test("ChildControlBroker keeps the 4 MiB frame ceiling closed", async () => {
@@ -222,6 +282,7 @@ test("ChildControlBroker orders blocked ACCEPT, nonreporters, exact acknowledgme
           order.push("nonreporter-kill-done");
         },
         async blockedObservationArrived() { order.push("observation-arrived"); },
+        restoredBlockedObservation() { return undefined; },
         async afterBlockedResultAcknowledged() { order.push("reporter-kill"); },
       };
     },
@@ -245,6 +306,43 @@ test("ChildControlBroker orders blocked ACCEPT, nonreporters, exact acknowledgme
   }
 });
 
+test("ChildControlBroker compares every in-flight observation before joining its attempt", async () => {
+  let releaseNonreporters: (() => void) | undefined;
+  const nonreporters = new Promise<void>((resolve) => { releaseNonreporters = resolve; });
+  const arrivals: string[] = [];
+  let acknowledgements = 0;
+  const child = { ...request("blocked-observation-drift"), kind: "blocked", tool_name: "autopilot_report_blocked", profile_id: "autopilot.blocked_report.v1:autopilot_report_blocked" };
+  const broker = await startChildControlBroker({
+    transport: {
+      async request(kind, payload) {
+        if (kind === "child-control") return blockedFrame((payload as { request: { request_id: string } }).request.request_id);
+        acknowledgements += 1;
+        return observedAck("receipt-1", "latch-1", "task-reporter");
+      },
+    } as never,
+    async applyBlockedGate() {
+      return {
+        reporterTaskId: "task-reporter",
+        async afterChildResponseWritten() { await nonreporters; },
+        async blockedObservationArrived(observation) { arrivals.push(observation.tool_call_id); },
+        restoredBlockedObservation() { return undefined; },
+        async afterBlockedResultAcknowledged() {},
+      };
+    },
+  });
+  try {
+    assert.notEqual((await exchange(broker.socketPath, framed(child))).length, 0);
+    const first = exchange(broker.socketPath, framed(blockedObservation()));
+    await waitFor(() => arrivals.length === 1);
+    const drifted = { ...blockedObservation(), tool_call_id: "different-tool-call" };
+    assert.equal((await exchange(broker.socketPath, framed(drifted))).length, 0, "drifted connection receives no clean success signal");
+    assert.deepEqual(arrivals, ["call-1", "different-tool-call"], "application persisted/compared both observations before dedupe");
+    releaseNonreporters?.();
+    assert.equal((await first).length, 0);
+    assert.equal(acknowledgements, 1);
+  } finally { await broker.stop(); }
+});
+
 test("ChildControlBroker refuses a wrong observation acknowledgment and keeps the reporter untouched", async () => {
   const reporterKills: string[] = [];
   const child = { ...request("blocked-wrong-ack"), kind: "blocked", tool_name: "autopilot_report_blocked", profile_id: "autopilot.blocked_report.v1:autopilot_report_blocked" };
@@ -260,6 +358,7 @@ test("ChildControlBroker refuses a wrong observation acknowledgment and keeps th
         reporterTaskId: "task-reporter",
         async afterChildResponseWritten() {},
         async blockedObservationArrived() {},
+        restoredBlockedObservation() { return undefined; },
         async afterBlockedResultAcknowledged() { reporterKills.push("task-reporter"); },
       };
     },

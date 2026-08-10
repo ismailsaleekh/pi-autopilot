@@ -33,7 +33,8 @@ test("spawn_wave_launches_all_before_await_and_records_partial_failure", async (
   const transport = {
     async request(kind: string, payload: Record<string, unknown>) {
       transportCalls.push({ kind, payload });
-      return { v: 1, id: 200 + transportCalls.length, kind: "done", payload: { status: `ack:${String(payload.action_id)}` } };
+      const id = 200 + transportCalls.length;
+      return { v: 1, id, kind: "done", payload: { status: `state:sequence=${String(id)};revision=${String(id)};hash=${"a".repeat(64)}` } };
     },
   };
   const promise = applyAndRecord(

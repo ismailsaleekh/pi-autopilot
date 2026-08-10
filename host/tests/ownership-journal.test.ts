@@ -7,7 +7,6 @@ import { test } from "node:test";
 import {
   HostOwnershipCoordinator,
   canonicalJournalJson,
-  OWNERSHIP_JOURNAL_MAX_RECORDS,
   OwnershipJournalError,
   ownershipJournalPath,
 } from "../src/ownership-journal.ts";
@@ -98,7 +97,7 @@ test("Host ownership journal rejects truncation, duplicate rows, and a symlink w
   } finally { state.cleanup(); }
 });
 
-test("provisional blocked hold drains in-flight ownership, rejects post-hold launches, and restores fail-closed", async () => {
+test("provisional blocked hold drains in-flight ownership, rejects post-hold launches, and restart begins fail-closed", async () => {
   const state = root();
   try {
     const coordinator = HostOwnershipCoordinator.open(state.path, SESSION);
@@ -113,8 +112,7 @@ test("provisional blocked hold drains in-flight ownership, rejects post-hold lau
     await held;
     assert.equal(coordinator.hasPendingAdmission, true);
     const reopened = HostOwnershipCoordinator.open(state.path, SESSION);
-    assert.equal(reopened.hasPendingAdmission, true, "ambiguous admission survives restart closed");
-    reopened.releaseBlockedAdmissionOnRetry();
+    assert.throws(() => reopened.enterLaunch(), /closed/u, "every restart remains held through reconciliation");
     reopened.finishActivation([]);
     assert.doesNotThrow(() => reopened.enterLaunch());
   } finally { state.cleanup(); }
@@ -130,6 +128,76 @@ test("Host ownership journal refuses a duplicate action/task and never enumerate
     assert.throws(() => coordinator.registerSuccessfulRun(action("other-action"), task()), /task ownership conflict/u);
     const rows = readFileSync(ownershipJournalPath(state.path, SESSION), "utf8").trimEnd().split("\n");
     assert.equal(rows.length, 1);
-    assert.ok(OWNERSHIP_JOURNAL_MAX_RECORDS > rows.length);
+  } finally { state.cleanup(); }
+});
+
+test("production-shaped 0755 state root is accepted unchanged while symlink, foreign, and non-directory roots fail", () => {
+  const state = root();
+  const link = `${state.path}-link`;
+  const file = `${state.path}-file`;
+  try {
+    chmodSync(state.path, 0o755);
+    const coordinator = HostOwnershipCoordinator.open(state.path, SESSION);
+    assert.equal(lstatSync(state.path).mode & 0o777, 0o755, "existing configured state root is never repaired");
+    assert.equal(lstatSync(join(state.path, "host-ownership")).mode & 0o777, 0o700);
+    assert.equal(coordinator.path, ownershipJournalPath(state.path, SESSION));
+
+    symlinkSync(state.path, link);
+    assert.throws(() => HostOwnershipCoordinator.open(link, SESSION), /state root|nonsymlink/u);
+    writeFileSync(file, "not a directory", "utf8");
+    assert.throws(() => HostOwnershipCoordinator.open(file, SESSION), /state root|directory/u);
+
+    // /private/tmp is a system-owned exact directory in the supported Unix
+    // runtime. Validation happens before any child path can be created.
+    assert.notEqual(lstatSync("/private/tmp").uid, process.geteuid?.());
+    assert.throws(() => HostOwnershipCoordinator.open("/private/tmp", SESSION), /state root|owner-controlled/u);
+  } finally {
+    rmSync(link, { force: true });
+    rmSync(file, { force: true });
+    state.cleanup();
+  }
+});
+
+test("one coordinator rejects duplicate and conflicting multi-record reconciliation", () => {
+  const state = root();
+  try {
+    const coordinator = HostOwnershipCoordinator.open(state.path, SESSION);
+    coordinator.registerSuccessfulRun(action(), task());
+    const directive = {
+      receiptId: "receipt-1",
+      reporterObserved: false,
+      gate: {
+        schema: "autopilot.child_control_blocked_gate.v1",
+        latch_id: "latch-1",
+        run_id: "run-1",
+        cancellations: [{ task_id: "task-1", action_id: "action-1", assignment_id: "assignment-1", reporter: true }],
+      },
+    };
+    coordinator.promoteBlockedGate(directive);
+    assert.throws(() => coordinator.assertReconciliationCapacity([directive, directive]), /more than one whole-process gate/u);
+    assert.throws(() => coordinator.assertReconciled([{ ...directive, receiptId: "receipt-2" }]), /lacks the exact durable Host gate/u);
+  } finally { state.cleanup(); }
+});
+
+test("more than 128 normal rows and 1,000 explicit BLOCKED RETRY cycles never grow or exhaust the journal", async () => {
+  const state = root();
+  try {
+    const coordinator = HostOwnershipCoordinator.open(state.path, SESSION);
+    coordinator.finishActivation([]);
+    for (let index = 0; index < 130; index += 1) {
+      const item = action(`action-${index}`, `assignment-${index}`);
+      const snapshot = task(`task-${index}`);
+      coordinator.registerSuccessfulRun(item, snapshot);
+      coordinator.markLaunchAcknowledged(item, snapshot);
+    }
+    const path = ownershipJournalPath(state.path, SESSION);
+    const before = readFileSync(path);
+    assert.ok(before.toString("utf8").trimEnd().split("\n").length > 128);
+    for (let index = 0; index < 1000; index += 1) {
+      await coordinator.acquireBlockedAdmission();
+      coordinator.releaseBlockedAdmissionOnRetry();
+    }
+    assert.deepEqual(readFileSync(path), before, "provisional RETRY holds are in-memory scheduling only");
+    assert.doesNotThrow(() => coordinator.enterLaunch());
   } finally { state.cleanup(); }
 });

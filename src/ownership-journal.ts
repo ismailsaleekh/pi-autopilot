@@ -21,9 +21,11 @@ import type { BackgroundLaunchGate } from "./effects.ts";
 /** Private, append-only Host ownership journal format. */
 export const OWNERSHIP_JOURNAL_SCHEMA = "autopilot.host_ownership_journal.v1";
 export const OWNERSHIP_JOURNAL_VERSION = 1;
-export const OWNERSHIP_JOURNAL_MAX_BYTES = 1024 * 1024;
+// A full W0 can retain many launches, acknowledgements, terminals, and
+// cancellations. The file ceiling bounds all parsing; there is deliberately
+// no smaller row/task counter that could become a hidden scheduling limit.
+export const OWNERSHIP_JOURNAL_MAX_BYTES = 8 * 1024 * 1024;
 export const OWNERSHIP_JOURNAL_MAX_RECORD_BYTES = 64 * 1024;
-export const OWNERSHIP_JOURNAL_MAX_RECORDS = 128;
 export const OWNERSHIP_JOURNAL_MAX_STRING_BYTES = 16 * 1024;
 
 const ZERO_HASH = "0".repeat(64);
@@ -35,8 +37,6 @@ type RowKind =
   | "launch-ack"
   | "terminal-tombstone"
   | "terminal-forwarded"
-  | "blocked-hold"
-  | "blocked-hold-release"
   | "blocked-gate"
   | "blocked-observation-arrived"
   | "blocked-observation-observed"
@@ -234,28 +234,24 @@ export class HostOwnershipCoordinator implements BackgroundLaunchGate {
     this.replace(binding, { ...binding, terminalForwarded: true });
   }
 
-  /** Close, fsync the provisional fact, then wait until every run is resolved or journaled. */
+  /**
+   * Close the scheduling-only provisional hold, then wait until every run is
+   * resolved or journaled. RETRY attempts deliberately leave no journal rows:
+   * activation itself starts held, so a process restart remains fail-closed
+   * until Core reconciliation decides the durable state.
+   */
   async acquireBlockedAdmission(): Promise<void> {
-    if (this.hold === "open") {
-      // If this append fails the in-memory gate remains closed; the caller must
-      // close the child connection and no later launch can pass this session.
-      this.hold = "provisional";
-      this.journal.append("blocked-hold", {});
-    }
+    if (this.hold === "open") this.hold = "provisional";
     await Promise.all([...this.flights]);
   }
 
   releaseBlockedAdmissionOnRetry(): void {
-    if (this.hold !== "provisional") return;
-    this.journal.append("blocked-hold-release", {});
-    this.hold = "open";
+    if (this.hold === "provisional") this.hold = "open";
   }
 
-  /** Any activation/replay fault is durable scheduling uncertainty, never open. */
+  /** Any activation/replay fault is scheduling uncertainty, never open. */
   retainFailClosedHold(): void {
-    if (this.hold !== "open") return;
-    this.hold = "provisional";
-    this.journal.append("blocked-hold", {});
+    if (this.hold === "open") this.hold = "provisional";
   }
 
   promoteBlockedGate(directive: BlockedGateDirective): void {
@@ -299,6 +295,12 @@ export class HostOwnershipCoordinator implements BackgroundLaunchGate {
 
   wasObserved(directive: BlockedGateDirective): boolean { return this.observed.has(gateKey(directive.receiptId, directive.gate.latch_id)); }
 
+  /** The only restart source for an arrived reporter observation is this exact journal row. */
+  observationFor(directive: BlockedGateDirective): BlockedObservationWire | undefined {
+    this.requireActiveGate(directive.receiptId, directive.gate.latch_id);
+    return this.observations.get(gateKey(directive.receiptId, directive.gate.latch_id));
+  }
+
   wasCancelled(directive: BlockedGateDirective, taskId: string): boolean {
     return this.cancellationRows.has(cancellationKey(directive.receiptId, directive.gate.latch_id, taskId));
   }
@@ -320,9 +322,18 @@ export class HostOwnershipCoordinator implements BackgroundLaunchGate {
     this.cancellationRows.add(key);
   }
 
+  /** BLOCKED terminates this whole Host process; one coordinator has one gate. */
+  assertReconciliationCapacity(records: readonly BlockedGateDirective[]): void {
+    if (records.length > 1) throw new OwnershipJournalError("Core blocked reconciliation contains more than one whole-process gate");
+  }
+
   /** Reconciliation is authoritative only when it intersects this exact journal. */
   assertReconciled(records: readonly BlockedGateDirective[]): void {
-    if (this.activeGate === undefined) return;
+    this.assertReconciliationCapacity(records);
+    if (this.activeGate === undefined) {
+      if (records.length !== 0) throw new OwnershipJournalError("Core blocked reconciliation named a gate absent from the Host journal");
+      return;
+    }
     const matching = records.filter((record) => sameDirective(this.activeGate as BlockedGateDirective, record));
     if (matching.length !== 1) throw new OwnershipJournalError("Core blocked reconciliation lacks the exact durable Host gate");
     if (this.wasObserved(this.activeGate) && !matching[0]?.reporterObserved) throw new OwnershipJournalError("Core blocked reconciliation lost durable reporter observation");
@@ -331,7 +342,6 @@ export class HostOwnershipCoordinator implements BackgroundLaunchGate {
   /** Activation keeps scheduling closed through replay/reconciliation. */
   finishActivation(records: readonly BlockedGateDirective[]): void {
     this.assertReconciled(records);
-    if (this.hold === "provisional" && records.length === 0) this.releaseBlockedAdmissionOnRetry();
     this.activationHold = false;
   }
 
@@ -368,14 +378,6 @@ export class HostOwnershipCoordinator implements BackgroundLaunchGate {
         this.replace(binding, { ...binding, terminalForwarded: true });
         return;
       }
-      case "blocked-hold":
-        if (this.hold !== "open" || this.activeGate !== undefined) throw new OwnershipJournalError("duplicate/conflicting blocked hold row");
-        this.hold = "provisional";
-        return;
-      case "blocked-hold-release":
-        if (this.hold !== "provisional" || this.activeGate !== undefined) throw new OwnershipJournalError("unpaired blocked hold release row");
-        this.hold = "open";
-        return;
       case "blocked-gate": {
         const directive: BlockedGateDirective = { receiptId: textField(row, "receipt_id"), gate: gateFromRow(row.gate), reporterObserved: false };
         validateDirective(directive);
@@ -505,7 +507,6 @@ class OwnershipJournal {
   rows(): readonly JournalRow[] { return this.chain; }
 
   append(kind: RowKind, payload: Record<string, unknown>): void {
-    if (this.chain.length >= OWNERSHIP_JOURNAL_MAX_RECORDS) throw new OwnershipJournalError("ownership journal exceeds hard record-count bound");
     const previous = this.chain.at(-1)?.row_sha256 ?? ZERO_HASH;
     const preimage = { schema: OWNERSHIP_JOURNAL_SCHEMA, version: OWNERSHIP_JOURNAL_VERSION, sequence: this.chain.length + 1, previous_sha256: previous, kind, ...payload };
     const row = { ...preimage, row_sha256: sha256(canonicalJournalJson(preimage)) } as JournalRow;
@@ -526,7 +527,6 @@ function parseRows(bytes: Buffer): JournalRow[] {
   let text: string;
   try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch { throw new OwnershipJournalError("ownership journal is not valid UTF-8"); }
   const lines = text.slice(0, -1).split("\n");
-  if (lines.length > OWNERSHIP_JOURNAL_MAX_RECORDS) throw new OwnershipJournalError("ownership journal exceeds hard record-count bound");
   const rows: JournalRow[] = [];
   let previous = ZERO_HASH;
   for (const [index, line] of lines.entries()) {
@@ -553,8 +553,6 @@ function validateRow(row: JournalRow): void {
     "launch-ack": ["schema", "version", "sequence", "previous_sha256", "kind", "task_id", "action_id", "assignment_id", "run_revision", "row_sha256"],
     "terminal-tombstone": ["schema", "version", "sequence", "previous_sha256", "kind", "task_id", "action_id", "assignment_id", "run_revision", "task", "status", "row_sha256"],
     "terminal-forwarded": ["schema", "version", "sequence", "previous_sha256", "kind", "task_id", "action_id", "assignment_id", "run_revision", "row_sha256"],
-    "blocked-hold": ["schema", "version", "sequence", "previous_sha256", "kind", "row_sha256"],
-    "blocked-hold-release": ["schema", "version", "sequence", "previous_sha256", "kind", "row_sha256"],
     "blocked-gate": ["schema", "version", "sequence", "previous_sha256", "kind", "receipt_id", "gate", "row_sha256"],
     "blocked-observation-arrived": ["schema", "version", "sequence", "previous_sha256", "kind", "receipt_id", "latch_id", "observation", "row_sha256"],
     "blocked-observation-observed": ["schema", "version", "sequence", "previous_sha256", "kind", "receipt_id", "latch_id", "row_sha256"],
@@ -579,26 +577,45 @@ function validateRow(row: JournalRow): void {
 }
 
 function ensureJournalDirectory(path: string): void {
-  const parent = dirname(path);
-  // The configured activation root is the only recursive creation boundary;
-  // both Host-owned descendants are created one segment at a time below.
-  try { mkdirSync(parent, { recursive: true, mode: 0o700 }); }
-  catch (error) { throw new OwnershipJournalError(`could not create ownership journal root ${parent}: ${errorMessage(error)}`); }
-  ensurePrivateDirectory(parent, false);
-  ensurePrivateDirectory(path, true);
+  const stateRoot = dirname(path);
+  // The activation root belongs to the configured Host runtime. It is never
+  // chmodded or recursively created here: production uses an owner-controlled
+  // 0755 root. Only this new Host-owned child is required to be private.
+  ensureOwnerControlledStateRoot(stateRoot);
+  let created = false;
+  try { mkdirSync(path, { mode: 0o700 }); created = true; }
+  catch (error) { if (!isCode(error, "EEXIST")) throw new OwnershipJournalError(`could not create ownership journal directory ${path}: ${errorMessage(error)}`); }
+  ensurePrivateDirectory(path);
+  if (created) syncDirectory(stateRoot, "configured ownership state root");
 }
 
-function ensurePrivateDirectory(path: string, create: boolean): void {
-  if (create) {
-    try { mkdirSync(path, { mode: 0o700 }); }
-    catch (error) { if (!isCode(error, "EEXIST")) throw new OwnershipJournalError(`could not create ownership journal directory ${path}: ${errorMessage(error)}`); }
+function ensureOwnerControlledStateRoot(path: string): void {
+  const stat = lstatVerified(path, "configured ownership state root");
+  if (!stat.isDirectory() || stat.uid !== effectiveUid() || (stat.mode & 0o022) !== 0) {
+    throw new OwnershipJournalError(`configured ownership state root ${path} is not an owner-controlled nonsymlink directory`);
   }
+  verifyOpenedDirectory(path, "configured ownership state root", false);
+}
+
+function ensurePrivateDirectory(path: string): void {
   const stat = lstatVerified(path, "ownership journal directory");
   if (!stat.isDirectory() || stat.uid !== effectiveUid() || (stat.mode & 0o777) !== 0o700) throw new OwnershipJournalError(`ownership journal directory ${path} is not an owner-only 0700 directory`);
-  // New and existing journal directories are synchronization boundaries. This
-  // is harmless for existing private directories and avoids a create gap.
+  verifyOpenedDirectory(path, "ownership journal directory", true);
+}
+
+function verifyOpenedDirectory(path: string, label: string, privateMode: boolean): void {
   const fd = openSync(path, fsConstants.O_RDONLY | noFollowFlag());
-  try { fsyncSync(fd); } finally { closeSync(fd); }
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isDirectory() || stat.uid !== effectiveUid() || (privateMode ? (stat.mode & 0o777) !== 0o700 : (stat.mode & 0o022) !== 0)) {
+      throw new OwnershipJournalError(`${label} file descriptor identity/mode drift`);
+    }
+    fsyncSync(fd);
+  } finally { closeSync(fd); }
+}
+
+function syncDirectory(path: string, label: string): void {
+  verifyOpenedDirectory(path, label, false);
 }
 
 function readVerifiedJournal(path: string): VerifiedJournalFile {
@@ -608,6 +625,7 @@ function readVerifiedJournal(path: string): VerifiedJournalFile {
   try {
     const opened = fstatSync(fd);
     verifyFileStat(opened);
+    if (opened.size > OWNERSHIP_JOURNAL_MAX_BYTES) throw new OwnershipJournalError("ownership journal exceeds hard byte bound");
     return { bytes: readFileSync(fd), identity: fileIdentity(opened) };
   } finally { closeSync(fd); }
 }
@@ -651,7 +669,10 @@ function verifyFileStat(stat: Stats): void {
 }
 function fileIdentity(stat: Stats): FileIdentity { return { dev: Number(stat.dev), ino: Number(stat.ino) }; }
 function sameFileIdentity(expected: FileIdentity, stat: Stats): boolean { return expected.dev === Number(stat.dev) && expected.ino === Number(stat.ino); }
-function noFollowFlag(): number { return fsConstants.O_NOFOLLOW ?? 0; }
+function noFollowFlag(): number {
+  if (typeof fsConstants.O_NOFOLLOW !== "number") throw new OwnershipJournalError("ownership journal requires O_NOFOLLOW");
+  return fsConstants.O_NOFOLLOW;
+}
 function effectiveUid(): number {
   if (typeof process.geteuid !== "function") throw new OwnershipJournalError("ownership journal requires an effective uid");
   return process.geteuid();
@@ -669,7 +690,7 @@ function actionFromDescriptor(descriptor: string): BackgroundAction {
 function gateFromRow(value: unknown): ChildControlBlockedGate {
   if (!isRecord(value)) throw new OwnershipJournalError("ownership journal gate is not an object");
   assertExactKeys(value, ["schema", "latch_id", "run_id", "cancellations"]);
-  if (value.schema !== "autopilot.child_control_blocked_gate.v1" || typeof value.latch_id !== "string" || typeof value.run_id !== "string" || !Array.isArray(value.cancellations) || value.cancellations.length === 0 || value.cancellations.length > OWNERSHIP_JOURNAL_MAX_RECORDS) throw new OwnershipJournalError("ownership journal gate is invalid");
+  if (value.schema !== "autopilot.child_control_blocked_gate.v1" || typeof value.latch_id !== "string" || typeof value.run_id !== "string" || !Array.isArray(value.cancellations) || value.cancellations.length === 0) throw new OwnershipJournalError("ownership journal gate is invalid");
   for (const item of value.cancellations) {
     if (!isRecord(item)) throw new OwnershipJournalError("ownership journal gate cancellation is invalid");
     assertExactKeys(item, ["task_id", "action_id", "assignment_id", "reporter"]);

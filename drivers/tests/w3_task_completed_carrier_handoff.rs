@@ -297,6 +297,31 @@ fn blocked_publication_boundaries_recover_once_and_corruption_fails_closed() {
         .path();
     drop(state);
 
+    // A Host restart has no surviving child socket to resend the raw report.
+    // Reconciliation must publish the already-admitted immutable prepared
+    // transaction, rather than deadlocking in the degraded pending posture.
+    remove_event_kinds(
+        &event_path,
+        &["blocked:accepted", "blocked:latch-event-ref"],
+    );
+    let mut prepared_restarted = CoreState::open(Some(event_path.clone())).unwrap();
+    let prepared_reconcile = json!({"v":1,"id":700,"kind":"blocked-reconcile","payload":{
+        "schema":"autopilot.blocked_reconcile.v1","broker_capability":fixture.broker_capability()
+    }});
+    let prepared_recovery =
+        seam::handle_line(&prepared_reconcile.to_string(), &mut prepared_restarted).unwrap();
+    assert_eq!(prepared_recovery.kind, "blocked-reconcile");
+    assert_eq!(
+        prepared_recovery.payload["records"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(event_kind_count(&event_path, "blocked:accepted"), 1);
+    assert_eq!(event_kind_count(&event_path, "blocked:latch-event-ref"), 1);
+    drop(prepared_restarted);
+
     // Receipt+latch with no accepted root uses the same prepared transaction;
     // an unrelated row cannot select a new cancellation snapshot or IDs.
     remove_event_kinds(

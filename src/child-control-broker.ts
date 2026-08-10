@@ -43,6 +43,8 @@ export interface BlockedGateApplication {
   afterChildResponseWritten(): Promise<void>;
   /** Persist this exact outer-runner observation before forwarding it to Core. */
   blockedObservationArrived(observation: BlockedObservationWire): Promise<void>;
+  /** Exact arrived observation restored from the Host journal, if any. */
+  restoredBlockedObservation(): BlockedObservationWire | undefined;
   /** Must run only after the exact Core observation acknowledgment. */
   afterBlockedResultAcknowledged(): Promise<void>;
 }
@@ -202,6 +204,7 @@ export async function startChildControlBroker(options: ChildControlBrokerOptions
   const liveServer = server;
   const liveSocketPath = socketPath;
   const liveDirectory = directory;
+  const liveBrokerCapability = launchFacts.capability;
   return {
     socketPath: liveSocketPath,
     launchFacts,
@@ -218,7 +221,20 @@ export async function startChildControlBroker(options: ChildControlBrokerOptions
         pendingAdmissions,
       );
       await pending.cancelNonReporters();
-      if (record.reporter_observed) await pending.cancelReporter();
+      if (record.reporter_observed) {
+        await pending.cancelReporter();
+        return;
+      }
+      const restored = pending.application.restoredBlockedObservation();
+      if (restored !== undefined) {
+        await pending.forwardObservation(restored, async () => {
+          const frame = validateCoreToHostFrame(await options.transport.request("blocked-result-observed", {
+            broker_capability: liveBrokerCapability,
+            ...restored,
+          }));
+          validateBlockedResultObservedAcknowledgment(frame, pending);
+        });
+      }
     },
     stop(): Promise<void> {
       if (stopPromise === undefined) {
@@ -298,6 +314,7 @@ async function handleConnection(
     );
     const response = payload.response;
     const gate = payload.blocked_gate;
+    validateRequestReceiptGateCorrelation(request.request, response, gate);
     if (gate !== null) {
       const blocked = blockedResponseCorrelation(response, gate);
       pending = await acquirePendingBlockedObservation(
@@ -309,14 +326,13 @@ async function handleConnection(
         pendingByReceipt,
         pendingAdmissions,
       );
-    } else if (blockedForward && response.outcome === "RETRY") {
-      // Only an explicit generated Core RETRY releases the scheduling hold.
-      // Transport, frame, write, and persistence ambiguity stays fail-closed.
-      options.releaseBlockedHoldOnRetry?.();
     }
 
     // The only bytes the nested child can observe are its generated response.
     await writeFrame(socket, response);
+    // Only a completely written explicit Core RETRY releases the scheduling
+    // hold. Transport, frame, and write ambiguity stays fail-closed.
+    if (blockedForward && response.outcome === "RETRY") options.releaseBlockedHoldOnRetry?.();
     if (pending !== undefined) await pending.cancelNonReporters();
   } catch (error) {
     // A pre- or post-write fault never removes a pending gate. The application
@@ -395,6 +411,30 @@ function validateChildControlResponseCorrelation(response: ChildControlResponse,
   // Receipt fields retain the original accepted transport correlation on an
   // idempotent replay. The response's request_id above is the current wire
   // correlation; Host must not reject Core's receipt alias as a new admission.
+}
+
+function validateRequestReceiptGateCorrelation(
+  request: ChildControlRequest,
+  response: ChildControlResponse,
+  gate: ChildControlBlockedGate | null,
+): void {
+  if (response.outcome === "RETRY") {
+    if (gate !== null) throw new ChildControlBrokerProtocolError("child-control RETRY must not carry a blocked gate");
+    return;
+  }
+  if (request.kind === "blocked") {
+    if (response.receipt.kind !== "blocked" || gate === null) {
+      throw new ChildControlBrokerProtocolError("blocked request requires a blocked ACCEPT receipt and exact blocked gate");
+    }
+    return;
+  }
+  if (request.kind === "submit") {
+    if (response.receipt.kind !== "submit" || gate !== null) {
+      throw new ChildControlBrokerProtocolError("submit request requires a submit ACCEPT receipt and no blocked gate");
+    }
+    return;
+  }
+  throw new ChildControlBrokerProtocolError("child-control request kind is invalid");
 }
 
 function blockedResponseCorrelation(
@@ -503,6 +543,7 @@ async function acquirePendingBlockedObservation(
     let nonReporterAttempt: Promise<void> | undefined;
     let reporterAttempt: Promise<void> | undefined;
     let observationAttempt: Promise<void> | undefined;
+    let arrivedObservation: BlockedObservationWire | undefined;
     let nonReportersCancelled = false;
     let reporterCancelled = false;
     const cancelNonReporters = (): Promise<void> => {
@@ -523,10 +564,17 @@ async function acquirePendingBlockedObservation(
       );
       return reporterAttempt;
     };
-    const forwardObservation = (observation: BlockedObservationWire, forward: () => Promise<void>): Promise<void> => {
+    const forwardObservation = async (observation: BlockedObservationWire, forward: () => Promise<void>): Promise<void> => {
+      // Persist/compare every outer observation before joining an in-flight
+      // attempt. A different authenticated identity must never borrow a clean
+      // success signal from the first connection.
+      await application.blockedObservationArrived(observation);
+      if (arrivedObservation !== undefined && !sameBlockedObservation(arrivedObservation, observation)) {
+        throw new ChildControlBrokerProtocolError("blocked-result-observed correlation drift during an in-flight attempt");
+      }
+      if (arrivedObservation === undefined) arrivedObservation = observation;
       if (observationAttempt !== undefined) return observationAttempt;
       observationAttempt = Promise.resolve().then(async () => {
-        await application.blockedObservationArrived(observation);
         await cancelNonReporters();
         await forward();
         await cancelReporter();
@@ -572,6 +620,16 @@ function assertSamePendingAdmission(
   if (pending.receiptId !== blocked.receiptId || pending.latchId !== blocked.latchId || pending.reporterTaskId !== blocked.reporterTaskId || !sameBlockedGate(pending.gate, gate)) {
     throw new ChildControlBrokerProtocolError("blocked receipt/latch admission correlation drift");
   }
+}
+
+function sameBlockedObservation(left: BlockedObservationWire, right: BlockedObservationWire): boolean {
+  return left.schema === right.schema
+    && left.token === right.token
+    && left.run_id === right.run_id
+    && left.assignment_id === right.assignment_id
+    && left.attempt === right.attempt
+    && left.receipt_id === right.receipt_id
+    && left.tool_call_id === right.tool_call_id;
 }
 
 function sameBlockedGate(left: ChildControlBlockedGate, right: ChildControlBlockedGate): boolean {

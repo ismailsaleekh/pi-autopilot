@@ -54,7 +54,7 @@ effect "child-control" operator_level_default="info" fail_closed=#true acknowled
 effect "blocked-result-observed" operator_level_default="info" fail_closed=#true acknowledge=#false
 effect "blocked-reconcile" operator_level_default="info" fail_closed=#true acknowledge=#false
 effect "ui" operator_level_default="info" fail_closed=#false acknowledge=#false
-effect "spawn" operator_level_default="info" fail_closed=#false acknowledge=#false
+effect "spawn" operator_level_default="info" fail_closed=#false acknowledge=#true
 effect "spawn-wave" operator_level_default="info" fail_closed=#false acknowledge=#true max_items=64
 effect "session" operator_level_default="error" fail_closed=#true acknowledge=#false
 effect "log" operator_level_default="info" fail_closed=#false acknowledge=#false

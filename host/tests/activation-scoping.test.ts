@@ -5,6 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import autopilotExtension from "../src/extension.ts";
+import { HostOwnershipCoordinator } from "../src/ownership-journal.ts";
 import extensionEntrypoint from "../../extensions/autopilot.ts";
 import {
   ACTIVATING_COMMANDS,
@@ -215,6 +216,7 @@ test("blocked gate closes launches, cancels only exact owned nonreporters after 
           ? { v: 1, id: this.calls.length, kind: "done", payload: { status: "ok" } }
           : { v: 1, id: this.calls.length, kind: "spawn", payload: { action } };
       }
+      if (kind === "spawn-result") return spawnAcknowledged(this.calls.length);
       return { v: 1, id: this.calls.length, kind: "done", payload: { status: "ok" } };
     },
     close() {},
@@ -281,6 +283,144 @@ test("blocked gate closes launches, cancels only exact owned nonreporters after 
     assert.deepEqual(kills, ["task-1"], "foreign task ids are never killed");
   } finally {
     state.cleanup();
+  }
+});
+
+test("activation replays an unacknowledged launch exactly after response loss and leaves rejected ACKs pending", async () => {
+  const cases = [
+    { label: "exact replay", status: `state:sequence=7;revision=7;hash=${"a".repeat(64)}`, pending: false },
+    { label: "unknown binding", status: "rejection:spawn-result-binding:missing", pending: true },
+    { label: "conflicting task", status: "rejection:spawn-result:acknowledged-task-id-conflict", pending: true },
+  ];
+  for (const item of cases) {
+    const state = tempStateRoot();
+    const action = terminalAction("action-replay", "assignment-replay", "replay task", "node replay");
+    const snapshot = { id: "task-replay", name: action.bg_run.name, command: action.bg_run.command, status: "running", outputPath: "/tmp/replay", isAgent: true, notifyOnCompletion: true, triggerOnCompletion: false };
+    const seeded = HostOwnershipCoordinator.open(state.root, SESSION_A);
+    seeded.registerSuccessfulRun(action, snapshot);
+    const pi = recordingPi();
+    const runs: string[] = [];
+    const transport = {
+      calls: [],
+      async request(kind, payload) {
+        this.calls.push({ kind, payload });
+        if (kind === "spawn-result") return { v: 1, id: this.calls.length, kind: "done", payload: { status: item.status } };
+        if (kind === "blocked-reconcile") return { v: 1, id: this.calls.length, kind: "blocked-reconcile", payload: { schema: "autopilot.blocked_reconcile_response.v1", records: [] } };
+        return { v: 1, id: this.calls.length, kind: "done", payload: { status: "ok" } };
+      },
+      close() {},
+    };
+    const background = {
+      async capabilities() { return { api_version: 1, run: true, run_is_agent: true, run_completion_trigger: true, status: true, logs: true, logs_bounded: true, kill: true }; },
+      async run(descriptor) { runs.push(descriptor.command); return snapshot; },
+      onTerminal() { return () => {}; },
+      async close() {},
+    };
+    try {
+      autopilotExtension(pi as never, { transport, backgroundTasks: background, stateRoot: state.root, processIdentity: PROCESS_IDENTITY });
+      await pi.emit("session_start", { reason: "startup" }, ctxFor(SESSION_A));
+      const command = () => pi.commands.get("autopilot-plan").handler("main A.md B.md C.md CTX.md", commandCtx(SESSION_A));
+      if (item.pending) await assert.rejects(command, /spawn-result acknowledgement/u, item.label);
+      else await command();
+      assert.deepEqual(runs, [], `${item.label}: restored action never runs a second time`);
+      assert.equal(HostOwnershipCoordinator.open(state.root, SESSION_A).pendingAcknowledgements.length, item.pending ? 1 : 0, item.label);
+    } finally { state.cleanup(); }
+  }
+});
+
+test("pending terminal continuations run only after reconciliation, and no continuation launch escapes a permanent gate", async () => {
+  for (const blocked of [false, true]) {
+    const state = tempStateRoot();
+    const terminalActionRecord = terminalAction("action-terminal", "assignment-terminal", "terminal task", "node terminal");
+    const continuation = terminalAction("action-continuation", "assignment-continuation", "continuation task", "node continuation");
+    const initialTask = { ...taskForAction(terminalActionRecord, "task-terminal"), status: "failed" };
+    const seeded = HostOwnershipCoordinator.open(state.root, SESSION_A);
+    seeded.registerSuccessfulRun(terminalActionRecord, initialTask);
+    seeded.markLaunchAcknowledged(terminalActionRecord, initialTask);
+    seeded.recordTerminal(initialTask, terminalActionRecord);
+    const gate = blockedGate([initialTask], [terminalActionRecord]);
+    if (blocked) seeded.promoteBlockedGate({ receiptId: "019faf00-0000-7000-8000-0000000000aa", gate, reporterObserved: false });
+
+    const pi = recordingPi();
+    const order: string[] = [];
+    const runs: string[] = [];
+    const transport = {
+      async request(kind) {
+        order.push(`core:${kind}`);
+        if (kind === "blocked-reconcile") return { v: 1, id: 1, kind: "blocked-reconcile", payload: { schema: "autopilot.blocked_reconcile_response.v1", records: blocked ? [blockedRecord(gate, true)] : [] } };
+        if (kind === "task-completed") return { v: 1, id: 2, kind: "spawn", payload: { action: continuation } };
+        if (kind === "spawn-result") return spawnAcknowledged(3);
+        return { v: 1, id: 4, kind: "done", payload: { status: "ok" } };
+      },
+      close() {},
+    };
+    const background = {
+      async capabilities() { return { api_version: 1, run: true, run_is_agent: true, run_completion_trigger: true, status: true, logs: true, logs_bounded: true, kill: true }; },
+      async run(descriptor) { runs.push(descriptor.command); return taskForAction(continuation, "task-continuation"); },
+      async killMany() { return []; },
+      onTerminal() { return () => {}; },
+      async close() {},
+    };
+    try {
+      autopilotExtension(pi as never, { transport, backgroundTasks: background, stateRoot: state.root, processIdentity: PROCESS_IDENTITY });
+      await pi.emit("session_start", { reason: "startup" }, ctxFor(SESSION_A));
+      const activate = () => pi.commands.get("autopilot-plan").handler("main A.md B.md C.md CTX.md", commandCtx(SESSION_A));
+      if (blocked) await assert.rejects(activate, /launch gate is closed|durable blocked ownership state/u);
+      else await activate();
+      assert.deepEqual(runs, blocked ? [] : ["node continuation"], `blocked=${String(blocked)}`);
+      assert.ok(order.indexOf("core:blocked-reconcile") < order.indexOf("core:task-completed"), "reconciliation precedes terminal continuation");
+      const restored = HostOwnershipCoordinator.open(state.root, SESSION_A);
+      assert.equal(restored.pendingTerminals.length, blocked ? 1 : 0);
+    } finally { state.cleanup(); }
+  }
+});
+
+test("reconciliation resumes an exact arrived reporter observation, or reporter-last kills when Core already observed it", async () => {
+  for (const reporterObserved of [false, true]) {
+    const state = tempStateRoot();
+    const reporter = terminalAction("action-reporter", "assignment-reporter", "reporter", "node reporter");
+    const sibling = terminalAction("action-sibling", "assignment-sibling", "sibling", "node sibling");
+    const reporterTask = taskForAction(reporter, "task-reporter");
+    const siblingTask = taskForAction(sibling, "task-sibling");
+    const gate = blockedGate([siblingTask, reporterTask], [sibling, reporter]);
+    const directive = { receiptId: "019faf00-0000-7000-8000-0000000000aa", gate, reporterObserved: false };
+    const seeded = HostOwnershipCoordinator.open(state.root, SESSION_A);
+    seeded.registerSuccessfulRun(reporter, reporterTask);
+    seeded.markLaunchAcknowledged(reporter, reporterTask);
+    seeded.registerSuccessfulRun(sibling, siblingTask);
+    seeded.markLaunchAcknowledged(sibling, siblingTask);
+    seeded.promoteBlockedGate(directive);
+    seeded.recordObservationArrived(blockedObservation(), directive);
+
+    const pi = recordingPi();
+    const order: string[] = [];
+    const transport = {
+      async request(kind) {
+        order.push(`core:${kind}`);
+        if (kind === "blocked-reconcile") return { v: 1, id: 1, kind: "blocked-reconcile", payload: { schema: "autopilot.blocked_reconcile_response.v1", records: [blockedRecord(gate, reporterObserved)] } };
+        if (kind === "blocked-result-observed") return observedBlockedAck();
+        return { v: 1, id: 3, kind: "done", payload: { status: "ok" } };
+      },
+      close() {},
+    };
+    const background = {
+      async capabilities() { return { api_version: 1, run: true, run_is_agent: true, run_completion_trigger: true, status: true, logs: true, logs_bounded: true, kill: true }; },
+      async run() { throw new Error("reconciliation must not launch"); },
+      async killMany(ids) { order.push(`kill:${ids[0]}`); return []; },
+      onTerminal() { return () => {}; },
+      async close() {},
+    };
+    try {
+      autopilotExtension(pi as never, { transport, backgroundTasks: background, stateRoot: state.root, processIdentity: PROCESS_IDENTITY });
+      await pi.emit("session_start", { reason: "startup" }, ctxFor(SESSION_A));
+      await pi.commands.get("autopilot-plan").handler("main A.md B.md C.md CTX.md", commandCtx(SESSION_A));
+      const expected = reporterObserved
+        ? ["core:blocked-reconcile", "kill:task-sibling", "kill:task-reporter", "core:command"]
+        : ["core:blocked-reconcile", "kill:task-sibling", "core:blocked-result-observed", "kill:task-reporter", "core:command"];
+      assert.deepEqual(order, expected, `reporter_observed=${String(reporterObserved)}`);
+      assert.equal(HostOwnershipCoordinator.open(state.root, SESSION_A).wasObserved(directive), true);
+      await pi.emit("session_shutdown", { reason: "quit" }, ctxFor(SESSION_A));
+    } finally { state.cleanup(); }
   }
 });
 
@@ -569,6 +709,7 @@ test("BUG-184 T11: foreign terminal events are out of jurisdiction while launche
       this.calls.push(timeoutMs === undefined ? { kind, payload } : { kind, payload, timeoutMs });
       if (kind === "blocked-reconcile") return { v: 1, id: this.calls.length, kind: "blocked-reconcile", payload: { schema: "autopilot.blocked_reconcile_response.v1", records: [] } };
       if (kind === "command") return { v: 1, id: this.calls.length, kind: "spawn", payload: { action } };
+      if (kind === "spawn-result") return spawnAcknowledged(this.calls.length);
       return { v: 1, id: this.calls.length, kind: "done", payload: { status: "ok" } };
     },
     close() { this.closed = true; },
@@ -617,6 +758,7 @@ test("BUG-184 T11b: a task Autopilot launched and lost still produces an operato
       this.calls.push(timeoutMs === undefined ? { kind, payload } : { kind, payload, timeoutMs });
       if (kind === "blocked-reconcile") return { v: 1, id: this.calls.length, kind: "blocked-reconcile", payload: { schema: "autopilot.blocked_reconcile_response.v1", records: [] } };
       if (kind === "command") return { v: 1, id: this.calls.length, kind: "spawn", payload: { action } };
+      if (kind === "spawn-result") return spawnAcknowledged(this.calls.length);
       // Force the binding to be dropped so the task becomes launched-and-lost.
       return { v: 1, id: this.calls.length, kind: "done", payload: { status: "ok" } };
     },
@@ -739,6 +881,7 @@ function fakeTransport(callLog = []) {
       callLog.push(`core:${kind}`);
       calls.push(timeoutMs === undefined ? { kind, payload } : { kind, payload, timeoutMs });
       if (kind === "blocked-reconcile") return { v: 1, id: calls.length, kind: "blocked-reconcile", payload: { schema: "autopilot.blocked_reconcile_response.v1", records: [] } };
+      if (kind === "spawn-result") return spawnAcknowledged(calls.length);
       return { v: 1, id: calls.length, kind: "done", payload: { status: "ok" } };
     },
     close() { this.closed = true; },
@@ -793,6 +936,56 @@ function fakeBackgroundTasks(callLog = []) {
       this.closeCalls += 1;
     },
   };
+}
+
+function taskForAction(action, id) {
+  return { id, name: action.bg_run.name, command: action.bg_run.command, status: "running", outputPath: `/tmp/${id}`, isAgent: action.bg_run.isAgent, notifyOnCompletion: action.bg_run.notifyOnCompletion, triggerOnCompletion: action.bg_run.triggerOnCompletion };
+}
+
+function blockedGate(tasks, actions) {
+  return {
+    schema: "autopilot.child_control_blocked_gate.v1",
+    latch_id: "019faf00-0000-7000-8000-0000000000bb",
+    run_id: "run-1",
+    cancellations: tasks.map((task, index) => ({ task_id: task.id, action_id: actions[index].action_id, assignment_id: actions[index].assignment_id, reporter: index === tasks.length - 1 })),
+  };
+}
+
+function blockedRecord(gate, reporterObserved) {
+  return {
+    schema: "autopilot.blocked_reconcile_record.v1",
+    blocked_receipt: {
+      schema: "autopilot.blocked_receipt.v1",
+      receipt_id: "019faf00-0000-7000-8000-0000000000aa",
+      run_id: "run-1",
+      run_revision: 1,
+      workstream: "workstream-1",
+      action_id: "action-reporter",
+      assignment_id: "assignment-reporter",
+      attempt: 1,
+      profile_id: "autopilot.blocked_report.v1:autopilot_report_blocked",
+      tool_name: "autopilot_report_blocked",
+      request_id: "request-1",
+      tool_call_id: "call-1",
+      report_digest: "a".repeat(64),
+      reason_code: "infrastructure",
+      cancellation_set_digest: "b".repeat(64),
+    },
+    blocked_gate: gate,
+    reporter_observed: reporterObserved,
+  };
+}
+
+function blockedObservation() {
+  return { schema: "autopilot.blocked_result_observed.v1", token: "child-token", run_id: "run-1", assignment_id: "assignment-reporter", attempt: 1, receipt_id: "019faf00-0000-7000-8000-0000000000aa", tool_call_id: "call-1" };
+}
+
+function observedBlockedAck() {
+  return { v: 1, id: 2, kind: "blocked-result-observed", payload: { schema: "autopilot.blocked_result_observed_ack.v1", receipt_id: "019faf00-0000-7000-8000-0000000000aa", latch_id: "019faf00-0000-7000-8000-0000000000bb", reporter_task_id: "task-reporter", status: "acknowledged" } };
+}
+
+function spawnAcknowledged(id) {
+  return { v: 1, id, kind: "done", payload: { status: `state:sequence=${String(id)};revision=${String(id)};hash=${"a".repeat(64)}` } };
 }
 
 function terminalAction(actionId, assignmentId, name, command) {
