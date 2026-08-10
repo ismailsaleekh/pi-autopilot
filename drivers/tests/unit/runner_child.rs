@@ -77,46 +77,44 @@ fn runtime_evidence_maps_delivery_ledgers_but_requires_nulls_elsewhere() {
 
 #[cfg(unix)]
 #[test]
-fn blocked_observation_rejects_malformed_and_wrong_generated_acknowledgments() {
+fn blocked_observation_emits_exact_wire_and_accepts_only_clean_eof() {
     use std::io::{Read, Write};
     use std::num::NonZeroU32;
     use std::os::unix::net::UnixListener;
 
-    for (label, acknowledgment, expected) in [
-        (
-            "malformed",
-            serde_json::json!({}),
-            "acknowledgment malformed",
-        ),
-        (
-            "wrong",
-            serde_json::json!({
-                "schema":"autopilot.blocked_result_observed_ack.v1",
-                "receipt_id":"wrong-receipt",
-                "latch_id":"latch-1",
-                "reporter_task_id":"reporter-1",
-                "status":"acknowledged"
-            }),
-            "acknowledgment correlation drift",
-        ),
+    for (label, child_visible_payload, succeeds) in [
+        ("clean-eof", None, true),
+        ("payload-drift", Some(b"unexpected".to_vec()), false),
     ] {
         let socket = std::path::PathBuf::from(format!(
-            "/tmp/ap-v5-ack-{}-{label}.sock",
+            "/tmp/ap-v5-observation-{}-{label}.sock",
             std::process::id()
         ));
         let _ = std::fs::remove_file(&socket);
-        let listener = UnixListener::bind(&socket).expect("ack listener");
+        let listener = UnixListener::bind(&socket).expect("observation listener");
         let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("ack accept");
+            let (mut stream, _) = listener.accept().expect("observation accept");
             let mut header = [0_u8; 4];
             stream.read_exact(&mut header).expect("request header");
             let mut request = vec![0_u8; u32::from_be_bytes(header) as usize];
             stream.read_exact(&mut request).expect("request body");
-            let body = serde_json::to_vec(&acknowledgment).expect("ack bytes");
-            stream
-                .write_all(&(body.len() as u32).to_be_bytes())
-                .and_then(|()| stream.write_all(&body))
-                .expect("ack write");
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&request).expect("request JSON"),
+                serde_json::json!({
+                    "schema":"autopilot.blocked_result_observed.v1",
+                    "token":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    "run_id":"run-1",
+                    "assignment_id":"assignment-1",
+                    "attempt":1,
+                    "receipt_id":"receipt-1",
+                    "tool_call_id":"current-call-2"
+                })
+            );
+            let mut trailing = [0_u8; 1];
+            assert_eq!(stream.read(&mut trailing).expect("write-half close"), 0);
+            if let Some(payload) = child_visible_payload {
+                stream.write_all(&payload).expect("payload drift write");
+            }
         });
         let control = ChildControlLaunchConfig {
             socket_path: socket.clone(),
@@ -126,11 +124,19 @@ fn blocked_observation_rejects_malformed_and_wrong_generated_acknowledgments() {
             attempt: NonZeroU32::new(1).expect("nonzero"),
             required_pi_version: "0.84.1".to_owned(),
         };
-        let error = observe_blocked_result(&control, "receipt-1".to_owned(), "call-1".to_owned())
-            .expect_err("bad acknowledgment must be infrastructure failure");
-        assert!(error.contains(expected), "{label}: {error}");
-        server.join().expect("ack server");
-        std::fs::remove_file(socket).expect("ack socket cleanup");
+        let result = observe_blocked_result(
+            &control,
+            "receipt-1".to_owned(),
+            "current-call-2".to_owned(),
+        );
+        if succeeds {
+            result.expect("clean EOF is private-peer completion");
+        } else {
+            let error = result.expect_err("child-visible payload is protocol drift");
+            assert!(error.contains("child-visible protocol payload"), "{label}: {error}");
+        }
+        server.join().expect("observation server");
+        std::fs::remove_file(socket).expect("observation socket cleanup");
     }
 }
 

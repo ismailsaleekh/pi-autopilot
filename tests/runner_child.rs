@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Read;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
@@ -155,7 +155,7 @@ fn fake_pi_journey_writes_identity_carrier_and_isolated_exact_args() {
 
 #[cfg(unix)]
 #[test]
-fn fresh_v5_keeps_one_session_through_unlimited_retries_then_correlates_blocked_accept() {
+fn fresh_v5_keeps_one_session_through_retries_compaction_and_parallel_alias_blocked_accept() {
     let root = temp_root("runner-v5-retry-accept");
     let socket = test_broker_socket();
     fs::remove_file(&socket).expect("replace inert broker socket");
@@ -171,19 +171,12 @@ fn fresh_v5_keeps_one_session_through_unlimited_retries_then_correlates_blocked_
             let mut body = vec![0_u8; u32::from_be_bytes(header) as usize];
             stream.read_exact(&mut body).expect("observation body");
             fs::write(&observed, &body).expect("observation record");
-            let request: Value = serde_json::from_slice(&body).expect("observation json");
-            let acknowledgment = json!({
-                "schema":"autopilot.blocked_result_observed_ack.v1",
-                "receipt_id":request["receipt_id"],
-                "latch_id":"latch-1",
-                "reporter_task_id":"reporter-task-1",
-                "status":"acknowledged"
-            });
-            let body = serde_json::to_vec(&acknowledgment).expect("ack json");
-            stream
-                .write_all(&(body.len() as u32).to_be_bytes())
-                .and_then(|()| stream.write_all(&body))
-                .expect("ack write");
+            let mut trailing = [0_u8; 1];
+            assert_eq!(
+                stream.read(&mut trailing).expect("observation write-half close"),
+                0,
+                "runner must expose no response channel after observation"
+            );
         }
     });
     let retries = 6;
@@ -203,7 +196,7 @@ fn fresh_v5_keeps_one_session_through_unlimited_retries_then_correlates_blocked_
             "profile_id":"autopilot.blocked_report.v1:autopilot_report_blocked",
             "tool_name":"autopilot_report_blocked",
             "request_id":"request-v5-1",
-            "tool_call_id":"call-v5-accept",
+            "tool_call_id":"call-v5-original-accepted",
             "report_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "reason_code":"infrastructure",
             "cancellation_set_digest":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -213,7 +206,8 @@ fn fresh_v5_keeps_one_session_through_unlimited_retries_then_correlates_blocked_
         concat!(
             "writeFileSync({prompt_count:?}, String(promptCount)); send({{type:'agent_start'}}); ",
             "for (let i=0;i<{retries};i++) {{ const callId='call-v5-retry-'+i; send({{type:'tool_execution_start',toolCallId:callId,toolName:'autopilot_submit_atoms'}}); send({{type:'tool_execution_end',toolCallId:callId,toolName:'autopilot_submit_atoms',result:{{content:[],terminate:false}},isError:true}}); send({{type:'message_end',message:{{role:'toolResult',toolCallId:callId,toolName:'autopilot_submit_atoms',content:[],isError:true}}}}); }} ",
-            "const receipt={receipt}; send({{type:'tool_execution_start',toolCallId:'call-v5-accept',toolName:'autopilot_report_blocked'}}); send({{type:'tool_execution_end',toolCallId:'call-v5-accept',toolName:'autopilot_report_blocked',result:{{content:[],details:receipt,terminate:true}},isError:false}}); send({{type:'message_end',message:{{role:'toolResult',toolCallId:'call-v5-accept',toolName:'autopilot_report_blocked',content:[],details:receipt,isError:false}}}}); send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}});"
+            "for (const reason of ['threshold','overflow','threshold']) {{ send({{type:'compaction_start',reason}}); send({{type:'compaction_end',reason,aborted:false,willRetry:false}}); }} ",
+            "const receipt={receipt}; send({{type:'tool_execution_start',toolCallId:'call-v5-accept',toolName:'autopilot_report_blocked'}}); send({{type:'tool_execution_end',toolCallId:'call-v5-accept',toolName:'autopilot_report_blocked',result:{{content:[],details:receipt,terminate:true}},isError:false}}); const laterRetry='call-v5-retry-after-accept'; send({{type:'tool_execution_start',toolCallId:laterRetry,toolName:'autopilot_submit_atoms'}}); send({{type:'tool_execution_end',toolCallId:laterRetry,toolName:'autopilot_submit_atoms',result:{{content:[],terminate:false}},isError:true}}); send({{type:'message_end',message:{{role:'toolResult',toolCallId:'call-v5-accept',toolName:'autopilot_report_blocked',content:[],details:receipt,isError:false}}}}); send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}});"
         ),
         receipt = serde_json::to_string(&receipt).expect("receipt json"),
         retries = retries,
@@ -238,6 +232,11 @@ fn fresh_v5_keeps_one_session_through_unlimited_retries_then_correlates_blocked_
     assert_eq!(observed["attempt"], 1);
     assert_eq!(observed["receipt_id"], "receipt-v5-1");
     assert_eq!(observed["tool_call_id"], "call-v5-accept");
+    assert_ne!(
+        observed["tool_call_id"],
+        receipt["receipt"]["tool_call_id"],
+        "observation must carry the current correlated Pi call, not the durable replay call"
+    );
     assert!(
         !carrier_path(&root).exists(),
         "fresh V5 wrote a legacy carrier"

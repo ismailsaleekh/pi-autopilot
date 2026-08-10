@@ -3,6 +3,7 @@ use crate::generated::pi_rpc::{FORBIDDEN_ORDERS, ORDER_STATES, ORDER_TRANSITIONS
 
 pub struct EventOrder {
     state: &'static str,
+    allow_automatic_compaction: bool,
 }
 impl Default for EventOrder {
     fn default() -> Self {
@@ -12,7 +13,14 @@ impl Default for EventOrder {
 impl EventOrder {
     #[must_use]
     pub fn new() -> Self {
-        Self { state: "idle" }
+        Self::with_automatic_compaction(false)
+    }
+    #[must_use]
+    pub fn with_automatic_compaction(allow_automatic_compaction: bool) -> Self {
+        Self {
+            state: "idle",
+            allow_automatic_compaction,
+        }
     }
     pub fn begin_cycle(&mut self) {
         if self.state == "settled" {
@@ -24,7 +32,14 @@ impl EventOrder {
         if FORBIDDEN_ORDERS.iter().any(|row| {
             (row.from.is_none() || row.from == Some(self.state))
                 && (row.event == "*" || row.event == key)
-        }) {
+        }) && !(self.allow_automatic_compaction
+            && matches!(
+                event,
+                RpcEvent::CompactionStart {
+                    reason: CompactionReason::Threshold | CompactionReason::Overflow,
+                }
+            ))
+        {
             return Err(if self.state == "settled" {
                 RpcError::OutOfOrderEvent(format!("event {event:?} arrived after agent_settled"))
             } else {
@@ -68,6 +83,9 @@ impl EventOrder {
             RpcEvent::CompactionStart {
                 reason: CompactionReason::Manual,
             } => "manual_compaction_start",
+            RpcEvent::CompactionStart {
+                reason: CompactionReason::Threshold | CompactionReason::Overflow,
+            } if self.allow_automatic_compaction => "manual_compaction_start",
             RpcEvent::CompactionStart {
                 reason: CompactionReason::Threshold | CompactionReason::Overflow,
             } => "threshold_or_overflow_compaction_start",

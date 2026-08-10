@@ -22,9 +22,8 @@ use crate::runner::rpc::{
 
 use kernel::failure::{Failure, OperatorDecision, RetryPolicy};
 use kernel::generated::{
-    AgentRunSpec, AgentRunSpecV5, BlockedResultObservedAckStatus, ChildControlAcceptReceipt,
-    ChildControlRuntimeEvidence, CoreToHostBlockedResultObservedPayload, SessionContinuity,
-    TaskDocument,
+    AgentRunSpec, AgentRunSpecV5, ChildControlAcceptReceipt, ChildControlRuntimeEvidence,
+    SessionContinuity, TaskDocument,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -653,8 +652,8 @@ pub fn main(args: &[String]) -> Result<(), String> {
             Ok(V5AcceptedTerminal::Submit) => runner.shutdown_v5(),
             Ok(V5AcceptedTerminal::Blocked {
                 receipt_id,
-                tool_call_id,
-            }) => match observe_blocked_result(&control, receipt_id, tool_call_id) {
+                current_tool_call_id,
+            }) => match observe_blocked_result(&control, receipt_id, current_tool_call_id) {
                 Ok(()) => runner.shutdown_v5(),
                 Err(error) => {
                     let _ = runner.shutdown_v5();
@@ -744,7 +743,7 @@ enum V5AcceptedTerminal {
     Submit,
     Blocked {
         receipt_id: String,
-        tool_call_id: String,
+        current_tool_call_id: String,
     },
 }
 
@@ -754,6 +753,16 @@ struct V5SuccessfulTool {
     details: Value,
     accepted: V5AcceptedTerminal,
     message_correlated: bool,
+}
+
+fn v5_accepted_if_correlated(
+    successful: &Option<V5SuccessfulTool>,
+    prompt_response_seen: bool,
+) -> Option<V5AcceptedTerminal> {
+    successful
+        .as_ref()
+        .filter(|item| prompt_response_seen && item.message_correlated)
+        .map(|item| item.accepted.clone())
 }
 
 /// Fresh V5 has one live Pi session. A generated bridge turns a Core RETRY
@@ -792,6 +801,10 @@ fn run_v5_child_control_session(
                     return Err("agent-run V5 prompt response drift".to_owned());
                 }
                 prompt_response_seen = true;
+                if let Some(accepted) = v5_accepted_if_correlated(&successful, prompt_response_seen)
+                {
+                    return Ok(accepted);
+                }
             }
             RpcFrame::Response(response) => {
                 return Err(format!(
@@ -799,9 +812,7 @@ fn run_v5_child_control_session(
                     response.id
                 ));
             }
-            RpcFrame::Event(RpcEvent::ToolExecutionStart) if successful.is_some() => {
-                return Err("agent-run V5 tool activity after accepted receipt".to_owned());
-            }
+            RpcFrame::Event(RpcEvent::ToolExecutionStart) => {}
             RpcFrame::Event(RpcEvent::ToolExecutionEnd {
                 tool_call_id,
                 tool_name,
@@ -809,8 +820,11 @@ fn run_v5_child_control_session(
                 is_error,
                 terminate,
             }) => {
+                // Pi executes a parallel batch concurrently. A receipt already
+                // correlated from this prompt is durable; later tool activity
+                // belongs to work normal process shutdown will cancel.
                 if successful.is_some() {
-                    return Err("agent-run V5 tool activity after accepted receipt".to_owned());
+                    continue;
                 }
                 let Some(kind) = v5_child_control_tool_kind(facade, &tool_name)? else {
                     continue;
@@ -856,6 +870,10 @@ fn run_v5_child_control_session(
                     accepted,
                     message_correlated,
                 });
+                if let Some(accepted) = v5_accepted_if_correlated(&successful, prompt_response_seen)
+                {
+                    return Ok(accepted);
+                }
             }
             RpcFrame::Event(RpcEvent::MessageEnd { message }) if message.role == "toolResult" => {
                 let tool_call_id = message
@@ -890,6 +908,10 @@ fn run_v5_child_control_session(
                     }
                     accepted.message_correlated = true;
                 }
+                if let Some(accepted) = v5_accepted_if_correlated(&successful, prompt_response_seen)
+                {
+                    return Ok(accepted);
+                }
             }
             RpcFrame::Event(RpcEvent::AgentSettled) => {
                 if !prompt_response_seen {
@@ -909,11 +931,8 @@ fn run_v5_child_control_session(
                 }
                 return Ok(accepted.accepted);
             }
-            RpcFrame::Event(RpcEvent::CompactionStart {
-                reason: CompactionReason::Threshold | CompactionReason::Overflow,
-            }) => {
-                return Err("agent-run V5 Pi attempted automatic compaction".to_owned());
-            }
+            // Threshold and overflow compaction preserve this same Pi session.
+            // Fresh V5 has no context deadline, repair turn, or tool reset here.
             RpcFrame::Event(_) => {}
         }
     }
@@ -984,7 +1003,7 @@ fn verify_v5_accept_receipt(
                 || receipt.attempt != attempt
                 || receipt.profile_id != profile.0
                 || receipt.tool_name.0 != profile.1
-                || receipt.tool_call_id != tool_call_id
+                || receipt.tool_call_id.is_empty()
                 || receipt.boundary_id != facade.boundary_id
                 || receipt.result_contract != facade.result_contract
                 || receipt.schema_digest.0 != profile.4
@@ -1010,7 +1029,7 @@ fn verify_v5_accept_receipt(
                 || receipt.attempt != attempt
                 || receipt.profile_id != blocked.0
                 || receipt.tool_name.0 != blocked.1
-                || receipt.tool_call_id != tool_call_id
+                || receipt.tool_call_id.is_empty()
                 || receipt.receipt_id.0.is_empty()
                 || receipt.request_id.0.is_empty()
             {
@@ -1018,7 +1037,7 @@ fn verify_v5_accept_receipt(
             }
             Ok(V5AcceptedTerminal::Blocked {
                 receipt_id: receipt.receipt_id.0.clone(),
-                tool_call_id: tool_call_id.to_owned(),
+                current_tool_call_id: tool_call_id.to_owned(),
             })
         }
         _ => Err("agent-run V5 child-control receipt/tool kind drift".to_owned()),
@@ -1063,46 +1082,18 @@ fn observe_blocked_result(
             .and_then(|()| stream.flush())
             .and_then(|()| stream.shutdown(NetShutdown::Write))
             .map_err(|error| format!("agent-run blocked observation write failed: {error}"))?;
-        let mut header = [0_u8; 4];
-        stream.read_exact(&mut header).map_err(|error| {
-            format!("agent-run blocked observation acknowledgment missing: {error}")
-        })?;
-        let length = usize::try_from(u32::from_be_bytes(header)).map_err(|_| {
-            "agent-run blocked observation acknowledgment length overflow".to_owned()
-        })?;
-        if length == 0 || length > limit {
-            return Err(
-                "agent-run blocked observation acknowledgment exceeds the hard ceiling".to_owned(),
-            );
+        // The generated observation acknowledgment is private Core→Host
+        // authority. The reporter observes only peer completion: clean EOF.
+        let mut payload = [0_u8; 1];
+        match stream.read(&mut payload) {
+            Ok(0) => Ok(()),
+            Ok(_) => Err(
+                "agent-run blocked observation carried child-visible protocol payload".to_owned(),
+            ),
+            Err(error) => Err(format!(
+                "agent-run blocked observation completion read failed: {error}"
+            )),
         }
-        let mut bytes = vec![0_u8; length];
-        stream.read_exact(&mut bytes).map_err(|error| {
-            format!("agent-run blocked observation acknowledgment truncated: {error}")
-        })?;
-        let mut extra = [0_u8; 1];
-        if stream.read(&mut extra).map_err(|error| {
-            format!("agent-run blocked observation acknowledgment read failed: {error}")
-        })? != 0
-        {
-            return Err(
-                "agent-run blocked observation acknowledgment carried extra bytes".to_owned(),
-            );
-        }
-        let acknowledgment: CoreToHostBlockedResultObservedPayload = serde_json::from_slice(&bytes)
-            .map_err(|error| {
-                format!("agent-run blocked observation acknowledgment malformed: {error}")
-            })?;
-        if acknowledgment.schema.0 != "autopilot.blocked_result_observed_ack.v1"
-            || acknowledgment.status != BlockedResultObservedAckStatus::Acknowledged
-            || acknowledgment.receipt_id.0 != receipt_id
-            || acknowledgment.latch_id.0.is_empty()
-            || acknowledgment.reporter_task_id.0.is_empty()
-        {
-            return Err(
-                "agent-run blocked observation acknowledgment correlation drift".to_owned(),
-            );
-        }
-        Ok(())
     }
     #[cfg(not(unix))]
     {
