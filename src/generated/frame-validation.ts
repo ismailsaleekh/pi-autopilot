@@ -52,6 +52,9 @@ const FRAME_VALIDATION_DESCRIPTORS = {
       "infrastructure",
       "unsafe-to-continue"
     ],
+    "blocked-result-observed-ack-status": [
+      "acknowledged"
+    ],
     "candidate_state": [
       "queued",
       "preparing",
@@ -360,6 +363,11 @@ const FRAME_VALIDATION_DESCRIPTORS = {
     }
   ],
   "routes": {
+    "blocked-result-observed": {
+      "effect": "blocked-result-observed",
+      "payload": "CoreToHostBlockedResultObservedPayload",
+      "posture": "supported"
+    },
     "child-control": {
       "effect": "child-control",
       "payload": "CoreToHostChildControlPayload",
@@ -503,6 +511,45 @@ const FRAME_VALIDATION_DESCRIPTORS = {
           "nullable": false,
           "required": true,
           "type": "bool"
+        }
+      ]
+    },
+    "CoreToHostBlockedResultObservedPayload": {
+      "fields": [
+        {
+          "kind": "value",
+          "name": "schema",
+          "nullable": false,
+          "required": true,
+          "type": "schema-id"
+        },
+        {
+          "kind": "value",
+          "name": "receipt_id",
+          "nullable": false,
+          "required": true,
+          "type": "uuidv7"
+        },
+        {
+          "kind": "value",
+          "name": "latch_id",
+          "nullable": false,
+          "required": true,
+          "type": "uuidv7"
+        },
+        {
+          "kind": "value",
+          "name": "reporter_task_id",
+          "nullable": false,
+          "required": true,
+          "type": "id"
+        },
+        {
+          "kind": "value",
+          "name": "status",
+          "nullable": false,
+          "required": true,
+          "type": "blocked-result-observed-ack-status"
         }
       ]
     },

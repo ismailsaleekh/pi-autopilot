@@ -1449,6 +1449,7 @@ Sources: `data/contracts.kdl`.
 | admission-mode | receipt_v1, replay_v0 |
 | child-control-request-kind | submit, blocked |
 | child-control-outcome | ACCEPT, RETRY |
+| blocked-result-observed-ack-status | acknowledged |
 | blocked-reason-code | missing-authority, external-dependency, infrastructure, unsafe-to-continue |
 | blocked-evidence-kind | observation, path, command, reference |
 
@@ -1459,6 +1460,7 @@ Sources: `data/contracts.kdl`.
 | child-control | host-to-core |  |
 | blocked-result-observed | host-to-core |  |
 | child-control | core-to-host |  |
+| blocked-result-observed | core-to-host |  |
 | spawn-attested | core-to-host |  |
 | reconcile-attested | core-to-host |  |
 | attested-task-observation | host-to-core |  |

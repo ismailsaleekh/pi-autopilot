@@ -229,6 +229,13 @@ pub enum BlockedReasonCode {
     UnsafeToContinue,
 }
 
+/// Closed broker-only acknowledgment status for one exact durable blocked-result observation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BlockedResultObservedAckStatus {
+    #[serde(rename = "acknowledged")]
+    Acknowledged,
+}
+
 /// D76 §5.3 candidate states.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CandidateState {
@@ -4465,6 +4472,22 @@ pub struct WorkMapRecoveryV2 {
     pub repair_evidence_refs: Vec<Ref>,
 }
 
+/// Broker-only closed acknowledgment of the exact durable blocked observation. It is neither a generic done alias nor model-facing content.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoreToHostBlockedResultObservedPayload {
+    #[serde(rename = "schema")]
+    pub schema: SchemaId,
+    #[serde(rename = "receipt_id")]
+    pub receipt_id: Uuidv7,
+    #[serde(rename = "latch_id")]
+    pub latch_id: Uuidv7,
+    #[serde(rename = "reporter_task_id")]
+    pub reporter_task_id: Id,
+    #[serde(rename = "status")]
+    pub status: BlockedResultObservedAckStatus,
+}
+
 /// Broker-only child-control result. Host applies the optional blocked gate directive before returning exactly response to the nested child and rejects every other Core effect kind on this socket path.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -4578,12 +4601,15 @@ pub struct HostToCoreAttestedTaskObservationPayload {
     pub sidecar_source_path: Path,
 }
 
-/// Authenticated outer-runner observation that the reporter's accepted blocked tool result was correlated through ToolExecutionEnd and message_end. It is separate from child-control request kind and carries no model authority.
+/// Authenticated outer-runner observation that the reporter's accepted blocked tool result was correlated through ToolExecutionEnd and message_end. Host supplies broker_capability as private Host/Core bridge authority; it is separate from child-control request kind and carries no model authority.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostToCoreBlockedResultObservedPayload {
     #[serde(rename = "schema")]
     pub schema: SchemaId,
+    /// Host/Core-private 256-bit lowercase-hex broker capability. Host adds it when forwarding; it is never child request, model payload, receipt, binding, log, or diagnostic content.
+    #[serde(rename = "broker_capability")]
+    pub broker_capability: String,
     #[serde(rename = "token")]
     pub token: String,
     #[serde(rename = "run_id")]
@@ -4598,10 +4624,13 @@ pub struct HostToCoreBlockedResultObservedPayload {
     pub tool_call_id: String,
 }
 
-/// Authenticated Host-broker child-control request. Core derives all authority from the bound capability; the model supplies only the raw tool payload in ChildControlRequest.
+/// Authenticated Host-broker child-control request. Core derives all authority from the Host-owned broker capability; the model supplies only the raw tool payload in the byte-identical ChildControlRequest.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostToCoreChildControlPayload {
+    /// Host/Core-private 256-bit lowercase-hex broker capability. Host adds it when forwarding; it is never child request, model payload, receipt, binding, log, or diagnostic content.
+    #[serde(rename = "broker_capability")]
+    pub broker_capability: String,
     #[serde(rename = "request")]
     pub request: ChildControlRequest,
 }

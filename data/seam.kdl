@@ -13,6 +13,7 @@ route kind="blocked-result-observed" direction="host-to-core" posture="supported
 route kind="operator-answer" direction="host-to-core" posture="supported" payload="HostToCoreOperatorAnswerPayload" adapter="operator-answer" effect="none"
 route kind="shutdown" direction="host-to-core" posture="supported" payload="HostToCoreShutdownPayload" adapter="shutdown" effect="none"
 route kind="child-control" direction="core-to-host" posture="supported" payload="CoreToHostChildControlPayload" adapter="none" effect="child-control" doc="Broker-only response: relay its typed child response after applying its optional blocked gate directive."
+route kind="blocked-result-observed" direction="core-to-host" posture="supported" payload="CoreToHostBlockedResultObservedPayload" adapter="none" effect="blocked-result-observed" doc="Broker-only closed acknowledgment of the exact durable blocked observation; never alias generic done."
 route kind="ui" direction="core-to-host" posture="supported" payload="CoreToHostUiPayload" adapter="none" effect="ui"
 route kind="spawn" direction="core-to-host" posture="supported" payload="CoreToHostSpawnPayload" adapter="none" effect="spawn"
 route kind="spawn-wave" direction="core-to-host" posture="supported" payload="CoreToHostSpawnWavePayload" adapter="none" effect="spawn-wave" max_items=64 unique="action_id|assignment_id"

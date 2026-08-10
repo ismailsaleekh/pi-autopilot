@@ -88,6 +88,8 @@ env_deny "AUTOPILOT_CONTROL_TOKEN"
 env_deny "AUTOPILOT_CONTROL_RUN_ID"
 env_deny "AUTOPILOT_CONTROL_ASSIGNMENT"
 env_deny "AUTOPILOT_CONTROL_ATTEMPT"
+env_deny "AUTOPILOT_CHILD_CONTROL_SOCKET_PATH"
+env_deny "AUTOPILOT_CHILD_CONTROL_BROKER_CAPABILITY"
 size_limit "terminal" bytes=4194304
 size_limit "entry_appended" bytes=16384
 state "idle" terminal_ok=#true

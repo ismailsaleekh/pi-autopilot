@@ -2212,6 +2212,11 @@ enum "child-control-outcome" {
     value "RETRY"
 }
 
+enum "blocked-result-observed-ack-status" {
+    doc "Closed broker-only acknowledgment status for one exact durable blocked-result observation."
+    value "acknowledged"
+}
+
 enum "blocked-reason-code" {
     value "missing-authority"
     value "external-dependency"
@@ -2228,13 +2233,15 @@ enum "blocked-evidence-kind" {
 
 
 frame direction="host-to-core" kind="child-control" {
-    doc "Authenticated Host-broker child-control request. Core derives all authority from the bound capability; the model supplies only the raw tool payload in ChildControlRequest."
+    doc "Authenticated Host-broker child-control request. Core derives all authority from the Host-owned broker capability; the model supplies only the raw tool payload in the byte-identical ChildControlRequest."
+    field "broker_capability" type="string" required=#true doc="Host/Core-private 256-bit lowercase-hex broker capability. Host adds it when forwarding; it is never child request, model payload, receipt, binding, log, or diagnostic content."
     field "request" type="child_control_request" required=#true
 }
 
 frame direction="host-to-core" kind="blocked-result-observed" {
-    doc "Authenticated outer-runner observation that the reporter's accepted blocked tool result was correlated through ToolExecutionEnd and message_end. It is separate from child-control request kind and carries no model authority."
+    doc "Authenticated outer-runner observation that the reporter's accepted blocked tool result was correlated through ToolExecutionEnd and message_end. Host supplies broker_capability as private Host/Core bridge authority; it is separate from child-control request kind and carries no model authority."
     field "schema" type="schema-id" required=#true constant="autopilot.blocked_result_observed.v1"
+    field "broker_capability" type="string" required=#true doc="Host/Core-private 256-bit lowercase-hex broker capability. Host adds it when forwarding; it is never child request, model payload, receipt, binding, log, or diagnostic content."
     field "token" type="string" required=#true
     field "run_id" type="id" required=#true
     field "assignment_id" type="id" required=#true
@@ -2247,6 +2254,15 @@ frame direction="core-to-host" kind="child-control" {
     doc "Broker-only child-control result. Host applies the optional blocked gate directive before returning exactly response to the nested child and rejects every other Core effect kind on this socket path."
     field "response" type="child_control_response" required=#true
     field "blocked_gate" type="child_control_blocked_gate" required=#true nullable=#true require_explicit_null=#true
+}
+
+frame direction="core-to-host" kind="blocked-result-observed" {
+    doc "Broker-only closed acknowledgment of the exact durable blocked observation. It is neither a generic done alias nor model-facing content."
+    field "schema" type="schema-id" required=#true constant="autopilot.blocked_result_observed_ack.v1"
+    field "receipt_id" type="uuidv7" required=#true
+    field "latch_id" type="uuidv7" required=#true
+    field "reporter_task_id" type="id" required=#true
+    field "status" type="blocked-result-observed-ack-status" required=#true
 }
 
 frame direction="core-to-host" kind="spawn-attested" {

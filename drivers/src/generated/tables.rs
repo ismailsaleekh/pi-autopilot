@@ -139,6 +139,14 @@ pub static CORE_TO_HOST_EFFECTS: &[SeamRouteRow] = &[
         effect: "child-control",
     },
     SeamRouteRow {
+        kind: "blocked-result-observed",
+        direction: SeamDirection::CoreToHost,
+        posture: SeamPosture::Supported,
+        payload: "CoreToHostBlockedResultObservedPayload",
+        adapter: "none",
+        effect: "blocked-result-observed",
+    },
+    SeamRouteRow {
         kind: "ui",
         direction: SeamDirection::CoreToHost,
         posture: SeamPosture::Supported,

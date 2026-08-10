@@ -42,6 +42,7 @@ export type AttemptAttribute = "interrupted" | "checkpointed" | "superseded";
 export type AttestedActionKind = "launch-attested-pi" | "reconcile-attested-pi";
 export type BlockedEvidenceKind = "observation" | "path" | "command" | "reference";
 export type BlockedReasonCode = "missing-authority" | "external-dependency" | "infrastructure" | "unsafe-to-continue";
+export type BlockedResultObservedAckStatus = "acknowledged";
 export type CandidateState = "queued" | "preparing" | "conflicted" | "resolving" | "focused-checking" | "ready-to-commit" | "committed" | "needs-fix" | "failed" | "superseded";
 export type ChildControlOutcome = "ACCEPT" | "RETRY";
 export type ChildControlRequestKind = "submit" | "blocked";
@@ -1795,6 +1796,14 @@ export interface WorkMapRecoveryV2 {
   repair_evidence_refs: Ref[];
 }
 
+export interface CoreToHostBlockedResultObservedPayload {
+  schema: SchemaId;
+  receipt_id: Uuidv7;
+  latch_id: Uuidv7;
+  reporter_task_id: Id;
+  status: BlockedResultObservedAckStatus;
+}
+
 export interface CoreToHostChildControlPayload {
   response: ChildControlResponse;
   blocked_gate: ChildControlBlockedGate | null;
@@ -1853,6 +1862,7 @@ export interface HostToCoreAttestedTaskObservationPayload {
 
 export interface HostToCoreBlockedResultObservedPayload {
   schema: SchemaId;
+  broker_capability: string;
   token: string;
   run_id: Id;
   assignment_id: Id;
@@ -1862,6 +1872,7 @@ export interface HostToCoreBlockedResultObservedPayload {
 }
 
 export interface HostToCoreChildControlPayload {
+  broker_capability: string;
   request: ChildControlRequest;
 }
 
@@ -1896,4 +1907,4 @@ export interface HostToCoreTaskCompletedPayload {
 }
 
 export type HostToCoreFrame = { v: 1; id: number; kind: "agent-result"; payload: HostToCoreAgentResultPayload } | { v: 1; id: number; kind: "attested-task-observation"; payload: HostToCoreAttestedTaskObservationPayload } | { v: 1; id: number; kind: "blocked-result-observed"; payload: HostToCoreBlockedResultObservedPayload } | { v: 1; id: number; kind: "child-control"; payload: HostToCoreChildControlPayload } | { v: 1; id: number; kind: "command"; payload: HostToCoreCommandPayload } | { v: 1; id: number; kind: "operator-answer"; payload: HostToCoreOperatorAnswerPayload } | { v: 1; id: number; kind: "shutdown"; payload: HostToCoreShutdownPayload } | { v: 1; id: number; kind: "spawn-result"; payload: HostToCoreSpawnResultPayload } | { v: 1; id: number; kind: "task-completed"; payload: HostToCoreTaskCompletedPayload };
-export type CoreToHostFrame = { v: 1; id: number; kind: "child-control"; payload: CoreToHostChildControlPayload } | { v: 1; id: number; kind: "done"; payload: CoreToHostDonePayload } | { v: 1; id: number; kind: "log"; payload: CoreToHostLogPayload } | { v: 1; id: number; kind: "reconcile-attested"; payload: CoreToHostReconcileAttestedPayload } | { v: 1; id: number; kind: "session"; payload: CoreToHostSessionPayload } | { v: 1; id: number; kind: "spawn"; payload: CoreToHostSpawnPayload } | { v: 1; id: number; kind: "spawn-attested"; payload: CoreToHostSpawnAttestedPayload } | { v: 1; id: number; kind: "spawn-wave"; payload: CoreToHostSpawnWavePayload } | { v: 1; id: number; kind: "ui"; payload: CoreToHostUiPayload };
+export type CoreToHostFrame = { v: 1; id: number; kind: "blocked-result-observed"; payload: CoreToHostBlockedResultObservedPayload } | { v: 1; id: number; kind: "child-control"; payload: CoreToHostChildControlPayload } | { v: 1; id: number; kind: "done"; payload: CoreToHostDonePayload } | { v: 1; id: number; kind: "log"; payload: CoreToHostLogPayload } | { v: 1; id: number; kind: "reconcile-attested"; payload: CoreToHostReconcileAttestedPayload } | { v: 1; id: number; kind: "session"; payload: CoreToHostSessionPayload } | { v: 1; id: number; kind: "spawn"; payload: CoreToHostSpawnPayload } | { v: 1; id: number; kind: "spawn-attested"; payload: CoreToHostSpawnAttestedPayload } | { v: 1; id: number; kind: "spawn-wave"; payload: CoreToHostSpawnWavePayload } | { v: 1; id: number; kind: "ui"; payload: CoreToHostUiPayload };

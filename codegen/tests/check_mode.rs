@@ -507,6 +507,8 @@ fn unified_submit_contracts_emit_closed_frames_and_non_fifo_placeholder_metadata
     assert!(!response.contains("task_id"));
     assert!(!response.contains("cancellations"));
     assert!(!response.contains("blocked_gate"));
+    assert!(rust.contains("pub enum BlockedResultObservedAckStatus {\n    #[serde(rename = \"acknowledged\")]\n    Acknowledged,"));
+    assert!(rust.contains("#[serde(deny_unknown_fields)]\npub struct CoreToHostBlockedResultObservedPayload {\n    #[serde(rename = \"schema\")]\n    pub schema: SchemaId,\n    #[serde(rename = \"receipt_id\")]\n    pub receipt_id: Uuidv7,\n    #[serde(rename = \"latch_id\")]\n    pub latch_id: Uuidv7,\n    #[serde(rename = \"reporter_task_id\")]\n    pub reporter_task_id: Id,\n    #[serde(rename = \"status\")]\n    pub status: BlockedResultObservedAckStatus,"));
     assert!(rust.contains("pub struct SubmitDiagnostic"));
     assert!(rust.contains("pub struct SubmitReceipt"));
     assert!(rust.contains("pub struct BlockedReceipt"));
@@ -538,20 +540,27 @@ fn unified_submit_routes_are_generated_row_driven_and_receipt_complete() {
     assert!(tables.contains("ChildControl(HostToCoreChildControlPayload)"));
     assert!(tables.contains("BlockedResultObserved(HostToCoreBlockedResultObservedPayload)"));
     assert!(tables.contains("kind: \"child-control\",\n        direction: SeamDirection::CoreToHost,\n        posture: SeamPosture::Supported"));
+    assert!(tables.contains("kind: \"blocked-result-observed\",\n        direction: SeamDirection::CoreToHost,\n        posture: SeamPosture::Supported,\n        payload: \"CoreToHostBlockedResultObservedPayload\",\n        adapter: \"none\",\n        effect: \"blocked-result-observed\","));
     assert!(tables.contains("\"child-control\" => decode::<HostToCoreChildControlPayload>"));
     assert!(tables.contains("\"blocked-result-observed\" => decode::<HostToCoreBlockedResultObservedPayload>"));
 
     let frame_validation = fs::read_to_string(temp.path().join("src/generated/frame-validation.ts"))
         .expect("read frame validation");
     assert!(frame_validation.contains("\"child-control\": {\n      \"effect\": \"child-control\","));
+    assert!(frame_validation.contains("\"blocked-result-observed\": {\n      \"effect\": \"blocked-result-observed\","));
+    assert!(frame_validation.contains("\"CoreToHostBlockedResultObservedPayload\": {"));
     let host_tables = fs::read_to_string(temp.path().join("src/generated/host-runtime-tables.ts"))
         .expect("read host effect table");
     assert!(host_tables.contains("\"kind\":\"child-control\""));
+    assert!(host_tables.contains("\"kind\":\"blocked-result-observed\""));
 
     let ts = fs::read_to_string(temp.path().join("src/generated/index.ts"))
         .expect("read generated TypeScript contracts");
     assert!(ts.contains("export type ChildControlRequestKind = \"submit\" | \"blocked\";"));
-    assert!(ts.contains("export interface HostToCoreBlockedResultObservedPayload"));
+    assert!(ts.contains("export interface HostToCoreBlockedResultObservedPayload {\n  schema: SchemaId;\n  broker_capability: string;"));
+    assert!(ts.contains("export interface HostToCoreChildControlPayload {\n  broker_capability: string;"));
+    assert!(ts.contains("export type BlockedResultObservedAckStatus = \"acknowledged\";"));
+    assert!(ts.contains("export interface CoreToHostBlockedResultObservedPayload {\n  schema: SchemaId;\n  receipt_id: Uuidv7;\n  latch_id: Uuidv7;\n  reporter_task_id: Id;\n  status: BlockedResultObservedAckStatus;\n}"));
     assert!(ts.contains("export interface CoreToHostChildControlPayload"));
     assert!(!ts.contains("ChildControlRequestKind = \"submit\" | \"blocked\" |"));
 
@@ -563,9 +572,12 @@ fn unified_submit_routes_are_generated_row_driven_and_receipt_complete() {
         "AUTOPILOT_CONTROL_RUN_ID",
         "AUTOPILOT_CONTROL_ASSIGNMENT",
         "AUTOPILOT_CONTROL_ATTEMPT",
+        "AUTOPILOT_CHILD_CONTROL_SOCKET_PATH",
+        "AUTOPILOT_CHILD_CONTROL_BROKER_CAPABILITY",
     ] {
         assert_eq!(rpc.matches(&format!("\"{name}\"",)).count(), 1, "{name} must be generated once");
     }
+    assert_eq!(rpc.matches("\"AUTOPILOT_CONTROL_").count(), 5, "only the five nested-Pi control variables are denied");
 
     let rust = fs::read_to_string(temp.path().join("kernel/src/generated/mod.rs"))
         .expect("read generated Rust contracts");
@@ -612,27 +624,34 @@ fn unified_submit_routes_are_generated_row_driven_and_receipt_complete() {
     assert!(rust.contains("pub struct SubmitReceiptEventRef"));
     assert!(rust.contains("pub struct BlockedLatchEventRef"));
 
-    // A supported route added only in KDL must add a route enum variant and
-    // admission arm. This proves route cardinality is data-driven, not six or
-    // another fixed number of Host-to-Core variants.
+    // Supported routes added only in KDL must expand both generated route
+    // surfaces. This proves Host-to-Core and Core-to-Host cardinalities remain
+    // row-driven rather than fixed at a historical count.
     let contracts_path = temp.path().join("data/contracts.kdl");
     let seam_path = temp.path().join("data/seam.kdl");
+    let host_path = temp.path().join("data/host-runtime.kdl");
     let contracts = fs::read_to_string(&contracts_path).expect("read contracts");
     fs::write(
         &contracts_path,
         format!(
-            "{contracts}\nframe direction=\"host-to-core\" kind=\"route-cardinality-probe\" {{\n    doc \"Codegen-only supported route cardinality probe.\"\n    field \"probe\" type=\"string\" required=#true\n}}\n"
+            "{contracts}\nframe direction=\"host-to-core\" kind=\"route-cardinality-probe\" {{\n    doc \"Codegen-only supported Host-to-Core route cardinality probe.\"\n    field \"probe\" type=\"string\" required=#true\n}}\nframe direction=\"core-to-host\" kind=\"core-route-cardinality-probe\" {{\n    doc \"Codegen-only supported Core-to-Host route cardinality probe.\"\n    field \"probe\" type=\"string\" required=#true\n}}\n"
         ),
     )
-    .expect("add probe frame");
+    .expect("add probe frames");
     let seam = fs::read_to_string(&seam_path).expect("read seam");
     fs::write(
         &seam_path,
         format!(
-            "{seam}route kind=\"route-cardinality-probe\" direction=\"host-to-core\" posture=\"supported\" payload=\"HostToCoreRouteCardinalityProbePayload\" adapter=\"route-cardinality-probe\" effect=\"none\"\n"
+            "{seam}route kind=\"route-cardinality-probe\" direction=\"host-to-core\" posture=\"supported\" payload=\"HostToCoreRouteCardinalityProbePayload\" adapter=\"route-cardinality-probe\" effect=\"none\"\nroute kind=\"core-route-cardinality-probe\" direction=\"core-to-host\" posture=\"supported\" payload=\"CoreToHostCoreRouteCardinalityProbePayload\" adapter=\"none\" effect=\"core-route-cardinality-probe\"\n"
         ),
     )
-    .expect("add probe route");
+    .expect("add probe routes");
+    let host = fs::read_to_string(&host_path).expect("read host runtime");
+    fs::write(
+        &host_path,
+        format!("{host}effect \"core-route-cardinality-probe\" operator_level_default=\"info\" fail_closed=#true acknowledge=#false\n"),
+    )
+    .expect("add probe effect");
     codegen_command()
         .current_dir(temp.path())
         .assert()
@@ -641,6 +660,13 @@ fn unified_submit_routes_are_generated_row_driven_and_receipt_complete() {
         .expect("read row-driven seam tables");
     assert!(expanded.contains("RouteCardinalityProbe(HostToCoreRouteCardinalityProbePayload)"));
     assert!(expanded.contains("\"route-cardinality-probe\" => decode::<HostToCoreRouteCardinalityProbePayload>"));
+    assert!(expanded.contains("kind: \"core-route-cardinality-probe\",\n        direction: SeamDirection::CoreToHost,\n        posture: SeamPosture::Supported"));
+    let expanded_validation = fs::read_to_string(temp.path().join("src/generated/frame-validation.ts"))
+        .expect("read row-driven frame validation");
+    assert!(expanded_validation.contains("\"core-route-cardinality-probe\": {\n      \"effect\": \"core-route-cardinality-probe\","));
+    let expanded_host = fs::read_to_string(temp.path().join("src/generated/host-runtime-tables.ts"))
+        .expect("read row-driven host effects");
+    assert!(expanded_host.contains("\"kind\":\"core-route-cardinality-probe\""));
 }
 
 #[test]
