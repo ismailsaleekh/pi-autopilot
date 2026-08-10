@@ -197,17 +197,33 @@ test("fresh delivery snapshots exact ledgers beside raw payload and blocked alwa
       async request(_kind, payload) {
         const request = (payload as { request: Record<string, unknown> }).request;
         forwarded.push(request);
+        const blocked = request.kind === "blocked";
         return {
           v: 1, id: 1, kind: "child-control",
           payload: {
             response: {
               schema: "autopilot.child_control_response.v1", request_id: request.request_id,
               outcome: "ACCEPT", receipt: completeAcceptReceipt(request.kind as "submit" | "blocked"),
-            }, blocked_gate: null,
+            },
+            blocked_gate: blocked ? {
+              schema: "autopilot.child_control_blocked_gate.v1",
+              latch_id: UUID_V7,
+              run_id: "run-1",
+              cancellations: [{ task_id: "task-reporter", action_id: "action-1", assignment_id: "assignment-1", reporter: true }],
+            } : null,
           },
         };
       },
     } as never,
+    async applyBlockedGate() {
+      return {
+        reporterTaskId: "task-reporter",
+        async afterChildResponseWritten() {},
+        async blockedObservationArrived() {},
+        restoredBlockedObservation() { return undefined; },
+        async afterBlockedResultAcknowledged() {},
+      };
+    },
   });
   try {
     const delivery = installDeliveryPolicyEnv();
