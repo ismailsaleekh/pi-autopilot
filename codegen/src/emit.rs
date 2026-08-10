@@ -987,18 +987,14 @@ export class ChildControlBridgeProtocolError extends Error {
   }
 }
 
-const PLACEHOLDER_TOKEN: unique symbol = Symbol("autopilot.child-control.placeholder");
 type PlaceholderObject = Record<PropertyKey, unknown>;
 type PendingCall = {
   readonly metadata: ChildControlToolMetadata;
   readonly rawPayload: unknown;
-  readonly placeholder: PlaceholderObject;
-  readonly token: object;
 };
 type CorrelationState = {
   readonly pending: Map<string, PendingCall>;
-  readonly pendingNonceByToken: WeakMap<object, string>;
-  readonly consumedNonceByToken: WeakMap<object, string>;
+  readonly consumedNonceByHolder: WeakMap<object, string>;
   readonly usedToolCallIds: Set<string>;
 };
 
@@ -1090,7 +1086,7 @@ export function createReplayV0ValidationRawCapture(profileId: string): ReplayV0R
 }
 
 function createCorrelationState(): CorrelationState {
-  return { pending: new Map<string, PendingCall>(), pendingNonceByToken: new WeakMap<object, string>(), consumedNonceByToken: new WeakMap<object, string>(), usedToolCallIds: new Set<string>() };
+  return { pending: new Map<string, PendingCall>(), consumedNonceByHolder: new WeakMap<object, string>(), usedToolCallIds: new Set<string>() };
 }
 
 function prepareCorrelatedPlaceholder(state: CorrelationState, profileId: string, rawPayload: unknown): Record<string, unknown> {
@@ -1099,38 +1095,27 @@ function prepareCorrelatedPlaceholder(state: CorrelationState, profileId: string
   const nonce = randomBytes(32).toString("hex");
   const placeholder = structuredClone(metadata.placeholder) as PlaceholderObject;
   setPointer(placeholder, metadata.placeholder_pointer, `${CHILD_CONTROL_PLACEHOLDER_SENTINEL}${nonce}`);
-  const token = {};
-  Object.defineProperty(placeholder, PLACEHOLDER_TOKEN, { configurable: false, enumerable: false, value: token, writable: false });
-  state.pending.set(nonce, { metadata, rawPayload: structuredClone(rawPayload), placeholder, token });
-  state.pendingNonceByToken.set(token, nonce);
+  state.pending.set(nonce, { metadata, rawPayload: structuredClone(rawPayload) });
   return placeholder as Record<string, unknown>;
 }
 
 function consumeCorrelatedPlaceholder(state: CorrelationState, toolCallId: string, placeholder: unknown): PendingCall {
   const holder = asPlaceholderObject(placeholder);
-  const token = holder[PLACEHOLDER_TOKEN];
-  if (token === null || typeof token !== "object") throw new ChildControlBridgeProtocolError("placeholder-tamper", "placeholder identity is absent");
   const nonce = placeholderNonce(holder);
   if (nonce === undefined || !/^[0-9a-f]{64}$/u.test(nonce)) throw new ChildControlBridgeProtocolError("placeholder-tamper", "placeholder marker is malformed");
-  const pendingNonce = state.pendingNonceByToken.get(token);
-  const consumedNonce = state.consumedNonceByToken.get(token);
-  if ((pendingNonce !== undefined && pendingNonce !== nonce) || (consumedNonce !== undefined && consumedNonce !== nonce)) {
-    throw new ChildControlBridgeProtocolError("placeholder-tamper", "placeholder marker drifted");
+  const consumedNonce = state.consumedNonceByHolder.get(holder);
+  if (consumedNonce !== undefined) {
+    if (consumedNonce !== nonce) throw new ChildControlBridgeProtocolError("placeholder-tamper", "placeholder marker drifted");
+    throw new ChildControlBridgeProtocolError("consumed-nonce", "placeholder was consumed");
   }
   const call = state.pending.get(nonce);
-  if (call === undefined) {
-    if (consumedNonce === nonce) throw new ChildControlBridgeProtocolError("consumed-nonce", "placeholder was consumed");
-    if (pendingNonce !== undefined || consumedNonce !== undefined) throw new ChildControlBridgeProtocolError("placeholder-tamper", "placeholder identity drifted");
-    throw new ChildControlBridgeProtocolError("unknown-nonce", "placeholder nonce is unknown");
-  }
-  if (pendingNonce !== nonce || consumedNonce !== undefined || call.placeholder !== holder || call.token !== token) throw new ChildControlBridgeProtocolError("placeholder-tamper", "placeholder identity drifted");
+  if (call === undefined) throw new ChildControlBridgeProtocolError("unknown-nonce", "placeholder nonce is unknown");
   const expected = structuredClone(call.metadata.placeholder) as PlaceholderObject;
   setPointer(expected, call.metadata.placeholder_pointer, `${CHILD_CONTROL_PLACEHOLDER_SENTINEL}${nonce}`);
   if (!sameJsonShape(holder, expected)) throw new ChildControlBridgeProtocolError("placeholder-tamper", "placeholder shape drifted");
   if (state.usedToolCallIds.has(toolCallId)) throw new ChildControlBridgeProtocolError("duplicate-tool-call-id", "tool call id was consumed");
   state.pending.delete(nonce);
-  state.pendingNonceByToken.delete(token);
-  state.consumedNonceByToken.set(token, nonce);
+  state.consumedNonceByHolder.set(holder, nonce);
   state.usedToolCallIds.add(toolCallId);
   return call;
 }

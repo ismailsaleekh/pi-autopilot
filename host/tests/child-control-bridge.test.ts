@@ -137,11 +137,13 @@ test("generated bridge preserves every profile raw tree and correlates reversed 
   const second = CHILD_CONTROL_TOOL_METADATA[2]!;
   const rawFirst = { null_value: null, nested: [{ value: "first" }] };
   const rawSecond = ["malformed-top-level", { value: "second" }];
-  const firstPlaceholder = bridge.prepareArguments(first.profile_id, rawFirst);
-  const secondPlaceholder = bridge.prepareArguments(second.profile_id, rawSecond);
+  const firstPlaceholder = structuredClone(bridge.prepareArguments(first.profile_id, rawFirst));
+  const secondPlaceholder = structuredClone(bridge.prepareArguments(second.profile_id, rawSecond));
 
-  await bridge.execute("call-second", secondPlaceholder, evidence);
-  await bridge.execute("call-first", firstPlaceholder, evidence);
+  await Promise.all([
+    bridge.execute("call-second", secondPlaceholder, evidence),
+    bridge.execute("call-first", firstPlaceholder, evidence),
+  ]);
 
   assert.deepEqual(requests.map((request) => request.raw_payload), [rawSecond, rawFirst]);
   assert.equal(Object.hasOwn(requests[1]!.raw_payload as object, "absent"), false);
@@ -153,16 +155,19 @@ test("generated bridge preserves every profile raw tree and correlates reversed 
 test("generated bridge returns distinct secret-free RETRY diagnostics for correlation faults", async () => {
   const metadata = CHILD_CONTROL_TOOL_METADATA[1]!;
   {
-    const bridge = injectedBridge([]);
-    const placeholder = bridge.prepareArguments(metadata.profile_id, {});
+    const requests: unknown[] = [];
+    const bridge = injectedBridge(requests);
+    const placeholder = structuredClone(bridge.prepareArguments(metadata.profile_id, {}));
     placeholder.tampered = true;
     await assert.rejects(bridge.execute("tampered", placeholder, evidence), (error) => {
       fixedRetry(error, "placeholder-tamper"); return true;
     });
+    assert.deepEqual(requests, []);
   }
   {
-    const bridge = injectedBridge([]);
-    const placeholder = bridge.prepareArguments(metadata.profile_id, {});
+    const requests: unknown[] = [];
+    const bridge = injectedBridge(requests);
+    const placeholder = structuredClone(bridge.prepareArguments(metadata.profile_id, {}));
     await bridge.execute("once", placeholder, evidence);
     await assert.rejects(bridge.execute("twice", placeholder, evidence), (error) => {
       fixedRetry(error, "consumed-nonce"); return true;
@@ -171,28 +176,30 @@ test("generated bridge returns distinct secret-free RETRY diagnostics for correl
     await assert.rejects(bridge.execute("twice-drifted", placeholder, evidence), (error) => {
       fixedRetry(error, "placeholder-tamper"); return true;
     });
+    assert.equal(requests.length, 1);
   }
   {
-    const bridge = injectedBridge([]);
-    const first = bridge.prepareArguments(metadata.profile_id, {});
-    const second = bridge.prepareArguments(metadata.profile_id, {});
+    const requests: unknown[] = [];
+    const bridge = injectedBridge(requests);
+    const first = structuredClone(bridge.prepareArguments(metadata.profile_id, {}));
+    const second = structuredClone(bridge.prepareArguments(metadata.profile_id, {}));
     await bridge.execute("same-call", first, evidence);
     await assert.rejects(bridge.execute("same-call", second, evidence), (error) => {
       fixedRetry(error, "duplicate-tool-call-id"); return true;
     });
+    assert.equal(requests.length, 1);
   }
   {
-    const bridge = injectedBridge([]);
-    const placeholder = bridge.prepareArguments(metadata.profile_id, {});
-    const foreign = structuredClone(placeholder);
-    const symbol = Object.getOwnPropertySymbols(placeholder)[0]!;
-    Object.defineProperty(foreign, symbol, { configurable: false, enumerable: false, value: {}, writable: false });
+    const requests: unknown[] = [];
+    const bridge = injectedBridge(requests);
+    const foreign = structuredClone(bridge.prepareArguments(metadata.profile_id, {}));
     assert.equal(replacePlaceholderMarker(foreign, "__autopilot_child_control_placeholder__:" + "b".repeat(64)), true);
     await assert.rejects(bridge.execute("unknown", foreign, evidence), (error) => {
       fixedRetry(error, "unknown-nonce");
       assert.equal(error instanceof Error && error.message.includes("b".repeat(64)), false, "nonce must stay secret-free");
       return true;
     });
+    assert.deepEqual(requests, []);
   }
 });
 

@@ -5,8 +5,16 @@ import { test } from "node:test";
 import { createBashTool } from "@earendil-works/pi-coding-agent";
 import { Compile } from "typebox/compile";
 
-import { createReplayV0ValidationRawCapture } from "../../src/generated/child-control-bridge.ts";
-import { SUBMIT_TOOLS, TERMINAL_TOOL_SCHEMAS } from "../../src/generated/tool-schemas.ts";
+import {
+  CHILD_CONTROL_TOOL_METADATA,
+  createChildControlBridge,
+  createReplayV0ValidationRawCapture,
+} from "../../src/generated/child-control-bridge.ts";
+import {
+  BLOCKED_REPORT_TOOL,
+  SUBMIT_TOOLS,
+  TERMINAL_TOOL_SCHEMAS,
+} from "../../src/generated/tool-schemas.ts";
 
 const root = new URL("../../", import.meta.url);
 
@@ -40,6 +48,36 @@ function firstRequiredArrayKey(schema: unknown, label: string): string {
   const found = requiredKeys(schema, label).find((key) => isRecord(properties[key]) && properties[key].type === "array");
   assert.equal(typeof found, "string", `${label} must have a required array container`);
   return found!;
+}
+
+function childControlRetry(error: unknown, category: string): boolean {
+  assert(error instanceof Error);
+  const diagnostic = readJsonRecord(error.message, "child-control retry");
+  assert.equal(diagnostic.schema, "autopilot.submit_diagnostic.v1");
+  assert.equal(diagnostic.code, "AUTOPILOT_SUBMIT_RETRY");
+  const errors = diagnostic.errors;
+  assert.equal(Array.isArray(errors), true);
+  assert.equal((errors as Array<Record<string, unknown>>)[0]?.code, `child-control.${category}`);
+  return true;
+}
+
+async function loadPi084ValidateToolArguments(): Promise<(
+  tool: { name: string; parameters: unknown },
+  toolCall: { id: string; name: string; arguments: unknown },
+) => unknown> {
+  const codingAgentEntry = import.meta.resolve("@earendil-works/pi-coding-agent");
+  const validationUrl = new URL(
+    "../node_modules/@earendil-works/pi-ai/dist/utils/validation.js",
+    codingAgentEntry,
+  );
+  const validation = await import(validationUrl.href) as {
+    validateToolArguments?: unknown;
+  };
+  assert.equal(typeof validation.validateToolArguments, "function", "Pi 0.84 validation entrypoint must exist");
+  return validation.validateToolArguments as (
+    tool: { name: string; parameters: unknown },
+    toolCall: { id: string; name: string; arguments: unknown },
+  ) => unknown;
 }
 
 const validSamples: Record<string, Record<string, unknown>> = {
@@ -259,6 +297,66 @@ test("Pi 0.84 Bash adapter preserves the hidden-shell no-session-environment bou
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }
+  }
+});
+
+test("Pi 0.84 real validation clone preserves raw correlation for all submit and BLOCKED profiles", async () => {
+  const validateToolArguments = await loadPi084ValidateToolArguments();
+  const descriptors = [...SUBMIT_TOOLS, BLOCKED_REPORT_TOOL];
+  assert.equal(descriptors.length, 15);
+  assert.deepEqual(
+    new Set(descriptors.map((descriptor) => descriptor.profile_id)),
+    new Set(CHILD_CONTROL_TOOL_METADATA.map((metadata) => metadata.profile_id)),
+    "the real lifecycle proof must cover all 14 submit profiles plus universal BLOCKED",
+  );
+
+  const requests: Array<Record<string, unknown>> = [];
+  const bridge = createChildControlBridge({
+    token: "a".repeat(64),
+    run_id: "run-1",
+    assignment_id: "assignment-1",
+    attempt: 1,
+  }, {
+    async request(request) {
+      requests.push(request as unknown as Record<string, unknown>);
+      throw new Error("captured after correlation");
+    },
+  });
+  const runtimeEvidence = {
+    schema: "autopilot.child_control_runtime_evidence.v1",
+    delivery_policy_denials: null,
+    approved_command_executions: null,
+  } as const;
+
+  const calls = descriptors.map((descriptor, index) => {
+    const rawPayload = [
+      "malformed-top-level",
+      { profile_id: descriptor.profile_id, null_value: null, nested: [{ ordinal: index }] },
+    ];
+    const prepared = bridge.prepareArguments(descriptor.profile_id, rawPayload);
+    const toolCallId = `pi084-real-clone-${index}`;
+    const validated = validateToolArguments(
+      { name: descriptor.name, parameters: descriptor.parameters },
+      { id: toolCallId, name: descriptor.name, arguments: prepared },
+    );
+    assert.notEqual(validated, prepared, `${descriptor.profile_id}: Pi validation must return its structured clone`);
+    assert.equal(Object.getOwnPropertySymbols(prepared).length, 0, `${descriptor.profile_id}: prepared placeholder must not rely on symbols`);
+    assert.equal(Object.getOwnPropertySymbols(validated as object).length, 0, `${descriptor.profile_id}: validated placeholder must remain symbol-free`);
+    return { descriptor, rawPayload, toolCallId, validated };
+  });
+
+  for (const call of calls.toReversed()) {
+    const priorRequests = requests.length;
+    await assert.rejects(
+      bridge.execute(call.toolCallId, call.validated, runtimeEvidence),
+      (error) => childControlRetry(error, "transport"),
+    );
+    assert.equal(requests.length, priorRequests + 1, `${call.descriptor.profile_id}: correlation must reach transport exactly once`);
+    const request = requests.at(-1)!;
+    assert.equal(request.profile_id, call.descriptor.profile_id);
+    assert.equal(request.tool_name, call.descriptor.name);
+    assert.equal(request.tool_call_id, call.toolCallId);
+    assert.deepEqual(request.raw_payload, call.rawPayload, `${call.descriptor.profile_id}: transport must receive the pre-validation raw tree`);
   }
 });
 
