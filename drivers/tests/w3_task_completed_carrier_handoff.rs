@@ -74,16 +74,199 @@ fn receipt_v1_planning_accepts_then_consumes_without_carrier_or_spec_rereads() {
 }
 
 #[test]
+fn receipt_v1_staged_actions_use_the_rooted_preconsume_revision_after_orphan_replay_restart() {
+    let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+    let fixture = Fixture::new("receipt-preconsume-revision");
+    fixture.install_transport_with_nonexistent_command_names();
+    fixture.write_manifest();
+    let event_path = fixture.root.join("events.jsonl");
+    let mut state = CoreState::open(Some(event_path.clone())).unwrap();
+    let issue =
+        fixture.seed_receipt_planning_binding(&mut state, "planning-ws-task-extractor-01", "TE01-");
+    let spec: kernel::generated::AgentRunSpecV5 =
+        serde_json::from_slice(&fs::read(&issue.binding.spec_path).unwrap()).unwrap();
+    let submit = json!({"v":1,"id":71,"kind":"child-control","payload":{"broker_capability":fixture.broker_capability(),"request":{
+        "schema":"autopilot.child_control_request.v1","request_id":"request-71",
+        "token":spec.child_control_token,"run_id":issue.receipt_binding.run_id,
+        "assignment_id":issue.receipt_binding.assignment_id,"attempt":issue.receipt_binding.attempt,
+        "tool_call_id":"tool-call-71","kind":"submit",
+        "tool_name":issue.receipt_binding.tool_name,"profile_id":issue.receipt_binding.profile_id,
+        "raw_payload":serde_json::from_str::<serde_json::Value>(&task_atoms("TE01-A")).unwrap(),
+        "runtime_evidence":{"schema":"autopilot.child_control_runtime_evidence.v1","delivery_policy_denials":null,"approved_command_executions":null}
+    }}});
+    let accepted = seam::handle_line(&submit.to_string(), &mut state).unwrap();
+    assert_eq!(accepted.payload["response"]["outcome"], "ACCEPT");
+    let issued =
+        accepted.payload["response"]["receipt"]["receipt"]["prepared_transition"]["issued_actions"]
+            .as_array()
+            .unwrap();
+    assert!(
+        !issued.is_empty(),
+        "the first receipt must stage the next wave"
+    );
+
+    let rooted_rows = fs::read_to_string(&event_path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<EventRow>(line).unwrap())
+        .collect::<Vec<_>>();
+    let root_ref_row = rooted_rows
+        .iter()
+        .find(|row| row.kind.0 == "submit:accepted-event-ref")
+        .unwrap();
+    let preconsume_revision = root_ref_row.new_revision;
+    for stored in issued {
+        assert_eq!(stored["action"]["run_revision"], preconsume_revision);
+        let binding_ref = stored["binding_ref"].as_str().unwrap();
+        let runner::VersionedRunnerBinding::ReceiptV1(binding) =
+            runner::decode_versioned_binding_ref(binding_ref).unwrap()
+        else {
+            panic!("staged action must retain a receipt_v1 binding");
+        };
+        assert_eq!(binding.run_revision, preconsume_revision);
+    }
+
+    // Retain the create-once receipt but discard its roots to model the
+    // receipt-orphan window. Replaying the exact child submit recreates the
+    // root pair, then a Core restart must retain the originally staged action.
+    let orphan_prefix = rooted_rows
+        .into_iter()
+        .filter(|row| {
+            !matches!(
+                row.kind.0.as_str(),
+                "submit:accepted" | "submit:accepted-event-ref"
+            )
+        })
+        .map(|row| serde_json::to_string(&row).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&event_path, format!("{orphan_prefix}\n")).unwrap();
+    drop(state);
+
+    let mut replayed = CoreState::open(Some(event_path.clone())).unwrap();
+    let replay = seam::handle_line(&submit.to_string(), &mut replayed).unwrap();
+    assert_eq!(replay.payload["response"]["outcome"], "ACCEPT");
+    drop(replayed);
+
+    let mut restarted = CoreState::open(Some(event_path.clone())).unwrap();
+    let completed = seam::handle_line(
+        &json!({"v":1,"id":72,"kind":"task-completed","payload":{
+            "task_id":"task-preconsume","action_id":issue.receipt_binding.action_id,
+            "assignment_id":issue.receipt_binding.assignment_id,"status":"completed"
+        }})
+        .to_string(),
+        &mut restarted,
+    )
+    .unwrap();
+    let action = completed.payload["actions"]
+        .as_array()
+        .and_then(|actions| actions.first())
+        .or_else(|| completed.payload.get("action"))
+        .unwrap();
+    assert_eq!(action["run_revision"], preconsume_revision);
+
+    let rows = fs::read_to_string(&event_path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<EventRow>(line).unwrap())
+        .collect::<Vec<_>>();
+    let consume = rows
+        .iter()
+        .find(|row| row.kind.0 == "submit:receipt-consumed")
+        .unwrap();
+    assert_eq!(consume.previous_revision, preconsume_revision);
+    let mut published_next_binding = false;
+    for reference in &consume.artifact_refs {
+        if !reference.0.starts_with(runner::ISSUED_BINDING_REF_PREFIX) {
+            continue;
+        }
+        let runner::VersionedRunnerBinding::ReceiptV1(binding) =
+            runner::decode_versioned_binding_ref(&reference.0).unwrap()
+        else {
+            continue;
+        };
+        if binding.action_id.0 == action["action_id"].as_str().unwrap()
+            && binding.assignment_id.0 == action["assignment_id"].as_str().unwrap()
+        {
+            assert_eq!(binding.run_revision, consume.previous_revision);
+            published_next_binding = true;
+        }
+    }
+    assert!(
+        published_next_binding,
+        "the consumed receipt must publish the staged next binding"
+    );
+}
+
+#[test]
+fn fresh_planning_projection_rejects_malformed_task_and_transition_refs() {
+    let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+    for (label, malformed_ref, expected) in [
+        (
+            "task-binding",
+            "task-binding:{not-json}",
+            "task binding ref JSON",
+        ),
+        (
+            "transition-marker",
+            "planning-transition-kind:not-a-closed-planning-kind",
+            "planning transition ref corruption",
+        ),
+    ] {
+        let fixture = Fixture::new(&format!("malformed-{label}"));
+        fixture.install_transport_with_nonexistent_command_names();
+        fixture.write_manifest();
+        let mut state = CoreState::open(None).unwrap();
+        let issue = fixture.seed_receipt_planning_binding(
+            &mut state,
+            "planning-ws-task-extractor-01",
+            "TE01-",
+        );
+        let appended = json!({"v":1,"id":81,"kind":"command","payload":{
+            "raw":format!("append:test:{malformed_ref}"),
+            "background_capabilities":{"api_version":1,"run":true,"run_is_agent":true,"run_completion_trigger":true,"status":true,"logs":true,"logs_bounded":true,"kill":true},
+            "background_capability_diagnostic":null
+        }});
+        seam::handle_line(&appended.to_string(), &mut state).unwrap();
+        let spec: kernel::generated::AgentRunSpecV5 =
+            serde_json::from_slice(&fs::read(&issue.binding.spec_path).unwrap()).unwrap();
+        let submit = json!({"v":1,"id":82,"kind":"child-control","payload":{"broker_capability":fixture.broker_capability(),"request":{
+            "schema":"autopilot.child_control_request.v1","request_id":format!("request-{label}"),
+            "token":spec.child_control_token,"run_id":issue.receipt_binding.run_id,
+            "assignment_id":issue.receipt_binding.assignment_id,"attempt":issue.receipt_binding.attempt,
+            "tool_call_id":format!("tool-{label}"),"kind":"submit",
+            "tool_name":issue.receipt_binding.tool_name,"profile_id":issue.receipt_binding.profile_id,
+            "raw_payload":serde_json::from_str::<serde_json::Value>(&task_atoms("TE01-A")).unwrap(),
+            "runtime_evidence":{"schema":"autopilot.child_control_runtime_evidence.v1","delivery_policy_denials":null,"approved_command_executions":null}
+        }}});
+        let retry = seam::handle_line(&submit.to_string(), &mut state).unwrap();
+        assert_eq!(retry.kind, "child-control", "{label}: {retry:?}");
+        assert_eq!(
+            retry.payload["response"]["outcome"], "RETRY",
+            "{label}: {retry:?}"
+        );
+        assert_eq!(
+            retry.payload["response"]["diagnostic"]["errors"][0]["code"],
+            "submit.planning_transition",
+            "{label}: {retry:?}"
+        );
+        assert!(
+            retry.payload["response"]["diagnostic"]["errors"][0]["actual"]["preview"]
+                .as_str()
+                .is_some_and(|detail| detail.contains(expected)),
+            "{label}: {retry:?}"
+        );
+    }
+}
+
+#[test]
 fn receipt_v1_missing_receipt_never_falls_back_to_legacy_carrier() {
     let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
     let fixture = Fixture::new("receipt-missing-no-legacy");
     fixture.install_transport_with_nonexistent_command_names();
     let mut state = CoreState::open(None).unwrap();
-    let issue = fixture.seed_receipt_planning_binding(
-        &mut state,
-        "planning-ws-task-extractor-01",
-        "TE01-",
-    );
+    let issue =
+        fixture.seed_receipt_planning_binding(&mut state, "planning-ws-task-extractor-01", "TE01-");
     fs::create_dir_all(Path::new(&issue.binding.carrier_path).parent().unwrap()).unwrap();
     fs::write(&issue.binding.carrier_path, b"not a receipt-backed carrier").unwrap();
     let completed = seam::handle_line(
@@ -96,7 +279,10 @@ fn receipt_v1_missing_receipt_never_falls_back_to_legacy_carrier() {
     )
     .unwrap();
     assert_eq!(completed.kind, "done");
-    assert_eq!(completed.payload["status"], "rejection:submit-receipt:missing receipt");
+    assert_eq!(
+        completed.payload["status"],
+        "rejection:submit-receipt:missing receipt"
+    );
 }
 
 #[test]

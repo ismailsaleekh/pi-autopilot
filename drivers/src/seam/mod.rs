@@ -716,6 +716,115 @@ struct PreparedPlanningTransitionV1 {
 }
 
 const PREPARED_PLANNING_TRANSITION_SCHEMA: &str = "autopilot.prepared_planning_transition.v1";
+const PLANNING_TRANSITION_KIND_REF_PREFIX: &str = "planning-transition-kind:";
+/// Direct legacy rows remain readable by their exact event kind. Receipt V1
+/// projects only one of these closed logical kinds through its explicit marker;
+/// no consumer infers planning semantics from a ref shape.
+const CLOSED_PLANNING_EVENT_KINDS: &[&str] = &[
+    "agent:result",
+    "planning:recovery-completed",
+    "planning:recovery-required",
+    "recovery:exhausted",
+    "recovery:inadmissible",
+    "planning:ready-to-execute",
+];
+
+fn closed_planning_event_kind(value: &str) -> Result<&'static str, String> {
+    CLOSED_PLANNING_EVENT_KINDS
+        .iter()
+        .copied()
+        .find(|known| *known == value)
+        .ok_or_else(|| format!("unknown planning transition kind: {value}"))
+}
+
+fn validate_planning_transition_semantics(event_kind: &str, refs: &[Ref]) -> Result<(), String> {
+    closed_planning_event_kind(event_kind)?;
+    if refs.is_empty() {
+        return Err("prepared planning transition has no semantic refs".to_owned());
+    }
+    let mut unique = BTreeSet::new();
+    for reference in refs {
+        if reference.0.trim().is_empty() {
+            return Err("prepared planning transition has an empty semantic ref".to_owned());
+        }
+        if reference.0.starts_with(PLANNING_TRANSITION_KIND_REF_PREFIX) {
+            return Err("prepared planning transition smuggles a marker ref".to_owned());
+        }
+        if !unique.insert(reference.0.as_str()) {
+            return Err("prepared planning transition has duplicate semantic refs".to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn planning_transition_kind_ref(event_kind: &str) -> Result<Ref, String> {
+    Ok(Ref(format!(
+        "{PLANNING_TRANSITION_KIND_REF_PREFIX}{}",
+        closed_planning_event_kind(event_kind)?
+    )))
+}
+
+/// Decode only the structural receipt projection marker. A marker is valid
+/// only on one receipt-consumed row with exactly one receipt-consumed ref.
+fn receipt_projected_planning_kind(event: &EventRow) -> Result<Option<&'static str>, String> {
+    let markers = event
+        .artifact_refs
+        .iter()
+        .filter(|reference| reference.0.starts_with(PLANNING_TRANSITION_KIND_REF_PREFIX))
+        .collect::<Vec<_>>();
+    if markers.is_empty() {
+        if event.kind.0 == "submit:receipt-consumed"
+            && event.artifact_refs.iter().any(|reference| {
+                reference.0.starts_with("planning-result-consumed:")
+            })
+        {
+            return Err("receipt planning consumption lacks its transition marker".to_owned());
+        }
+        return Ok(None);
+    }
+    if event.kind.0 != "submit:receipt-consumed" {
+        return Err("planning transition marker appears outside receipt consumption".to_owned());
+    }
+    let [marker] = markers.as_slice() else {
+        return Err("receipt consumption has duplicate planning transition markers".to_owned());
+    };
+    let kind = marker
+        .0
+        .strip_prefix(PLANNING_TRANSITION_KIND_REF_PREFIX)
+        .ok_or_else(|| "planning transition marker prefix drift".to_owned())?;
+    if event
+        .artifact_refs
+        .iter()
+        .filter(|reference| reference.0.starts_with(SUBMIT_RECEIPT_CONSUMED_PREFIX))
+        .count()
+        != 1
+    {
+        return Err("receipt planning transition lacks one receipt-consumed ref".to_owned());
+    }
+    if event
+        .artifact_refs
+        .iter()
+        .filter(|reference| reference.0.starts_with("planning-result-consumed:"))
+        .count()
+        != 1
+    {
+        return Err("receipt planning transition lacks one planning-result-consumed ref".to_owned());
+    }
+    closed_planning_event_kind(kind).map(Some)
+}
+
+fn logical_planning_event_kind(event: &EventRow) -> Result<Option<&'static str>, String> {
+    if let Some(kind) = receipt_projected_planning_kind(event)? {
+        return Ok(Some(kind));
+    }
+    if event.kind.0 == "submit:receipt-consumed" {
+        return Ok(None);
+    }
+    Ok(CLOSED_PLANNING_EVENT_KINDS
+        .iter()
+        .copied()
+        .find(|known| *known == event.kind.0))
+}
 
 fn submit_root_for_carrier(carrier_path: &Path) -> Result<PathBuf, String> {
     let carriers = carrier_path
@@ -757,15 +866,10 @@ fn planning_transition_artifact(
     binding: &runner::ReceiptV1RunnerBinding,
     transition: &PreparedPlanningTransitionV1,
 ) -> Result<(PathBuf, Vec<u8>), String> {
-    if transition.schema != PREPARED_PLANNING_TRANSITION_SCHEMA
-        || transition.event_kind.trim().is_empty()
-        || transition
-            .refs
-            .iter()
-            .any(|reference| reference.0.is_empty())
-    {
-        return Err("prepared planning transition has malformed semantic facts".to_owned());
+    if transition.schema != PREPARED_PLANNING_TRANSITION_SCHEMA {
+        return Err("prepared planning transition schema drift".to_owned());
     }
+    validate_planning_transition_semantics(&transition.event_kind, &transition.refs)?;
     let bytes = crate::evidence::canonical_json(transition).map_err(|error| error.to_string())?;
     Ok((prepared_planning_transition_path(binding)?, bytes))
 }
@@ -773,7 +877,7 @@ fn planning_transition_artifact(
 fn prepared_planning_transition_from_receipt(
     receipt: &SubmitReceipt,
 ) -> Result<PreparedPlanningTransitionV1, String> {
-    let mut matches = receipt
+    let matches = receipt
         .prepared_transition
         .artifact_refs
         .iter()
@@ -782,7 +886,9 @@ fn prepared_planning_transition_from_receipt(
     if matches.len() != 1 {
         return Err("receipt lacks exactly one prepared planning transition artifact".to_owned());
     }
-    let artifact = matches.pop().expect("checked exactly one");
+    let [artifact] = matches.as_slice() else {
+        return Err("receipt lacks exactly one prepared planning transition artifact".to_owned());
+    };
     verify_prepared_artifact(artifact, SUBMIT_RECEIPT_MAX_BYTES)?;
     let bytes = runner::read_bounded_authority_file(
         Path::new(&artifact.artifact_ref.0),
@@ -793,16 +899,12 @@ fn prepared_planning_transition_from_receipt(
         .map_err(|error| format!("prepared planning transition JSON: {error}"))?;
     let canonical = crate::evidence::canonical_json(&transition)
         .map_err(|error| format!("prepared planning transition canonical JSON: {error}"))?;
-    if canonical != bytes
-        || transition.schema != PREPARED_PLANNING_TRANSITION_SCHEMA
-        || transition.event_kind.trim().is_empty()
-        || transition
-            .refs
-            .iter()
-            .any(|reference| reference.0.is_empty())
-    {
+    if canonical != bytes || transition.schema != PREPARED_PLANNING_TRANSITION_SCHEMA {
         return Err("prepared planning transition semantic authority drift".to_owned());
     }
+    validate_planning_transition_semantics(&transition.event_kind, &transition.refs).map_err(
+        |error| format!("prepared planning transition semantic authority drift: {error}"),
+    )?;
     Ok(transition)
 }
 
@@ -924,16 +1026,31 @@ fn commit_staged_planning_submit(
             binding.boundary_id.0.as_str(),
             "planning.work-map.v1" | "planning.work-map.v2"
         )
-        && serde_json::from_slice::<serde_json::Value>(raw)
-            .ok()
-            .and_then(|value| value.get("recovery").cloned())
-            .is_some()
     {
-        return Err(staging_retry(
-            "submit.ordinary_recovery_forbidden",
-            "/recovery",
-            "ordinary planning work-map has recovery evidence",
-        ));
+        // This is an authority guard, not a best-effort feature probe. A
+        // malformed canonical payload must fail admission rather than being
+        // mistaken for a work map with no recovery property.
+        let value: serde_json::Value = serde_json::from_slice(raw).map_err(|error| {
+            staging_retry(
+                "submit.ordinary_recovery_guard",
+                "/raw_payload",
+                format!("ordinary planning recovery guard JSON: {error}"),
+            )
+        })?;
+        let object = value.as_object().ok_or_else(|| {
+            staging_retry(
+                "submit.ordinary_recovery_guard",
+                "/raw_payload",
+                "ordinary planning recovery guard requires an object payload",
+            )
+        })?;
+        if object.contains_key("recovery") {
+            return Err(staging_retry(
+                "submit.ordinary_recovery_forbidden",
+                "/recovery",
+                "ordinary planning work-map has recovery evidence",
+            ));
+        }
     }
 
     let carrier_bytes = crate::evidence::canonical_json(&prepared.carrier).map_err(|error| {
@@ -957,15 +1074,10 @@ fn commit_staged_planning_submit(
     let recovery = match v2_admission.as_ref() {
         Some(admitted) => match admitted.recovery_disposition() {
             Some(
-                kernel::generated::RecoveryDisposition::RequiresNewAuthority
+                disposition @ (kernel::generated::RecoveryDisposition::RequiresNewAuthority
                 | kernel::generated::RecoveryDisposition::InfrastructureBlocked
-                | kernel::generated::RecoveryDisposition::UnsafeBlocked,
-            ) => PlanningRecoveryAdmission::FailClosed(
-                admitted
-                    .recovery_disposition()
-                    .expect("matched blocked V2 recovery")
-                    .clone(),
-            ),
+                | kernel::generated::RecoveryDisposition::UnsafeBlocked),
+            ) => PlanningRecoveryAdmission::FailClosed(disposition.clone()),
             _ => PlanningRecoveryAdmission::Continue,
         },
         None => validate_recovery_work_map(&carrier, &legacy)
@@ -1170,18 +1282,28 @@ fn stage_planning_semantics(
                 format!("planning assignment authority: {error}"),
             )
         })?;
+    let assignment_boundary = assignment.boundary_id.as_deref().ok_or_else(|| {
+        (
+            "".to_owned(),
+            "planning manifest boundary authority is absent".to_owned(),
+        )
+    })?;
+    let binding_attempt = binding.attempt.ok_or_else(|| {
+        (
+            "".to_owned(),
+            "fresh planning binding attempt authority is absent".to_owned(),
+        )
+    })?;
     if assignment.role != binding.role_id.0
         || assignment.mode != binding.mode.0
-        || assignment
-            .boundary_id
-            .as_deref()
-            .unwrap_or("planning.questions.v1")
-            != binding.boundary_id.0
-        || u32::from(assignment.ordinal) != binding.attempt.unwrap_or(0)
+        || assignment_boundary != binding.boundary_id.0
+        || assignment_boundary != binding.result_contract.0
+        || u32::from(assignment.ordinal) != binding_attempt
     {
         return Err((
             "".to_owned(),
-            "planning manifest role/mode/boundary/ordinal authority drift".to_owned(),
+            "planning manifest role/mode/boundary/result-contract/ordinal authority drift"
+                .to_owned(),
         ));
     }
     let mut refs = vec![
@@ -1459,6 +1581,48 @@ fn staged_planning_effect(
     semantic_event_kind: &str,
     semantic_refs: &[Ref],
 ) -> Result<StagedPlanningEffect, String> {
+    let mut projected = CoreState {
+        event_path: None,
+        state: state.state.clone(),
+        events: state.events.clone(),
+        event_bytes: state.event_bytes.clone(),
+    };
+    // Receipt V1 always roots acceptance before task completion. Project the
+    // two exact root kinds first; the state after the second root is exactly
+    // the state immediately before the consume row that publishes bindings.
+    projected
+        .append(EventKind("submit:accepted".to_owned()), Vec::new())
+        .map_err(|error| error.to_string())?;
+    projected
+        .append(
+            EventKind("submit:accepted-event-ref".to_owned()),
+            Vec::new(),
+        )
+        .map_err(|error| error.to_string())?;
+    let pre_consume_revision = projected.state.revision;
+    let mut projection_refs = vec![
+        // The receipt id is minted after staging, so this in-memory row uses
+        // only a nonpersisted structural sentinel. It is never an authority
+        // ref and exists solely to keep the projected row's closed shape.
+        Ref(format!(
+            "{SUBMIT_RECEIPT_CONSUMED_PREFIX}projected:{}:{}:{}",
+            binding.action_id.0, binding.assignment_id.0, binding.run_revision
+        )),
+        planning_result_consumed_ref(binding),
+        terminal_consumed_ref(binding),
+        planning_transition_kind_ref(semantic_event_kind)?,
+    ];
+    projection_refs.extend(semantic_refs.iter().cloned());
+    // This is an in-memory projection of precisely the one eventual receipt
+    // consumption row. It is never persisted and never substitutes a legacy
+    // planning event. Its post-consume revision is intentionally never used
+    // for the newly issued actions: their bindings are stored on this row.
+    projected
+        .append(
+            EventKind("submit:receipt-consumed".to_owned()),
+            projection_refs,
+        )
+        .map_err(|error| error.to_string())?;
     if semantic_event_kind == "planning:ready-to-execute" {
         return Ok(StagedPlanningEffect {
             effect: DeferredHostEffectV1::Done {
@@ -1474,29 +1638,7 @@ fn staged_planning_effect(
             artifacts: Vec::new(),
         });
     }
-    let mut projected = CoreState {
-        event_path: None,
-        state: state.state.clone(),
-        events: state.events.clone(),
-        event_bytes: state.event_bytes.clone(),
-    };
-    let mut projection_refs = vec![
-        planning_result_consumed_ref(binding),
-        terminal_consumed_ref(binding),
-    ];
-    projection_refs.extend(semantic_refs.iter().cloned());
-    // This is an in-memory projection of precisely the one eventual receipt
-    // consumption row. It is never persisted and never substitutes a legacy
-    // planning event.
-    projected
-        .append(
-            EventKind("submit:receipt-consumed".to_owned()),
-            projection_refs,
-        )
-        .map_err(|error| error.to_string())?;
-    match next_planning_outcome(&binding.workstream.0, &projected)
-        .map_err(|error| format!("{error:?}"))?
-    {
+    match next_planning_outcome(&binding.workstream.0, &projected)? {
         planning::PlanningWaveOutcome::Launch { assignments, .. } => {
             let input_set = read_planning_input_set(&binding.workstream.0)?;
             let mut accepted = accepted_planning_artifacts_for_issue(&binding.workstream.0, state)
@@ -1548,7 +1690,7 @@ fn staged_planning_effect(
                     planning_bg_action(
                         &binding.workstream.0,
                         assignment,
-                        projected.state.revision,
+                        pre_consume_revision,
                         &input_set,
                         registry,
                         accepted.clone(),
@@ -1753,6 +1895,30 @@ fn verify_issued_action(issued: &PreparedSubmitIssuedAction) -> Result<(), Strin
         || binding.run_revision != issued.action.run_revision
     {
         return Err("issued binding identity/digest drift".to_owned());
+    }
+    Ok(())
+}
+
+/// Fresh bindings are persisted on the receipt-consumed row rather than a
+/// later legacy spawn row. Their revision must therefore equal the durable
+/// state revision immediately before that row is appended.
+fn verify_issued_action_at_preconsume_revision(
+    issued: &PreparedSubmitIssuedAction,
+    preconsume_revision: u64,
+) -> Result<(), String> {
+    verify_issued_action(issued)?;
+    let versioned = runner::decode_versioned_binding_ref(&issued.binding_ref.0)
+        .map_err(|error| format!("issued binding ref: {error}"))?;
+    let VersionedRunnerBinding::ReceiptV1(binding) = versioned else {
+        return Err("issued action binding is not receipt_v1".to_owned());
+    };
+    if issued.action.run_revision != preconsume_revision
+        || binding.run_revision != preconsume_revision
+    {
+        return Err(format!(
+            "issued action/binding revision drift before receipt consume: expected={preconsume_revision};action={};binding={}",
+            issued.action.run_revision, binding.run_revision
+        ));
     }
     Ok(())
 }
@@ -2439,7 +2605,7 @@ fn route_plan(id: u64, args: &[String], state: &mut CoreState) -> Result<SeamEnv
         planning_assignments(workstream).map_err(|error| context_status("planning", error))?;
     write_planning_manifest(workstream, &input_set, &inventory, &dossier, &assignments)?;
     match next_planning_outcome(workstream, state)
-        .map_err(|error| context_status("planning", error))?
+        .map_err(|error| format!("CONTEXT_GAP:planning:{error}"))?
     {
         planning::PlanningWaveOutcome::Launch {
             assignments: wave, ..
@@ -3216,7 +3382,7 @@ fn accept_planning_carrier(
         return done(id, rejection("planning-postprocess", &error.to_string()));
     }
     match next_planning_outcome(&carrier.workstream, state)
-        .map_err(|error| context_status("planning", error))?
+        .map_err(|error| format!("CONTEXT_GAP:planning:{error}"))?
     {
         planning::PlanningWaveOutcome::Launch {
             assignments: next, ..
@@ -3334,7 +3500,7 @@ fn planning_blocked_or_summary(
             done(id, planning_waiting_status(&wave_id, &active, state))
         }
         Ok(_) => done(id, state.summary()),
-        Err(error) => done(id, rejection("planning-postprocess", &format!("{error:?}"))),
+        Err(error) => done(id, rejection("planning-postprocess", &error)),
     }
 }
 
@@ -3770,15 +3936,12 @@ fn route_receipt_v1_task_completed(
         rooted_ref,
         runner::receipt_binding_ref(&binding)?,
     ];
-    if binding.result_contract.0.starts_with("planning.") {
+    if let Some(transition) = planning_transition.as_ref() {
         refs.push(planning_result_consumed_ref(&facade));
-        let transition = planning_transition
-            .as_ref()
-            .expect("planning receipt must have staged planning transition");
-        refs.push(Ref(format!(
-            "planning-transition-kind:{}",
-            transition.event_kind
-        )));
+        refs.push(match planning_transition_kind_ref(&transition.event_kind) {
+            Ok(reference) => reference,
+            Err(error) => return done(id, rejection("submit-receipt", &error)),
+        });
         refs.extend(transition.refs.iter().cloned());
     }
     refs.extend(
@@ -3789,6 +3952,11 @@ fn route_receipt_v1_task_completed(
             .map(|artifact| artifact.artifact_ref.clone()),
     );
     for issued in &receipt.prepared_transition.issued_actions {
+        if let Err(error) =
+            verify_issued_action_at_preconsume_revision(issued, state.state.revision)
+        {
+            return done(id, rejection("submit-receipt", &error));
+        }
         refs.push(issued.action_ref.clone());
         refs.push(issued.binding_ref.clone());
     }

@@ -115,7 +115,15 @@ fn planning_bg_action(workstream: &str, assignment: &AgentAssignment, run_revisi
         assignment_id: idv(&assignment.assignment_id),
         role_id: idv(&assignment.role),
         mode: ModeId(assignment.mode.clone()),
-        boundary_id: kernel::generated::ContractId(assignment.boundary_id.clone().unwrap_or_else(|| "planning.questions.v1".to_owned())),
+        boundary_id: kernel::generated::ContractId(
+            assignment
+                .boundary_id
+                .clone()
+                .ok_or_else(|| runner::RunnerError::InvalidSpec(format!(
+                    "planning assignment {} lacks boundary authority",
+                    assignment.assignment_id
+                )))?,
+        ),
         attempt: u32::from(assignment.ordinal),
         run_revision,
         authority_set_id: input_set.authority_set_id.clone(),
@@ -206,9 +214,10 @@ fn runner_doc_from_task(document: &planning::TaskDocument) -> runner::RunnerTask
     };
     runner::RunnerTaskDocument::new(document.path.clone(), class.to_owned(), document.digest.clone(), document.body.clone())
 }
-fn next_planning_outcome(workstream: &str, state: &CoreState) -> Result<planning::PlanningWaveOutcome, planning::PlanningError> {
-    let manifest = read_planning_schedule_manifest(workstream).map_err(planning::PlanningError::ContextGap)?;
-    let refs = planning_refs_from_state(workstream, state);
+fn next_planning_outcome(workstream: &str, state: &CoreState) -> Result<planning::PlanningWaveOutcome, String> {
+    let manifest = read_planning_schedule_manifest(workstream)
+        .map_err(|error| format!("planning manifest: {error}"))?;
+    let refs = planning_refs_from_state(workstream, state)?;
     Ok(planning::next_planning_wave(&manifest, &refs, manifest.planning_wave_cap))
 }
 fn unacknowledged_planning_actions(state: &mut CoreState, active: &[planning::PlanningActiveRef]) -> Result<Vec<BackgroundAction>, AnyError> {
@@ -245,7 +254,21 @@ fn issued_action_for_active_ref(issued: &[BackgroundAction], active_ref: &planni
 }
 
 fn binding_for_active_ref(state: &CoreState, active_ref: &planning::PlanningActiveRef) -> Result<runner::IssuedRunnerBinding, AnyError> {
-    let mut matches = state.state.refs.keys().filter_map(|reference| runner::decode_binding_ref(&reference.0)).filter(|binding| binding.assignment_id.0 == active_ref.assignment_id && binding.action_id.0 == active_ref.action_id && binding.run_revision == active_ref.run_revision && binding.result_contract.0.starts_with("planning.")).collect::<Vec<_>>();
+    let mut matches = Vec::new();
+    for reference in state.state.refs.keys() {
+        let Some(binding) = versioned_binding_facade(reference)
+            .map_err(|error| format!("CONTEXT_GAP:planning-reemit:{error}"))?
+        else {
+            continue;
+        };
+        if binding.assignment_id.0 == active_ref.assignment_id
+            && binding.action_id.0 == active_ref.action_id
+            && binding.run_revision == active_ref.run_revision
+            && binding.result_contract.0.starts_with("planning.")
+        {
+            matches.push(binding);
+        }
+    }
     match matches.len() {
         1 => Ok(matches.remove(0)),
         0 => Err(format!("CONTEXT_GAP:planning-reemit:missing-binding:{}:{}:{}", active_ref.assignment_id, active_ref.action_id, active_ref.run_revision).into()),
@@ -415,13 +438,40 @@ fn read_planning_schedule_manifest(workstream: &str) -> Result<planning::Plannin
     Ok(planning::PlanningManifest { workstream: workstream.to_owned(), planning_wave_cap, planning_max_attempts, assignments, waves })
 }
 
-fn planning_refs_from_state(workstream: &str, state: &CoreState) -> planning::PlanningRefs {
+/// Fresh planning state is reconstructed only from exact durable namespaces.
+/// A ref outside these namespaces is irrelevant; a malformed ref inside one is
+/// state corruption, never an implicit absence of planning authority.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlanningTaskBindingRef {
+    task_id: Id,
+    action_id: Id,
+    assignment_id: Id,
+    run_revision: u64,
+}
+
+fn planning_refs_from_state(workstream: &str, state: &CoreState) -> Result<planning::PlanningRefs, String> {
+    for event in &state.events {
+        receipt_projected_planning_kind(event)
+            .map_err(|error| format!("planning transition ref corruption: {error}"))?;
+    }
+    let mut bindings = Vec::new();
+    let mut task_bindings = Vec::new();
+    for reference in state.state.refs.keys() {
+        if let Some(binding) = versioned_binding_facade(reference)? {
+            bindings.push(binding);
+        }
+        if let Some(task_binding) = planning_task_binding_ref(reference)? {
+            task_bindings.push(task_binding);
+        }
+    }
+
     let mut refs = planning::PlanningRefs::default();
-    for binding in state.state.refs.keys().filter_map(versioned_binding_facade) {
+    for binding in bindings {
         if binding.workstream.0 != workstream || !binding.result_contract.0.starts_with("planning.") { continue; }
         let issued = planning::PlanningIssuedRef { assignment_id: binding.assignment_id.0.clone(), action_id: binding.action_id.0.clone(), run_revision: binding.run_revision };
         refs.issued.push(issued.clone());
-        if let Some(task_id) = launch_ack_task_id(state, &binding) {
+        if let Some(task_id) = launch_ack_task_id(state, &binding, &task_bindings)? {
             refs.launch_acks.insert(planning::PlanningLaunchAckRef { assignment_id: issued.assignment_id.clone(), action_id: issued.action_id.clone(), run_revision: issued.run_revision, task_id });
         }
         if planning_result_consumed(state, &binding) {
@@ -443,31 +493,49 @@ fn planning_refs_from_state(workstream: &str, state: &CoreState) -> planning::Pl
             }
         }
     }
-    refs
+    Ok(refs)
 }
 
-fn versioned_binding_facade(reference: &Ref) -> Option<runner::IssuedRunnerBinding> {
-    match runner::decode_versioned_binding_ref(&reference.0).ok()? {
-        runner::VersionedRunnerBinding::ReplayV0(binding) => Some(binding),
-        runner::VersionedRunnerBinding::ReceiptV1(binding) => {
-            Some(runner::receipt_v1_validator_facade(&binding))
-        }
+fn versioned_binding_facade(reference: &Ref) -> Result<Option<runner::IssuedRunnerBinding>, String> {
+    if !reference.0.starts_with(runner::ISSUED_BINDING_REF_PREFIX) {
+        return Ok(None);
+    }
+    match runner::decode_versioned_binding_ref(&reference.0)
+        .map_err(|error| format!("runner binding ref corruption: {error}"))?
+    {
+        runner::VersionedRunnerBinding::ReplayV0(binding) => Ok(Some(binding)),
+        runner::VersionedRunnerBinding::ReceiptV1(binding) => Ok(Some(runner::receipt_v1_validator_facade(&binding))),
     }
 }
 
-fn launch_ack_task_id(state: &CoreState, binding: &runner::IssuedRunnerBinding) -> Option<String> {
+fn planning_task_binding_ref(reference: &Ref) -> Result<Option<PlanningTaskBindingRef>, String> {
+    let Some(encoded) = reference.0.strip_prefix("task-binding:") else {
+        return Ok(None);
+    };
+    let binding: PlanningTaskBindingRef = serde_json::from_str(encoded)
+        .map_err(|error| format!("task binding ref JSON: {error}"))?;
+    if binding.task_id.0.trim().is_empty()
+        || binding.action_id.0.trim().is_empty()
+        || binding.assignment_id.0.trim().is_empty()
+    {
+        return Err("task binding ref has an empty planning identity".to_owned());
+    }
+    Ok(Some(binding))
+}
+
+fn launch_ack_task_id(state: &CoreState, binding: &runner::IssuedRunnerBinding, task_bindings: &[PlanningTaskBindingRef]) -> Result<Option<String>, String> {
     if !launch_ack_consumed(state, binding) {
-        return None;
+        return Ok(None);
     }
-    state.state.refs.keys().find_map(|reference| {
-        let rest = reference.0.strip_prefix("task-binding:")?;
-        let value = serde_json::from_str::<serde_json::Value>(rest).ok()?;
-        let action_id = value.get("action_id").and_then(|item| item.as_str())?;
-        let assignment_id = value.get("assignment_id").and_then(|item| item.as_str())?;
-        let run_revision = value.get("run_revision").and_then(|item| item.as_u64())?;
-        let task_id = value.get("task_id").and_then(|item| item.as_str())?;
-        (action_id == binding.action_id.0 && assignment_id == binding.assignment_id.0 && run_revision == binding.run_revision).then(|| task_id.to_owned())
-    })
+    let mut matches = task_bindings.iter()
+        .filter(|task| task.action_id == binding.action_id && task.assignment_id == binding.assignment_id && task.run_revision == binding.run_revision)
+        .map(|task| task.task_id.0.clone())
+        .collect::<Vec<_>>();
+    match matches.len() {
+        0 => Err(format!("launch acknowledgement lacks exact task binding:{}:{}:{}", binding.action_id.0, binding.assignment_id.0, binding.run_revision)),
+        1 => Ok(matches.pop()),
+        count => Err(format!("launch acknowledgement has ambiguous task bindings:{}:{}:{}:{count}", binding.action_id.0, binding.assignment_id.0, binding.run_revision)),
+    }
 }
 
 fn read_runner_spec_for_binding(binding: &runner::IssuedRunnerBinding) -> Result<kernel::generated::AgentRunSpec, String> {
@@ -497,10 +565,13 @@ fn planning_task_extractors_complete(workstream: &str, state: &CoreState) -> Res
         .iter()
         .filter(|assignment| assignment.role == "task-extractor")
         .collect::<Vec<_>>();
-    Ok(!extractors.is_empty()
-        && extractors.iter().all(|assignment| {
-            accepted_binding_for_assignment(state, &assignment.assignment_id).is_some()
-        }))
+    if extractors.is_empty() { return Ok(false); }
+    for assignment in extractors {
+        if accepted_binding_for_assignment(state, &assignment.assignment_id)?.is_none() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn ensure_atom_registry_after_task_atoms(workstream: &str, state: &CoreState) -> Result<(), AnyError> {
@@ -509,7 +580,13 @@ fn ensure_atom_registry_after_task_atoms(workstream: &str, state: &CoreState) ->
     if task_extractors.is_empty() {
         return Ok(());
     }
-    let all_accepted = task_extractors.iter().all(|assignment| accepted_binding_for_assignment(state, &assignment.assignment_id).is_some());
+    let mut all_accepted = true;
+    for assignment in task_extractors {
+        if accepted_binding_for_assignment(state, &assignment.assignment_id)?.is_none() {
+            all_accepted = false;
+            break;
+        }
+    }
     if all_accepted {
         let _ = ensure_atom_registry(workstream, state)?;
     }
@@ -551,7 +628,7 @@ fn stage_atom_registry(
                 (binding.clone(), carrier.raw_output.clone(), prefix.to_owned())
             }
             None => {
-                let binding = accepted_binding_for_assignment(state, &assignment.assignment_id)
+                let binding = accepted_binding_for_assignment(state, &assignment.assignment_id)?
                     .ok_or_else(|| format!("CONTEXT_GAP:atom-registry:unaccepted {}", assignment.assignment_id))?;
                 let carrier_text = fs::read_to_string(&binding.carrier_path)
                     .map_err(|error| format!("CONTEXT_GAP:atom-registry-carrier:{}:{error}", binding.carrier_path))?;
@@ -599,8 +676,19 @@ fn ensure_atom_registry(workstream: &str, state: &CoreState) -> Result<(String, 
     }
 }
 
-fn accepted_binding_for_assignment(state: &CoreState, assignment_id: &str) -> Option<runner::IssuedRunnerBinding> {
-    state.state.refs.keys().filter_map(versioned_binding_facade).find(|binding| binding.assignment_id.0 == assignment_id && planning_result_consumed(state, binding))
+fn accepted_binding_for_assignment(state: &CoreState, assignment_id: &str) -> Result<Option<runner::IssuedRunnerBinding>, String> {
+    let mut matches = Vec::new();
+    for reference in state.state.refs.keys() {
+        let Some(binding) = versioned_binding_facade(reference)? else { continue; };
+        if binding.assignment_id.0 == assignment_id && planning_result_consumed(state, &binding) {
+            matches.push(binding);
+        }
+    }
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(matches.pop()),
+        count => Err(format!("accepted planning binding is ambiguous for {assignment_id}:{count}")),
+    }
 }
 
 fn accepted_planning_artifacts_for_issue(workstream: &str, state: &CoreState) -> Result<Vec<runner::AcceptedPlanningArtifactBinding>, AnyError> {
@@ -610,14 +698,20 @@ fn accepted_planning_artifacts_for_issue(workstream: &str, state: &CoreState) ->
         assignments.insert(assignment.assignment_id.as_str(), (order, assignment));
     }
     let mut rows: Vec<(String, usize, runner::AcceptedPlanningArtifactBinding)> = Vec::new();
-    for binding in state.state.refs.keys().filter_map(versioned_binding_facade) {
+    for reference in state.state.refs.keys() {
+        let Some(binding) = versioned_binding_facade(reference)
+            .map_err(|error| format!("CONTEXT_GAP:accepted-artifact:{error}"))?
+        else { continue; };
         if binding.workstream.0 != workstream || !planning_result_consumed(state, &binding) { continue; }
         let Some((order, assignment)) = assignments.get(binding.assignment_id.0.as_str()) else {
             return Err(format!("CONTEXT_GAP:accepted-artifact:unknown assignment {}", binding.assignment_id.0).into());
         };
-        let expected = assignment.boundary_id.as_deref().unwrap_or("planning.questions.v1");
-        if expected != binding.result_contract.0 {
-            return Err(format!("CONTEXT_GAP:accepted-artifact:boundary drift {} expected {expected} got {}", binding.assignment_id.0, binding.result_contract.0).into());
+        let expected = assignment.boundary_id.as_deref().ok_or_else(|| format!(
+            "CONTEXT_GAP:accepted-artifact:assignment {} lacks boundary authority",
+            binding.assignment_id.0
+        ))?;
+        if expected != binding.result_contract.0 || expected != binding.boundary_id.0 {
+            return Err(format!("CONTEXT_GAP:accepted-artifact:boundary drift {} expected {expected} got boundary={} result_contract={}", binding.assignment_id.0, binding.boundary_id.0, binding.result_contract.0).into());
         }
         let categories = accepted_artifact_categories_for_role(&assignment.role, &binding.result_contract.0)?;
         if categories.is_empty() { continue; }
@@ -838,14 +932,8 @@ fn event_has_one_ref(event: &EventRow, value: &str) -> bool {
         == 1
 }
 
-fn receipt_consumed_ready_event(event: &EventRow) -> bool {
-    event.kind.0 == "submit:receipt-consumed"
-        && event_has_one_ref(event, "planning-transition-kind:planning:ready-to-execute")
-        && event.artifact_refs.iter().filter(|reference| reference.0.starts_with(SUBMIT_RECEIPT_CONSUMED_PREFIX)).count() == 1
-}
-
-fn planning_ready_event(event: &EventRow) -> bool {
-    event.kind.0 == "planning:ready-to-execute" || receipt_consumed_ready_event(event)
+fn planning_ready_event(event: &EventRow) -> Result<bool, String> {
+    Ok(matches!(logical_planning_event_kind(event)?, Some("planning:ready-to-execute")))
 }
 
 fn v2_ready_event_is_complete(event: &EventRow, root: &ApprovedPlanV2ReadyRootV1) -> bool {
@@ -869,7 +957,7 @@ fn v2_ready_event_is_complete(event: &EventRow, root: &ApprovedPlanV2ReadyRootV1
             && event.artifact_refs.iter().filter(|reference| reference.0.starts_with("watchdog-effects:")).count() == 1
             && event.artifact_refs.iter().filter(|reference| reference.0.starts_with("watchdog-semantic-authority:")).count() == 1;
     }
-    common && receipt_consumed_ready_event(event)
+    common && event.kind.0 == "submit:receipt-consumed"
 }
 
 fn v2_ready_root_for_workstream(
@@ -884,10 +972,11 @@ fn v2_ready_root_for_workstream(
             .filter(|reference| reference.0.starts_with(APPROVED_PLAN_V2_READY_ROOT_PREFIX))
             .map(parse_approved_plan_v2_ready_root)
             .collect::<Result<Vec<_>, _>>()?;
-        if !planning_ready_event(event) && !roots.is_empty() {
+        let ready = planning_ready_event(event)?;
+        if !ready && !roots.is_empty() {
             return Err("approved-plan-v2 ready root appears outside ready event".to_owned());
         }
-        if !planning_ready_event(event) {
+        if !ready {
             continue;
         }
         for root in roots.iter().flatten() {
@@ -948,7 +1037,10 @@ fn read_approved_plan_artifact(
     let ready_events = state
         .events
         .iter()
-        .filter(|event| planning_ready_event(event))
+        .map(|event| planning_ready_event(event).map(|ready| (event, ready)))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter_map(|(event, ready)| ready.then_some(event))
         .collect::<Vec<_>>();
     if !ready_events.is_empty()
         && ready_events
@@ -991,34 +1083,35 @@ fn v2_subject_binding(
         .planning_subject_digest
         .as_ref()
         .ok_or_else(|| "V2 recovery missing typed subject digest".to_owned())?;
-    let mut matches = state
-        .state
-        .refs
-        .keys()
-        .filter_map(|reference| match runner::decode_versioned_binding_ref(&reference.0).ok()? {
-            // Historical replay stays byte-for-byte on its legacy carrier
-            // path. Only fresh V5 subjects must be receipt-consumed roots.
-            runner::VersionedRunnerBinding::ReplayV0(binding) => Some((binding, false)),
-            runner::VersionedRunnerBinding::ReceiptV1(binding) => {
-                Some((runner::receipt_v1_validator_facade(&binding), true))
-            }
-        })
-        .filter(|(candidate, receipt_v1)| {
-            if candidate.assignment_id != *assignment
-                || candidate.carrier_path != *path
-                || (*receipt_v1 && !planning_result_consumed(state, candidate))
-            {
-                return false;
-            }
-            runner::read_bounded_authority_file(
-                Path::new(&candidate.carrier_path),
-                MAX_TERMINAL_CARRIER_BYTES,
-            )
-            .map(|bytes| sha256_hex_local(&bytes) == *digest)
-            .unwrap_or(false)
-        })
-        .map(|(binding, _)| binding)
-        .collect::<Vec<_>>();
+    let mut matches = Vec::new();
+    for reference in state.state.refs.keys() {
+        let Some(candidate) = versioned_binding_facade(reference).map_err(|error| {
+            format!("V2 recovery typed subject binding is malformed: {error}")
+        })? else { continue; };
+        let receipt_v1 = reference.0.starts_with(runner::ISSUED_BINDING_REF_PREFIX)
+            && matches!(
+                runner::decode_versioned_binding_ref(&reference.0)
+                    .map_err(|error| format!("V2 recovery typed subject binding is malformed: {error}"))?,
+                runner::VersionedRunnerBinding::ReceiptV1(_)
+            );
+        if candidate.assignment_id != *assignment || candidate.carrier_path != *path { continue; }
+        if receipt_v1 && !planning_result_consumed(state, &candidate) { continue; }
+        let bytes = runner::read_bounded_authority_file(
+            Path::new(&candidate.carrier_path),
+            MAX_TERMINAL_CARRIER_BYTES,
+        ).map_err(|error| format!(
+            "V2 recovery typed subject binding is absent or drifted: carrier read:{}:{error}",
+            candidate.carrier_path
+        ))?;
+        let actual = sha256_hex_local(&bytes);
+        if actual != *digest {
+            return Err(format!(
+                "V2 recovery typed subject binding is absent or drifted: carrier digest drift:{}:expected={digest}:got={actual}",
+                candidate.carrier_path
+            ));
+        }
+        matches.push(candidate);
+    }
     match matches.len() {
         1 => Ok(matches.remove(0)),
         0 => Err("V2 recovery typed subject binding is absent or drifted".to_owned()),
