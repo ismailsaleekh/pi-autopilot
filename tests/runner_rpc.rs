@@ -1,12 +1,18 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::fs;
 use std::io::{BufReader, ErrorKind, Read};
+#[cfg(unix)]
+use std::num::NonZeroU32;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use drivers::runner::rpc::{
-    CompactionReason, JsonlReader, RpcClient, RpcCommand, RpcCommandKind, RpcError, RpcEvent,
-    RpcFrame, RpcProtocol, RpcSpawnConfig, launch_arguments,
+    ChildControlLaunchConfig, CompactionReason, JsonlReader, RpcClient, RpcCommand, RpcCommandKind,
+    RpcError, RpcEvent, RpcFrame, RpcProtocol, RpcSpawnConfig, launch_arguments,
 };
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
@@ -477,6 +483,124 @@ fn runner_rpc_spawn_uses_exact_rpc_flags_and_removes_metered_api_environment() {
     assert_eq!(env["OPENROUTER_API_KEY"], serde_json::Value::Null);
 }
 
+#[cfg(unix)]
+#[test]
+fn runner_rpc_v5_denies_then_readds_exactly_five_control_variables() {
+    let root = temp_root("runner-rpc-v5-env");
+    let (listener, socket) = control_socket();
+    let version_env = root.join("version-env.json");
+    let launch_env = root.join("launch-env.json");
+    write_fake_pi(
+        &root,
+        &format!(
+            r#"#!/usr/bin/env python3
+import json, os, sys
+keys = ['AUTOPILOT_CONTROL_SOCK','AUTOPILOT_CONTROL_TOKEN','AUTOPILOT_CONTROL_RUN_ID','AUTOPILOT_CONTROL_ASSIGNMENT','AUTOPILOT_CONTROL_ATTEMPT','AUTOPILOT_CHILD_CONTROL_SOCKET_PATH','AUTOPILOT_CHILD_CONTROL_BROKER_CAPABILITY']
+if '--version' in sys.argv:
+    json.dump({{key:os.environ.get(key) for key in keys}}, open({version_env:?}, 'w'))
+    print('0.84.1')
+    sys.exit(0)
+json.dump({{'values':{{key:os.environ.get(key) for key in keys}},'control_keys':sorted(key for key in os.environ if key.startswith('AUTOPILOT_CONTROL_'))}}, open({launch_env:?}, 'w'))
+for _ in sys.stdin: pass
+"#
+        ),
+    );
+    let mut config = test_spawn_config(&root);
+    config.pi_executable = root.join("pi").into_os_string();
+    config.runtime_addon = Some(root.join("child-addon.ts"));
+    config.terminal_profile = Some("planning.task-atoms.v1:autopilot_submit_atoms".to_owned());
+    config.carrier_binding = Some("binding".to_owned());
+    config.child_control = Some(ChildControlLaunchConfig {
+        socket_path: socket.clone(),
+        token: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
+        run_id: "019fa883-1eaf-75f9-99af-6aa246736f72".to_owned(),
+        assignment_id: "planning-main-task-extractor-01".to_owned(),
+        attempt: NonZeroU32::new(1).expect("nonzero"),
+        required_pi_version: "0.84.1".to_owned(),
+    });
+    let mut client = RpcClient::spawn(config).expect("V5 spawn");
+    client
+        .shutdown(Duration::from_secs(5))
+        .expect("V5 shutdown");
+    drop(listener);
+    let version: serde_json::Value =
+        serde_json::from_slice(&fs::read(version_env).expect("version env")).expect("version json");
+    let launch: serde_json::Value =
+        serde_json::from_slice(&fs::read(launch_env).expect("launch env")).expect("launch json");
+    for private in [
+        "AUTOPILOT_CHILD_CONTROL_SOCKET_PATH",
+        "AUTOPILOT_CHILD_CONTROL_BROKER_CAPABILITY",
+    ] {
+        assert_eq!(
+            version[private],
+            serde_json::Value::Null,
+            "version {private}"
+        );
+        assert_eq!(
+            launch["values"][private],
+            serde_json::Value::Null,
+            "launch {private}"
+        );
+    }
+    assert_eq!(version["AUTOPILOT_CONTROL_TOKEN"], serde_json::Value::Null);
+    assert_eq!(
+        launch["control_keys"],
+        serde_json::json!([
+            "AUTOPILOT_CONTROL_ASSIGNMENT",
+            "AUTOPILOT_CONTROL_ATTEMPT",
+            "AUTOPILOT_CONTROL_RUN_ID",
+            "AUTOPILOT_CONTROL_SOCK",
+            "AUTOPILOT_CONTROL_TOKEN"
+        ])
+    );
+    assert_eq!(
+        launch["values"]["AUTOPILOT_CONTROL_SOCK"],
+        socket.to_string_lossy().as_ref()
+    );
+    assert_eq!(launch["values"]["AUTOPILOT_CONTROL_ATTEMPT"], "1");
+}
+
+#[cfg(unix)]
+#[test]
+fn runner_rpc_v5_version_mismatch_never_spawns_the_controlled_child() {
+    let root = temp_root("runner-rpc-v5-version");
+    let (_listener, socket) = control_socket();
+    let launch = root.join("launch-should-not-exist");
+    write_fake_pi(
+        &root,
+        &format!(
+            r#"#!/usr/bin/env python3
+import pathlib, sys
+if '--version' in sys.argv:
+    print('0.84.0')
+    sys.exit(0)
+pathlib.Path({launch:?}).write_text('launched')
+"#
+        ),
+    );
+    let mut config = test_spawn_config(&root);
+    config.pi_executable = root.join("pi").into_os_string();
+    config.runtime_addon = Some(root.join("child-addon.ts"));
+    config.terminal_profile = Some("planning.task-atoms.v1:autopilot_submit_atoms".to_owned());
+    config.carrier_binding = Some("binding".to_owned());
+    config.child_control = Some(ChildControlLaunchConfig {
+        socket_path: socket,
+        token: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
+        run_id: "019fa883-1eaf-75f9-99af-6aa246736f72".to_owned(),
+        assignment_id: "planning-main-task-extractor-01".to_owned(),
+        attempt: NonZeroU32::new(1).expect("nonzero"),
+        required_pi_version: "0.84.1".to_owned(),
+    });
+    assert!(matches!(
+        RpcClient::spawn(config),
+        Err(RpcError::ProtocolViolation(detail)) if detail.contains("required V5 runtime")
+    ));
+    assert!(
+        !launch.exists(),
+        "version mismatch launched a control-bearing Pi child"
+    );
+}
+
 #[test]
 fn launch_arguments_include_explicit_child_addon_once() {
     let root = temp_root("runner-launch-addon");
@@ -728,6 +852,27 @@ fn write_fake_pi(root: &Path, body: &str) {
         perms.set_mode(0o755);
         fs::set_permissions(&path, perms).expect("chmod");
     }
+}
+
+#[cfg(unix)]
+fn control_socket() -> (UnixListener, PathBuf) {
+    let root = PathBuf::from("/tmp/.pi-ap");
+    fs::create_dir_all(&root).expect("broker root");
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).expect("broker root mode");
+    let directory = loop {
+        let value = TEMP_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let directory = root.join(format!("{value:010x}"));
+        match fs::create_dir(&directory) {
+            Ok(()) => break directory,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("broker directory {directory:?}: {error}"),
+        }
+    };
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).expect("broker dir mode");
+    let socket = directory.join("s");
+    let listener = UnixListener::bind(&socket).expect("broker socket");
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).expect("broker socket mode");
+    (listener, socket)
 }
 
 fn temp_root(name: &str) -> PathBuf {

@@ -1,8 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
+#[cfg(unix)]
+use std::net::Shutdown as NetShutdown;
 use std::num::NonZeroU32;
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -11,13 +15,17 @@ use crate::checkpoint::{
     ContextBudget,
 };
 use crate::runner::rpc::{
-    AppendedEntry, CompactionReason, DeliveryPolicyLaunchConfig, RpcClient, RpcCommand,
-    RpcCommandKind, RpcDiagnostics, RpcEvent, RpcFrame, RpcResponse, RpcSpawnConfig,
-    TerminalMessage, ToolCarrierDetails, ValidationEvidenceLaunchConfig,
+    AppendedEntry, ChildControlLaunchConfig, CompactionReason, DeliveryPolicyLaunchConfig,
+    RpcClient, RpcCommand, RpcCommandKind, RpcDiagnostics, RpcEvent, RpcFrame, RpcResponse,
+    RpcSpawnConfig, TerminalMessage, ToolCarrierDetails, ValidationEvidenceLaunchConfig,
 };
 
 use kernel::failure::{Failure, OperatorDecision, RetryPolicy};
-use kernel::generated::{AdmissionMode, AgentRunSpec, AgentRunSpecV5, SessionContinuity, TaskDocument};
+use kernel::generated::{
+    AgentRunSpec, AgentRunSpecV5, BlockedResultObservedAckStatus, ChildControlAcceptReceipt,
+    ChildControlRuntimeEvidence, CoreToHostBlockedResultObservedPayload, SessionContinuity,
+    TaskDocument,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest as ShaDigest, Sha256};
@@ -620,23 +628,45 @@ pub fn main(args: &[String]) -> Result<(), String> {
         let fresh: AgentRunSpecV5 = serde_json::from_value(spec_value).map_err(|error| {
             format!("agent-run V5 spec is malformed, incomplete, or has unknown fields: {error}")
         })?;
-        if fresh.schema.0 != "autopilot.agent_run_spec.v5"
-            || fresh.admission_mode != AdmissionMode::ReceiptV1
-            || fresh.required_pi_version != super::REQUIRED_PI_VERSION
-            || fresh.child_control_socket_path.0.is_empty()
-            || !super::constant_time_hex_digest_matches(
-                &fresh.child_control_token,
-                &fresh.child_control_token_digest.0,
-            )
-        {
-            return Err("agent-run V5 child-control authority drift".to_owned());
-        }
         let facade = super::project_v5_spec_for_shared_admission(&fresh);
+        let control = super::v5_child_control_launch_config(&fresh)
+            .map_err(|error| format!("agent-run V5 child-control authority drift: {error}"))?;
         validate_spec(&facade, &spec_path)?;
-        // Fresh V5 has no child-owned carrier/audit persistence path. The
-        // Host broker (added separately) transports its terminal payload to
-        // Core's `child-control` route, which stages and roots the receipt.
-        return Err("agent-run receipt_v1 requires the Host child-control broker".to_owned());
+        let prompt_path = PathBuf::from(&facade.prompt_path.0);
+        let prompt = read_bounded_utf8(
+            &prompt_path,
+            MAX_RENDERED_PROMPT_BYTES,
+            "agent-run V5 prompt read",
+        )?;
+        let digest = sha256_hex(prompt.as_bytes());
+        if digest != facade.prompt_digest.0 {
+            return Err(format!(
+                "agent-run V5 prompt digest mismatch: expected {}, got {digest}",
+                facade.prompt_digest.0
+            ));
+        }
+        let mut runner = RpcAssignment::spawn_and_configure_v5(&facade, control.clone())?;
+        let mut session = PromptSession::new(&facade);
+        let result =
+            run_v5_child_control_session(&mut runner, &facade, &fresh, &mut session, &prompt);
+        match result {
+            Ok(V5AcceptedTerminal::Submit) => runner.shutdown_v5(),
+            Ok(V5AcceptedTerminal::Blocked {
+                receipt_id,
+                tool_call_id,
+            }) => match observe_blocked_result(&control, receipt_id, tool_call_id) {
+                Ok(()) => runner.shutdown_v5(),
+                Err(error) => {
+                    let _ = runner.shutdown_v5();
+                    Err(error)
+                }
+            },
+            Err(error) => {
+                let _ = runner.shutdown_v5();
+                Err(error)
+            }
+        }?;
+        return Ok(());
     }
     let spec: AgentRunSpec = serde_json::from_value(spec_value).map_err(|error| {
         format!("agent-run spec is malformed, incomplete, or has unknown fields: {error}")
@@ -707,6 +737,378 @@ pub fn main(args: &[String]) -> Result<(), String> {
     append_attempt_event(&spec, attempt, "accepted", AttemptEventDetail::none())
         .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+enum V5AcceptedTerminal {
+    Submit,
+    Blocked {
+        receipt_id: String,
+        tool_call_id: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct V5SuccessfulTool {
+    tool_call_id: String,
+    details: Value,
+    accepted: V5AcceptedTerminal,
+    message_correlated: bool,
+}
+
+/// Fresh V5 has one live Pi session. A generated bridge turns a Core RETRY
+/// into an ordinary nonterminating tool error, so this loop deliberately has
+/// no counter, deadline, repair prompt, or tool freeze.
+fn run_v5_child_control_session(
+    runner: &mut RpcAssignment,
+    facade: &AgentRunSpec,
+    fresh: &AgentRunSpecV5,
+    session: &mut PromptSession,
+    prompt: &str,
+) -> Result<V5AcceptedTerminal, String> {
+    session
+        .validate_prompt_purpose(PromptPurpose::Normal)
+        .map_err(ChildError::into_message)?;
+    let prompt_id = runner.next_id("v5-prompt");
+    runner
+        .client
+        .send_command(RpcCommand::prompt(prompt_id.clone(), prompt.to_owned()))
+        .map_err(|error| format!("agent-run V5 rpc prompt failed: {error}"))?;
+    session.turns_sent = session.turns_sent.saturating_add(1);
+
+    let mut prompt_response_seen = false;
+    let mut successful: Option<V5SuccessfulTool> = None;
+    let mut tool_result_ids = BTreeSet::new();
+    let mut tool_result_details = BTreeMap::new();
+    loop {
+        let frame = runner
+            .client
+            .next_frame()
+            .map_err(|error| format!("agent-run V5 rpc stream failed: {error}"))?
+            .ok_or_else(|| "agent-run V5 rpc stream ended before agent_settled".to_owned())?;
+        match frame {
+            RpcFrame::Response(response) if response.id == prompt_id => {
+                if response.command != RpcCommandKind::Prompt || !response.success {
+                    return Err("agent-run V5 prompt response drift".to_owned());
+                }
+                prompt_response_seen = true;
+            }
+            RpcFrame::Response(response) => {
+                return Err(format!(
+                    "agent-run V5 unexpected rpc response id {} during child-control session",
+                    response.id
+                ));
+            }
+            RpcFrame::Event(RpcEvent::ToolExecutionStart) if successful.is_some() => {
+                return Err("agent-run V5 tool activity after accepted receipt".to_owned());
+            }
+            RpcFrame::Event(RpcEvent::ToolExecutionEnd {
+                tool_call_id,
+                tool_name,
+                details,
+                is_error,
+                terminate,
+            }) => {
+                if successful.is_some() {
+                    return Err("agent-run V5 tool activity after accepted receipt".to_owned());
+                }
+                let Some(kind) = v5_child_control_tool_kind(facade, &tool_name)? else {
+                    continue;
+                };
+                if is_error && !terminate {
+                    // RETRY is deliberately model-visible and nonterminal.
+                    continue;
+                }
+                if is_error || !terminate {
+                    return Err(format!(
+                        "agent-run V5 child-control tool {tool_name} has invalid isError={is_error} terminate={terminate} outcome"
+                    ));
+                }
+                let details = details.ok_or_else(|| {
+                    format!(
+                        "agent-run V5 child-control tool {tool_name} returned no receipt details"
+                    )
+                })?;
+                let receipt: ChildControlAcceptReceipt = serde_json::from_value(details.clone())
+                    .map_err(|error| {
+                        format!(
+                            "agent-run V5 child-control tool {tool_name} details are not a generated ACCEPT receipt: {error}"
+                        )
+                    })?;
+                let accepted =
+                    verify_v5_accept_receipt(facade, fresh, kind, &tool_call_id, &receipt)?;
+                let message_correlated = if let Some(message_details) =
+                    tool_result_details.get(&tool_call_id)
+                {
+                    if canonical_detail_bytes(&details)? != canonical_detail_bytes(message_details)?
+                    {
+                        return Err(format!(
+                            "agent-run V5 tool details drift between tool_execution_end and toolResult for {tool_call_id}"
+                        ));
+                    }
+                    true
+                } else {
+                    false
+                };
+                successful = Some(V5SuccessfulTool {
+                    tool_call_id,
+                    details,
+                    accepted,
+                    message_correlated,
+                });
+            }
+            RpcFrame::Event(RpcEvent::MessageEnd { message }) if message.role == "toolResult" => {
+                let tool_call_id = message
+                    .tool_call_id
+                    .ok_or_else(|| "agent-run V5 toolResult missing toolCallId".to_owned())?;
+                if !tool_result_ids.insert(tool_call_id.clone()) {
+                    return Err(format!(
+                        "agent-run V5 received duplicate toolResult for {tool_call_id}"
+                    ));
+                }
+                let Some(details) = message.details else {
+                    continue;
+                };
+                if tool_result_details
+                    .insert(tool_call_id.clone(), details.clone())
+                    .is_some()
+                {
+                    return Err(format!(
+                        "agent-run V5 received duplicate toolResult details for {tool_call_id}"
+                    ));
+                }
+                if let Some(accepted) = successful
+                    .as_mut()
+                    .filter(|item| item.tool_call_id == tool_call_id)
+                {
+                    if canonical_detail_bytes(&accepted.details)?
+                        != canonical_detail_bytes(&details)?
+                    {
+                        return Err(format!(
+                            "agent-run V5 tool details drift between tool_execution_end and toolResult for {tool_call_id}"
+                        ));
+                    }
+                    accepted.message_correlated = true;
+                }
+            }
+            RpcFrame::Event(RpcEvent::AgentSettled) => {
+                if !prompt_response_seen {
+                    return Err(
+                        "agent-run V5 prompt response missing before agent_settled".to_owned()
+                    );
+                }
+                let accepted = successful.ok_or_else(|| {
+                    "agent-run V5 session settled without an accepted child-control receipt"
+                        .to_owned()
+                })?;
+                if !accepted.message_correlated {
+                    return Err(format!(
+                        "agent-run V5 terminating tool missing correlated toolResult details for {}",
+                        accepted.tool_call_id
+                    ));
+                }
+                return Ok(accepted.accepted);
+            }
+            RpcFrame::Event(RpcEvent::CompactionStart {
+                reason: CompactionReason::Threshold | CompactionReason::Overflow,
+            }) => {
+                return Err("agent-run V5 Pi attempted automatic compaction".to_owned());
+            }
+            RpcFrame::Event(_) => {}
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum V5ChildControlTool {
+    Submit,
+    Blocked,
+}
+
+fn v5_child_control_tool_kind(
+    facade: &AgentRunSpec,
+    tool_name: &str,
+) -> Result<Option<V5ChildControlTool>, String> {
+    let submit = super::terminal_profile_for(
+        &facade.role_id.0,
+        &facade.boundary_id.0,
+        &facade.result_contract.0,
+    )
+    .map_err(|error| error.to_string())?;
+    if tool_name == submit.1 {
+        return Ok(Some(V5ChildControlTool::Submit));
+    }
+    let blocked = kernel::generated::UNIVERSAL_CHILD_TOOLS
+        .first()
+        .ok_or_else(|| "agent-run V5 lacks generated blocked tool metadata".to_owned())?;
+    if tool_name == blocked.1 {
+        return Ok(Some(V5ChildControlTool::Blocked));
+    }
+    if kernel::generated::TERMINAL_PROFILES
+        .iter()
+        .any(|profile| profile.1 == tool_name)
+    {
+        return Err(format!(
+            "agent-run V5 received an unexpected terminal tool {tool_name}"
+        ));
+    }
+    Ok(None)
+}
+
+fn verify_v5_accept_receipt(
+    facade: &AgentRunSpec,
+    fresh: &AgentRunSpecV5,
+    kind: V5ChildControlTool,
+    tool_call_id: &str,
+    receipt: &ChildControlAcceptReceipt,
+) -> Result<V5AcceptedTerminal, String> {
+    let attempt = fresh
+        .attempt
+        .filter(|attempt| *attempt != 0)
+        .ok_or_else(|| "agent-run V5 receipt lacks explicit nonzero attempt".to_owned())?;
+    match (kind, receipt) {
+        (V5ChildControlTool::Submit, ChildControlAcceptReceipt::Submit { schema, receipt }) => {
+            let profile = super::terminal_profile_for(
+                &facade.role_id.0,
+                &facade.boundary_id.0,
+                &facade.result_contract.0,
+            )
+            .map_err(|error| error.to_string())?;
+            if schema.0 != "autopilot.child_control_accept_receipt.v1"
+                || receipt.schema.0 != "autopilot.submit_receipt.v1"
+                || receipt.run_id != fresh.run_id
+                || receipt.run_revision != facade.run_revision
+                || receipt.workstream != facade.workstream
+                || receipt.action_id != facade.action_id
+                || receipt.assignment_id != fresh.assignment_id
+                || receipt.attempt != attempt
+                || receipt.profile_id != profile.0
+                || receipt.tool_name.0 != profile.1
+                || receipt.tool_call_id != tool_call_id
+                || receipt.boundary_id != facade.boundary_id
+                || receipt.result_contract != facade.result_contract
+                || receipt.schema_digest.0 != profile.4
+                || receipt.carrier_binding_digest.0 != carrier_binding(facade)
+                || receipt.receipt_id.0.is_empty()
+                || receipt.request_id.0.is_empty()
+            {
+                return Err("agent-run V5 submit receipt identity drift".to_owned());
+            }
+            Ok(V5AcceptedTerminal::Submit)
+        }
+        (V5ChildControlTool::Blocked, ChildControlAcceptReceipt::Blocked { schema, receipt }) => {
+            let blocked = kernel::generated::UNIVERSAL_CHILD_TOOLS
+                .first()
+                .ok_or_else(|| "agent-run V5 lacks generated blocked tool metadata".to_owned())?;
+            if schema.0 != "autopilot.child_control_accept_receipt.v1"
+                || receipt.schema.0 != "autopilot.blocked_receipt.v1"
+                || receipt.run_id != fresh.run_id
+                || receipt.run_revision != facade.run_revision
+                || receipt.workstream != facade.workstream
+                || receipt.action_id != facade.action_id
+                || receipt.assignment_id != fresh.assignment_id
+                || receipt.attempt != attempt
+                || receipt.profile_id != blocked.0
+                || receipt.tool_name.0 != blocked.1
+                || receipt.tool_call_id != tool_call_id
+                || receipt.receipt_id.0.is_empty()
+                || receipt.request_id.0.is_empty()
+            {
+                return Err("agent-run V5 blocked receipt identity drift".to_owned());
+            }
+            Ok(V5AcceptedTerminal::Blocked {
+                receipt_id: receipt.receipt_id.0.clone(),
+                tool_call_id: tool_call_id.to_owned(),
+            })
+        }
+        _ => Err("agent-run V5 child-control receipt/tool kind drift".to_owned()),
+    }
+}
+
+fn canonical_detail_bytes(value: &Value) -> Result<Vec<u8>, String> {
+    crate::evidence::canonical_json(value)
+        .map_err(|error| format!("agent-run V5 receipt canonicalization failed: {error}"))
+}
+
+fn observe_blocked_result(
+    control: &ChildControlLaunchConfig,
+    receipt_id: String,
+    tool_call_id: String,
+) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let request = serde_json::json!({
+            "schema": "autopilot.blocked_result_observed.v1",
+            "token": control.token,
+            "run_id": control.run_id,
+            "assignment_id": control.assignment_id,
+            "attempt": control.attempt.get(),
+            "receipt_id": receipt_id,
+            "tool_call_id": tool_call_id,
+        });
+        let bytes = serde_json::to_vec(&request)
+            .map_err(|error| format!("agent-run blocked observation serialize failed: {error}"))?;
+        let limit = crate::generated::pi_rpc::DEFAULT_MAX_TERMINAL_BYTES;
+        if bytes.is_empty() || bytes.len() > limit {
+            return Err("agent-run blocked observation frame exceeds the hard ceiling".to_owned());
+        }
+        let mut stream = UnixStream::connect(&control.socket_path).map_err(|error| {
+            format!("agent-run blocked observation transport unavailable: {error}")
+        })?;
+        let length = u32::try_from(bytes.len())
+            .map_err(|_| "agent-run blocked observation frame length overflow".to_owned())?;
+        stream
+            .write_all(&length.to_be_bytes())
+            .and_then(|()| stream.write_all(&bytes))
+            .and_then(|()| stream.flush())
+            .and_then(|()| stream.shutdown(NetShutdown::Write))
+            .map_err(|error| format!("agent-run blocked observation write failed: {error}"))?;
+        let mut header = [0_u8; 4];
+        stream.read_exact(&mut header).map_err(|error| {
+            format!("agent-run blocked observation acknowledgment missing: {error}")
+        })?;
+        let length = usize::try_from(u32::from_be_bytes(header)).map_err(|_| {
+            "agent-run blocked observation acknowledgment length overflow".to_owned()
+        })?;
+        if length == 0 || length > limit {
+            return Err(
+                "agent-run blocked observation acknowledgment exceeds the hard ceiling".to_owned(),
+            );
+        }
+        let mut bytes = vec![0_u8; length];
+        stream.read_exact(&mut bytes).map_err(|error| {
+            format!("agent-run blocked observation acknowledgment truncated: {error}")
+        })?;
+        let mut extra = [0_u8; 1];
+        if stream.read(&mut extra).map_err(|error| {
+            format!("agent-run blocked observation acknowledgment read failed: {error}")
+        })? != 0
+        {
+            return Err(
+                "agent-run blocked observation acknowledgment carried extra bytes".to_owned(),
+            );
+        }
+        let acknowledgment: CoreToHostBlockedResultObservedPayload = serde_json::from_slice(&bytes)
+            .map_err(|error| {
+                format!("agent-run blocked observation acknowledgment malformed: {error}")
+            })?;
+        if acknowledgment.schema.0 != "autopilot.blocked_result_observed_ack.v1"
+            || acknowledgment.status != BlockedResultObservedAckStatus::Acknowledged
+            || acknowledgment.receipt_id.0 != receipt_id
+            || acknowledgment.latch_id.0.is_empty()
+            || acknowledgment.reporter_task_id.0.is_empty()
+        {
+            return Err(
+                "agent-run blocked observation acknowledgment correlation drift".to_owned(),
+            );
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (control, receipt_id, tool_call_id);
+        Err("agent-run blocked observation requires AF_UNIX".to_owned())
+    }
 }
 
 fn run_value_attempts(
@@ -1376,6 +1778,21 @@ impl RpcAssignment {
     }
 
     fn spawn_and_configure(spec: &AgentRunSpec) -> Result<Self, String> {
+        Self::spawn_and_configure_inner(spec, None, false)
+    }
+
+    fn spawn_and_configure_v5(
+        spec: &AgentRunSpec,
+        child_control: ChildControlLaunchConfig,
+    ) -> Result<Self, String> {
+        Self::spawn_and_configure_inner(spec, Some(child_control), true)
+    }
+
+    fn spawn_and_configure_inner(
+        spec: &AgentRunSpec,
+        child_control: Option<ChildControlLaunchConfig>,
+        v5: bool,
+    ) -> Result<Self, String> {
         let tools = spec
             .allowed_tools
             .iter()
@@ -1412,6 +1829,7 @@ impl RpcAssignment {
             crate::generated::pi_rpc::DEFAULT_MAX_TERMINAL_BYTES,
         )?;
         config.max_terminal_bytes = bounded_terminal_limit(terminal_limit)?;
+        config.child_control = child_control;
         if let Some((path, _)) = runtime_addon(spec) {
             config.runtime_addon = Some(PathBuf::from(&path.0));
             config.terminal_profile = spec.terminal_profile_id.clone();
@@ -1515,7 +1933,11 @@ impl RpcAssignment {
         }
         let state_id = runner.next_id("state");
         let state = runner.command_response(RpcCommand::get_state(state_id))?;
-        runner.validate_state(spec, &state)?;
+        if v5 {
+            runner.validate_state_v5(spec, &state)?;
+        } else {
+            runner.validate_state(spec, &state)?;
+        }
         if runtime_addon(spec).is_some() {
             let entries_id = runner.next_id("entries");
             let entries = runner.command_response(RpcCommand::get_entries(entries_id))?;
@@ -2242,6 +2664,37 @@ impl RpcAssignment {
         Ok(())
     }
 
+    /// Fresh V5 validates the same observed Pi identity without creating the
+    /// historical startup marker. Receipt admission, not a runner artifact,
+    /// owns fresh V5 persistence.
+    fn validate_state_v5(&self, spec: &AgentRunSpec, response: &RpcResponse) -> Result<(), String> {
+        let data = response
+            .data
+            .as_ref()
+            .ok_or_else(|| "agent-run V5 get_state missing data".to_owned())?;
+        let value: Value = serde_json::from_str(data)
+            .map_err(|error| format!("agent-run V5 get_state malformed data: {error}"))?;
+        Self::validate_session_history(spec, &value)?;
+        let session = value.get("sessionId").and_then(Value::as_str);
+        let thinking = value.get("thinkingLevel").and_then(Value::as_str);
+        let auto = value.get("autoCompactionEnabled").and_then(Value::as_bool);
+        let model = value
+            .get("model")
+            .and_then(Value::as_object)
+            .ok_or_else(|| "agent-run V5 get_state missing model".to_owned())?;
+        let provider = model.get("provider").and_then(Value::as_str);
+        let model_id = model.get("id").and_then(Value::as_str);
+        if session != Some(spec.session_id.0.as_str())
+            || provider != Some(spec.provider.as_str())
+            || model_id != Some(spec.model.as_str())
+            || thinking != Some(spec.thinking.0.as_str())
+            || auto != Some(false)
+        {
+            return Err("agent-run V5 get_state identity drift".to_owned());
+        }
+        Ok(())
+    }
+
     fn validate_startup_session_history(
         spec: &AgentRunSpec,
         state: &Value,
@@ -2497,16 +2950,29 @@ impl RpcAssignment {
             .map_err(|error| error.to_string())?;
         let diagnostics = self.client.diagnostics();
         write_rpc_stats_if_requested(&diagnostics)?;
-        if shutdown.escalated {
-            return Err("agent-run rpc shutdown escalated after stdin close".to_owned());
+        validate_rpc_shutdown(shutdown)
+    }
+
+    /// V5 success must wait for the same exact process/stderr lifecycle, but
+    /// must not create the historical optional runner diagnostics artifact.
+    fn shutdown_v5(&mut self) -> Result<(), String> {
+        let shutdown = self
+            .client
+            .shutdown(Duration::from_millis(250))
+            .map_err(|error| error.to_string())?;
+        validate_rpc_shutdown(shutdown)
+    }
+}
+
+fn validate_rpc_shutdown(shutdown: crate::runner::rpc::RpcShutdown) -> Result<(), String> {
+    if shutdown.escalated {
+        return Err("agent-run rpc shutdown escalated after stdin close".to_owned());
+    }
+    match shutdown.status {
+        Some(status) if !status.success() => {
+            Err(format!("agent-run pi exited nonzero status={status}"))
         }
-        match shutdown.status {
-            Some(status) if !status.success() => {
-                return Err(format!("agent-run pi exited nonzero status={status}"));
-            }
-            _ => {}
-        }
-        Ok(())
+        _ => Ok(()),
     }
 }
 
@@ -4887,10 +5353,11 @@ fn ensure_carrier_absent(spec: &AgentRunSpec) -> Result<(), String> {
     }
 }
 
-/// Reusable Core-side child admission. The Host supplies only the raw pre-schema
-/// JSON tree and opaque tool-call id; all profile, boundary, schema, and
-/// carrier-binding facts are derived from the authenticated V5 spec facade.
-/// This function never writes a carrier, audit, model submission, or receipt.
+/// Reusable Core-side V5 child admission. The Host supplies the untouched
+/// raw pre-schema JSON tree and separate generated runtime evidence; all
+/// profile, boundary, schema, and carrier-binding facts are derived from the
+/// authenticated V5 spec facade. This never writes a carrier, audit, model
+/// submission, or receipt.
 pub(crate) fn admit_submission(
     spec_path: &Path,
     spec_bytes: &str,
@@ -4898,6 +5365,7 @@ pub(crate) fn admit_submission(
     spec: &AgentRunSpec,
     required_pi_version: &str,
     raw_payload: Value,
+    runtime_evidence: ChildControlRuntimeEvidence,
     tool_call_id: String,
 ) -> Result<PreparedCarrier, AdmissionFailure> {
     if contains_placeholder_sentinel(&raw_payload) {
@@ -4909,6 +5377,8 @@ pub(crate) fn admit_submission(
         &spec.result_contract.0,
     )
     .map_err(|error| AdmissionFailure::Authority(error.to_string()))?;
+    let (delivery_policy_denials, approved_command_executions) =
+        map_runtime_evidence_into_tool_details(spec, runtime_evidence)?;
     let terminal = ToolTerminal {
         tool_name: profile.1.to_owned(),
         tool_call_id,
@@ -4920,11 +5390,10 @@ pub(crate) fn admit_submission(
             schema_digest: profile.4.to_owned(),
             binding: carrier_binding(spec),
             payload: raw_payload.clone(),
-            // Delivery execution ledgers are Host/runner observations. A
-            // raw child-control request cannot manufacture them; the existing
-            // validator consequently rejects their absence as a value retry.
-            delivery_policy_denials: None,
-            approved_command_executions: None,
+            // Runtime evidence is a generated closed carrier beside the raw
+            // model payload. It is never merged into or inferred from it.
+            delivery_policy_denials,
+            approved_command_executions,
         },
         details_value: raw_payload,
     };
@@ -4954,6 +5423,50 @@ pub(crate) fn admit_submission(
         serde_json::Value::String(required_pi_version.to_owned()),
     );
     Ok(prepared)
+}
+
+fn map_runtime_evidence_into_tool_details(
+    spec: &AgentRunSpec,
+    runtime_evidence: ChildControlRuntimeEvidence,
+) -> Result<(Option<Value>, Option<Value>), AdmissionFailure> {
+    if runtime_evidence.schema.0 != "autopilot.child_control_runtime_evidence.v1" {
+        return Err(AdmissionFailure::Authority(
+            "child-control runtime evidence schema drift".to_owned(),
+        ));
+    }
+    let is_delivery = matches!(
+        spec.assignment_kind,
+        kernel::generated::ValidationAssignmentKind::Delivery
+    );
+    match (
+        runtime_evidence.delivery_policy_denials.0,
+        runtime_evidence.approved_command_executions.0,
+        is_delivery,
+    ) {
+        (None, None, false) => Ok((None, None)),
+        (Some(_), _, false) | (_, Some(_), false) => Err(AdmissionFailure::Authority(
+            "child-control runtime evidence must use explicit null delivery ledgers outside delivery"
+                .to_owned(),
+        )),
+        (Some(denials), Some(executions), true) => {
+            let denials = serde_json::to_value(denials).map_err(|error| {
+                AdmissionFailure::Authority(format!(
+                    "child-control runtime denial ledger serialization failed: {error}"
+                ))
+            })?;
+            let executions = serde_json::to_value(executions).map_err(|error| {
+                AdmissionFailure::Authority(format!(
+                    "child-control runtime execution ledger serialization failed: {error}"
+                ))
+            })?;
+            Ok((Some(denials), Some(executions)))
+        }
+        (None, _, true) | (_, None, true) => Err(AdmissionFailure::Value {
+            field: "runtime_evidence".to_owned(),
+            expected: "both delivery runtime ledgers".to_owned(),
+            actual: "missing explicit delivery ledger".to_owned(),
+        }),
+    }
 }
 
 fn contains_placeholder_sentinel(value: &Value) -> bool {
@@ -4995,13 +5508,14 @@ fn prepare_carrier(
             "terminal profile identity drift: expected {profile:?}/{expected_binding}, got {terminal:?}"
         )));
     }
-    let raw_bytes = crate::evidence::canonical_json(&terminal.details.payload).map_err(|error| {
-        CarrierRejection::Value(value_rejection(
-            "payload",
-            "canonical JSON tool payload",
-            error.to_string(),
-        ))
-    })?;
+    let raw_bytes =
+        crate::evidence::canonical_json(&terminal.details.payload).map_err(|error| {
+            CarrierRejection::Value(value_rejection(
+                "payload",
+                "canonical JSON tool payload",
+                error.to_string(),
+            ))
+        })?;
     let raw_output = String::from_utf8(raw_bytes).map_err(|error| {
         CarrierRejection::Identity(format!("canonical JSON payload UTF-8: {error}"))
     })?;

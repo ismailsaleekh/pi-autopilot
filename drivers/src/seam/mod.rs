@@ -10,9 +10,9 @@ use kernel::boundary::Rejection;
 use kernel::generated::{
     AllocationLaneProposal, AutopilotEventRef, BackgroundAction, CONTRACT_VERSION,
     ChildControlAcceptReceipt, ChildControlRequest, ChildControlRequestKind, ChildControlResponse,
-    CoreToHostChildControlPayload, CoreToHostDonePayload, CoreToHostSpawnPayload,
-    CoreToHostSpawnWavePayload, CoreToHostUiPayload, DeferredHostEffectV1, DeliveryBoundary,
-    DeliveryResult, Digest, EventKind, EventRow, HostToCoreAgentResultPayload,
+    ChildControlRuntimeEvidence, CoreToHostChildControlPayload, CoreToHostDonePayload,
+    CoreToHostSpawnPayload, CoreToHostSpawnWavePayload, CoreToHostUiPayload, DeferredHostEffectV1,
+    DeliveryBoundary, DeliveryResult, Digest, EventKind, EventRow, HostToCoreAgentResultPayload,
     HostToCoreBlockedResultObservedPayload, HostToCoreChildControlPayload,
     HostToCoreCommandPayload, HostToCoreSpawnResultPayload, HostToCoreTaskCompletedPayload, Id,
     ModeId, Nullable, PreparedSubmitArtifactRef, PreparedSubmitIssuedAction,
@@ -325,7 +325,8 @@ fn admit_child_control_request(
     // raw bytes. It deliberately does not reread a later request/tool-call or
     // mutable V5 spec before replaying the immutable receipt transaction.
     if matches!(&request.kind, ChildControlRequestKind::Submit) {
-        if !runner::constant_time_hex_digest_matches(&request.token, &binding.run_capability_digest) {
+        if !runner::constant_time_hex_digest_matches(&request.token, &binding.run_capability_digest)
+        {
             return Err(child_control_diagnostic(
                 "submit.capability",
                 "/token",
@@ -455,6 +456,7 @@ fn admit_child_control_request(
             "Resubmit through the exact issued terminal profile.",
         ));
     }
+    validate_child_control_runtime_evidence(request, &facade)?;
     match request.kind {
         ChildControlRequestKind::Blocked => {
             let report: kernel::generated::BlockedReport =
@@ -542,6 +544,7 @@ fn admit_child_control_request(
                 &facade,
                 &spec_v5.required_pi_version,
                 request.raw_payload.clone(),
+                request.runtime_evidence.clone(),
                 request.tool_call_id.clone(),
             )
             .map_err(|failure| match failure {
@@ -579,6 +582,51 @@ fn admit_child_control_request(
             })
         }
     }
+}
+
+fn validate_child_control_runtime_evidence(
+    request: &ChildControlRequest,
+    facade: &kernel::generated::AgentRunSpec,
+) -> Result<(), SubmitDiagnostic> {
+    if request.runtime_evidence.schema.0 != "autopilot.child_control_runtime_evidence.v1" {
+        return Err(child_control_diagnostic(
+            "submit.runtime_evidence_schema",
+            "/runtime_evidence/schema",
+            "autopilot.child_control_runtime_evidence.v1",
+            &serde_json::json!(request.runtime_evidence.schema.0),
+            "Send the generated runtime evidence carrier unchanged.",
+        ));
+    }
+    let delivery_submit = matches!(request.kind, ChildControlRequestKind::Submit)
+        && matches!(
+            facade.assignment_kind,
+            kernel::generated::ValidationAssignmentKind::Delivery
+        );
+    let has_denials = request.runtime_evidence.delivery_policy_denials.0.is_some();
+    let has_executions = request
+        .runtime_evidence
+        .approved_command_executions
+        .0
+        .is_some();
+    if (delivery_submit && (!has_denials || !has_executions))
+        || (!delivery_submit && (has_denials || has_executions))
+    {
+        return Err(child_control_diagnostic(
+            "submit.runtime_evidence_profile",
+            "/runtime_evidence",
+            if delivery_submit {
+                "both delivery runtime ledgers"
+            } else {
+                "explicit null delivery runtime ledgers"
+            },
+            &serde_json::json!({
+                "delivery_policy_denials_present": has_denials,
+                "approved_command_executions_present": has_executions,
+            }),
+            "Send the generated profile-specific runtime evidence without merging it into raw_payload.",
+        ));
+    }
+    Ok(())
 }
 
 fn strict_versioned_runner_bindings(
@@ -1550,6 +1598,11 @@ fn route_blocked_result_observed(
             "evidence": [{"kind":"observation","value":"outer runner correlation"}],
             "last_attempted_action": "blocked-result-observed",
         }),
+        runtime_evidence: ChildControlRuntimeEvidence {
+            schema: SchemaId("autopilot.child_control_runtime_evidence.v1".to_owned()),
+            delivery_policy_denials: Nullable(None),
+            approved_command_executions: Nullable(None),
+        },
     };
     // Wave 6 owns latch lookup and reporter release. Until then an
     // authenticated observation is idempotently recognized, while invalid

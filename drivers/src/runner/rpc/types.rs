@@ -1,4 +1,5 @@
 use std::ffi::OsString;
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::process::ExitStatus;
 
@@ -22,6 +23,9 @@ pub struct RpcSpawnConfig {
     pub carrier_binding: Option<String>,
     pub delivery_policy: Option<DeliveryPolicyLaunchConfig>,
     pub validation_evidence: Option<ValidationEvidenceLaunchConfig>,
+    /// Fresh V5-only child capability facts. `None` means that no nested
+    /// process receives any `AUTOPILOT_CONTROL_*` environment variable.
+    pub child_control: Option<ChildControlLaunchConfig>,
     pub pi_executable: OsString,
     pub stderr_tail_bytes: usize,
     pub max_terminal_bytes: usize,
@@ -47,6 +51,34 @@ pub struct ValidationEvidenceLaunchConfig {
     pub context_digest: String,
     pub cwd: String,
 }
+
+/// The complete closed V5 nested-child control authority. This is deliberately
+/// separate from the Host/Core broker capability, which must never enter a Pi
+/// child process.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ChildControlLaunchConfig {
+    pub socket_path: PathBuf,
+    pub token: String,
+    pub run_id: String,
+    pub assignment_id: String,
+    pub attempt: NonZeroU32,
+    pub required_pi_version: String,
+}
+
+impl std::fmt::Debug for ChildControlLaunchConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ChildControlLaunchConfig")
+            .field("socket_path", &self.socket_path)
+            .field("token", &"<redacted>")
+            .field("run_id", &self.run_id)
+            .field("assignment_id", &self.assignment_id)
+            .field("attempt", &self.attempt)
+            .field("required_pi_version", &self.required_pi_version)
+            .finish()
+    }
+}
+
 impl RpcSpawnConfig {
     #[must_use]
     pub fn new(
@@ -71,6 +103,7 @@ impl RpcSpawnConfig {
             carrier_binding: None,
             delivery_policy: None,
             validation_evidence: None,
+            child_control: None,
             pi_executable: OsString::from("pi"),
             stderr_tail_bytes: DEFAULT_STDERR_TAIL_BYTES,
             max_terminal_bytes: super::DEFAULT_MAX_TERMINAL_BYTES,

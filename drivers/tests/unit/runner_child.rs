@@ -21,6 +21,120 @@ fn terminal_byte_override_cannot_widen_the_generated_hard_ceiling() {
 }
 
 #[test]
+fn runtime_evidence_maps_delivery_ledgers_but_requires_nulls_elsewhere() {
+    let null_evidence: kernel::generated::ChildControlRuntimeEvidence =
+        serde_json::from_value(serde_json::json!({
+            "schema":"autopilot.child_control_runtime_evidence.v1",
+            "delivery_policy_denials":null,
+            "approved_command_executions":null
+        }))
+        .expect("generated explicit-null evidence");
+    let planning = agent_run_spec_with_tools(["autopilot_submit_atoms"]);
+    assert_eq!(
+        map_runtime_evidence_into_tool_details(&planning, null_evidence.clone())
+            .expect("non-delivery explicit nulls"),
+        (None, None)
+    );
+
+    let delivery_evidence: kernel::generated::ChildControlRuntimeEvidence =
+        serde_json::from_value(serde_json::json!({
+            "schema":"autopilot.child_control_runtime_evidence.v1",
+            "delivery_policy_denials":{
+                "schema":"autopilot.delivery_policy_denials.v2",
+                "overflowed":false,
+                "entries":[]
+            },
+            "approved_command_executions":{
+                "schema":"autopilot.approved_command_executions.v1",
+                "overflowed":false,
+                "entries":[]
+            }
+        }))
+        .expect("generated delivery evidence");
+    let mut delivery = planning.clone();
+    delivery.assignment_kind = kernel::generated::ValidationAssignmentKind::Delivery;
+    let (denials, executions) =
+        map_runtime_evidence_into_tool_details(&delivery, delivery_evidence)
+            .expect("delivery ledger mapping");
+    assert_eq!(
+        denials.expect("denials")["schema"],
+        "autopilot.delivery_policy_denials.v2"
+    );
+    assert_eq!(
+        executions.expect("executions")["schema"],
+        "autopilot.approved_command_executions.v1"
+    );
+
+    assert!(matches!(
+        map_runtime_evidence_into_tool_details(&planning, serde_json::from_value(serde_json::json!({
+            "schema":"autopilot.child_control_runtime_evidence.v1",
+            "delivery_policy_denials":{"schema":"autopilot.delivery_policy_denials.v2","overflowed":false,"entries":[]},
+            "approved_command_executions":null
+        })).expect("generated non-delivery evidence")),
+        Err(AdmissionFailure::Authority(_))
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn blocked_observation_rejects_malformed_and_wrong_generated_acknowledgments() {
+    use std::io::{Read, Write};
+    use std::num::NonZeroU32;
+    use std::os::unix::net::UnixListener;
+
+    for (label, acknowledgment, expected) in [
+        (
+            "malformed",
+            serde_json::json!({}),
+            "acknowledgment malformed",
+        ),
+        (
+            "wrong",
+            serde_json::json!({
+                "schema":"autopilot.blocked_result_observed_ack.v1",
+                "receipt_id":"wrong-receipt",
+                "latch_id":"latch-1",
+                "reporter_task_id":"reporter-1",
+                "status":"acknowledged"
+            }),
+            "acknowledgment correlation drift",
+        ),
+    ] {
+        let socket = std::path::PathBuf::from(format!(
+            "/tmp/ap-v5-ack-{}-{label}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&socket);
+        let listener = UnixListener::bind(&socket).expect("ack listener");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("ack accept");
+            let mut header = [0_u8; 4];
+            stream.read_exact(&mut header).expect("request header");
+            let mut request = vec![0_u8; u32::from_be_bytes(header) as usize];
+            stream.read_exact(&mut request).expect("request body");
+            let body = serde_json::to_vec(&acknowledgment).expect("ack bytes");
+            stream
+                .write_all(&(body.len() as u32).to_be_bytes())
+                .and_then(|()| stream.write_all(&body))
+                .expect("ack write");
+        });
+        let control = ChildControlLaunchConfig {
+            socket_path: socket.clone(),
+            token: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
+            run_id: "run-1".to_owned(),
+            assignment_id: "assignment-1".to_owned(),
+            attempt: NonZeroU32::new(1).expect("nonzero"),
+            required_pi_version: "0.84.1".to_owned(),
+        };
+        let error = observe_blocked_result(&control, "receipt-1".to_owned(), "call-1".to_owned())
+            .expect_err("bad acknowledgment must be infrastructure failure");
+        assert!(error.contains(expected), "{label}: {error}");
+        server.join().expect("ack server");
+        std::fs::remove_file(socket).expect("ack socket cleanup");
+    }
+}
+
+#[test]
 fn subscription_startup_stagger_is_bounded_and_spreads_wave_ordinals() {
     let policy = SubscriptionStartupStaggerPolicy::parse().expect("package policy");
     let delays = (1..=7)

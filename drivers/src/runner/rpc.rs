@@ -15,8 +15,8 @@ pub use crate::generated::pi_rpc::*;
 pub use order::EventOrder;
 pub(crate) use types::settings_identity;
 pub use types::{
-    DeliveryPolicyLaunchConfig, RpcDiagnostics, RpcError, RpcShutdown, RpcSpawnConfig,
-    ValidationEvidenceLaunchConfig, launch_arguments,
+    ChildControlLaunchConfig, DeliveryPolicyLaunchConfig, RpcDiagnostics, RpcError, RpcShutdown,
+    RpcSpawnConfig, ValidationEvidenceLaunchConfig, launch_arguments,
 };
 
 const TERM_GRACE_POLL_MS: u64 = 20;
@@ -93,37 +93,32 @@ impl RpcClient {
             && (config.terminal_profile.is_some()
                 || config.carrier_binding.is_some()
                 || config.delivery_policy.is_some()
-                || config.validation_evidence.is_some())
+                || config.validation_evidence.is_some()
+                || config.child_control.is_some())
         {
             return Err(RpcError::ProtocolViolation(
-                "terminal profile/binding/policy without runtime add-on".to_owned(),
+                "terminal profile/binding/policy/control without runtime add-on".to_owned(),
             ));
         }
-        let pi_version = if matches!(
+        if let Some(control) = &config.child_control {
+            validate_child_control_config(control, &config)?;
+        }
+        let legacy_pi_version_evidence = matches!(
             config.terminal_profile.as_deref(),
             Some(
                 "planning.work-map.v2:autopilot_submit_plan_cluster"
                     | "planning.work-map.v2:autopilot_submit_synthesis"
                     | "recovery-work-map.v2"
             )
-        ) {
-            let output = Command::new(&config.pi_executable)
-                .arg("--version")
-                .output()
-                .map_err(|error| RpcError::Io(format!("Pi --version failed: {error}")))?;
-            if !output.status.success() || output.stdout.len() > 4096 {
-                return Err(RpcError::ProtocolViolation(
-                    "Pi --version failed or exceeded evidence bound".to_owned(),
-                ));
-            }
-            let version = String::from_utf8(output.stdout)
-                .map_err(|error| RpcError::Utf8(error.to_string()))?
-                .trim()
-                .to_owned();
-            if version.is_empty() {
-                return Err(RpcError::ProtocolViolation(
-                    "Pi --version emitted no version".to_owned(),
-                ));
+        );
+        let pi_version = if legacy_pi_version_evidence || config.child_control.is_some() {
+            let version = observe_pi_version(&config.pi_executable)?;
+            if let Some(control) = &config.child_control {
+                if version != control.required_pi_version {
+                    return Err(RpcError::ProtocolViolation(
+                        "Pi --version does not match the required V5 runtime".to_owned(),
+                    ));
+                }
             }
             Some(version)
         } else {
@@ -139,6 +134,12 @@ impl RpcClient {
         command
             .current_dir(&config.cwd)
             .args(launch_arguments(&config));
+        // Deny inherited control and Host/Core bridge facts before adding the
+        // one V5 child capability tuple below. This applies to every nested
+        // Pi process, including non-V5 historical replay.
+        for key in ENV_DENY {
+            command.env_remove(key);
+        }
         if let Some(profile) = &config.terminal_profile {
             command.env("AUTOPILOT_TERMINAL_PROFILE", profile);
         }
@@ -171,8 +172,17 @@ impl RpcClient {
             );
             command.env("AUTOPILOT_VALIDATION_CWD", &policy.cwd);
         }
-        for key in ENV_DENY {
-            command.env_remove(key);
+        if let Some(control) = &config.child_control {
+            // This is the only re-add after ENV_DENY. Keep the V5 child
+            // transport closed to exactly these five names.
+            command.env("AUTOPILOT_CONTROL_SOCK", &control.socket_path);
+            command.env("AUTOPILOT_CONTROL_TOKEN", &control.token);
+            command.env("AUTOPILOT_CONTROL_RUN_ID", &control.run_id);
+            command.env("AUTOPILOT_CONTROL_ASSIGNMENT", &control.assignment_id);
+            command.env(
+                "AUTOPILOT_CONTROL_ATTEMPT",
+                control.attempt.get().to_string(),
+            );
         }
         command
             .stdin(Stdio::piped())
@@ -352,6 +362,70 @@ impl RpcClient {
             .as_ref()
             .map_or_else(Vec::new, |read| read.data.clone())
     }
+}
+
+fn validate_child_control_config(
+    control: &ChildControlLaunchConfig,
+    config: &RpcSpawnConfig,
+) -> Result<(), RpcError> {
+    if config.runtime_addon.is_none()
+        || config.terminal_profile.as_deref().is_none_or(str::is_empty)
+        || config.carrier_binding.as_deref().is_none_or(str::is_empty)
+        || !control.socket_path.is_absolute()
+        || super::validate_child_control_socket_path(&control.socket_path).is_err()
+        || !is_lower_hex_64(&control.token)
+        || !valid_control_identity(&control.run_id)
+        || !valid_control_identity(&control.assignment_id)
+        || control.required_pi_version != super::REQUIRED_PI_VERSION
+    {
+        return Err(RpcError::ProtocolViolation(
+            "V5 child-control launch authority is malformed".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn observe_pi_version(pi_executable: &std::ffi::OsStr) -> Result<String, RpcError> {
+    let mut command = Command::new(pi_executable);
+    // The pre-spawn proof is itself a nested Pi invocation. Do not allow it to
+    // inherit either a stale child token or the private Host/Core bridge.
+    for key in ENV_DENY {
+        command.env_remove(key);
+    }
+    let output = command
+        .arg("--version")
+        .output()
+        .map_err(|error| RpcError::Io(format!("Pi --version failed: {error}")))?;
+    if !output.status.success() || output.stdout.len() > 4096 {
+        return Err(RpcError::ProtocolViolation(
+            "Pi --version failed or exceeded evidence bound".to_owned(),
+        ));
+    }
+    let version = String::from_utf8(output.stdout)
+        .map_err(|error| RpcError::Utf8(error.to_string()))?
+        .trim()
+        .to_owned();
+    if version.is_empty() {
+        return Err(RpcError::ProtocolViolation(
+            "Pi --version emitted no version".to_owned(),
+        ));
+    }
+    Ok(version)
+}
+
+fn is_lower_hex_64(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn valid_control_identity(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 512
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
 fn stderr_completion_error(detail: &str) -> RpcError {

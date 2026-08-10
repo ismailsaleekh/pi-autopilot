@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
+use std::num::NonZeroU32;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -3216,8 +3217,21 @@ pub fn read_receipt_v1_spec(
 /// An explicit field-for-field V5 projection used only by shared validators
 /// which predate the V5 transport fields. It cannot deserialize arbitrary JSON
 /// or select a version by shape.
+fn v5_shared_validator_facade(mut facade: AgentRunSpec) -> AgentRunSpec {
+    if matches!(
+        facade.assignment_kind,
+        ValidationAssignmentKind::PlanningReview
+    ) {
+        // V4's shared planning validator reserves `attempt` for delivery
+        // identity. V5 validates its required planning attempt exclusively in
+        // the closed child-control facts instead of widening that legacy view.
+        facade.attempt = None;
+    }
+    facade
+}
+
 pub fn project_v5_spec_for_shared_admission(spec: &AgentRunSpecV5) -> AgentRunSpec {
-    AgentRunSpec {
+    v5_shared_validator_facade(AgentRunSpec {
         schema: kernel::generated::SchemaId("autopilot.agent_run_spec.v4".to_owned()),
         assignment_kind: spec.assignment_kind.clone(),
         action_id: spec.action_id.clone(),
@@ -3276,7 +3290,41 @@ pub fn project_v5_spec_for_shared_admission(spec: &AgentRunSpecV5) -> AgentRunSp
         atom_registry_digest: spec.atom_registry_digest.clone(),
         planning_inputs_path: spec.planning_inputs_path.clone(),
         planning_inputs_digest: spec.planning_inputs_digest.clone(),
+    })
+}
+
+/// Project only the V5 child-control facts required by the nested Pi launch.
+/// It neither reads Host/Core bridge capability nor manufactures a V4 default.
+pub fn v5_child_control_launch_config(
+    spec: &AgentRunSpecV5,
+) -> Result<rpc::ChildControlLaunchConfig, RunnerError> {
+    let attempt = spec.attempt.and_then(NonZeroU32::new).ok_or_else(|| {
+        RunnerError::InvalidSpec("receipt_v1 spec lacks an explicit nonzero attempt".to_owned())
+    })?;
+    if spec.schema.0 != "autopilot.agent_run_spec.v5"
+        || spec.admission_mode != AdmissionMode::ReceiptV1
+        || spec.required_pi_version != REQUIRED_PI_VERSION
+        || spec.run_id.0.trim().is_empty()
+        || spec.assignment_id.0.trim().is_empty()
+        || validate_child_control_socket_path(Path::new(&spec.child_control_socket_path.0)).is_err()
+        || !is_lower_hex_64(&spec.child_control_token)
+        || !constant_time_hex_digest_matches(
+            &spec.child_control_token,
+            &spec.child_control_token_digest.0,
+        )
+    {
+        return Err(RunnerError::InvalidSpec(
+            "receipt_v1 child-control launch authority drift".to_owned(),
+        ));
     }
+    Ok(rpc::ChildControlLaunchConfig {
+        socket_path: PathBuf::from(&spec.child_control_socket_path.0),
+        token: spec.child_control_token.clone(),
+        run_id: spec.run_id.0.clone(),
+        assignment_id: spec.assignment_id.0.clone(),
+        attempt,
+        required_pi_version: spec.required_pi_version.clone(),
+    })
 }
 
 pub fn validate_receipt_v1_spec(
@@ -3311,13 +3359,7 @@ pub fn validate_receipt_v1_spec(
     if profile.0 != binding.profile_id
         || profile.1 != binding.tool_name.0
         || profile.4 != binding.schema_digest
-        || validate_child_control_socket_path(Path::new(&spec.child_control_socket_path.0)).is_err()
-        || !is_lower_hex_64(&spec.child_control_token)
-        || !is_sha256_hex(&spec.child_control_token_digest.0)
-        || !constant_time_hex_digest_matches(
-            &spec.child_control_token,
-            &spec.child_control_token_digest.0,
-        )
+        || v5_child_control_launch_config(spec).is_err()
     {
         return Err(RunnerError::InvalidSpec(
             "receipt_v1 profile or control authority drift".to_owned(),
@@ -5013,7 +5055,8 @@ fn write_receipt_v1_spec_document(
                 &existing.child_control_token,
                 &existing.child_control_token_digest.0,
             )
-            || project_v5_spec_for_shared_admission(&existing) != *facade
+            || project_v5_spec_for_shared_admission(&existing)
+                != v5_shared_validator_facade(facade.clone())
         {
             return Err(RunnerError::InvalidSpec(
                 "existing receipt_v1 spec conflicts with exact issuance authority".to_owned(),

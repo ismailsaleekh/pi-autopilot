@@ -3,6 +3,11 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
@@ -145,6 +150,101 @@ fn fake_pi_journey_writes_identity_carrier_and_isolated_exact_args() {
     assert_eq!(
         PathBuf::from(argv_record["cwd"].as_str().expect("cwd")),
         root
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_keeps_one_session_through_unlimited_retries_then_correlates_blocked_accept() {
+    let root = temp_root("runner-v5-retry-accept");
+    let socket = test_broker_socket();
+    fs::remove_file(&socket).expect("replace inert broker socket");
+    let listener = UnixListener::bind(&socket).expect("listen broker socket");
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).expect("broker socket mode");
+    let observed = root.join("blocked-observation.json");
+    let observed_thread = std::thread::spawn({
+        let observed = observed.clone();
+        move || {
+            let (mut stream, _) = listener.accept().expect("accept observation");
+            let mut header = [0_u8; 4];
+            stream.read_exact(&mut header).expect("observation header");
+            let mut body = vec![0_u8; u32::from_be_bytes(header) as usize];
+            stream.read_exact(&mut body).expect("observation body");
+            fs::write(&observed, &body).expect("observation record");
+            let request: Value = serde_json::from_slice(&body).expect("observation json");
+            let acknowledgment = json!({
+                "schema":"autopilot.blocked_result_observed_ack.v1",
+                "receipt_id":request["receipt_id"],
+                "latch_id":"latch-1",
+                "reporter_task_id":"reporter-task-1",
+                "status":"acknowledged"
+            });
+            let body = serde_json::to_vec(&acknowledgment).expect("ack json");
+            stream
+                .write_all(&(body.len() as u32).to_be_bytes())
+                .and_then(|()| stream.write_all(&body))
+                .expect("ack write");
+        }
+    });
+    let retries = 6;
+    let prompt_count = root.join("v5-prompt-count.txt");
+    let receipt = json!({
+        "kind":"blocked",
+        "schema":"autopilot.child_control_accept_receipt.v1",
+        "receipt":{
+            "schema":"autopilot.blocked_receipt.v1",
+            "receipt_id":"receipt-v5-1",
+            "run_id":"019fa883-1eaf-75f9-99af-6aa246736f72",
+            "run_revision":1,
+            "workstream":"main",
+            "action_id":"action-planning-main-task-extractor-01",
+            "assignment_id":"planning-main-task-extractor-01",
+            "attempt":1,
+            "profile_id":"autopilot.blocked_report.v1:autopilot_report_blocked",
+            "tool_name":"autopilot_report_blocked",
+            "request_id":"request-v5-1",
+            "tool_call_id":"call-v5-accept",
+            "report_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "reason_code":"infrastructure",
+            "cancellation_set_digest":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+    });
+    let on_prompt = format!(
+        concat!(
+            "writeFileSync({prompt_count:?}, String(promptCount)); send({{type:'agent_start'}}); ",
+            "for (let i=0;i<{retries};i++) {{ const callId='call-v5-retry-'+i; send({{type:'tool_execution_start',toolCallId:callId,toolName:'autopilot_submit_atoms'}}); send({{type:'tool_execution_end',toolCallId:callId,toolName:'autopilot_submit_atoms',result:{{content:[],terminate:false}},isError:true}}); send({{type:'message_end',message:{{role:'toolResult',toolCallId:callId,toolName:'autopilot_submit_atoms',content:[],isError:true}}}}); }} ",
+            "const receipt={receipt}; send({{type:'tool_execution_start',toolCallId:'call-v5-accept',toolName:'autopilot_report_blocked'}}); send({{type:'tool_execution_end',toolCallId:'call-v5-accept',toolName:'autopilot_report_blocked',result:{{content:[],details:receipt,terminate:true}},isError:false}}); send({{type:'message_end',message:{{role:'toolResult',toolCallId:'call-v5-accept',toolName:'autopilot_report_blocked',content:[],details:receipt,isError:false}}}}); send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}});"
+        ),
+        receipt = serde_json::to_string(&receipt).expect("receipt json"),
+        retries = retries,
+        prompt_count = prompt_count,
+    );
+    let fake = rpc_fake_pi("", &on_prompt).replace("fake-pi-v2", "0.84.1");
+    write_fake_pi(&root, &fake);
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&spec, &socket);
+
+    with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect("V5 retries remain in one same-session RPC run until blocked ACCEPT");
+    observed_thread.join().expect("observation broker");
+    assert_eq!(fs::read_to_string(prompt_count).expect("prompt count"), "1");
+    let observed: Value = serde_json::from_slice(&fs::read(observed).expect("observation bytes"))
+        .expect("observation json");
+    assert_eq!(observed["schema"], "autopilot.blocked_result_observed.v1");
+    assert_eq!(observed["run_id"], "019fa883-1eaf-75f9-99af-6aa246736f72");
+    assert_eq!(observed["assignment_id"], "planning-main-task-extractor-01");
+    assert_eq!(observed["attempt"], 1);
+    assert_eq!(observed["receipt_id"], "receipt-v5-1");
+    assert_eq!(observed["tool_call_id"], "call-v5-accept");
+    assert!(
+        !carrier_path(&root).exists(),
+        "fresh V5 wrote a legacy carrier"
+    );
+    assert!(
+        !root.join(".pi/autopilot/runner/attempt-events").exists(),
+        "fresh V5 wrote historical attempt evidence"
     );
 }
 
@@ -3570,6 +3670,24 @@ fn write_planning_spec_inner(
     )
     .expect("spec");
     paths.spec_path
+}
+
+fn upgrade_to_v5_spec(spec_path: &Path, socket: &Path) {
+    let mut spec: Value =
+        serde_json::from_slice(&fs::read(spec_path).expect("read V4 spec")).expect("V4 spec JSON");
+    let token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    spec["schema"] = json!("autopilot.agent_run_spec.v5");
+    spec["admission_mode"] = json!("receipt_v1");
+    spec["required_pi_version"] = json!("0.84.1");
+    spec["child_control_socket_path"] = json!(socket);
+    spec["child_control_token"] = json!(token);
+    spec["child_control_token_digest"] = json!(sha256_hex(token.as_bytes()));
+    spec["attempt"] = json!(1);
+    fs::write(
+        spec_path,
+        serde_json::to_vec_pretty(&spec).expect("V5 spec JSON"),
+    )
+    .expect("write V5 spec");
 }
 
 fn write_work_map_spec_with_prompt(
