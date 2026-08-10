@@ -28,4 +28,4 @@ If context is insufficient, emit the declared context gap or checkpoint behavior
 
 ## Terminal result
 
-Terminalize only through `autopilot_emit_status`. The terminal result must name the role/mode/assignment, exact evidence, unresolved gaps or findings, and must not claim completion when a required contract is unmet.
+Call `autopilot_emit_status` when the payload is ready. If it returns `RETRY`, correct the reported diagnostic and call `autopilot_emit_status` again in this same session. Only `ACCEPT` terminalizes. Do not return the payload as assistant prose or markdown.

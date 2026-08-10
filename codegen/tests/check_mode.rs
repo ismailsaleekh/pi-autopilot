@@ -529,6 +529,15 @@ fn unified_submit_contracts_emit_closed_frames_and_non_fifo_placeholder_metadata
     assert!(bridge.contains("AUTOPILOT_CONTROL_ATTEMPT"));
     assert!(bridge.contains("runtime_evidence: runtimeEvidence"));
     assert!(bridge.contains("fixedRetry(category"));
+    assert!(bridge.contains("Number.isFinite(value)"));
+    assert!(bridge.contains("createReplayV0ValidationRawCapture"));
+    assert!(bridge.contains("unknown-nonce"));
+    assert!(bridge.contains("consumed-nonce"));
+    assert!(bridge.contains("duplicate-tool-call-id"));
+    assert!(bridge.contains("placeholder-tamper"));
+    assert!(bridge.contains("isSubmitReceipt(value"));
+    assert!(bridge.contains("isBlockedReceipt(value"));
+    assert!(bridge.contains("compareDiagnosticErrors"));
     assert!(!bridge.contains("shift()"));
 
     let ts = fs::read_to_string(temp.path().join("src/generated/tool-schemas.ts"))

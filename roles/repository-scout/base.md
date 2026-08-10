@@ -28,4 +28,4 @@ If context is insufficient, emit the declared context gap or checkpoint behavior
 
 ## Terminal result
 
-Terminalize only through `autopilot_submit_scout_report` as the final action. Submit the typed scout dossier payload; do not return a prose dossier, markdown, or assistant-text JSON as the carrier.
+Call `autopilot_submit_scout_report` when the payload is ready. If it returns `RETRY`, correct the reported diagnostic and call `autopilot_submit_scout_report` again in this same session. Only `ACCEPT` terminalizes. Do not return the payload as assistant prose or markdown.

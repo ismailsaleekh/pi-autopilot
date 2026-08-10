@@ -5,7 +5,8 @@ import { test } from "node:test";
 import { createBashTool } from "@earendil-works/pi-coding-agent";
 import { Compile } from "typebox/compile";
 
-import { TERMINAL_TOOL_SCHEMAS } from "../../src/generated/tool-schemas.ts";
+import { createReplayV0ValidationRawCapture } from "../../src/generated/child-control-bridge.ts";
+import { SUBMIT_TOOLS, TERMINAL_TOOL_SCHEMAS } from "../../src/generated/tool-schemas.ts";
 
 const root = new URL("../../", import.meta.url);
 
@@ -259,6 +260,18 @@ test("Pi 0.84 Bash adapter preserves the hidden-shell no-session-environment bou
       else process.env[key] = value;
     }
   }
+});
+
+test("Pi 0.84 TypeBox accepts the generated V3 replay placeholder without changing model-facing schema bytes", () => {
+  const descriptor = SUBMIT_TOOLS.find((tool) => tool.profile_id === "validation-status.v3")!;
+  const check = Compile(descriptor.parameters);
+  const capture = createReplayV0ValidationRawCapture(descriptor.profile_id)!;
+  const malformedRaw = ["malformed-top-level", { null_value: null }];
+  assert.equal(check.Check(malformedRaw), false, "raw malformed V3 remains invalid to the unchanged model-facing TypeBox schema");
+  const placeholder = capture.prepareArguments(malformedRaw);
+  assert.equal(check.Check(placeholder), true, "generated replay placeholder crosses Pi TypeBox before raw capture execute");
+  assert.deepEqual(capture.execute("pi084-v3-raw", placeholder), malformedRaw);
+  assert.equal(createReplayV0ValidationRawCapture("delivery-status.v2"), undefined, "fresh/non-V3 profiles never get local replay capture");
 });
 
 test("TypeBox 1.3.7 under Pi 0.84 compiles every terminal schema with strict null/array semantics", () => {

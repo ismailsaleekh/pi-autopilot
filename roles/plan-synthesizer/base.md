@@ -28,4 +28,4 @@ If context is insufficient, emit the declared context gap or checkpoint behavior
 
 ## Terminal result
 
-Terminalize only through `autopilot_submit_synthesis` as the final action. Submit the typed work-map payload; do not return plan prose, markdown unit sections, or assistant-text JSON as the carrier.
+Call `autopilot_submit_synthesis` when the payload is ready. If it returns `RETRY`, correct the reported diagnostic and call `autopilot_submit_synthesis` again in this same session. Only `ACCEPT` terminalizes. Do not return the payload as assistant prose or markdown.

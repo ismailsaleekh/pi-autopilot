@@ -47,6 +47,31 @@ fn prompt_renders_layers_sections_deterministically_and_injects_generated_admits
 }
 
 #[test]
+fn nine_submit_prompt_artifacts_cover_the_fourteen_same_session_profiles() {
+    for (artifact, tools) in [
+        ("task_atoms", &["autopilot_submit_atoms"][..]),
+        ("scout_dossier", &["autopilot_submit_context", "autopilot_submit_scout_report"][..]),
+        ("questions", &["autopilot_submit_resolution"][..]),
+        ("work_map", &["autopilot_submit_plan_cluster", "autopilot_submit_synthesis", "autopilot_emit_status"][..]),
+        ("work_map_v2", &["autopilot_submit_plan_cluster", "autopilot_submit_synthesis", "autopilot_emit_status"][..]),
+        ("plan_review", &["autopilot_submit_review"][..]),
+        ("delivery_submission_v2", &["autopilot_emit_status"][..]),
+        ("validation_submission_v2", &["autopilot_emit_status"][..]),
+        ("validation_submission_v3", &["autopilot_emit_status"][..]),
+    ] {
+        let prompt = fs::read_to_string(package_root().join("generated/prompts").join(format!("{artifact}.md")))
+            .expect("generated submit prompt is readable");
+        assert!(prompt.contains("when the payload is ready"), "{artifact}");
+        assert!(prompt.contains("If it returns RETRY, correct the reported diagnostic and call"), "{artifact}");
+        assert!(prompt.contains("again in this same session. Only ACCEPT terminalizes."), "{artifact}");
+        assert!(prompt.contains("Do not return the payload as assistant prose or markdown."), "{artifact}");
+        for tool in tools {
+            assert!(prompt.contains(tool), "{artifact} lacks {tool}");
+        }
+    }
+}
+
+#[test]
 fn parity_check_fails_when_generated_prompt_drifts_from_contract_source() {
     let temp_root = copy_prompt_fixture_root().expect("temp prompt fixture root is copied");
     let prompt_path = temp_root

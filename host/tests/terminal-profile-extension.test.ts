@@ -21,6 +21,7 @@ import { startChildControlBroker } from "../../src/child-control-broker.ts";
 interface RegisteredTool {
   name: string;
   description?: string;
+  promptGuidelines?: string[];
   parameters?: unknown;
   prepareArguments?: (params: unknown) => Record<string, unknown>;
   execute: (toolCallId: string, params: Record<string, unknown>) => Promise<{
@@ -60,6 +61,32 @@ function canonicalJson(value: unknown): string {
   const encoded = JSON.stringify(value);
   if (encoded === undefined) throw new Error("terminal schema contains a non-JSON value");
   return encoded;
+}
+
+const UUID_V7 = "018f0f00-0000-7000-8000-000000000001";
+const DIGEST = "a".repeat(64);
+
+function completeAcceptReceipt(kind: "submit" | "blocked") {
+  const submit = {
+    schema: "autopilot.submit_receipt.v1", receipt_id: UUID_V7, run_id: "run-1", run_revision: 1,
+    workstream: "workstream-1", action_id: "action-1", assignment_id: "assignment-1", attempt: 1,
+    profile_id: "profile-1", tool_name: "tool-1", boundary_id: "boundary-1", result_contract: "result-1",
+    schema_digest: DIGEST, spec_digest: DIGEST, carrier_binding_digest: DIGEST, authority_digest: DIGEST,
+    frozen_validator_versions: [{ validator_id: "validator-1", version: "v1", digest: DIGEST }],
+    raw_payload_digest: DIGEST, raw_payload_byte_count: 0, request_id: "request-1", tool_call_id: "call-1",
+    prepared_transition: {
+      schema: "autopilot.prepared_submit_transition.v1", transition_ref: "transition-1", transition_digest: DIGEST,
+      carrier: { artifact_ref: "carrier-1", artifact_schema: "artifact-1", sha256: DIGEST, byte_count: 0 },
+      artifact_refs: [], issued_actions: [], deferred_host_effect: { kind: "done", payload: { status: "done" } },
+    },
+  };
+  const blocked = {
+    schema: "autopilot.blocked_receipt.v1", receipt_id: UUID_V7, run_id: "run-1", run_revision: 1,
+    workstream: "workstream-1", action_id: "action-1", assignment_id: "assignment-1", attempt: 1,
+    profile_id: "profile-1", tool_name: "tool-1", request_id: "request-1", tool_call_id: "call-1",
+    report_digest: DIGEST, reason_code: "infrastructure", cancellation_set_digest: DIGEST,
+  };
+  return { kind, schema: "autopilot.child_control_accept_receipt.v1", receipt: kind === "submit" ? submit : blocked };
 }
 
 const EXPECTED_TERMINAL_PROFILES = [
@@ -139,7 +166,9 @@ test("fresh child-control registration exposes every submit profile plus the exa
         process.chdir(cwd);
       }
       const blocked = tools.find((tool) => tool.name === BLOCKED_REPORT_TOOL.name);
-      assert.equal(tools.some((tool) => tool.name === descriptor.name), true, descriptor.profile_id);
+      const submit = tools.find((tool) => tool.name === descriptor.name);
+      assert.ok(submit, descriptor.profile_id);
+      assert.deepEqual(submit.promptGuidelines, [`Call ${descriptor.name} when the payload is ready. If it returns RETRY, correct the reported diagnostic and call ${descriptor.name} again in this same session. Only ACCEPT terminalizes. Do not return the payload as assistant prose or markdown.`], descriptor.profile_id);
       assert.equal(blocked?.description, BLOCKED_REPORT_TOOL.description, descriptor.profile_id);
       assert.equal(tools.length, descriptor.profile_id === "delivery-status.v2" ? 5 : descriptor.profile_id === "validation-status.v3" ? 3 : 2);
     }
@@ -173,7 +202,7 @@ test("fresh delivery snapshots exact ledgers beside raw payload and blocked alwa
           payload: {
             response: {
               schema: "autopilot.child_control_response.v1", request_id: request.request_id,
-              outcome: "ACCEPT", receipt: { kind: request.kind, schema: "autopilot.child_control_accept_receipt.v1", receipt: {} },
+              outcome: "ACCEPT", receipt: completeAcceptReceipt(request.kind as "submit" | "blocked"),
             }, blocked_gate: null,
           },
         };
@@ -203,8 +232,8 @@ test("fresh delivery snapshots exact ledgers beside raw payload and blocked alwa
     const submitResult = await submit.execute("delivery-call", submit.prepareArguments!(submitRaw));
     const blockedRaw = { schema: "autopilot.blocked_report.v1", reason_code: "infrastructure", summary: "blocked", evidence: [{ kind: "observation", value: "socket" }], last_attempted_action: "submit" };
     const blockedResult = await blocked.execute("blocked-call", blocked.prepareArguments!(blockedRaw));
-    assert.deepEqual(submitResult.details, { kind: "submit", schema: "autopilot.child_control_accept_receipt.v1", receipt: {} });
-    assert.deepEqual(blockedResult.details, { kind: "blocked", schema: "autopilot.child_control_accept_receipt.v1", receipt: {} });
+    assert.deepEqual(submitResult.details, completeAcceptReceipt("submit"));
+    assert.deepEqual(blockedResult.details, completeAcceptReceipt("blocked"));
     assert.deepEqual(forwarded[0]!.raw_payload, { explicit: null });
     assert.deepEqual(forwarded[0]!.runtime_evidence, {
       schema: "autopilot.child_control_runtime_evidence.v1",
@@ -475,7 +504,7 @@ test("selected terminal profile registers exactly one same-name schema", { concu
       }
       const rawPayload = {};
       const prepared = submitTool.prepareArguments?.(rawPayload) ?? rawPayload;
-      if (validationEnv) assert.equal(submitTool.prepareArguments, undefined, "V4 has no handwritten V3 transport carrier");
+      if (validationEnv) assert.notEqual(submitTool.prepareArguments, undefined, "replay_v0 V3 uses generated nonce-correlated raw capture");
       const result = await submitTool.execute("opaque-call", prepared);
       assert.equal(result.terminate, true);
       assert.equal(result.details?.profile_id, expected.profile_id);
@@ -505,6 +534,42 @@ test("selected terminal profile registers exactly one same-name schema", { concu
     if (previousBinding === undefined) delete process.env.AUTOPILOT_CARRIER_BINDING;
     else process.env.AUTOPILOT_CARRIER_BINDING = previousBinding;
     clearDeliveryPolicyEnv();
+    clearValidationPolicyEnv();
+  }
+});
+
+test("replay_v0 V3 raw capture preserves malformed trees across reversed calls without a BLOCKED fallback", { concurrency: false }, async () => {
+  const controlKeys = ["AUTOPILOT_CONTROL_SOCK", "AUTOPILOT_CONTROL_TOKEN", "AUTOPILOT_CONTROL_RUN_ID", "AUTOPILOT_CONTROL_ASSIGNMENT", "AUTOPILOT_CONTROL_ATTEMPT", "AUTOPILOT_TERMINAL_PROFILE"] as const;
+  const prior = new Map(controlKeys.map((key) => [key, process.env[key]]));
+  const validation = installValidationPolicyEnv();
+  try {
+    for (const key of controlKeys) delete process.env[key];
+    process.env.AUTOPILOT_TERMINAL_PROFILE = "validation-status.v3";
+    const tools: RegisteredTool[] = [];
+    const cwd = process.cwd();
+    process.chdir(validation.worktree);
+    try {
+      childExtension({ registerTool(tool: RegisteredTool) { tools.push(tool); }, on() {}, appendEntry() {}, getActiveTools() { return tools.map((tool) => tool.name); } } as never);
+    } finally {
+      process.chdir(cwd);
+    }
+    const submit = tools.find((tool) => tool.name === "autopilot_emit_status")!;
+    // replay_v0 has no authenticated ChildControl; registering BLOCKED here would be silent/nonfunctional.
+    assert.equal(tools.some((tool) => tool.name === BLOCKED_REPORT_TOOL.name), false);
+    assert.notEqual(submit.prepareArguments, undefined);
+    const firstRaw = ["malformed-top-level", { null_value: null }];
+    const secondRaw = null;
+    const first = submit.prepareArguments!(firstRaw);
+    const second = submit.prepareArguments!(secondRaw);
+    const secondResult = await submit.execute("replay-second", second);
+    const firstResult = await submit.execute("replay-first", first);
+    assert.deepEqual(secondResult.details?.payload, secondRaw);
+    assert.deepEqual(firstResult.details?.payload, firstRaw);
+  } finally {
+    for (const [key, value] of prior) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
     clearValidationPolicyEnv();
   }
 });

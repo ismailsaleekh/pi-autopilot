@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { createBashTool, createEditTool, createLocalBashOperations, createReadTool, createWriteTool, defineTool, type BashOperations, type EditOperations, type ExtensionAPI, type ReadOperations, type WriteOperations } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-import { childControlEnvironmentPresent, createEnvironmentChildControlBridge, type ChildControlBridge } from "../src/generated/child-control-bridge.ts";
+import { childControlEnvironmentPresent, createEnvironmentChildControlBridge, createReplayV0ValidationRawCapture, type ChildControlBridge, type ReplayV0RawCapture } from "../src/generated/child-control-bridge.ts";
 import type { ChildControlRuntimeEvidence } from "../src/generated/index.ts";
 import type { SubmitToolDescriptor, UniversalChildToolDescriptor } from "../src/generated/tool-schemas.ts";
 
@@ -326,9 +326,9 @@ export function runAutopilotChild(
   const deliveryPolicy = loadDeliveryPolicyForProfile(tool.profile_id);
   const validationPolicy = loadValidationReadPolicy(tool.profile_id);
   const bridge = childControlEnvironmentPresent() ? createEnvironmentChildControlBridge() : undefined;
-  if (deliveryPolicy) registerDeliveryPolicyTools(pi, deliveryPolicy);
-  if (validationPolicy) registerValidationReadOverride(pi, validationPolicy);
-  registerTool(pi, tool, deliveryPolicy, bridge);
+  const replayV0RawCapture = bridge === undefined ? createReplayV0ValidationRawCapture(tool.profile_id) : undefined;
+  if (deliveryPolicy) registerDeliveryPolicyTools(pi, deliveryPolicy); if (validationPolicy) registerValidationReadOverride(pi, validationPolicy);
+  registerTool(pi, tool, deliveryPolicy, bridge, undefined, replayV0RawCapture);
   if (bridge) registerTool(pi, blockedTool, deliveryPolicy, bridge, blockedTool.description);
   pi.on("session_start", async () => {
     const receipt: Record<string, unknown> = {
@@ -467,31 +467,31 @@ function registerTool(
   deliveryPolicy?: DeliveryPolicy,
   bridge?: ChildControlBridge,
   exactDescription?: string,
+  replayV0RawCapture?: ReplayV0RawCapture,
 ): void {
   const computed = createHash("sha256").update(canonicalJson(tool.parameters)).digest("hex");
   if (computed !== tool.schema_digest) {
     throw new Error(`autopilot child tool ${tool.name} parameter digest drift: declared ${tool.schema_digest}, computed ${computed}`);
   }
   const description = exactDescription
-    ?? `Submit the final ${tool.boundary_id} payload. Use this as the final action; assistant prose is not a carrier.`;
+    ?? `Call ${tool.name} when the payload is ready. If it returns RETRY, correct the reported diagnostic and call ${tool.name} again in this same session. Only ACCEPT terminalizes. Do not return the payload as assistant prose or markdown.`;
   pi.registerTool(defineTool({
     name: tool.name,
     label: tool.label,
     description,
-    promptSnippet: `Submit ${tool.boundary_id} as a terminating typed Autopilot carrier`,
+    promptSnippet: `Submit ${tool.boundary_id} as a typed Autopilot payload`,
     promptGuidelines: [
-      `Call ${tool.name} exactly once as the final action for ${tool.boundary_id}.`,
-      "Do not return the payload as assistant prose or markdown.",
+      `Call ${tool.name} when the payload is ready. If it returns RETRY, correct the reported diagnostic and call ${tool.name} again in this same session. Only ACCEPT terminalizes. Do not return the payload as assistant prose or markdown.`,
     ],
     parameters: tool.parameters,
-    ...(bridge === undefined ? {} : { prepareArguments(args: unknown) { return bridge.prepareArguments(tool.profile_id, args); } }),
+    ...(bridge !== undefined ? { prepareArguments(args: unknown) { return bridge.prepareArguments(tool.profile_id, args); } } : replayV0RawCapture === undefined ? {} : { prepareArguments(args: unknown) { return replayV0RawCapture.prepareArguments(args); } }),
     async execute(toolCallId, params) {
       const legacyResult = () => ({
         content: [{ type: "text" as const, text: `Submitted ${tool.boundary_id}` }],
         details: {
           profile_id: tool.profile_id, tool_name: tool.name, boundary_id: tool.boundary_id,
           result_contract: tool.result_contract, schema_digest: tool.schema_digest,
-          binding: process.env["AUTOPILOT_CARRIER_BINDING"] ?? "", payload: params as Record<string, unknown>,
+          binding: process.env["AUTOPILOT_CARRIER_BINDING"] ?? "", payload: replayV0RawCapture === undefined ? params as Record<string, unknown> : replayV0RawCapture.execute(toolCallId, params),
           ...(deliveryPolicy === undefined ? {} : {
             delivery_policy_denials: deliveryPolicy.denialLedger(), approved_command_executions: deliveryPolicy.executionLedger(),
           }),

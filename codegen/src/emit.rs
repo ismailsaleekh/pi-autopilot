@@ -969,7 +969,13 @@ export interface ChildControlBridge {
   execute(toolCallId: string, placeholder: unknown, runtimeEvidence: ChildControlRuntimeEvidence): Promise<ChildControlAcceptReceipt>;
 }
 
-type FixedRetryCategory = "transport" | "protocol" | "placeholder" | "nonce";
+/** Historical no-control validation-status.v3 only; replay_v0 has no ChildControl route. */
+export interface ReplayV0RawCapture {
+  prepareArguments(rawPayload: unknown): Record<string, unknown>;
+  execute(toolCallId: string, placeholder: unknown): unknown;
+}
+
+type FixedRetryCategory = "transport" | "protocol" | "unknown-nonce" | "consumed-nonce" | "duplicate-tool-call-id" | "placeholder-tamper";
 const RETRY_ERROR: unique symbol = Symbol("autopilot.child-control.retry");
 
 export class ChildControlBridgeProtocolError extends Error {
@@ -988,6 +994,12 @@ type PendingCall = {
   readonly rawPayload: unknown;
   readonly placeholder: PlaceholderObject;
   readonly token: object;
+};
+type CorrelationState = {
+  readonly pending: Map<string, PendingCall>;
+  readonly nonceByToken: Map<object, string>;
+  readonly consumed: Set<string>;
+  readonly usedToolCallIds: Set<string>;
 };
 
 export function createChildControlBridge(
@@ -1017,39 +1029,20 @@ function createBridge(
   binding: () => ChildControlBridgeBinding,
   transport: ChildControlBridgeTransport,
 ): ChildControlBridge {
-  const pending = new Map<string, PendingCall>();
-  const usedToolCallIds = new Set<string>();
+  const state = createCorrelationState();
   return {
     prepareArguments(profileId, rawPayload) {
       try {
-        const metadata = CHILD_CONTROL_TOOL_METADATA.find((row) => row.profile_id === profileId);
-        if (metadata === undefined) throw new ChildControlBridgeProtocolError("placeholder", "unknown profile");
-        const nonce = randomBytes(32).toString("hex");
-        const placeholder = structuredClone(metadata.placeholder) as PlaceholderObject;
-        setPointer(placeholder, metadata.placeholder_pointer, `${CHILD_CONTROL_PLACEHOLDER_SENTINEL}${nonce}`);
-        const token = {};
-        Object.defineProperty(placeholder, PLACEHOLDER_TOKEN, { configurable: false, enumerable: false, value: token, writable: false });
-        pending.set(nonce, { metadata, rawPayload: structuredClone(rawPayload), placeholder, token });
-        return placeholder as Record<string, unknown>;
+        return prepareCorrelatedPlaceholder(state, profileId, rawPayload);
       } catch (error) {
-        throw fixedRetry(errorCategory(error, "placeholder"));
+        throw fixedRetry(errorCategory(error, "placeholder-tamper"));
       }
     },
     async execute(toolCallId, placeholder, runtimeEvidence) {
       try {
-        const holder = asPlaceholderObject(placeholder);
-        const token = holder[PLACEHOLDER_TOKEN];
-        if (token === null || typeof token !== "object") throw new ChildControlBridgeProtocolError("placeholder", "placeholder token is absent");
-        const nonce = placeholderNonce(holder);
-        if (nonce === undefined) throw new ChildControlBridgeProtocolError("nonce", "placeholder nonce is absent");
-        const call = pending.get(nonce);
-        if (call === undefined || call.placeholder !== holder || call.token !== token) throw new ChildControlBridgeProtocolError("nonce", "placeholder nonce is consumed");
-        pending.delete(nonce);
-        const expected = structuredClone(call.metadata.placeholder) as PlaceholderObject;
-        setPointer(expected, call.metadata.placeholder_pointer, `${CHILD_CONTROL_PLACEHOLDER_SENTINEL}${nonce}`);
-        if (usedToolCallIds.has(toolCallId)) throw new ChildControlBridgeProtocolError("nonce", "tool call id is consumed");
-        if (!sameJsonShape(holder, expected)) throw new ChildControlBridgeProtocolError("placeholder", "placeholder shape drift");
-        usedToolCallIds.add(toolCallId);
+        const call = consumeCorrelatedPlaceholder(state, toolCallId, placeholder);
+        // Reject non-JSON and non-finite values before any transport can serialize them.
+        canonicalJson(call.rawPayload);
         const facts = binding();
         const request: ChildControlRequest = {
           schema: "autopilot.child_control_request.v1",
@@ -1074,9 +1067,73 @@ function createBridge(
   };
 }
 
+export function createReplayV0ValidationRawCapture(profileId: string): ReplayV0RawCapture | undefined {
+  if (profileId !== "validation-status.v3") return undefined;
+  const state = createCorrelationState();
+  return {
+    prepareArguments(rawPayload) {
+      try {
+        return prepareCorrelatedPlaceholder(state, profileId, rawPayload);
+      } catch (error) {
+        throw fixedRetry(errorCategory(error, "placeholder-tamper"));
+      }
+    },
+    execute(toolCallId, placeholder) {
+      try {
+        return consumeCorrelatedPlaceholder(state, toolCallId, placeholder).rawPayload;
+      } catch (error) {
+        if (isRetryError(error)) throw error;
+        throw fixedRetry(errorCategory(error, "protocol"));
+      }
+    },
+  };
+}
+
+function createCorrelationState(): CorrelationState {
+  return { pending: new Map<string, PendingCall>(), nonceByToken: new Map<object, string>(), consumed: new Set<string>(), usedToolCallIds: new Set<string>() };
+}
+
+function prepareCorrelatedPlaceholder(state: CorrelationState, profileId: string, rawPayload: unknown): Record<string, unknown> {
+  const metadata = CHILD_CONTROL_TOOL_METADATA.find((row) => row.profile_id === profileId);
+  if (metadata === undefined) throw new ChildControlBridgeProtocolError("placeholder-tamper", "generated profile is absent");
+  const nonce = randomBytes(32).toString("hex");
+  const placeholder = structuredClone(metadata.placeholder) as PlaceholderObject;
+  setPointer(placeholder, metadata.placeholder_pointer, `${CHILD_CONTROL_PLACEHOLDER_SENTINEL}${nonce}`);
+  const token = {};
+  Object.defineProperty(placeholder, PLACEHOLDER_TOKEN, { configurable: false, enumerable: false, value: token, writable: false });
+  state.pending.set(nonce, { metadata, rawPayload: structuredClone(rawPayload), placeholder, token });
+  state.nonceByToken.set(token, nonce);
+  return placeholder as Record<string, unknown>;
+}
+
+function consumeCorrelatedPlaceholder(state: CorrelationState, toolCallId: string, placeholder: unknown): PendingCall {
+  const holder = asPlaceholderObject(placeholder);
+  const token = holder[PLACEHOLDER_TOKEN];
+  if (token === null || typeof token !== "object") throw new ChildControlBridgeProtocolError("placeholder-tamper", "placeholder identity is absent");
+  const nonce = placeholderNonce(holder);
+  if (nonce === undefined || !/^[0-9a-f]{64}$/u.test(nonce)) throw new ChildControlBridgeProtocolError("placeholder-tamper", "placeholder marker is malformed");
+  const expectedNonce = state.nonceByToken.get(token);
+  if (expectedNonce !== undefined && expectedNonce !== nonce) throw new ChildControlBridgeProtocolError("placeholder-tamper", "placeholder marker drifted");
+  const call = state.pending.get(nonce);
+  if (call === undefined) {
+    if (state.consumed.has(nonce) && expectedNonce === nonce) throw new ChildControlBridgeProtocolError("consumed-nonce", "placeholder was consumed");
+    if (expectedNonce !== undefined || state.consumed.has(nonce)) throw new ChildControlBridgeProtocolError("placeholder-tamper", "placeholder identity drifted");
+    throw new ChildControlBridgeProtocolError("unknown-nonce", "placeholder nonce is unknown");
+  }
+  if (expectedNonce !== nonce || call.placeholder !== holder || call.token !== token) throw new ChildControlBridgeProtocolError("placeholder-tamper", "placeholder identity drifted");
+  const expected = structuredClone(call.metadata.placeholder) as PlaceholderObject;
+  setPointer(expected, call.metadata.placeholder_pointer, `${CHILD_CONTROL_PLACEHOLDER_SENTINEL}${nonce}`);
+  if (!sameJsonShape(holder, expected)) throw new ChildControlBridgeProtocolError("placeholder-tamper", "placeholder shape drifted");
+  if (state.usedToolCallIds.has(toolCallId)) throw new ChildControlBridgeProtocolError("duplicate-tool-call-id", "tool call id was consumed");
+  state.pending.delete(nonce);
+  state.consumed.add(nonce);
+  state.usedToolCallIds.add(toolCallId);
+  return call;
+}
+
 function asPlaceholderObject(value: unknown): PlaceholderObject {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new ChildControlBridgeProtocolError("placeholder", "placeholder is not an object");
+    throw new ChildControlBridgeProtocolError("placeholder-tamper", "placeholder is not an object");
   }
   return value as PlaceholderObject;
 }
@@ -1114,17 +1171,17 @@ function setPointer(value: PlaceholderObject, pointer: string, marker: string): 
     if (Array.isArray(current)) {
       const offset = Number(part);
       if (!Number.isInteger(offset) || current[offset] === undefined) {
-        throw new ChildControlBridgeProtocolError("placeholder", "generated placeholder pointer drift");
+        throw new ChildControlBridgeProtocolError("placeholder-tamper", "generated placeholder pointer drift");
       }
       if (last) current[offset] = marker;
       else current = current[offset];
     } else if (current !== null && typeof current === "object") {
       const record = current as Record<string, unknown>;
-      if (!(part in record)) throw new ChildControlBridgeProtocolError("placeholder", "generated placeholder pointer drift");
+      if (!(part in record)) throw new ChildControlBridgeProtocolError("placeholder-tamper", "generated placeholder pointer drift");
       if (last) record[part] = marker;
       else current = record[part];
     } else {
-      throw new ChildControlBridgeProtocolError("placeholder", "generated placeholder pointer drift");
+      throw new ChildControlBridgeProtocolError("placeholder-tamper", "generated placeholder pointer drift");
     }
   }
 }
@@ -1254,48 +1311,186 @@ function acceptedReceipt(value: unknown, requestId: string): ChildControlAcceptR
     throw new ChildControlBridgeProtocolError("protocol", "child-control response union is invalid");
   }
   if (outcome === "RETRY") throwCoreRetry(response.diagnostic);
-  const receipt = asRecord(response.receipt, "receipt");
-  if (!closedKeys(receipt, ["kind", "schema", "receipt"]) || (receipt.kind !== "submit" && receipt.kind !== "blocked") || receipt.schema !== "autopilot.child_control_accept_receipt.v1" || !isRecord(receipt.receipt)) {
-    throw new ChildControlBridgeProtocolError("protocol", "child-control accept receipt is invalid");
+  if (!isChildControlAcceptReceipt(response.receipt)) {
+    throw new ChildControlBridgeProtocolError("protocol", "child-control accept receipt leaves are invalid");
   }
-  return receipt as ChildControlAcceptReceipt;
+  return response.receipt;
 }
 
 function throwCoreRetry(value: unknown): never {
   const diagnostic = asRecord(value, "diagnostic");
   if (!isRetryDiagnostic(diagnostic)) {
-    throw new ChildControlBridgeProtocolError("protocol", "child-control retry diagnostic is invalid");
+    throw new ChildControlBridgeProtocolError("protocol", "child-control retry diagnostic leaves are invalid");
   }
   throw retryError(canonicalJson(diagnostic));
 }
 
-function isRetryDiagnostic(diagnostic: Record<string, unknown>): boolean {
-  return closedKeys(diagnostic, ["schema", "code", "error_count", "errors"])
-    && diagnostic.schema === "autopilot.submit_diagnostic.v1"
-    && diagnostic.code === "AUTOPILOT_SUBMIT_RETRY"
-    && Number.isInteger(diagnostic.error_count)
-    && Array.isArray(diagnostic.errors)
-    && diagnostic.errors.length > 0
-    && diagnostic.error_count === diagnostic.errors.length
-    && diagnostic.errors.every(isDiagnosticError);
+function isChildControlAcceptReceipt(value: unknown): value is ChildControlAcceptReceipt {
+  if (!isRecord(value) || !closedKeys(value, ["kind", "schema", "receipt"]) || value.schema !== "autopilot.child_control_accept_receipt.v1") return false;
+  return value.kind === "submit" ? isSubmitReceipt(value.receipt) : value.kind === "blocked" && isBlockedReceipt(value.receipt);
 }
 
-function isDiagnosticError(value: unknown): boolean {
-  if (!isRecord(value) || !closedKeys(value, ["index", "code", "pointer", "expected", "actual", "fix"])) return false;
+function isSubmitReceipt(value: unknown): boolean {
+  if (!isRecord(value) || !closedKeys(value, ["schema", "receipt_id", "run_id", "run_revision", "workstream", "action_id", "assignment_id", "attempt", "profile_id", "tool_name", "boundary_id", "result_contract", "schema_digest", "spec_digest", "carrier_binding_digest", "authority_digest", "frozen_validator_versions", "raw_payload_digest", "raw_payload_byte_count", "request_id", "tool_call_id", "prepared_transition"])) return false;
+  return value.schema === "autopilot.submit_receipt.v1"
+    && isUuidV7(value.receipt_id)
+    && [value.run_id, value.workstream, value.action_id, value.assignment_id, value.profile_id, value.tool_name, value.boundary_id, value.result_contract, value.request_id, value.tool_call_id].every(isNonemptyString)
+    && isU64(value.run_revision)
+    && isU32(value.attempt)
+    && [value.schema_digest, value.spec_digest, value.carrier_binding_digest, value.authority_digest, value.raw_payload_digest].every(isDigest)
+    && isU64(value.raw_payload_byte_count)
+    && Array.isArray(value.frozen_validator_versions)
+    && value.frozen_validator_versions.length > 0
+    && value.frozen_validator_versions.every(isSubmitReceiptValidatorVersion)
+    && isPreparedSubmitTransition(value.prepared_transition);
+}
+
+function isSubmitReceiptValidatorVersion(value: unknown): boolean {
+  return isRecord(value)
+    && closedKeys(value, ["validator_id", "version", "digest"])
+    && isNonemptyString(value.validator_id)
+    && isNonemptyString(value.version)
+    && isDigest(value.digest);
+}
+
+function isPreparedSubmitTransition(value: unknown): boolean {
+  return isRecord(value)
+    && closedKeys(value, ["schema", "transition_ref", "transition_digest", "carrier", "artifact_refs", "issued_actions", "deferred_host_effect"])
+    && value.schema === "autopilot.prepared_submit_transition.v1"
+    && isNonemptyString(value.transition_ref)
+    && isDigest(value.transition_digest)
+    && isPreparedSubmitArtifactRef(value.carrier)
+    && Array.isArray(value.artifact_refs)
+    && value.artifact_refs.every(isPreparedSubmitArtifactRef)
+    && Array.isArray(value.issued_actions)
+    && value.issued_actions.every(isPreparedSubmitIssuedAction)
+    && isDeferredHostEffect(value.deferred_host_effect);
+}
+
+function isPreparedSubmitArtifactRef(value: unknown): boolean {
+  return isRecord(value)
+    && closedKeys(value, ["artifact_ref", "artifact_schema", "sha256", "byte_count"])
+    && isNonemptyString(value.artifact_ref)
+    && isNonemptyString(value.artifact_schema)
+    && isDigest(value.sha256)
+    && isU64(value.byte_count);
+}
+
+function isPreparedSubmitIssuedAction(value: unknown): boolean {
+  return isRecord(value)
+    && closedKeys(value, ["action_ref", "action", "binding_ref", "binding_digest"])
+    && isNonemptyString(value.action_ref)
+    && isBackgroundAction(value.action)
+    && isNonemptyString(value.binding_ref)
+    && isDigest(value.binding_digest);
+}
+
+function isDeferredHostEffect(value: unknown): boolean {
+  if (!isRecord(value) || !closedKeys(value, ["kind", "payload"])) return false;
+  if (value.kind === "done") return isRecord(value.payload) && closedKeys(value.payload, ["status"]) && typeof value.payload.status === "string";
+  if (value.kind === "spawn") return isRecord(value.payload) && closedKeys(value.payload, ["action"]) && isBackgroundAction(value.payload.action);
+  return value.kind === "spawn-wave" && isRecord(value.payload) && closedKeys(value.payload, ["actions"]) && Array.isArray(value.payload.actions) && value.payload.actions.every(isBackgroundAction);
+}
+
+function isBackgroundAction(value: unknown): boolean {
+  if (!isRecord(value) || !closedOptionalKeys(value, ["action_id", "assignment_id", "kind", "bg_run", "run_revision", "supersession_state"], ["expires_at"])) return false;
+  if (!isNonemptyString(value.action_id) || !isNonemptyString(value.assignment_id) || !isNonemptyString(value.kind) || !isU64(value.run_revision) || !isNonemptyString(value.supersession_state)) return false;
+  if (value.expires_at !== undefined && value.expires_at !== null && !isNonemptyString(value.expires_at)) return false;
+  const bgRun = value.bg_run;
+  return isRecord(bgRun)
+    && closedOptionalKeys(bgRun, ["name", "command", "isAgent", "notifyOnCompletion", "triggerOnCompletion"], ["timeoutSeconds"])
+    && typeof bgRun.name === "string"
+    && typeof bgRun.command === "string"
+    && typeof bgRun.isAgent === "boolean"
+    && typeof bgRun.notifyOnCompletion === "boolean"
+    && typeof bgRun.triggerOnCompletion === "boolean"
+    && (bgRun.timeoutSeconds === undefined || isU32(bgRun.timeoutSeconds));
+}
+
+function isBlockedReceipt(value: unknown): boolean {
+  if (!isRecord(value) || !closedKeys(value, ["schema", "receipt_id", "run_id", "run_revision", "workstream", "action_id", "assignment_id", "attempt", "profile_id", "tool_name", "request_id", "tool_call_id", "report_digest", "reason_code", "cancellation_set_digest"])) return false;
+  return value.schema === "autopilot.blocked_receipt.v1"
+    && isUuidV7(value.receipt_id)
+    && [value.run_id, value.workstream, value.action_id, value.assignment_id, value.profile_id, value.tool_name, value.request_id, value.tool_call_id].every(isNonemptyString)
+    && isBlockedReasonCode(value.reason_code)
+    && isU64(value.run_revision)
+    && isU32(value.attempt)
+    && isDigest(value.report_digest)
+    && isDigest(value.cancellation_set_digest);
+}
+
+function isBlockedReasonCode(value: unknown): boolean {
+  return value === "missing-authority" || value === "external-dependency" || value === "infrastructure" || value === "unsafe-to-continue";
+}
+
+function isRetryDiagnostic(diagnostic: Record<string, unknown>): boolean {
+  const errors = diagnostic.errors;
+  if (!closedKeys(diagnostic, ["schema", "code", "error_count", "errors"])
+    || diagnostic.schema !== "autopilot.submit_diagnostic.v1"
+    || diagnostic.code !== "AUTOPILOT_SUBMIT_RETRY"
+    || !isU32(diagnostic.error_count)
+    || !Array.isArray(errors)
+    || errors.length === 0
+    || diagnostic.error_count !== errors.length
+    || !errors.every((error, index) => isDiagnosticError(error, index))) return false;
+  return errors.every((error, index) => index === 0 || compareDiagnosticErrors(errors[index - 1] as Record<string, unknown>, error as Record<string, unknown>) <= 0);
+}
+
+function isDiagnosticError(value: unknown, index: number): boolean {
+  if (!isRecord(value) || !closedKeys(value, ["index", "code", "pointer", "expected", "actual", "fix"]) || value.index !== index || !isU32(value.index)) return false;
   const actual = value.actual;
-  return Number.isInteger(value.index)
-    && typeof value.code === "string"
-    && typeof value.pointer === "string"
-    && typeof value.expected === "string"
-    && typeof value.fix === "string"
+  return isBoundedNonemptyString(value.code, 256)
+    && isBoundedString(value.pointer, 4096)
+    && isBoundedNonemptyString(value.expected, 4096)
+    && isBoundedNonemptyString(value.fix, 4096)
     && isRecord(actual)
     && closedKeys(actual, ["preview", "redacted", "truncated", "sha256", "byte_count", "item_count"])
-    && typeof actual.preview === "string"
+    && isBoundedString(actual.preview, 256)
     && typeof actual.redacted === "boolean"
     && typeof actual.truncated === "boolean"
-    && typeof actual.sha256 === "string"
-    && Number.isInteger(actual.byte_count)
-    && Number.isInteger(actual.item_count);
+    && isDigest(actual.sha256)
+    && isU64(actual.byte_count)
+    && isU64(actual.item_count);
+}
+
+function compareDiagnosticErrors(left: Record<string, unknown>, right: Record<string, unknown>): number {
+  for (const key of ["pointer", "code", "expected"] as const) {
+    const comparison = compareUtf8(left[key] as string, right[key] as string);
+    if (comparison !== 0) return comparison;
+  }
+  return compareUtf8((left.actual as Record<string, unknown>).sha256 as string, (right.actual as Record<string, unknown>).sha256 as string);
+}
+
+function compareUtf8(left: string, right: string): number {
+  return Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"));
+}
+
+function isUuidV7(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(value);
+}
+
+function isDigest(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{64}$/u.test(value);
+}
+
+function isU32(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= 0xffffffff;
+}
+
+function isU64(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isNonemptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function isBoundedString(value: unknown, maxBytes: number): value is string {
+  return typeof value === "string" && Buffer.byteLength(value, "utf8") <= maxBytes;
+}
+
+function isBoundedNonemptyString(value: unknown, maxBytes: number): value is string {
+  return isBoundedString(value, maxBytes) && value.length > 0;
 }
 
 function asRecord(value: unknown, label: string): Record<string, unknown> {
@@ -1312,13 +1507,28 @@ function closedKeys(value: Record<string, unknown>, expected: readonly string[])
   return keys.length === expected.length && keys.every((key, index) => key === [...expected].sort()[index]);
 }
 
+function closedOptionalKeys(value: Record<string, unknown>, required: readonly string[], optional: readonly string[]): boolean {
+  const keys = Object.keys(value);
+  return required.every((key) => Object.hasOwn(value, key))
+    && keys.every((key) => required.includes(key) || optional.includes(key));
+}
+
 function errorCategory(error: unknown, fallback: FixedRetryCategory): FixedRetryCategory {
   return error instanceof ChildControlBridgeProtocolError ? error.category : fallback;
 }
 
 function fixedRetry(category: FixedRetryCategory): Error {
+  const details: Record<FixedRetryCategory, { expected: string; fix: string }> = {
+    transport: { expected: "a generated child-control ACCEPT response", fix: "Retry through the generated child-control bridge." },
+    protocol: { expected: "a valid generated child-control protocol response", fix: "Retry the submit tool in this same session." },
+    "unknown-nonce": { expected: "a pending generated submit placeholder", fix: "Call the submit tool again with a freshly prepared payload." },
+    "consumed-nonce": { expected: "an unconsumed generated submit placeholder", fix: "Call the submit tool again with a freshly prepared payload." },
+    "duplicate-tool-call-id": { expected: "a new tool call identity", fix: "Call the submit tool again with a new tool call." },
+    "placeholder-tamper": { expected: "an unmodified generated submit placeholder", fix: "Call the submit tool again without modifying its generated placeholder." },
+  };
   const actual = { category };
   const bytes = Buffer.from(canonicalJson(actual), "utf8");
+  const detail = details[category];
   const diagnostic = {
     schema: "autopilot.submit_diagnostic.v1",
     code: "AUTOPILOT_SUBMIT_RETRY",
@@ -1327,9 +1537,9 @@ function fixedRetry(category: FixedRetryCategory): Error {
       index: 0,
       code: `child-control.${category}`,
       pointer: "",
-      expected: "a generated child-control ACCEPT response",
+      expected: detail.expected,
       actual: { preview: "[redacted]", redacted: true, truncated: false, sha256: createHash("sha256").update(bytes).digest("hex"), byte_count: bytes.length, item_count: 1 },
-      fix: "Retry through the generated child-control bridge.",
+      fix: detail.fix,
     }],
   };
   return retryError(canonicalJson(diagnostic));
@@ -1342,10 +1552,13 @@ function retryError(message: string): Error {
 }
 
 function isRetryError(value: unknown): value is Error {
-  return value instanceof Error && (value as Record<PropertyKey, unknown>)[RETRY_ERROR] === true;
+  return value instanceof Error && (value as unknown as Record<PropertyKey, unknown>)[RETRY_ERROR] === true;
 }
 
 function canonicalJson(value: unknown): string {
+  if (typeof value === "number" && !Number.isFinite(value)) {
+    throw new ChildControlBridgeProtocolError("protocol", "child-control number is not finite");
+  }
   if (value === null || typeof value === "boolean" || typeof value === "number" || typeof value === "string") {
     const encoded = JSON.stringify(value);
     if (encoded !== undefined) return encoded;

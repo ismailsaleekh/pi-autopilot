@@ -25,6 +25,34 @@ const evidence = {
   approved_command_executions: null,
 } as const;
 
+const UUID_V7 = "018f0f00-0000-7000-8000-000000000001";
+const DIGEST = "a".repeat(64);
+
+function submitReceipt() {
+  return {
+    schema: "autopilot.submit_receipt.v1", receipt_id: UUID_V7, run_id: "run-1", run_revision: 1,
+    workstream: "workstream-1", action_id: "action-1", assignment_id: "assignment-1", attempt: 1,
+    profile_id: "profile-1", tool_name: "tool-1", boundary_id: "boundary-1", result_contract: "result-1",
+    schema_digest: DIGEST, spec_digest: DIGEST, carrier_binding_digest: DIGEST, authority_digest: DIGEST,
+    frozen_validator_versions: [{ validator_id: "validator-1", version: "v1", digest: DIGEST }],
+    raw_payload_digest: DIGEST, raw_payload_byte_count: 0, request_id: "request-1", tool_call_id: "call-1",
+    prepared_transition: {
+      schema: "autopilot.prepared_submit_transition.v1", transition_ref: "transition-1", transition_digest: DIGEST,
+      carrier: { artifact_ref: "carrier-1", artifact_schema: "artifact-1", sha256: DIGEST, byte_count: 0 },
+      artifact_refs: [], issued_actions: [], deferred_host_effect: { kind: "done", payload: { status: "done" } },
+    },
+  };
+}
+
+function blockedReceipt() {
+  return {
+    schema: "autopilot.blocked_receipt.v1", receipt_id: UUID_V7, run_id: "run-1", run_revision: 1,
+    workstream: "workstream-1", action_id: "action-1", assignment_id: "assignment-1", attempt: 1,
+    profile_id: "profile-1", tool_name: "tool-1", request_id: "request-1", tool_call_id: "call-1",
+    report_digest: DIGEST, reason_code: "infrastructure", cancellation_set_digest: DIGEST,
+  };
+}
+
 function accept(requestId: string, kind: "submit" | "blocked" = "submit") {
   return {
     schema: "autopilot.child_control_response.v1",
@@ -33,7 +61,7 @@ function accept(requestId: string, kind: "submit" | "blocked" = "submit") {
     receipt: {
       kind,
       schema: "autopilot.child_control_accept_receipt.v1",
-      receipt: {},
+      receipt: kind === "submit" ? submitReceipt() : blockedReceipt(),
     },
   };
 }
@@ -55,6 +83,28 @@ function canonicalJson(value: unknown): string {
     return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
   }
   return JSON.stringify(value)!;
+}
+
+function replacePlaceholderMarker(value: unknown, marker: string): boolean {
+  if (Array.isArray(value)) {
+    for (const [index, item] of value.entries()) {
+      if (typeof item === "string" && item.startsWith("__autopilot_child_control_placeholder__:")) {
+        value[index] = marker;
+        return true;
+      }
+      if (replacePlaceholderMarker(item, marker)) return true;
+    }
+  }
+  if (value !== null && typeof value === "object") {
+    for (const [key, item] of Object.entries(value)) {
+      if (typeof item === "string" && item.startsWith("__autopilot_child_control_placeholder__:")) {
+        (value as Record<string, unknown>)[key] = marker;
+        return true;
+      }
+      if (replacePlaceholderMarker(item, marker)) return true;
+    }
+  }
+  return false;
 }
 
 function injectedBridge(requests: unknown[]) {
@@ -90,14 +140,14 @@ test("generated bridge preserves every profile raw tree and correlates reversed 
   assert.deepEqual(requests.map((request) => request.runtime_evidence), [evidence, evidence]);
 });
 
-test("generated bridge returns fixed RETRY diagnostics for placeholder, nonce, and duplicate-call faults", async () => {
+test("generated bridge returns distinct secret-free RETRY diagnostics for correlation faults", async () => {
   const metadata = CHILD_CONTROL_TOOL_METADATA[1]!;
   {
     const bridge = injectedBridge([]);
     const placeholder = bridge.prepareArguments(metadata.profile_id, {});
     placeholder.tampered = true;
     await assert.rejects(bridge.execute("tampered", placeholder, evidence), (error) => {
-      fixedRetry(error, "placeholder"); return true;
+      fixedRetry(error, "placeholder-tamper"); return true;
     });
   }
   {
@@ -105,7 +155,7 @@ test("generated bridge returns fixed RETRY diagnostics for placeholder, nonce, a
     const placeholder = bridge.prepareArguments(metadata.profile_id, {});
     await bridge.execute("once", placeholder, evidence);
     await assert.rejects(bridge.execute("twice", placeholder, evidence), (error) => {
-      fixedRetry(error, "nonce"); return true;
+      fixedRetry(error, "consumed-nonce"); return true;
     });
   }
   {
@@ -114,8 +164,34 @@ test("generated bridge returns fixed RETRY diagnostics for placeholder, nonce, a
     const second = bridge.prepareArguments(metadata.profile_id, {});
     await bridge.execute("same-call", first, evidence);
     await assert.rejects(bridge.execute("same-call", second, evidence), (error) => {
-      fixedRetry(error, "nonce"); return true;
+      fixedRetry(error, "duplicate-tool-call-id"); return true;
     });
+  }
+  {
+    const bridge = injectedBridge([]);
+    const placeholder = bridge.prepareArguments(metadata.profile_id, {});
+    const foreign = structuredClone(placeholder);
+    const symbol = Object.getOwnPropertySymbols(placeholder)[0]!;
+    Object.defineProperty(foreign, symbol, { configurable: false, enumerable: false, value: {}, writable: false });
+    assert.equal(replacePlaceholderMarker(foreign, "__autopilot_child_control_placeholder__:" + "b".repeat(64)), true);
+    await assert.rejects(bridge.execute("unknown", foreign, evidence), (error) => {
+      fixedRetry(error, "unknown-nonce");
+      assert.equal(error instanceof Error && error.message.includes("b".repeat(64)), false, "nonce must stay secret-free");
+      return true;
+    });
+  }
+});
+
+test("generated bridge rejects NaN and infinities before transport serialization", async () => {
+  const metadata = CHILD_CONTROL_TOOL_METADATA[1]!;
+  for (const value of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+    const requests: unknown[] = [];
+    const bridge = injectedBridge(requests);
+    const placeholder = bridge.prepareArguments(metadata.profile_id, { value });
+    await assert.rejects(bridge.execute("non-finite", placeholder, evidence), (error) => {
+      fixedRetry(error, "protocol"); return true;
+    });
+    assert.deepEqual(requests, []);
   }
 });
 
@@ -139,6 +215,44 @@ test("generated bridge throws the canonical Core RETRY diagnostic unchanged", as
     assert.equal(error.message, canonicalJson(diagnostic));
     return true;
   });
+});
+
+test("generated bridge rejects malformed ACCEPT leaves and noncanonical RETRY leaves", async () => {
+  const diagnostic = {
+    schema: "autopilot.submit_diagnostic.v1", code: "AUTOPILOT_SUBMIT_RETRY", error_count: 1,
+    errors: [{ index: 0, code: "core.value", pointer: "/x", expected: "value", actual: { preview: "x", redacted: false, truncated: false, sha256: DIGEST, byte_count: 1, item_count: 1 }, fix: "Retry." }],
+  };
+  const cases: Array<(requestId: string) => unknown> = [
+    (requestId) => {
+      const response = accept(requestId);
+      delete (response.receipt.receipt as Record<string, unknown>).schema_digest;
+      return response;
+    },
+    (requestId) => {
+      const response = accept(requestId);
+      (response.receipt.receipt as Record<string, unknown>).attempt = 0x1_0000_0000;
+      return response;
+    },
+    (requestId) => {
+      const response = accept(requestId, "blocked");
+      (response.receipt.receipt as Record<string, unknown>).report_digest = "A".repeat(64);
+      return response;
+    },
+    (requestId) => {
+      const response = accept(requestId, "blocked");
+      (response.receipt.receipt as Record<string, unknown>).run_revision = Number.MAX_SAFE_INTEGER + 1;
+      return response;
+    },
+    (requestId) => ({ schema: "autopilot.child_control_response.v1", request_id: requestId, outcome: "RETRY", diagnostic: { ...diagnostic, errors: [{ ...diagnostic.errors[0]!, actual: { ...diagnostic.errors[0]!.actual, byte_count: -1 } }] } }),
+    (requestId) => ({ schema: "autopilot.child_control_response.v1", request_id: requestId, outcome: "RETRY", diagnostic: { ...diagnostic, error_count: 2, errors: [{ ...diagnostic.errors[0]!, pointer: "/z" }, { ...diagnostic.errors[0]!, index: 1, pointer: "/a" }] } }),
+  ];
+  for (const response of cases) {
+    const bridge = createChildControlBridge({ token: "a".repeat(64), run_id: "run-1", assignment_id: "assignment-1", attempt: 1 }, { async request(request) { return response(request.request_id) as never; } });
+    const placeholder = bridge.prepareArguments(CHILD_CONTROL_TOOL_METADATA[1]!.profile_id, {});
+    await assert.rejects(bridge.execute("malformed-leaf", placeholder, evidence), (error) => {
+      fixedRetry(error, "protocol"); return true;
+    });
+  }
 });
 
 test("generated environment reader rejects absent, partial, empty, and malformed five-variable bindings", { concurrency: false }, async () => {
@@ -173,7 +287,7 @@ test("generated AF_UNIX client sends separate runtime evidence and receives rece
     const bridge = createEnvironmentChildControlBridge();
     const placeholder = bridge.prepareArguments(CHILD_CONTROL_TOOL_METADATA[1]!.profile_id, { raw: null });
     const receipt = await bridge.execute("socket-accept", placeholder, evidence);
-    assert.deepEqual(receipt, { kind: "submit", schema: "autopilot.child_control_accept_receipt.v1", receipt: {} });
+    assert.deepEqual(receipt, { kind: "submit", schema: "autopilot.child_control_accept_receipt.v1", receipt: submitReceipt() });
   });
   try {
     assert.deepEqual(forwarded[0]!.raw_payload, { raw: null });

@@ -1,5 +1,6 @@
 use drivers::planning::planning_assignment_roles;
 use drivers::roles::RoleRegistry;
+use std::fs;
 
 #[test]
 fn role_matrix_matches_d76_section_2_3_exactly() {
@@ -153,6 +154,29 @@ fn role_matrix_matches_d76_section_2_3_exactly() {
         ),
     ];
     assert_eq!(actual, expected);
+}
+
+#[test]
+fn active_submit_role_prose_requires_same_session_retry_for_all_eleven_roles() {
+    for (role, tool) in [
+        ("task-extractor", "autopilot_submit_atoms"),
+        ("repository-scout", "autopilot_submit_scout_report"),
+        ("context-curator", "autopilot_submit_context"),
+        ("contradiction-resolver", "autopilot_submit_resolution"),
+        ("plan-compiler", "autopilot_submit_plan_cluster"),
+        ("plan-synthesizer", "autopilot_submit_synthesis"),
+        ("plan-reviewer", "autopilot_submit_review"),
+        ("recovery-engineer", "autopilot_emit_status"),
+        ("implementer", "autopilot_emit_status"),
+        ("fixer-integrator", "autopilot_emit_status"),
+        ("validator", "autopilot_emit_status"),
+    ] {
+        let prose = fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("roles").join(role).join("base.md")).expect("active role prose");
+        assert!(prose.contains(&format!("Call `{tool}` when the payload is ready.")), "{role}");
+        assert!(prose.contains("If it returns `RETRY`, correct the reported diagnostic"), "{role}");
+        assert!(prose.contains("again in this same session. Only `ACCEPT` terminalizes."), "{role}");
+        assert!(prose.contains("Do not return the payload as assistant prose or markdown."), "{role}");
+    }
 }
 
 #[test]

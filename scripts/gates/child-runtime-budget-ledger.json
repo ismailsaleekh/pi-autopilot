@@ -97,5 +97,14 @@
     "sourceDelta": 0,
     "date": "2026-08-10",
     "justification": "ZERO-NET V5 child-control replacement. Exact gate measurement before and after is 1117 counted handwritten LOC, with 48 counted lines removed and 48 counted lines added (git diff --unified=0, excluding blank and whole-line comments exactly as child-runtime-thinness.sh). Removed the handwritten V3 raw FIFO carrier (rawV3Payloads, shift, and its profile special case) and fresh terminal-carrier details. Added generated nonce-correlated prepare/execute bridge registration, the generated universal blocked tool only for fresh control sessions, receipt-only ACCEPT results, and closed runtime_evidence snapshots. The ceiling is unchanged: this is a substitution under the existing zero-headroom budget, not a raise. Legacy V4 keeps its genuinely consumed carrier branch only when all five V5 child-control variables are absent."
+  },
+  {
+    "from": 1117,
+    "to": 1117,
+    "actualBefore": 1117,
+    "actualAfter": 1117,
+    "sourceDelta": 0,
+    "date": "2026-08-10",
+    "justification": "ZERO-NET Wave 4C correction. Exact gate measurement remains 1117 counted handwritten LOC: generated validation-status.v3 replay raw-capture wiring replaced equal counted runtime surface while all nonce correlation, finite-JSON rejection, response-leaf validation, and diagnostics remain generated in src/generated/child-control-bridge.ts from codegen/src/emit.rs. The runtime only selects that generated V3 no-control capture, continues fresh ChildControl unchanged, and does not register replay BLOCKED because replay_v0 lacks authenticated ChildControl. No retry/session cap, FIFO, second transport, local semantic admission, or new model-facing schema is introduced."
   }
 ]

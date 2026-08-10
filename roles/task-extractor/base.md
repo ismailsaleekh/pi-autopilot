@@ -28,4 +28,4 @@ If context is insufficient, emit the declared context gap or checkpoint behavior
 
 ## Terminal result
 
-Terminalize only through `autopilot_submit_atoms` as the final action. Submit the typed atoms payload; do not return a prose atom list, markdown, or assistant-text JSON as the carrier.
+Call `autopilot_submit_atoms` when the payload is ready. If it returns `RETRY`, correct the reported diagnostic and call `autopilot_submit_atoms` again in this same session. Only `ACCEPT` terminalizes. Do not return the payload as assistant prose or markdown.
