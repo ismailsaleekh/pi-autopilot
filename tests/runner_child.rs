@@ -247,6 +247,190 @@ fn fresh_v5_keeps_one_session_through_retries_compaction_and_parallel_alias_bloc
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn fresh_v5_submit_accept_survives_successful_escalated_shutdown() {
+    let root = temp_root("runner-v5-submit-escalated-cleanup");
+    let socket = test_broker_socket();
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&spec, &socket);
+    let receipt = v5_submit_accept_receipt(&spec);
+    let on_prompt = v5_accept_events(
+        &receipt,
+        "autopilot_submit_atoms",
+        "call-v5-submit-cleanup",
+        "call-v5-submit-cleanup",
+        false,
+    );
+    let signal_marker = root.join("cleanup-signal.txt");
+    let pid_path = root.join("cleanup-pid.txt");
+    write_fake_pi(
+        &root,
+        &v5_escalating_fake_pi(&on_prompt, &signal_marker, &pid_path),
+    );
+
+    with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect("a verified Submit ACCEPT must survive successful forced cleanup");
+
+    assert_eq!(
+        fs::read_to_string(&signal_marker).expect("cleanup signal marker"),
+        "SIGTERM"
+    );
+    assert_recorded_pid_gone(&pid_path);
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_blocked_accept_survives_escalation_after_observation() {
+    let root = temp_root("runner-v5-blocked-escalated-cleanup");
+    let socket = test_broker_socket();
+    fs::remove_file(&socket).expect("replace inert broker socket");
+    let listener = UnixListener::bind(&socket).expect("listen broker socket");
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).expect("broker socket mode");
+    let observed = root.join("blocked-observation.json");
+    let observed_thread = std::thread::spawn({
+        let observed = observed.clone();
+        move || {
+            let (mut stream, _) = listener.accept().expect("accept observation");
+            let mut header = [0_u8; 4];
+            stream.read_exact(&mut header).expect("observation header");
+            let mut body = vec![0_u8; u32::from_be_bytes(header) as usize];
+            stream.read_exact(&mut body).expect("observation body");
+            fs::write(&observed, &body).expect("observation record");
+        }
+    });
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&spec, &socket);
+    let receipt = v5_blocked_accept_receipt(&spec);
+    let on_prompt = v5_accept_events(
+        &receipt,
+        "autopilot_report_blocked",
+        "call-v5-blocked-cleanup",
+        "call-v5-blocked-cleanup",
+        false,
+    );
+    let signal_marker = root.join("cleanup-signal.txt");
+    let pid_path = root.join("cleanup-pid.txt");
+    write_fake_pi(
+        &root,
+        &v5_escalating_fake_pi(&on_prompt, &signal_marker, &pid_path),
+    );
+
+    with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect("a verified BLOCKED ACCEPT must survive cleanup after observation");
+    observed_thread.join().expect("observation broker");
+
+    let observed: Value = serde_json::from_slice(&fs::read(observed).expect("observation bytes"))
+        .expect("observation JSON");
+    assert_eq!(observed["receipt_id"], receipt["receipt"]["receipt_id"]);
+    assert_eq!(observed["tool_call_id"], "call-v5-blocked-cleanup");
+    assert_eq!(
+        fs::read_to_string(&signal_marker).expect("cleanup signal marker"),
+        "SIGTERM"
+    );
+    assert_recorded_pid_gone(&pid_path);
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_accept_still_rejects_graceful_nonzero_exit() {
+    let root = temp_root("runner-v5-graceful-nonzero");
+    let socket = test_broker_socket();
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&spec, &socket);
+    let receipt = v5_submit_accept_receipt(&spec);
+    let on_prompt = v5_accept_events(
+        &receipt,
+        "autopilot_submit_atoms",
+        "call-v5-graceful-nonzero",
+        "call-v5-graceful-nonzero",
+        false,
+    );
+    let fake = replace_fake_stdin_end(
+        rpc_fake_pi("", &on_prompt).replace("fake-pi-v2", "0.84.1"),
+        "process.stdin.on('end', () => process.exit(73));",
+    );
+    write_fake_pi(&root, &fake);
+
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("an independent graceful nonzero Pi exit must remain fatal");
+    assert!(error.contains("agent-run pi exited nonzero"), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_uncorrelated_result_cannot_gain_escalation_success() {
+    let root = temp_root("runner-v5-uncorrelated-escalation");
+    let socket = test_broker_socket();
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&spec, &socket);
+    let receipt = v5_submit_accept_receipt(&spec);
+    let on_prompt = v5_accept_events(
+        &receipt,
+        "autopilot_submit_atoms",
+        "call-v5-uncorrelated-execution",
+        "call-v5-uncorrelated-message",
+        true,
+    );
+    let signal_marker = root.join("cleanup-signal.txt");
+    let pid_path = root.join("cleanup-pid.txt");
+    write_fake_pi(
+        &root,
+        &v5_escalating_fake_pi(&on_prompt, &signal_marker, &pid_path),
+    );
+
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("uncorrelated receipt details must remain fatal before cleanup");
+    assert!(
+        error.contains("terminating tool missing correlated toolResult details"),
+        "{error}"
+    );
+    assert_eq!(
+        fs::read_to_string(&signal_marker).expect("cleanup signal marker"),
+        "SIGTERM"
+    );
+    assert_recorded_pid_gone(&pid_path);
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_accept_does_not_swallow_shutdown_stderr_overflow() {
+    let root = temp_root("runner-v5-shutdown-stderr-overflow");
+    let socket = test_broker_socket();
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&spec, &socket);
+    let receipt = v5_submit_accept_receipt(&spec);
+    let on_prompt = v5_accept_events(
+        &receipt,
+        "autopilot_submit_atoms",
+        "call-v5-stderr-overflow",
+        "call-v5-stderr-overflow",
+        false,
+    );
+    let fake = replace_fake_stdin_end(
+        rpc_fake_pi("", &on_prompt).replace("fake-pi-v2", "0.84.1"),
+        "process.stdin.on('end', () => { process.stderr.write('x'.repeat(262145)); });",
+    );
+    write_fake_pi(&root, &fake);
+
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("verified ACCEPT must not swallow stderr cleanup corruption");
+    assert!(
+        error.contains("rpc stderr exceeded hard ceiling"),
+        "{error}"
+    );
+}
+
 #[test]
 fn reader_only_specs_fail_before_pi_spawn() {
     let root = temp_root("runner-replay-reader-only");
@@ -4152,6 +4336,166 @@ fn valid_handoff() -> Value {
         },
         "next_action":"resume and emit final atoms"
     })
+}
+
+#[cfg(unix)]
+fn v5_submit_accept_receipt(spec_path: &Path) -> Value {
+    let spec_bytes = fs::read(spec_path).expect("V5 spec bytes");
+    let fresh: kernel::generated::AgentRunSpecV5 =
+        serde_json::from_slice(&spec_bytes).expect("V5 spec JSON");
+    let facade = drivers::runner::project_v5_spec_for_shared_admission(&fresh);
+    let (profile_id, tool_name, boundary_id, result_contract, schema_digest) =
+        kernel::generated::TERMINAL_PROFILES
+            .iter()
+            .copied()
+            .find(|profile| profile.0 == "planning.task-atoms.v1:autopilot_submit_atoms")
+            .expect("task-atoms terminal profile");
+    let transition_ref = format!("{}/.pi/test-submit-transition.json", facade.cwd.0);
+    json!({
+        "kind":"submit",
+        "schema":"autopilot.child_control_accept_receipt.v1",
+        "receipt":{
+            "schema":"autopilot.submit_receipt.v1",
+            "receipt_id":"019fa883-1eaf-75f9-99af-6aa246736f72",
+            "run_id":fresh.run_id.0,
+            "run_revision":fresh.run_revision,
+            "workstream":fresh.workstream.0,
+            "action_id":fresh.action_id.0,
+            "assignment_id":fresh.assignment_id.0,
+            "attempt":fresh.attempt.expect("V5 attempt"),
+            "profile_id":profile_id,
+            "tool_name":tool_name,
+            "boundary_id":boundary_id,
+            "result_contract":result_contract,
+            "schema_digest":schema_digest,
+            "spec_digest":sha256_hex(&spec_bytes),
+            "carrier_binding_digest":child::carrier_binding(&facade),
+            "authority_digest":sha256_hex(b"test V5 submit authority"),
+            "frozen_validator_versions":[],
+            "raw_payload_digest":sha256_hex(b"{}"),
+            "raw_payload_byte_count":2,
+            "request_id":"request-v5-submit-cleanup",
+            "tool_call_id":"core-v5-submit-call",
+            "prepared_transition":{
+                "schema":"autopilot.prepared_submit_transition.v1",
+                "transition_ref":transition_ref,
+                "transition_digest":sha256_hex(b"test V5 prepared transition"),
+                "carrier":{
+                    "artifact_ref":facade.carrier_path.0,
+                    "artifact_schema":"autopilot.planning_carrier.v1",
+                    "sha256":sha256_hex(b"test V5 carrier"),
+                    "byte_count":0
+                },
+                "artifact_refs":[],
+                "issued_actions":[],
+                "deferred_host_effect":{
+                    "kind":"done",
+                    "payload":{"status":"test V5 accepted"}
+                }
+            }
+        }
+    })
+}
+
+#[cfg(unix)]
+fn v5_blocked_accept_receipt(spec_path: &Path) -> Value {
+    let fresh: kernel::generated::AgentRunSpecV5 =
+        serde_json::from_slice(&fs::read(spec_path).expect("V5 spec bytes")).expect("V5 spec JSON");
+    let blocked = kernel::generated::UNIVERSAL_CHILD_TOOLS[0];
+    json!({
+        "kind":"blocked",
+        "schema":"autopilot.child_control_accept_receipt.v1",
+        "receipt":{
+            "schema":"autopilot.blocked_receipt.v1",
+            "receipt_id":"019fa883-1eaf-75f9-99af-6aa246736f73",
+            "run_id":fresh.run_id.0,
+            "run_revision":fresh.run_revision,
+            "workstream":fresh.workstream.0,
+            "action_id":fresh.action_id.0,
+            "assignment_id":fresh.assignment_id.0,
+            "attempt":fresh.attempt.expect("V5 attempt"),
+            "profile_id":blocked.0,
+            "tool_name":blocked.1,
+            "request_id":"request-v5-blocked-cleanup",
+            "tool_call_id":"core-v5-blocked-call",
+            "report_digest":sha256_hex(b"test V5 blocked report"),
+            "reason_code":"infrastructure",
+            "cancellation_set_digest":sha256_hex(b"test V5 cancellation set")
+        }
+    })
+}
+
+#[cfg(unix)]
+fn v5_accept_events(
+    receipt: &Value,
+    tool_name: &str,
+    execution_call_id: &str,
+    result_call_id: &str,
+    settle: bool,
+) -> String {
+    let settled = if settle {
+        "send({type:'agent_end',willRetry:false}); send({type:'agent_settled'});"
+    } else {
+        ""
+    };
+    format!(
+        concat!(
+            "const acceptedReceipt={receipt}; const acceptedTool={tool}; ",
+            "const executionCall={execution_call}; const resultCall={result_call}; send({{type:'agent_start'}}); ",
+            "send({{type:'tool_execution_start',toolCallId:executionCall,toolName:acceptedTool}}); ",
+            "send({{type:'tool_execution_end',toolCallId:executionCall,toolName:acceptedTool,result:{{content:[],details:acceptedReceipt,terminate:true}},isError:false}}); ",
+            "send({{type:'message_end',message:{{role:'toolResult',toolCallId:resultCall,toolName:acceptedTool,content:[],details:acceptedReceipt,isError:false}}}}); ",
+            "{settled}"
+        ),
+        receipt = serde_json::to_string(receipt).expect("accept receipt JSON"),
+        tool = serde_json::to_string(tool_name).expect("tool JSON"),
+        execution_call = serde_json::to_string(execution_call_id).expect("execution call JSON"),
+        result_call = serde_json::to_string(result_call_id).expect("result call JSON"),
+        settled = settled,
+    )
+}
+
+#[cfg(unix)]
+fn v5_escalating_fake_pi(on_prompt: &str, signal_marker: &Path, pid_path: &Path) -> String {
+    let setup = format!(
+        concat!(
+            "writeFileSync({pid_path:?}, String(process.pid)); ",
+            "const cleanupKeepalive=setInterval(() => {{}}, 1000); ",
+            "process.on('SIGTERM', () => {{ writeFileSync({signal_marker:?}, 'SIGTERM'); ",
+            "clearInterval(cleanupKeepalive); process.exit(143); }});"
+        ),
+        pid_path = pid_path,
+        signal_marker = signal_marker,
+    );
+    replace_fake_stdin_end(
+        rpc_fake_pi(&setup, on_prompt).replace("fake-pi-v2", "0.84.1"),
+        "process.stdin.on('end', () => {});",
+    )
+}
+
+#[cfg(unix)]
+fn replace_fake_stdin_end(fake: String, replacement: &str) -> String {
+    const ORIGINAL: &str = "process.stdin.on('end', () => process.exit(0));";
+    assert_eq!(
+        fake.matches(ORIGINAL).count(),
+        1,
+        "fake Pi stdin-end fixture drift"
+    );
+    fake.replacen(ORIGINAL, replacement, 1)
+}
+
+#[cfg(unix)]
+fn assert_recorded_pid_gone(pid_path: &Path) {
+    let pid = fs::read_to_string(pid_path).expect("recorded fake Pi pid");
+    let output = Command::new("kill")
+        .args(["-0", pid.trim()])
+        .output()
+        .expect("inspect fake Pi pid");
+    assert!(
+        !output.status.success(),
+        "fake Pi process {} survived successful cleanup",
+        pid.trim()
+    );
 }
 
 fn success_fake_pi(output: &str) -> String {

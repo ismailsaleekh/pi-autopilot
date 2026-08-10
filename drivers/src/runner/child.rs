@@ -1351,6 +1351,12 @@ impl RpcAssignment {
             .client
             .shutdown(Duration::from_millis(250))
             .map_err(|error| error.to_string())?;
+        if shutdown.escalated {
+            // The verified ACCEPT is already the semantic terminal. A successful
+            // shutdown result proves process-group cleanup, reaping, and stderr
+            // completion even when cleanup had to signal Pi.
+            return Ok(());
+        }
         validate_rpc_shutdown(shutdown)
     }
 }
