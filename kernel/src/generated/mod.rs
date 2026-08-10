@@ -2046,6 +2046,12 @@ pub struct ChildControlBlockedGate {
 pub struct ChildControlBlockedCancellation {
     #[serde(rename = "task_id")]
     pub task_id: Id,
+    /// Host-only durable launch-journal correlation; copied exactly from the Core latch.
+    #[serde(rename = "action_id")]
+    pub action_id: Id,
+    /// Host-only durable launch-journal correlation; copied exactly from the Core latch.
+    #[serde(rename = "assignment_id")]
+    pub assignment_id: Id,
     #[serde(rename = "reporter")]
     pub reporter: bool,
 }

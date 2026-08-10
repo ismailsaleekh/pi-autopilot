@@ -517,7 +517,11 @@ function sameBlockedGate(left: ChildControlBlockedGate, right: ChildControlBlock
     && left.cancellations.length === right.cancellations.length
     && left.cancellations.every((cancellation, index) => {
       const other = right.cancellations[index];
-      return other !== undefined && other.task_id === cancellation.task_id && other.reporter === cancellation.reporter;
+      return other !== undefined
+        && other.task_id === cancellation.task_id
+        && other.action_id === cancellation.action_id
+        && other.assignment_id === cancellation.assignment_id
+        && other.reporter === cancellation.reporter;
     });
 }
 

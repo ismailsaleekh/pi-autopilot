@@ -86,6 +86,8 @@ fn blocked_latch_is_rooted_replayed_and_observed_once() {
         fixture.seed_receipt_planning_binding(&mut state, "planning-ws-task-extractor-02", "BL02-");
     let sibling_b =
         fixture.seed_receipt_planning_binding(&mut state, "planning-ws-task-extractor-03", "BL03-");
+    let terminal =
+        fixture.seed_receipt_planning_binding(&mut state, "planning-ws-task-extractor-04", "BL04-");
     let foreign = fixture.issue_task_extractor(
         "foreign-workstream",
         "planning-foreign-task-extractor-01",
@@ -99,6 +101,7 @@ fn blocked_latch_is_rooted_replayed_and_observed_once() {
         (&sibling_b, "task-beta"),
         (&reporter, "task-reporter"),
         (&sibling_a, "task-alpha"),
+        (&terminal, "task-terminal"),
         (&foreign, "task-foreign"),
     ] {
         let launched = json!({"v":1,"id":63,"kind":"spawn-result","payload":{
@@ -108,6 +111,15 @@ fn blocked_latch_is_rooted_replayed_and_observed_once() {
         }});
         seam::handle_line(&launched.to_string(), &mut state).unwrap();
     }
+    append_ref(
+        &mut state,
+        &Ref(format!(
+            "terminal-consumed:{}:{}:{}",
+            terminal.receipt_binding.action_id.0,
+            terminal.receipt_binding.assignment_id.0,
+            terminal.receipt_binding.run_revision
+        )),
+    );
     let spec: kernel::generated::AgentRunSpecV5 =
         serde_json::from_slice(&fs::read(&reporter.binding.spec_path).unwrap()).unwrap();
     let blocked = json!({"v":1,"id":64,"kind":"child-control","payload":{
@@ -128,9 +140,9 @@ fn blocked_latch_is_rooted_replayed_and_observed_once() {
     assert_eq!(
         accepted.payload["blocked_gate"]["cancellations"],
         json!([
-            {"task_id":"task-alpha","reporter":false},
-            {"task_id":"task-beta","reporter":false},
-            {"task_id":"task-reporter","reporter":true}
+            {"task_id":"task-alpha","action_id":"action-planning-ws-task-extractor-02","assignment_id":"planning-ws-task-extractor-02","reporter":false},
+            {"task_id":"task-beta","action_id":"action-planning-ws-task-extractor-03","assignment_id":"planning-ws-task-extractor-03","reporter":false},
+            {"task_id":"task-reporter","action_id":"action-planning-ws-task-extractor-01","assignment_id":"planning-ws-task-extractor-01","reporter":true}
         ])
     );
     let receipt = accepted.payload["response"]["receipt"]["receipt"].clone();
@@ -143,16 +155,51 @@ fn blocked_latch_is_rooted_replayed_and_observed_once() {
     conflict["payload"]["request"]["raw_payload"]["summary"] = json!("different blocker");
     let rejected = seam::handle_line(&conflict.to_string(), &mut state).unwrap();
     assert_eq!(rejected.payload["response"]["outcome"], "RETRY");
+
+    // A rooted exact alias authenticates against only durable binding/receipt/
+    // latch/root authority. It must survive deletion of all mutable child
+    // sources, while a changed canonical report remains a RETRY.
+    fs::create_dir_all(Path::new(&reporter.binding.carrier_path).parent().unwrap()).unwrap();
+    fs::write(&reporter.binding.carrier_path, b"mutable carrier source").unwrap();
+    fs::remove_file(&reporter.binding.spec_path).unwrap();
+    fs::remove_file(&reporter.binding.carrier_path).unwrap();
+    let source_free = seam::handle_line(&replay.to_string(), &mut state).unwrap();
+    assert_eq!(source_free.payload["response"]["outcome"], "ACCEPT");
+    let changed_without_sources = seam::handle_line(&conflict.to_string(), &mut state).unwrap();
+    assert_eq!(
+        changed_without_sources.payload["response"]["outcome"],
+        "RETRY"
+    );
+
     let reopened = CoreState::open(Some(event_path)).unwrap();
     let mut reopened = reopened;
+    let restarted_source_free = seam::handle_line(&replay.to_string(), &mut reopened).unwrap();
+    assert_eq!(
+        restarted_source_free.payload["response"]["outcome"],
+        "ACCEPT"
+    );
     let reconcile = json!({"v":1,"id":65,"kind":"blocked-reconcile","payload":{
         "schema":"autopilot.blocked_reconcile.v1","broker_capability":fixture.broker_capability()
     }});
+    let malformed_reconcile =
+        json!({"v":1,"id":650,"kind":"blocked-reconcile","payload":{"unexpected":true}});
+    let malformed_reconcile_response =
+        seam::handle_line(&malformed_reconcile.to_string(), &mut reopened).unwrap();
+    assert_eq!(malformed_reconcile_response.kind, "done");
+    assert!(
+        malformed_reconcile_response.payload["status"]
+            .as_str()
+            .is_some_and(|status| status.starts_with("rejection:blocked-reconcile:"))
+    );
     let reconciliation = seam::handle_line(&reconcile.to_string(), &mut reopened).unwrap();
     assert_eq!(reconciliation.kind, "blocked-reconcile");
     assert_eq!(
         reconciliation.payload["records"].as_array().unwrap().len(),
         1
+    );
+    assert_eq!(
+        reconciliation.payload["records"][0]["blocked_gate"]["cancellations"],
+        accepted.payload["blocked_gate"]["cancellations"]
     );
     let observed = json!({"v":1,"id":66,"kind":"blocked-result-observed","payload":{
         "schema":"autopilot.blocked_result_observed.v1","broker_capability":fixture.broker_capability(),
@@ -160,12 +207,262 @@ fn blocked_latch_is_rooted_replayed_and_observed_once() {
         "assignment_id":reporter.receipt_binding.assignment_id,"attempt":reporter.receipt_binding.attempt,
         "receipt_id":receipt["receipt_id"],"tool_call_id":"blocked-call-2"
     }});
+    let malformed_observation =
+        json!({"v":1,"id":660,"kind":"blocked-result-observed","payload":{"unexpected":true}});
+    let malformed_observation_response =
+        seam::handle_line(&malformed_observation.to_string(), &mut reopened).unwrap();
+    assert_eq!(malformed_observation_response.kind, "done");
+    assert!(
+        malformed_observation_response.payload["status"]
+            .as_str()
+            .is_some_and(|status| status.starts_with("rejection:blocked-result-observed:"))
+    );
+    let mut unauthorized_observation = observed.clone();
+    unauthorized_observation["payload"]["broker_capability"] = json!("f".repeat(64));
+    let unauthorized_observation_response =
+        seam::handle_line(&unauthorized_observation.to_string(), &mut reopened).unwrap();
+    assert_eq!(unauthorized_observation_response.kind, "done");
     let first_observation = seam::handle_line(&observed.to_string(), &mut reopened).unwrap();
     assert_eq!(first_observation.kind, "blocked-result-observed");
     let duplicate_observation = seam::handle_line(&observed.to_string(), &mut reopened).unwrap();
     assert_eq!(duplicate_observation.payload, first_observation.payload);
     let rows = fs::read_to_string(fixture.root.join("events.jsonl")).unwrap();
     assert_eq!(rows.matches("blocked:result-observed").count(), 1);
+}
+
+#[test]
+fn blocked_publication_boundaries_recover_once_and_corruption_fails_closed() {
+    fn remove_event_kinds(path: &Path, removed: &[&str]) {
+        let rows = fs::read_to_string(path).unwrap();
+        let retained = rows
+            .lines()
+            .filter(|line| {
+                let event: EventRow = serde_json::from_str(line).unwrap();
+                !removed.contains(&event.kind.0.as_str())
+            })
+            .collect::<Vec<_>>();
+        fs::write(path, format!("{}\n", retained.join("\n"))).unwrap();
+    }
+    fn event_kind_count(path: &Path, kind: &str) -> usize {
+        fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .filter(|line| serde_json::from_str::<EventRow>(line).unwrap().kind.0 == kind)
+            .count()
+    }
+
+    let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+    let fixture = Fixture::new("blocked-publication-boundaries");
+    fixture.install_transport_with_nonexistent_command_names();
+    let event_path = fixture.root.join("events.jsonl");
+    let mut state = CoreState::open(Some(event_path.clone())).unwrap();
+    let reporter =
+        fixture.seed_receipt_planning_binding(&mut state, "planning-ws-task-extractor-01", "BND-");
+    let launched = json!({"v":1,"id":69,"kind":"spawn-result","payload":{
+        "action_id":reporter.receipt_binding.action_id,
+        "assignment_id":reporter.receipt_binding.assignment_id,
+        "status":"launched","task_id":"boundary-reporter","diagnostic":null
+    }});
+    seam::handle_line(&launched.to_string(), &mut state).unwrap();
+    let spec: kernel::generated::AgentRunSpecV5 =
+        serde_json::from_slice(&fs::read(&reporter.binding.spec_path).unwrap()).unwrap();
+    let blocked = json!({"v":1,"id":70,"kind":"child-control","payload":{
+        "broker_capability":fixture.broker_capability(),"request":{
+            "schema":"autopilot.child_control_request.v1","request_id":"boundary-request",
+            "token":spec.child_control_token,"run_id":reporter.receipt_binding.run_id,
+            "assignment_id":reporter.receipt_binding.assignment_id,"attempt":reporter.receipt_binding.attempt,
+            "tool_call_id":"boundary-call","kind":"blocked",
+            "tool_name":"autopilot_report_blocked",
+            "profile_id":"autopilot.blocked_report.v1:autopilot_report_blocked",
+            "raw_payload":{"schema":"autopilot.blocked_report.v1","reason_code":"infrastructure","summary":"publication boundary","evidence":[{"kind":"observation","value":"focused fixture"}],"last_attempted_action":"run focused fixture"},
+            "runtime_evidence":{"schema":"autopilot.child_control_runtime_evidence.v1","delivery_policy_denials":null,"approved_command_executions":null}
+        }
+    }});
+    assert_eq!(
+        seam::handle_line(&blocked.to_string(), &mut state)
+            .unwrap()
+            .payload["response"]["outcome"],
+        "ACCEPT"
+    );
+    let durable_root = Path::new(&reporter.binding.carrier_path)
+        .parent()
+        .and_then(Path::parent)
+        .unwrap()
+        .to_path_buf();
+    let latch_path = fs::read_dir(durable_root.join("blocked-latches"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    drop(state);
+
+    // Receipt+latch with no accepted root uses the same prepared transaction;
+    // an unrelated row cannot select a new cancellation snapshot or IDs.
+    remove_event_kinds(
+        &event_path,
+        &["blocked:accepted", "blocked:latch-event-ref"],
+    );
+    let mut recovered = CoreState::open(Some(event_path.clone())).unwrap();
+    append_ref(
+        &mut recovered,
+        &Ref("unrelated-durable:blocked-receipt-latch-recovery".to_owned()),
+    );
+    let receipt_latch_recovery = seam::handle_line(&blocked.to_string(), &mut recovered).unwrap();
+    assert_eq!(
+        receipt_latch_recovery.payload["response"]["outcome"],
+        "ACCEPT"
+    );
+    assert_eq!(event_kind_count(&event_path, "blocked:accepted"), 1);
+    assert_eq!(event_kind_count(&event_path, "blocked:latch-event-ref"), 1);
+    drop(recovered);
+
+    // Receipt-only is also recovered from that immutable prepared authority,
+    // not by re-deriving mutable launch acknowledgements.
+    remove_event_kinds(
+        &event_path,
+        &["blocked:accepted", "blocked:latch-event-ref"],
+    );
+    fs::remove_file(&latch_path).unwrap();
+    let mut receipt_only = CoreState::open(Some(event_path.clone())).unwrap();
+    let receipt_only_recovery = seam::handle_line(&blocked.to_string(), &mut receipt_only).unwrap();
+    assert_eq!(
+        receipt_only_recovery.payload["response"]["outcome"],
+        "ACCEPT"
+    );
+    assert!(latch_path.exists());
+    assert_eq!(event_kind_count(&event_path, "blocked:accepted"), 1);
+    assert_eq!(event_kind_count(&event_path, "blocked:latch-event-ref"), 1);
+    drop(receipt_only);
+
+    // The accepted root is the publication boundary: open repairs exactly a
+    // missing event-ref and never duplicates receipt, latch, root, or ref.
+    remove_event_kinds(&event_path, &["blocked:latch-event-ref"]);
+    let mut root_repaired = CoreState::open(Some(event_path.clone())).unwrap();
+    assert_eq!(event_kind_count(&event_path, "blocked:accepted"), 1);
+    assert_eq!(event_kind_count(&event_path, "blocked:latch-event-ref"), 1);
+    let reconcile = json!({"v":1,"id":71,"kind":"blocked-reconcile","payload":{
+        "schema":"autopilot.blocked_reconcile.v1","broker_capability":fixture.broker_capability()
+    }});
+    assert_eq!(
+        seam::handle_line(&reconcile.to_string(), &mut root_repaired)
+            .unwrap()
+            .kind,
+        "blocked-reconcile"
+    );
+    drop(root_repaired);
+
+    // A rooted artifact fault is not a Core death. It globally suppresses
+    // launch routes and makes private reconciliation a deterministic frame.
+    fs::write(&latch_path, b"{}").unwrap();
+    let mut degraded = CoreState::open(Some(event_path.clone())).unwrap();
+    let rows_before = fs::read_to_string(&event_path).unwrap();
+    let private_rejection = seam::handle_line(&reconcile.to_string(), &mut degraded).unwrap();
+    assert_eq!(private_rejection.kind, "done");
+    assert!(
+        private_rejection.payload["status"]
+            .as_str()
+            .is_some_and(|status| status.starts_with("rejection:blocked-reconcile:"))
+    );
+    let run = json!({"v":1,"id":72,"kind":"command","payload":{
+        "raw":"/autopilot ws",
+        "background_capabilities":{"api_version":1,"run":true,"run_is_agent":true,"run_completion_trigger":true,"status":true,"logs":true,"logs_bounded":true,"kill":true},
+        "background_capability_diagnostic":null
+    }});
+    let launch_rejection = seam::handle_line(&run.to_string(), &mut degraded).unwrap();
+    assert_eq!(launch_rejection.kind, "done");
+    assert!(
+        launch_rejection.payload["status"]
+            .as_str()
+            .is_some_and(|status| status.starts_with("rejection:blocked-latch:"))
+    );
+    assert_eq!(fs::read_to_string(event_path).unwrap(), rows_before);
+}
+
+#[test]
+fn blocked_rejections_leave_no_durable_artifacts_before_a_reporter_launch_ack() {
+    let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+    let fixture = Fixture::new("blocked-rejection-zero-state");
+    fixture.install_transport_with_nonexistent_command_names();
+    let event_path = fixture.root.join("events.jsonl");
+    let mut state = CoreState::open(Some(event_path.clone())).unwrap();
+    let reporter =
+        fixture.seed_receipt_planning_binding(&mut state, "planning-ws-task-extractor-01", "BRJ-");
+    let spec: kernel::generated::AgentRunSpecV5 =
+        serde_json::from_slice(&fs::read(&reporter.binding.spec_path).unwrap()).unwrap();
+    let blocked = json!({"v":1,"id":67,"kind":"child-control","payload":{
+        "broker_capability":fixture.broker_capability(),"request":{
+            "schema":"autopilot.child_control_request.v1","request_id":"blocked-reject-1",
+            "token":spec.child_control_token,"run_id":reporter.receipt_binding.run_id,
+            "assignment_id":reporter.receipt_binding.assignment_id,"attempt":reporter.receipt_binding.attempt,
+            "tool_call_id":"blocked-reject-call","kind":"blocked",
+            "tool_name":"autopilot_report_blocked",
+            "profile_id":"autopilot.blocked_report.v1:autopilot_report_blocked",
+            "raw_payload":{"schema":"autopilot.blocked_report.v1","reason_code":"infrastructure","summary":"no launch ack","evidence":[{"kind":"observation","value":"focused fixture"}],"last_attempted_action":"run focused fixture"},
+            "runtime_evidence":{"schema":"autopilot.child_control_runtime_evidence.v1","delivery_policy_denials":null,"approved_command_executions":null}
+        }
+    }});
+    let mut malformed = blocked.clone();
+    malformed["payload"]["request"]["raw_payload"]["schema"] = json!("wrong");
+    let mut unauthorized = blocked.clone();
+    unauthorized["payload"]["broker_capability"] = json!("f".repeat(64));
+    for frame in [&malformed, &unauthorized, &blocked] {
+        let response = seam::handle_line(&frame.to_string(), &mut state).unwrap();
+        assert_eq!(response.kind, "child-control");
+        assert_eq!(response.payload["response"]["outcome"], "RETRY");
+    }
+    let durable_root = Path::new(&reporter.binding.carrier_path)
+        .parent()
+        .and_then(Path::parent)
+        .unwrap();
+    for directory in [
+        "blocked-prepared-transactions",
+        "blocked-receipts",
+        "blocked-latches",
+    ] {
+        assert!(
+            !durable_root.join(directory).exists(),
+            "{directory} must not exist after rejected blocked admission"
+        );
+    }
+    assert!(!fs::read_to_string(event_path).unwrap().contains("blocked:"));
+}
+
+#[test]
+fn launch_ack_replay_is_exactly_idempotent_and_conflicting_task_ids_reject() {
+    let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+    let fixture = Fixture::new("launch-ack-idempotency");
+    fixture.install_transport_with_nonexistent_command_names();
+    let event_path = fixture.root.join("events.jsonl");
+    let mut state = CoreState::open(Some(event_path.clone())).unwrap();
+    let issue =
+        fixture.seed_receipt_planning_binding(&mut state, "planning-ws-task-extractor-01", "ACK-");
+    let launched = json!({"v":1,"id":68,"kind":"spawn-result","payload":{
+        "action_id":issue.receipt_binding.action_id,
+        "assignment_id":issue.receipt_binding.assignment_id,
+        "status":"launched","task_id":"journal-owned-task","diagnostic":null
+    }});
+    let first = seam::handle_line(&launched.to_string(), &mut state).unwrap();
+    assert_eq!(first.kind, "done");
+    let replay = seam::handle_line(&launched.to_string(), &mut state).unwrap();
+    assert_eq!(replay.kind, "done");
+    assert_eq!(replay.payload, first.payload);
+    let mut conflict = launched.clone();
+    conflict["payload"]["task_id"] = json!("different-journal-task");
+    let rejected = seam::handle_line(&conflict.to_string(), &mut state).unwrap();
+    assert_eq!(rejected.kind, "done");
+    assert!(
+        rejected.payload["status"]
+            .as_str()
+            .is_some_and(|status| status.contains("acknowledged-task-id-conflict"))
+    );
+    assert_eq!(
+        fs::read_to_string(event_path)
+            .unwrap()
+            .matches("background:launch-ack")
+            .count(),
+        1
+    );
 }
 
 #[test]

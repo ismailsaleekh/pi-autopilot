@@ -619,6 +619,8 @@ export interface ChildControlBlockedGate {
 
 export interface ChildControlBlockedCancellation {
   task_id: Id;
+  action_id: Id;
+  assignment_id: Id;
   reporter: boolean;
 }
 

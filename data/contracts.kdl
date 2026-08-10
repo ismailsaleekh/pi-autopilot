@@ -1366,6 +1366,8 @@ artifact "child_control_blocked_gate" schema="autopilot.child_control_blocked_ga
     list "cancellations" item="child_control_blocked_cancellation" required=#true min_items=1
     record "child_control_blocked_cancellation" {
         field "task_id" type="id" required=#true
+        field "action_id" type="id" required=#true doc="Host-only durable launch-journal correlation; copied exactly from the Core latch."
+        field "assignment_id" type="id" required=#true doc="Host-only durable launch-journal correlation; copied exactly from the Core latch."
         field "reporter" type="bool" required=#true
     }
 }
