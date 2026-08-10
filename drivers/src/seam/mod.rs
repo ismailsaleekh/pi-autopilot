@@ -6003,7 +6003,13 @@ fn route_plan(id: u64, args: &[String], state: &mut CoreState) -> Result<SeamEnv
             controlled_spawn_wave(id, actions, state, "planning")
         }
         planning::PlanningWaveOutcome::WaitingOnInFlight { wave_id, active } => {
-            let actions = unacknowledged_planning_actions(state, &active)?;
+            let actions = match unacknowledged_planning_actions(state, &active) {
+                Ok(actions) => actions,
+                Err(error) => match migration_required_status(&error) {
+                    Some(status) => return done(id, status),
+                    None => return Err(error),
+                },
+            };
             if actions.is_empty() {
                 return done(id, planning_waiting_status(&wave_id, &active, state));
             }
@@ -6038,8 +6044,13 @@ fn route_run(id: u64, workstream: &str, state: &mut CoreState) -> Result<SeamEnv
     {
         return done(id, status);
     }
-    let outcome = advance_run(id, workstream, state)?;
-    advance_run_envelope(id, outcome)
+    match advance_run(id, workstream, state) {
+        Ok(outcome) => advance_run_envelope(id, outcome),
+        Err(error) => match migration_required_status(&error) {
+            Some(status) => done(id, status),
+            None => Err(error),
+        },
+    }
 }
 
 #[derive(Debug)]
@@ -6189,7 +6200,17 @@ fn resume_pending_validation_recovery(
             if terminal_consumed(state, &recovery) || launch_ack_consumed(state, &recovery) {
                 continue;
             }
-            let action = planning_action_from_binding(&recovery)?;
+            let receipt_recovery = match versioned_binding_for(
+                state,
+                &recovery.action_id.0,
+                &recovery.assignment_id.0,
+            )? {
+                VersionedRunnerBinding::ReceiptV1(binding) => binding,
+                VersionedRunnerBinding::ReplayV0(binding) => {
+                    return Err(replay_v0_migration_required(&binding));
+                }
+            };
+            let action = planning_action_from_binding(&receipt_recovery)?;
             state.append(
                 EventKind("recovery:resumed".to_owned()),
                 vec![
@@ -6265,7 +6286,17 @@ fn resume_pending_delivery_recovery(
             if terminal_consumed(state, &recovery) || launch_ack_consumed(state, &recovery) {
                 continue;
             }
-            let action = planning_action_from_binding(&recovery)?;
+            let receipt_recovery = match versioned_binding_for(
+                state,
+                &recovery.action_id.0,
+                &recovery.assignment_id.0,
+            )? {
+                VersionedRunnerBinding::ReceiptV1(binding) => binding,
+                VersionedRunnerBinding::ReplayV0(binding) => {
+                    return Err(replay_v0_migration_required(&binding));
+                }
+            };
+            let action = planning_action_from_binding(&receipt_recovery)?;
             state.append(
                 EventKind("recovery:resumed".to_owned()),
                 vec![
@@ -6836,7 +6867,13 @@ fn accept_planning_carrier(
             return controlled_spawn_wave(id, actions, state, "planning");
         }
         planning::PlanningWaveOutcome::WaitingOnInFlight { wave_id, active } => {
-            let actions = unacknowledged_planning_actions(state, &active)?;
+            let actions = match unacknowledged_planning_actions(state, &active) {
+                Ok(actions) => actions,
+                Err(error) => match migration_required_status(&error) {
+                    Some(status) => return done(id, status),
+                    None => return Err(error),
+                },
+            };
             if actions.is_empty() {
                 return done(id, planning_waiting_status(&wave_id, &active, state));
             }
@@ -8790,6 +8827,13 @@ fn rejection(code: &str, detail: &str) -> String {
     format!("rejection:{code}:{detail}")
 }
 
+fn migration_required_status(error: &AnyError) -> Option<String> {
+    error
+        .to_string()
+        .strip_prefix(REPLAY_V0_MIGRATION_REQUIRED_PREFIX)
+        .map(|detail| rejection("migration-required", detail))
+}
+
 fn bounded_ref_detail(detail: &str) -> String {
     let single_line = detail.replace(['\n', '\r'], " ");
     let mut chars = single_line.chars();
@@ -9941,8 +9985,13 @@ fn integrate_validated_candidate(
     {
         return done(id, status);
     }
-    let outcome = advance_run(id, workstream, state)?;
-    advance_run_envelope(id, outcome)
+    match advance_run(id, workstream, state) {
+        Ok(outcome) => advance_run_envelope(id, outcome),
+        Err(error) => match migration_required_status(&error) {
+            Some(status) => done(id, status),
+            None => Err(error),
+        },
+    }
 }
 
 fn conflict_response(

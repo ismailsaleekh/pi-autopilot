@@ -248,6 +248,43 @@ fn fresh_v5_keeps_one_session_through_retries_compaction_and_parallel_alias_bloc
 }
 
 #[test]
+fn reader_only_specs_fail_before_pi_spawn() {
+    let root = temp_root("runner-replay-reader-only");
+    let spawned = root.join("pi-spawned");
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(
+            &format!("writeFileSync({spawned:?}, 'spawned');"),
+            "throw new Error('reader-only spec must not spawn Pi');",
+        ),
+    );
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+
+    let no_field = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("no-field spec must be reader-only");
+    assert!(no_field.contains("migration-required"), "{no_field}");
+    assert!(!spawned.exists(), "no-field spec spawned Pi");
+    assert!(!carrier_path(&root).exists(), "no-field spec wrote a carrier");
+
+    let mut replay: Value =
+        serde_json::from_slice(&fs::read(&spec).expect("legacy spec bytes")).expect("legacy JSON");
+    replay["admission_mode"] = json!("replay_v0");
+    fs::write(&spec, serde_json::to_vec_pretty(&replay).expect("replay spec bytes"))
+        .expect("write replay_v0 spec");
+    let explicit_replay = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("replay_v0 spec must be reader-only");
+    assert!(
+        explicit_replay.contains("migration-required"),
+        "{explicit_replay}"
+    );
+    assert!(!spawned.exists(), "replay_v0 spec spawned Pi");
+}
+
+#[test]
 fn accepted_terminal_is_not_persisted_before_stderr_completion() {
     let root = temp_root("runner-stderr-before-carrier");
     let accepted = transcript("planning.task-atoms.v1");

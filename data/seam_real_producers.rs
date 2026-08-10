@@ -220,15 +220,30 @@ fn next_planning_outcome(workstream: &str, state: &CoreState) -> Result<planning
     let refs = planning_refs_from_state(workstream, state)?;
     Ok(planning::next_planning_wave(&manifest, &refs, manifest.planning_wave_cap))
 }
+const REPLAY_V0_MIGRATION_REQUIRED_PREFIX: &str = "MIGRATION_REQUIRED:replay_v0";
+
+fn replay_v0_migration_required(binding: &runner::IssuedRunnerBinding) -> AnyError {
+    format!(
+        "{REPLAY_V0_MIGRATION_REQUIRED_PREFIX}:assignment={};action={};fresh-receipt_v1-reissue-required",
+        binding.assignment_id.0, binding.action_id.0,
+    )
+    .into()
+}
+
 fn unacknowledged_planning_actions(state: &mut CoreState, active: &[planning::PlanningActiveRef]) -> Result<Vec<BackgroundAction>, AnyError> {
     let issued = issued_actions(state);
     let mut actions = Vec::new();
     let mut recovered = Vec::new();
     for active_ref in active.iter().filter(|active_ref| !active_ref.launch_acknowledged) {
+        let binding = match versioned_binding_for_active_ref(state, active_ref)? {
+            runner::VersionedRunnerBinding::ReceiptV1(binding) => binding,
+            runner::VersionedRunnerBinding::ReplayV0(binding) => {
+                return Err(replay_v0_migration_required(&binding));
+            }
+        };
         match issued_action_for_active_ref(&issued, active_ref)? {
             Some(action) => actions.push(action),
             None => {
-                let binding = binding_for_active_ref(state, active_ref)?;
                 let action = planning_action_from_binding(&binding)?;
                 recovered.push(action.clone());
                 actions.push(action);
@@ -253,18 +268,27 @@ fn issued_action_for_active_ref(issued: &[BackgroundAction], active_ref: &planni
     }
 }
 
-fn binding_for_active_ref(state: &CoreState, active_ref: &planning::PlanningActiveRef) -> Result<runner::IssuedRunnerBinding, AnyError> {
+fn versioned_binding_for_active_ref(
+    state: &CoreState,
+    active_ref: &planning::PlanningActiveRef,
+) -> Result<runner::VersionedRunnerBinding, AnyError> {
     let mut matches = Vec::new();
     for reference in state.state.refs.keys() {
-        let Some(binding) = versioned_binding_facade(reference)
-            .map_err(|error| format!("CONTEXT_GAP:planning-reemit:{error}"))?
-        else {
+        if !reference.0.starts_with(runner::ISSUED_BINDING_REF_PREFIX) {
             continue;
+        }
+        let binding = runner::decode_versioned_binding_ref(&reference.0)
+            .map_err(|error| format!("CONTEXT_GAP:planning-reemit:{error}"))?;
+        let facade = match &binding {
+            runner::VersionedRunnerBinding::ReplayV0(binding) => binding.clone(),
+            runner::VersionedRunnerBinding::ReceiptV1(binding) => {
+                runner::receipt_v1_validator_facade(binding)
+            }
         };
-        if binding.assignment_id.0 == active_ref.assignment_id
-            && binding.action_id.0 == active_ref.action_id
-            && binding.run_revision == active_ref.run_revision
-            && binding.result_contract.0.starts_with("planning.")
+        if facade.assignment_id.0 == active_ref.assignment_id
+            && facade.action_id.0 == active_ref.action_id
+            && facade.run_revision == active_ref.run_revision
+            && facade.result_contract.0.starts_with("planning.")
         {
             matches.push(binding);
         }
@@ -276,24 +300,14 @@ fn binding_for_active_ref(state: &CoreState, active_ref: &planning::PlanningActi
     }
 }
 
-fn planning_action_from_binding(binding: &runner::IssuedRunnerBinding) -> Result<BackgroundAction, AnyError> {
+fn planning_action_from_binding(
+    binding: &runner::ReceiptV1RunnerBinding,
+) -> Result<BackgroundAction, AnyError> {
     let spec_path = PathBuf::from(&binding.spec_path);
-    let spec_bytes = fs::read(&spec_path).map_err(|error| format!("CONTEXT_GAP:planning-reemit:spec-read:{}:{error}", binding.spec_path))?;
-    let digest = sha256_hex_local(&spec_bytes);
-    if digest != binding.spec_digest { return Err(format!("CONTEXT_GAP:planning-reemit:spec-digest:{}", binding.assignment_id.0).into()); }
-    let value: serde_json::Value = serde_json::from_slice(&spec_bytes)
-        .map_err(|error| format!("CONTEXT_GAP:planning-reemit:spec-json:{}:{error}", binding.spec_path))?;
-    let spec = match value.get("admission_mode") {
-        None => serde_json::from_value::<kernel::generated::AgentRunSpec>(value)
-            .map_err(|error| format!("CONTEXT_GAP:planning-reemit:legacy-spec:{}:{error}", binding.spec_path))?,
-        Some(serde_json::Value::String(mode)) if mode == "receipt_v1" => {
-            let fresh: kernel::generated::AgentRunSpecV5 = serde_json::from_value(value)
-                .map_err(|error| format!("CONTEXT_GAP:planning-reemit:V5-spec:{}:{error}", binding.spec_path))?;
-            runner::project_v5_spec_for_shared_admission(&fresh)
-        }
-        Some(_) => return Err(format!("CONTEXT_GAP:planning-reemit:unsupported-admission-mode:{}", binding.spec_path).into()),
-    };
-    validate_reemit_spec_binding(&spec, binding)?;
+    let (_, spec, _) = runner::read_receipt_v1_spec(binding)
+        .map_err(|error| format!("CONTEXT_GAP:planning-reemit:receipt_v1-spec:{error}"))?;
+    let facade = runner::receipt_v1_validator_facade(binding);
+    validate_reemit_spec_binding(&spec, &facade)?;
     let facts = runner::RunnerTransportFacts::from_env().map_err(|error| format!("CONTEXT_GAP:planning-reemit:transport:{error:?}"))?;
     Ok(BackgroundAction {
         action_id: binding.action_id.clone(),
