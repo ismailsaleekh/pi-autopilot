@@ -247,8 +247,8 @@ fn route_child_control(
                 "Continue only after the Wave 6 blocked-latch consumer is available.",
             ),
         ),
-        Ok(ChildControlAdmission::Replay(receipt)) => {
-            match root_or_verify_submit_receipt(state, &receipt) {
+        Ok(ChildControlAdmission::Replay { receipt, binding }) => {
+            match root_or_verify_submit_receipt(state, &receipt, &binding) {
                 Ok(()) => child_control_accept(id, request_id, receipt),
                 Err(detail) => child_control_retry(
                     id,
@@ -279,7 +279,10 @@ fn route_child_control(
 
 enum ChildControlAdmission {
     BlockedPreflight,
-    Replay(SubmitReceipt),
+    Replay {
+        receipt: SubmitReceipt,
+        binding: runner::ReceiptV1RunnerBinding,
+    },
     /// Child admission completed in memory. The Core-only planning transition
     /// is staged and committed by the serialized seam turn below.
     Staged {
@@ -383,7 +386,7 @@ fn admit_child_control_request(
             )
         })? {
             if receipt_matches_request(&receipt, &binding, &raw) {
-                return Ok(ChildControlAdmission::Replay(receipt));
+                return Ok(ChildControlAdmission::Replay { receipt, binding });
             }
             return Err(child_control_diagnostic(
                 "submit.receipt_conflict",
@@ -518,7 +521,7 @@ fn admit_child_control_request(
                 )
             })? {
                 if receipt_matches_request(&receipt, &binding, &raw) {
-                    return Ok(ChildControlAdmission::Replay(receipt));
+                    return Ok(ChildControlAdmission::Replay { receipt, binding });
                 }
                 return Err(child_control_diagnostic(
                     "submit.receipt_conflict",
@@ -955,6 +958,17 @@ fn receipt_matches_request(
         && receipt.raw_payload_byte_count == raw.len() as u64
 }
 
+/// One receipt V1 parent generation selects one and only one continuation
+/// generation.  This is immutable binding identity, not an event/state slot.
+fn receipt_v1_continuation_run_revision(
+    binding: &runner::ReceiptV1RunnerBinding,
+) -> Result<u64, String> {
+    binding
+        .run_revision
+        .checked_add(1)
+        .ok_or_else(|| "receipt_v1 continuation run revision overflow".to_owned())
+}
+
 fn artifact_ref(path: &Path, schema: &str, bytes: &[u8]) -> PreparedSubmitArtifactRef {
     PreparedSubmitArtifactRef {
         artifact_ref: Ref(path.display().to_string()),
@@ -1126,6 +1140,8 @@ fn commit_staged_planning_submit(
         PREPARED_PLANNING_TRANSITION_SCHEMA.to_owned(),
         planning_sidecar_bytes,
     ));
+    let continuation_run_revision = receipt_v1_continuation_run_revision(binding)
+        .map_err(|detail| staging_retry("submit.planning_transition", "", detail))?;
     let staged_effect = staged_planning_effect(
         state,
         &legacy,
@@ -1133,6 +1149,7 @@ fn commit_staged_planning_submit(
         &carrier_bytes,
         &semantic.event_kind,
         &semantic.refs,
+        continuation_run_revision,
     )
     .map_err(|detail| staging_retry("submit.planning_transition", "", detail))?;
     staged_artifacts.extend(staged_effect.artifacts.clone());
@@ -1245,7 +1262,7 @@ fn commit_staged_planning_submit(
         SUBMIT_RECEIPT_MAX_BYTES,
     )
     .map_err(|error| staging_retry("submit.receipt_write", "", error.to_string()))?;
-    root_or_verify_submit_receipt(state, &receipt)
+    root_or_verify_submit_receipt(state, &receipt, binding)
         .map_err(|detail| staging_retry("submit.receipt_root", "", detail))?;
     Ok(receipt)
 }
@@ -1427,7 +1444,6 @@ fn stage_planning_semantics(
         if is_final_review {
             refs.extend([
                 Ref(carrier.carrier_path.clone()),
-                Ref("planning.plan-review.v1".to_owned()),
                 Ref("semantic-recovery-exhausted".to_owned()),
             ]);
             return Ok(StagedPlanningSemantics {
@@ -1580,6 +1596,7 @@ fn staged_planning_effect(
     staged_carrier_bytes: &[u8],
     semantic_event_kind: &str,
     semantic_refs: &[Ref],
+    continuation_run_revision: u64,
 ) -> Result<StagedPlanningEffect, String> {
     let mut projected = CoreState {
         event_path: None,
@@ -1587,28 +1604,20 @@ fn staged_planning_effect(
         events: state.events.clone(),
         event_bytes: state.event_bytes.clone(),
     };
-    // The selected run revision is the revision of this receipt's second
-    // root (`submit:accepted-event-ref`).  It is selected while staging, then
-    // carried verbatim by the immutable action/binding.  Private projections
-    // below deliberately do not affect it: they are semantic acceptance
-    // facts, not durable rows that happened before this root pair.
-    projected
-        .append(EventKind("submit:accepted".to_owned()), Vec::new())
-        .map_err(|error| error.to_string())?;
-    projected
-        .append(
-            EventKind("submit:accepted-event-ref".to_owned()),
-            Vec::new(),
-        )
-        .map_err(|error| error.to_string())?;
-    let staged_revision = projected.state.revision;
+    // Every sibling issued from this receipt receives the parent's immutable
+    // receipt_v1 binding generation plus one. Projection rows and durable
+    // roots are semantic evidence only; neither may select a run revision.
 
     // An accepted receipt is planning authority before its Host completion.
     // Project every earlier fully rooted receipt through its own sealed
     // transition, rather than treating an unconsumed sibling as in-flight.
     // Discovery starts exclusively from exact accepted-root refs/events.
     let rooted_receipts = rooted_planning_receipts(state)?;
-    project_unconsumed_rooted_planning_receipts(&mut projected, &rooted_receipts)?;
+    project_unconsumed_rooted_planning_receipts(
+        &mut projected,
+        &rooted_receipts,
+        &binding.workstream.0,
+    )?;
 
     let mut projection_refs = vec![
         // The receipt id is minted after staging, so this in-memory row uses
@@ -1624,8 +1633,8 @@ fn staged_planning_effect(
     ];
     projection_refs.extend(semantic_refs.iter().cloned());
     // This is the current receipt's private, eventual consumption row. Its
-    // action revision remains `staged_revision`, not this synthetic row's
-    // revision and never a later live-state revision.
+    // next action revision remains the parent receipt_v1 binding generation
+    // plus one, never this synthetic row's revision or live mutable state.
     projected
         .append(
             EventKind("submit:receipt-consumed".to_owned()),
@@ -1693,7 +1702,7 @@ fn staged_planning_effect(
                     planning_bg_action(
                         &binding.workstream.0,
                         assignment,
-                        staged_revision,
+                        continuation_run_revision,
                         &input_set,
                         registry,
                         accepted.clone(),
@@ -1846,7 +1855,7 @@ fn rooted_planning_receipts(state: &CoreState) -> Result<Vec<RootedPlanningRecei
             return Err("rooted receipt carrier/binding identity drift".to_owned());
         }
         let rooted_event = verify_rooted_submit_receipt(state, &receipt)?;
-        verify_receipt_issued_actions_at_staged_revision(state, &receipt)?;
+        verify_receipt_issued_actions_at_continuation_revision(&receipt, &binding)?;
         if !binding.result_contract.0.starts_with("planning.") {
             continue;
         }
@@ -1948,11 +1957,17 @@ fn receipt_is_exactly_consumed(
     Ok(true)
 }
 
+/// Rooted receipts are globally corruption-checked, but staging may project
+/// only the exact current workstream into its private scheduling state.
 fn project_unconsumed_rooted_planning_receipts(
     projected: &mut CoreState,
     rooted_receipts: &[RootedPlanningReceipt],
+    workstream: &str,
 ) -> Result<(), String> {
-    for prior in rooted_receipts.iter().filter(|receipt| !receipt.consumed) {
+    for prior in rooted_receipts
+        .iter()
+        .filter(|receipt| !receipt.consumed && receipt.facade.workstream.0 == workstream)
+    {
         let refs = receipt_consumption_refs(
             &prior.receipt,
             &prior.binding,
@@ -2319,13 +2334,12 @@ fn verify_issued_action(issued: &PreparedSubmitIssuedAction) -> Result<(), Strin
     Ok(())
 }
 
-/// The run revision is selected by the receipt's accepted-event-ref root at
-/// staging time. It is immutable action/binding identity, never a claim about
-/// whichever durable revision happens to exist when Host later reports a task
-/// completion.
-fn verify_issued_action_at_staged_revision(
+/// Issued actions are immutable continuations of the parent receipt_v1
+/// binding. They must not be tied to accepted roots, event references, or the
+/// mutable state revision observed during completion.
+fn verify_issued_action_at_continuation_revision(
     issued: &PreparedSubmitIssuedAction,
-    staged_revision: u64,
+    continuation_run_revision: u64,
 ) -> Result<(), String> {
     verify_issued_action(issued)?;
     let versioned = runner::decode_versioned_binding_ref(&issued.binding_ref.0)
@@ -2333,9 +2347,11 @@ fn verify_issued_action_at_staged_revision(
     let VersionedRunnerBinding::ReceiptV1(binding) = versioned else {
         return Err("issued action binding is not receipt_v1".to_owned());
     };
-    if issued.action.run_revision != staged_revision || binding.run_revision != staged_revision {
+    if issued.action.run_revision != continuation_run_revision
+        || binding.run_revision != continuation_run_revision
+    {
         return Err(format!(
-            "issued action/binding staged revision drift: expected={staged_revision};action={};binding={}",
+            "issued action/binding continuation revision drift: expected={continuation_run_revision};action={};binding={}",
             issued.action.run_revision, binding.run_revision
         ));
     }
@@ -2592,35 +2608,22 @@ fn verify_rooted_submit_receipt(
         .ok_or_else(|| "accepted receipt event hash reference is absent".to_owned())
 }
 
-/// The stable selected revision is the accepted-root revision plus one: the
-/// deterministic slot reserved for its required non-circular event-ref.  It
-/// remains stable if response-loss recovery appends that event-ref after other
-/// durable rows, and is never inferred from a later task-completed turn.
-fn rooted_receipt_staged_revision(
-    state: &CoreState,
+/// Root, projection, and receipt-only completion all check the continuation
+/// from the same immutable parent receipt/binding pair. No current state or
+/// root/event position participates in this identity check.
+fn verify_receipt_issued_actions_at_continuation_revision(
     receipt: &SubmitReceipt,
-) -> Result<u64, String> {
-    let root = receipt_root(receipt)?;
-    let index = accepted_root_index(state, &root)?
-        .ok_or_else(|| "accepted receipt event root is absent".to_owned())?;
-    receipt_event_ref_for_root(state, &root, index)?
-        .ok_or_else(|| "accepted receipt event hash reference is absent".to_owned())?;
-    state.events[index]
-        .new_revision
-        .checked_add(1)
-        .ok_or_else(|| "accepted receipt staged revision overflow".to_owned())
-}
-
-fn verify_receipt_issued_actions_at_staged_revision(
-    state: &CoreState,
-    receipt: &SubmitReceipt,
+    parent_binding: &runner::ReceiptV1RunnerBinding,
 ) -> Result<(), String> {
+    if !receipt_matches_binding(receipt, parent_binding) {
+        return Err("receipt continuation parent binding identity drift".to_owned());
+    }
     if !receipt.result_contract.0.starts_with("planning.") {
         return Ok(());
     }
-    let staged_revision = rooted_receipt_staged_revision(state, receipt)?;
+    let continuation_run_revision = receipt_v1_continuation_run_revision(parent_binding)?;
     for issued in &receipt.prepared_transition.issued_actions {
-        verify_issued_action_at_staged_revision(issued, staged_revision)?;
+        verify_issued_action_at_continuation_revision(issued, continuation_run_revision)?;
     }
     Ok(())
 }
@@ -2628,8 +2631,10 @@ fn verify_receipt_issued_actions_at_staged_revision(
 fn root_or_verify_submit_receipt(
     state: &mut CoreState,
     receipt: &SubmitReceipt,
+    parent_binding: &runner::ReceiptV1RunnerBinding,
 ) -> Result<(), String> {
     verify_durable_submit_receipt_transaction(receipt)?;
+    verify_receipt_issued_actions_at_continuation_revision(receipt, parent_binding)?;
     let root = receipt_root(receipt)?;
     if let Some(index) = accepted_root_index(state, &root)? {
         if receipt_event_ref_for_root(state, &root, index)?.is_none() {
@@ -2654,7 +2659,7 @@ fn root_or_verify_submit_receipt(
             .ok_or_else(|| "accepted event append lost its row".to_owned())?;
         append_receipt_event_ref(state, &root, index)?;
     }
-    verify_receipt_issued_actions_at_staged_revision(state, receipt)
+    Ok(())
 }
 
 fn child_control_accept(
@@ -2724,7 +2729,7 @@ fn route_blocked_result_observed(
             id,
             rejection("blocked-result-observed", "unexpected-submit-stage"),
         ),
-        Ok(ChildControlAdmission::Replay(_)) => done(
+        Ok(ChildControlAdmission::Replay { .. }) => done(
             id,
             rejection("blocked-result-observed", "unexpected-submit-replay"),
         ),
@@ -4366,7 +4371,7 @@ fn route_receipt_v1_task_completed(
         Ok(reference) => reference,
         Err(error) => return done(id, rejection("submit-receipt", &error)),
     };
-    if let Err(error) = verify_receipt_issued_actions_at_staged_revision(state, &receipt) {
+    if let Err(error) = verify_receipt_issued_actions_at_continuation_revision(&receipt, &binding) {
         return done(id, rejection("submit-receipt", &error));
     }
     let consumed_ref = Ref(format!(

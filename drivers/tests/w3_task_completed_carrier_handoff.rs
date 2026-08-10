@@ -74,7 +74,7 @@ fn receipt_v1_planning_accepts_then_consumes_without_carrier_or_spec_rereads() {
 }
 
 #[test]
-fn receipt_v1_staged_actions_use_the_rooted_preconsume_revision_after_orphan_replay_restart() {
+fn receipt_v1_orphan_retry_keeps_parent_binding_continuation_after_intervening_rows() {
     let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
     let fixture = Fixture::new("receipt-preconsume-revision");
     fixture.install_transport_with_nonexistent_command_names();
@@ -105,30 +105,27 @@ fn receipt_v1_staged_actions_use_the_rooted_preconsume_revision_after_orphan_rep
         "the first receipt must stage the next wave"
     );
 
+    let receipt = accepted.payload["response"]["receipt"]["receipt"].clone();
     let rooted_rows = fs::read_to_string(&event_path)
         .unwrap()
         .lines()
         .map(|line| serde_json::from_str::<EventRow>(line).unwrap())
         .collect::<Vec<_>>();
-    let root_ref_row = rooted_rows
-        .iter()
-        .find(|row| row.kind.0 == "submit:accepted-event-ref")
-        .unwrap();
-    let preconsume_revision = root_ref_row.new_revision;
+    let continuation_revision = issue.receipt_binding.run_revision.checked_add(1).unwrap();
     for stored in issued {
-        assert_eq!(stored["action"]["run_revision"], preconsume_revision);
+        assert_eq!(stored["action"]["run_revision"], continuation_revision);
         let binding_ref = stored["binding_ref"].as_str().unwrap();
         let runner::VersionedRunnerBinding::ReceiptV1(binding) =
             runner::decode_versioned_binding_ref(binding_ref).unwrap()
         else {
             panic!("staged action must retain a receipt_v1 binding");
         };
-        assert_eq!(binding.run_revision, preconsume_revision);
+        assert_eq!(binding.run_revision, continuation_revision);
     }
 
     // Retain the create-once receipt but discard its roots to model the
-    // receipt-orphan window. Replaying the exact child submit recreates the
-    // root pair, then a Core restart must retain the originally staged action.
+    // crash-after-artifacts/receipt window. An unrelated durable row lands
+    // before exact retry; it must not select a new action generation.
     let orphan_prefix = rooted_rows
         .into_iter()
         .filter(|row| {
@@ -144,8 +141,13 @@ fn receipt_v1_staged_actions_use_the_rooted_preconsume_revision_after_orphan_rep
     drop(state);
 
     let mut replayed = CoreState::open(Some(event_path.clone())).unwrap();
+    append_ref(
+        &mut replayed,
+        &Ref("unrelated-durable:orphan-retry".to_owned()),
+    );
     let replay = seam::handle_line(&submit.to_string(), &mut replayed).unwrap();
     assert_eq!(replay.payload["response"]["outcome"], "ACCEPT");
+    assert_eq!(replay.payload["response"]["receipt"]["receipt"], receipt);
     drop(replayed);
 
     let mut restarted = CoreState::open(Some(event_path.clone())).unwrap();
@@ -163,7 +165,7 @@ fn receipt_v1_staged_actions_use_the_rooted_preconsume_revision_after_orphan_rep
         .and_then(|actions| actions.first())
         .or_else(|| completed.payload.get("action"))
         .unwrap();
-    assert_eq!(action["run_revision"], preconsume_revision);
+    assert_eq!(action["run_revision"], continuation_revision);
 
     let rows = fs::read_to_string(&event_path)
         .unwrap()
@@ -174,7 +176,10 @@ fn receipt_v1_staged_actions_use_the_rooted_preconsume_revision_after_orphan_rep
         .iter()
         .find(|row| row.kind.0 == "submit:receipt-consumed")
         .unwrap();
-    assert_eq!(consume.previous_revision, preconsume_revision);
+    assert!(
+        consume.previous_revision > continuation_revision,
+        "intervening durable rows must not poison the immutable continuation"
+    );
     let mut published_next_binding = false;
     for reference in &consume.artifact_refs {
         if !reference.0.starts_with(runner::ISSUED_BINDING_REF_PREFIX) {
@@ -188,7 +193,7 @@ fn receipt_v1_staged_actions_use_the_rooted_preconsume_revision_after_orphan_rep
         if binding.action_id.0 == action["action_id"].as_str().unwrap()
             && binding.assignment_id.0 == action["assignment_id"].as_str().unwrap()
         {
-            assert_eq!(binding.run_revision, consume.previous_revision);
+            assert_eq!(binding.run_revision, continuation_revision);
             published_next_binding = true;
         }
     }
@@ -308,6 +313,15 @@ fn rooted_parallel_planning_receipts_close_one_wave_under_either_completion_orde
             .clone();
         assert_eq!(stored_actions.len(), 1, "{label}: {receipt_b:?}");
         assert_eq!(
+            a.receipt_binding.run_revision,
+            b.receipt_binding.run_revision
+        );
+        assert_eq!(
+            stored_actions[0]["action"]["run_revision"],
+            b.receipt_binding.run_revision.checked_add(1).unwrap(),
+            "{label}: the P2 action is the immutable P1 sibling generation plus one"
+        );
+        assert_eq!(
             stored_actions[0]["action"]["action_id"],
             "action-planning-ws-repository-scout-01"
         );
@@ -387,7 +401,7 @@ fn rooted_parallel_planning_receipts_close_one_wave_under_either_completion_orde
         );
 
         // Completion replay returns only the stored effect. It does not stage
-        // a second wave or mutate the selected action/binding revision.
+        // a second wave or mutate the parent-selected action/binding revision.
         let replay_b = fixture.task_completed(&mut state, &b, &format!("task-{label}-b-replay"));
         assert_eq!(
             spawned_assignment_ids(&replay_b),
@@ -426,7 +440,7 @@ fn rooted_parallel_planning_receipts_close_one_wave_under_either_completion_orde
             .unwrap();
         assert!(
             b_consume.previous_revision > selected_revision,
-            "{label}: unrelated rows and/or sibling completion must not invalidate the staged revision"
+            "{label}: unrelated rows and/or sibling completion must not invalidate the immutable continuation"
         );
         let published = consumed
             .iter()
@@ -446,6 +460,62 @@ fn rooted_parallel_planning_receipts_close_one_wave_under_either_completion_orde
             .collect::<Vec<_>>();
         assert_eq!(published.len(), 1, "{label}: one next-wave binding only");
     }
+}
+
+#[test]
+fn rooted_receipt_activation_cannot_cross_workstreams_during_private_projection() {
+    let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+    let fixture = Fixture::new("workstream-isolation");
+    fixture.install_transport_with_nonexistent_command_names();
+    fixture.write_first_review_manifest("alpha");
+    fixture.write_task_then_gated_scout_manifest("bravo");
+    let event_path = fixture.root.join("events.jsonl");
+    let mut state = CoreState::open(Some(event_path.clone())).unwrap();
+
+    // Alpha's rooted, unconsumed first-review receipt carries the real
+    // recovery activation. It remains globally verified but must not enter
+    // Bravo's private scheduling projection.
+    let alpha = fixture.issue_first_review("alpha");
+    append_ref(
+        &mut state,
+        &runner::receipt_binding_ref(&alpha.receipt_binding).unwrap(),
+    );
+    append_ref(&mut state, &Ref(alpha.binding.assignment_id.0.clone()));
+    let alpha_accepted = fixture.submit_receipt(
+        &mut state,
+        &alpha,
+        "alpha-blocked-review",
+        &blocked_review_raw(),
+    );
+    assert_eq!(alpha_accepted.payload["response"]["outcome"], "ACCEPT");
+
+    // Bravo's P2 scout is gated only by its own workstream's recovery ref.
+    // A global projection/activation scan would incorrectly stage that scout.
+    let bravo = fixture.issue_task_extractor("bravo", "planning-bravo-task-extractor-01", "BR01-");
+    append_ref(
+        &mut state,
+        &runner::receipt_binding_ref(&bravo.receipt_binding).unwrap(),
+    );
+    append_ref(&mut state, &Ref(bravo.binding.assignment_id.0.clone()));
+    let bravo_accepted =
+        fixture.submit_receipt(&mut state, &bravo, "bravo-atoms", &task_atoms("BR01-A"));
+    assert_eq!(bravo_accepted.payload["response"]["outcome"], "ACCEPT");
+    assert!(
+        bravo_accepted.payload["response"]["receipt"]["receipt"]["prepared_transition"]
+            ["issued_actions"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "alpha recovery activation must not stage bravo's gated scout: {bravo_accepted:?}"
+    );
+
+    let rooted = fs::read_to_string(event_path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<EventRow>(line).unwrap())
+        .filter(|row| row.kind.0 == "submit:accepted")
+        .count();
+    assert_eq!(rooted, 2, "both workstream receipts must be rooted");
 }
 
 #[test]
@@ -749,6 +819,60 @@ impl Fixture {
         })).unwrap()).unwrap();
     }
 
+    fn write_first_review_manifest(&self, workstream: &str) {
+        let directory = self.root.join(".pi/autopilot").join(workstream);
+        fs::create_dir_all(&directory).unwrap();
+        let authority = runner_doc_json("task.md", "authority", "auth", "Do the work");
+        let context = runner_doc_json(
+            "context.md",
+            "context/non-authority",
+            "auth",
+            "Repo context",
+        );
+        fs::write(
+            directory.join("planning-manifest.json"),
+            serde_json::to_vec_pretty(&json!({
+                "workstream":workstream,"authority_set_id":"auth","authority_documents":[authority],"context_documents":[context],"context_document":context,
+                "assignments":[
+                    {"assignment_id":format!("planning-{workstream}-plan-reviewer-01"),"role":"plan-reviewer","mode":"full-review","boundary_id":"planning.plan-review.v1","ordinal":1,"atom_id_prefix":null}
+                ],
+                "planning_wave_cap":7,"planning_max_attempts":2,
+                "planning_waves":[{"id":"P1.review","role":"plan-reviewer","dependencies":[],"ordinals":null,"activation_ref":null,"canonical_output":false}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn write_task_then_gated_scout_manifest(&self, workstream: &str) {
+        let directory = self.root.join(".pi/autopilot").join(workstream);
+        fs::create_dir_all(&directory).unwrap();
+        let authority = runner_doc_json("task.md", "authority", "auth", "Do the work");
+        let context = runner_doc_json(
+            "context.md",
+            "context/non-authority",
+            "auth",
+            "Repo context",
+        );
+        fs::write(
+            directory.join("planning-manifest.json"),
+            serde_json::to_vec_pretty(&json!({
+                "workstream":workstream,"authority_set_id":"auth","authority_documents":[authority],"context_documents":[context],"context_document":context,
+                "assignments":[
+                    {"assignment_id":format!("planning-{workstream}-task-extractor-01"),"role":"task-extractor","mode":"inventory","boundary_id":"planning.task-atoms.v1","ordinal":1,"atom_id_prefix":"BR01-"},
+                    {"assignment_id":format!("planning-{workstream}-repository-scout-01"),"role":"repository-scout","mode":"initial-grounding","boundary_id":"planning.scout-dossier.v1","ordinal":2,"atom_id_prefix":null}
+                ],
+                "planning_wave_cap":7,"planning_max_attempts":2,
+                "planning_waves":[
+                    {"id":"P1.extract","role":"task-extractor","dependencies":[],"ordinals":null,"activation_ref":null,"canonical_output":false},
+                    {"id":"P2.gated-scout","role":"repository-scout","dependencies":["P1.extract"],"ordinals":null,"activation_ref":"planning-recovery-required","canonical_output":false}
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
     fn submit_receipt_file(&self, issue: &runner::IssuedRunnerAction) -> PathBuf {
         let root = Path::new(&issue.binding.carrier_path)
             .parent()
@@ -826,6 +950,15 @@ impl Fixture {
     }
 
     fn issue_planning(&self, assignment_id: &str, prefix: &str) -> runner::IssuedRunnerAction {
+        self.issue_task_extractor("ws", assignment_id, prefix)
+    }
+
+    fn issue_task_extractor(
+        &self,
+        workstream: &str,
+        assignment_id: &str,
+        prefix: &str,
+    ) -> runner::IssuedRunnerAction {
         let context_document = runner_doc(
             "context.md",
             "context/non-authority",
@@ -833,7 +966,7 @@ impl Fixture {
             "Repo context",
         );
         let issued = runner::planning_issue(&PlanningRunnerRequest {
-            workstream: "ws".to_owned(),
+            workstream: workstream.to_owned(),
             action_id: Id(format!("action-{assignment_id}")),
             assignment_id: Id(assignment_id.to_owned()),
             role_id: Id("task-extractor".to_owned()),
@@ -856,6 +989,91 @@ impl Fixture {
         assert!(issued.action.bg_run.notify_on_completion);
         assert!(!issued.action.bg_run.trigger_on_completion);
         issued
+    }
+
+    fn issue_first_review(&self, workstream: &str) -> runner::IssuedRunnerAction {
+        let context_document = runner_doc(
+            "context.md",
+            "context/non-authority",
+            "auth",
+            "Repo context",
+        );
+        let compiler_route = serde_json::from_value(serde_json::json!({
+            "version":"v2",
+            "profile_id":"planning.work-map.v2:autopilot_submit_plan_cluster",
+            "tool_name":"autopilot_submit_plan_cluster",
+            "boundary_id":"planning.work-map.v2",
+            "result_contract":"planning.work-map.v2",
+            "schema_digest":"4f341cc4aade90ac13c4584898f29b42d054d4ea4b5c126117841550e680ae75"
+        }))
+        .unwrap();
+        let synthesized_route = serde_json::from_value(serde_json::json!({
+            "version":"v2",
+            "profile_id":"planning.work-map.v2:autopilot_submit_synthesis",
+            "tool_name":"autopilot_submit_synthesis",
+            "boundary_id":"planning.work-map.v2",
+            "result_contract":"planning.work-map.v2",
+            "schema_digest":"4f341cc4aade90ac13c4584898f29b42d054d4ea4b5c126117841550e680ae75"
+        }))
+        .unwrap();
+        runner::planning_issue(&PlanningRunnerRequest {
+            workstream: workstream.to_owned(),
+            action_id: Id(format!("action-planning-{workstream}-plan-reviewer-01")),
+            assignment_id: Id(format!("planning-{workstream}-plan-reviewer-01")),
+            role_id: Id("plan-reviewer".to_owned()),
+            mode: ModeId("full-review".to_owned()),
+            boundary_id: ContractId("planning.plan-review.v1".to_owned()),
+            attempt: 1,
+            run_revision: 1,
+            authority_set_id: "auth".to_owned(),
+            authority_documents: vec![runner_doc("task.md", "authority", "auth", "Do the work")],
+            context_document: context_document.clone(),
+            context_documents: vec![context_document],
+            mode_parameter: first_mode_parameter_for("plan-reviewer"),
+            atom_id_prefix: None,
+            atom_registry_path: None,
+            atom_registry_digest: None,
+            terminal_route: None,
+            accepted_planning_artifacts: vec![
+                runner::AcceptedPlanningArtifactBinding {
+                    category_id: "task-atoms".to_owned(),
+                    assignment_id: Id(format!("planning-{workstream}-task-extractor-01")),
+                    role_id: Id("task-extractor".to_owned()),
+                    boundary_id: ContractId("planning.task-atoms.v1".to_owned()),
+                    terminal_route: None,
+                    path: format!("/sealed/{workstream}/atoms-carrier.json"),
+                    digest: "sealed-atoms-digest".to_owned(),
+                },
+                runner::AcceptedPlanningArtifactBinding {
+                    category_id: "scout-findings".to_owned(),
+                    assignment_id: Id(format!("planning-{workstream}-repository-scout-01")),
+                    role_id: Id("repository-scout".to_owned()),
+                    boundary_id: ContractId("planning.scout-dossier.v1".to_owned()),
+                    terminal_route: None,
+                    path: format!("/sealed/{workstream}/scout-carrier.json"),
+                    digest: "sealed-scout-digest".to_owned(),
+                },
+                runner::AcceptedPlanningArtifactBinding {
+                    category_id: "compiler-work-maps".to_owned(),
+                    assignment_id: Id(format!("planning-{workstream}-plan-compiler-01")),
+                    role_id: Id("plan-compiler".to_owned()),
+                    boundary_id: ContractId("planning.work-map.v2".to_owned()),
+                    terminal_route: Some(compiler_route),
+                    path: format!("/sealed/{workstream}/compiler-carrier.json"),
+                    digest: "sealed-compiler-digest".to_owned(),
+                },
+                runner::AcceptedPlanningArtifactBinding {
+                    category_id: "synthesized-work-map".to_owned(),
+                    assignment_id: Id(format!("planning-{workstream}-plan-synthesizer-01")),
+                    role_id: Id("plan-synthesizer".to_owned()),
+                    boundary_id: ContractId("planning.work-map.v2".to_owned()),
+                    terminal_route: Some(synthesized_route),
+                    path: format!("/sealed/{workstream}/synthesized-carrier.json"),
+                    digest: "sealed-synthesized-digest".to_owned(),
+                },
+            ],
+        })
+        .unwrap()
     }
 }
 
@@ -918,6 +1136,12 @@ fn spawned_assignment_ids(response: &SeamEnvelope) -> Vec<String> {
 
 fn task_atoms(id: &str) -> String {
     json!({"atoms":[{"id":id,"kind":"work","text":"Do the work","sources":[anchor("task.md", "authority", "auth", "Do the work")]}]}).to_string()
+}
+
+fn blocked_review_raw() -> String {
+    json!({"verdicts": drivers::seam::REQUIRED_PLAN_REVIEW_CRITERIA.iter().map(|criterion| {
+        json!({"criterion_id":criterion,"verdict":if *criterion == "review.forward-validation" { "blocked" } else { "pass" },"finding":"workstream isolation probe"})
+    }).collect::<Vec<_>>()}).to_string()
 }
 
 fn runner_doc(path: &str, class: &str, authority_set_id: &str, body: &str) -> RunnerTaskDocument {

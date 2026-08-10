@@ -585,7 +585,7 @@ fn approved_plan_promotion_uses_digest_bound_subject_not_mutable_projection() {
     reject_variant(
         "split-root",
         split,
-        "ready root event is incomplete or split",
+        "receipt planning transition lacks one planning-result-consumed ref",
     );
     let mut non_ready = rows.clone();
     non_ready[0].artifact_refs.push(Ref(canonical_root.clone()));
@@ -885,7 +885,8 @@ fn blocked_second_plan_review_exhausts_semantic_recovery_without_looping() {
         &blocked_raw,
     );
     let status = done_status(&blocked);
-    assert!(status.contains("submit:planning-accepted"), "{status}");
+    assert_eq!(blocked.kind, "done", "{blocked:?}");
+    assert!(status.starts_with("submit:planning-accepted;"), "{status}");
     assert!(
         !repo
             .join(".pi/autopilot/main/approved-plan.v2.json")
@@ -1592,7 +1593,10 @@ fn send_planning_completion_inner(
         accepted.payload["response"]["outcome"], "ACCEPT",
         "planning submit response: {accepted:?}"
     );
-    send_frame(
+    let deferred_effect = accepted.payload["response"]["receipt"]["receipt"]
+        ["prepared_transition"]["deferred_host_effect"]
+        .clone();
+    let completed = send_frame(
         serde_json::json!({
             "v":1,
             "id":id + 1,
@@ -1606,7 +1610,18 @@ fn send_planning_completion_inner(
         }),
         event_log,
         Some(&cwd),
-    )
+    );
+    assert_eq!(
+        completed.kind,
+        deferred_effect["kind"].as_str().unwrap(),
+        "receipt-only completion must relay the stored deferred effect: {completed:?}"
+    );
+    assert_eq!(
+        completed.payload,
+        deferred_effect["payload"],
+        "receipt-only completion must relay the stored deferred payload: {completed:?}"
+    );
+    completed
 }
 
 fn planning_tool_name(role_id: &str, boundary_id: &str) -> &'static str {

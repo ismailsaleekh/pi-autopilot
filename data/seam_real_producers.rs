@@ -482,14 +482,22 @@ fn planning_refs_from_state(workstream: &str, state: &CoreState) -> Result<plann
             refs.terminal_failures.insert(planning::PlanningTerminalFailureRef { assignment_id: issued.assignment_id.clone(), action_id: issued.action_id.clone(), run_revision: issued.run_revision, status: "launch-failed".to_owned() });
         }
     }
-    for reference in state.state.refs.keys() {
-        for activation in [
-            "planning-resolution-required",
-            "planning-recovery-required",
-            "planning-rereview-required",
-        ] {
-            if reference.0 == activation || reference.0.starts_with(&format!("{activation}:")) {
-                refs.activation_refs.insert(activation.to_owned());
+    // Activation is event-scoped planning authority. A similarly named ref
+    // from another workstream must not schedule this workstream.
+    for event in &state.events {
+        if logical_planning_event_kind(event)?.is_none()
+            || !event.artifact_refs.iter().any(|reference| reference.0 == workstream) {
+            continue;
+        }
+        for reference in &event.artifact_refs {
+            for activation in [
+                "planning-resolution-required",
+                "planning-recovery-required",
+                "planning-rereview-required",
+            ] {
+                if reference.0 == activation || reference.0.starts_with(&format!("{activation}:")) {
+                    refs.activation_refs.insert(activation.to_owned());
+                }
             }
         }
     }
