@@ -1370,6 +1370,14 @@ artifact "child_control_blocked_gate" schema="autopilot.child_control_blocked_ga
     }
 }
 
+artifact "blocked_reconcile_record" schema="autopilot.blocked_reconcile_record.v1" producer="Package" model_produced=#false {
+    doc "Closed durable blocked-latch replay record for Host restart. Every field is reconstructed from validated Core event roots only."
+    field "schema" type="schema-id" required=#true constant="autopilot.blocked_reconcile_record.v1"
+    field "blocked_receipt" type="blocked_receipt" required=#true
+    field "blocked_gate" type="child_control_blocked_gate" required=#true
+    field "reporter_observed" type="bool" required=#true
+}
+
 artifact "approved_command_execution" schema="autopilot.approved_command_execution.v1" producer="Package" model_produced=#false {
     doc "Closed runtime-owned approved-command execution observation."
     field "execution_id" type="string" required=#true
@@ -2310,6 +2318,12 @@ frame direction="host-to-core" kind="blocked-result-observed" {
     field "tool_call_id" type="string" required=#true
 }
 
+frame direction="host-to-core" kind="blocked-reconcile" {
+    doc "Authenticated Host restart request for every validated pending durable blocked latch. The broker capability is the only request authority."
+    field "schema" type="schema-id" required=#true constant="autopilot.blocked_reconcile.v1"
+    field "broker_capability" type="string" required=#true doc="Host/Core-private 256-bit lowercase-hex broker capability."
+}
+
 frame direction="core-to-host" kind="child-control" {
     doc "Broker-only child-control result. Host applies the optional blocked gate directive before returning exactly response to the nested child and rejects every other Core effect kind on this socket path."
     field "response" type="child_control_response" required=#true
@@ -2323,6 +2337,12 @@ frame direction="core-to-host" kind="blocked-result-observed" {
     field "latch_id" type="uuidv7" required=#true
     field "reporter_task_id" type="id" required=#true
     field "status" type="blocked-result-observed-ack-status" required=#true
+}
+
+frame direction="core-to-host" kind="blocked-reconcile" {
+    doc "Closed Host restart response containing every validated pending blocked latch and its durable reporter observation state."
+    field "schema" type="schema-id" required=#true constant="autopilot.blocked_reconcile_response.v1"
+    list "records" item="blocked_reconcile_record" required=#true
 }
 
 frame direction="core-to-host" kind="spawn-attested" {

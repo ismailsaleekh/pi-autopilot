@@ -1966,6 +1966,20 @@ pub struct BlockedReceipt {
     pub cancellation_set_digest: Digest,
 }
 
+/// Closed durable blocked-latch replay record for Host restart. Every field is reconstructed from validated Core event roots only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlockedReconcileRecord {
+    #[serde(rename = "schema")]
+    pub schema: SchemaId,
+    #[serde(rename = "blocked_receipt")]
+    pub blocked_receipt: BlockedReceipt,
+    #[serde(rename = "blocked_gate")]
+    pub blocked_gate: ChildControlBlockedGate,
+    #[serde(rename = "reporter_observed")]
+    pub reporter_observed: bool,
+}
+
 /// Closed universal blocked report. Core derives workstream, action, cancellation scope, and all durable effects from the authenticated lease.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -4579,6 +4593,16 @@ pub struct WorkMapRecoveryV2 {
     pub repair_evidence_refs: Vec<Ref>,
 }
 
+/// Closed Host restart response containing every validated pending blocked latch and its durable reporter observation state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoreToHostBlockedReconcilePayload {
+    #[serde(rename = "schema")]
+    pub schema: SchemaId,
+    #[serde(rename = "records")]
+    pub records: Vec<BlockedReconcileRecord>,
+}
+
 /// Broker-only closed acknowledgment of the exact durable blocked observation. It is neither a generic done alias nor model-facing content.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -4706,6 +4730,17 @@ pub struct HostToCoreAttestedTaskObservationPayload {
     pub report_source_path: Path,
     #[serde(rename = "sidecar_source_path")]
     pub sidecar_source_path: Path,
+}
+
+/// Authenticated Host restart request for every validated pending durable blocked latch. The broker capability is the only request authority.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostToCoreBlockedReconcilePayload {
+    #[serde(rename = "schema")]
+    pub schema: SchemaId,
+    /// Host/Core-private 256-bit lowercase-hex broker capability.
+    #[serde(rename = "broker_capability")]
+    pub broker_capability: String,
 }
 
 /// Authenticated outer-runner observation that the reporter's accepted blocked tool result was correlated through ToolExecutionEnd and message_end. Host supplies broker_capability as private Host/Core bridge authority; it is separate from child-control request kind and carries no model authority.

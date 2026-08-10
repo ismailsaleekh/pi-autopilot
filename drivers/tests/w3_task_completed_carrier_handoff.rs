@@ -74,6 +74,101 @@ fn receipt_v1_planning_accepts_then_consumes_without_carrier_or_spec_rereads() {
 }
 
 #[test]
+fn blocked_latch_is_rooted_replayed_and_observed_once() {
+    let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+    let fixture = Fixture::new("blocked-latch");
+    fixture.install_transport_with_nonexistent_command_names();
+    let event_path = fixture.root.join("events.jsonl");
+    let mut state = CoreState::open(Some(event_path.clone())).unwrap();
+    let reporter =
+        fixture.seed_receipt_planning_binding(&mut state, "planning-ws-task-extractor-01", "BL01-");
+    let sibling_a =
+        fixture.seed_receipt_planning_binding(&mut state, "planning-ws-task-extractor-02", "BL02-");
+    let sibling_b =
+        fixture.seed_receipt_planning_binding(&mut state, "planning-ws-task-extractor-03", "BL03-");
+    let foreign = fixture.issue_task_extractor(
+        "foreign-workstream",
+        "planning-foreign-task-extractor-01",
+        "FOREIGN-",
+    );
+    append_ref(
+        &mut state,
+        &runner::receipt_binding_ref(&foreign.receipt_binding).unwrap(),
+    );
+    for (issue, task_id) in [
+        (&sibling_b, "task-beta"),
+        (&reporter, "task-reporter"),
+        (&sibling_a, "task-alpha"),
+        (&foreign, "task-foreign"),
+    ] {
+        let launched = json!({"v":1,"id":63,"kind":"spawn-result","payload":{
+            "action_id":issue.receipt_binding.action_id,
+            "assignment_id":issue.receipt_binding.assignment_id,
+            "status":"launched","task_id":task_id,"diagnostic":null
+        }});
+        seam::handle_line(&launched.to_string(), &mut state).unwrap();
+    }
+    let spec: kernel::generated::AgentRunSpecV5 =
+        serde_json::from_slice(&fs::read(&reporter.binding.spec_path).unwrap()).unwrap();
+    let blocked = json!({"v":1,"id":64,"kind":"child-control","payload":{
+        "broker_capability":fixture.broker_capability(),"request":{
+            "schema":"autopilot.child_control_request.v1","request_id":"blocked-request-1",
+            "token":spec.child_control_token,"run_id":reporter.receipt_binding.run_id,
+            "assignment_id":reporter.receipt_binding.assignment_id,"attempt":reporter.receipt_binding.attempt,
+            "tool_call_id":"blocked-call-1","kind":"blocked",
+            "tool_name":"autopilot_report_blocked",
+            "profile_id":"autopilot.blocked_report.v1:autopilot_report_blocked",
+            "raw_payload":{"schema":"autopilot.blocked_report.v1","reason_code":"infrastructure","summary":"launch is blocked","evidence":[{"kind":"observation","value":"focused fixture"}],"last_attempted_action":"run focused fixture"},
+            "runtime_evidence":{"schema":"autopilot.child_control_runtime_evidence.v1","delivery_policy_denials":null,"approved_command_executions":null}
+        }
+    }});
+    let accepted = seam::handle_line(&blocked.to_string(), &mut state).unwrap();
+    assert_eq!(accepted.payload["response"]["outcome"], "ACCEPT");
+    assert_eq!(accepted.payload["response"]["receipt"]["kind"], "blocked");
+    assert_eq!(
+        accepted.payload["blocked_gate"]["cancellations"],
+        json!([
+            {"task_id":"task-alpha","reporter":false},
+            {"task_id":"task-beta","reporter":false},
+            {"task_id":"task-reporter","reporter":true}
+        ])
+    );
+    let receipt = accepted.payload["response"]["receipt"]["receipt"].clone();
+    let mut replay = blocked.clone();
+    replay["payload"]["request"]["request_id"] = json!("blocked-request-2");
+    replay["payload"]["request"]["tool_call_id"] = json!("blocked-call-2");
+    let replayed = seam::handle_line(&replay.to_string(), &mut state).unwrap();
+    assert_eq!(replayed.payload["response"]["receipt"]["receipt"], receipt);
+    let mut conflict = replay.clone();
+    conflict["payload"]["request"]["raw_payload"]["summary"] = json!("different blocker");
+    let rejected = seam::handle_line(&conflict.to_string(), &mut state).unwrap();
+    assert_eq!(rejected.payload["response"]["outcome"], "RETRY");
+    let reopened = CoreState::open(Some(event_path)).unwrap();
+    let mut reopened = reopened;
+    let reconcile = json!({"v":1,"id":65,"kind":"blocked-reconcile","payload":{
+        "schema":"autopilot.blocked_reconcile.v1","broker_capability":fixture.broker_capability()
+    }});
+    let reconciliation = seam::handle_line(&reconcile.to_string(), &mut reopened).unwrap();
+    assert_eq!(reconciliation.kind, "blocked-reconcile");
+    assert_eq!(
+        reconciliation.payload["records"].as_array().unwrap().len(),
+        1
+    );
+    let observed = json!({"v":1,"id":66,"kind":"blocked-result-observed","payload":{
+        "schema":"autopilot.blocked_result_observed.v1","broker_capability":fixture.broker_capability(),
+        "token":spec.child_control_token,"run_id":reporter.receipt_binding.run_id,
+        "assignment_id":reporter.receipt_binding.assignment_id,"attempt":reporter.receipt_binding.attempt,
+        "receipt_id":receipt["receipt_id"],"tool_call_id":"blocked-call-2"
+    }});
+    let first_observation = seam::handle_line(&observed.to_string(), &mut reopened).unwrap();
+    assert_eq!(first_observation.kind, "blocked-result-observed");
+    let duplicate_observation = seam::handle_line(&observed.to_string(), &mut reopened).unwrap();
+    assert_eq!(duplicate_observation.payload, first_observation.payload);
+    let rows = fs::read_to_string(fixture.root.join("events.jsonl")).unwrap();
+    assert_eq!(rows.matches("blocked:result-observed").count(), 1);
+}
+
+#[test]
 fn receipt_v1_orphan_retry_keeps_parent_binding_continuation_after_intervening_rows() {
     let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
     let fixture = Fixture::new("receipt-preconsume-revision");

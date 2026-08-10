@@ -377,6 +377,11 @@ const FRAME_VALIDATION_DESCRIPTORS = {
     }
   ],
   "routes": {
+    "blocked-reconcile": {
+      "effect": "blocked-reconcile",
+      "payload": "CoreToHostBlockedReconcilePayload",
+      "posture": "supported"
+    },
     "blocked-result-observed": {
       "effect": "blocked-result-observed",
       "payload": "CoreToHostBlockedResultObservedPayload",
@@ -525,6 +530,25 @@ const FRAME_VALIDATION_DESCRIPTORS = {
           "nullable": false,
           "required": true,
           "type": "bool"
+        }
+      ]
+    },
+    "CoreToHostBlockedReconcilePayload": {
+      "fields": [
+        {
+          "kind": "value",
+          "name": "schema",
+          "nullable": false,
+          "required": true,
+          "type": "schema-id"
+        },
+        {
+          "item_kind": "value",
+          "item_type": "object",
+          "kind": "list",
+          "name": "records",
+          "nullable": false,
+          "required": true
         }
       ]
     },

@@ -191,6 +191,7 @@ fn append_runner_invocation(
     issue: &runner::IssuedRunnerAction,
 ) -> Result<(), AnyError> {
     let binding = &issue.receipt_binding;
+    ensure_workstream_unblocked(state, &binding.workstream.0)?;
     let mut refs = vec![
         Ref(binding.workstream.0.clone()),
         Ref(binding.assignment_id.0.clone()),
@@ -337,6 +338,7 @@ fn validate_reemit_spec_binding(spec: &kernel::generated::AgentRunSpec, binding:
 fn record_recovered_planning_control_actions(state: &mut CoreState, actions: &[BackgroundAction]) -> Result<(), AnyError> {
     validate_spawn_wave_actions(actions)?;
     for action in actions {
+        ensure_action_unblocked(state, action)?;
         crate::control::admit_exact_bg_run((action, &action.bg_run)).map_err(|error| format!("control:bg-run:{}", error.actual()))?;
     }
     let policy = crate::control::ControlPolicy::package().map_err(|error| format!("control:policy:{error:?}"))?;

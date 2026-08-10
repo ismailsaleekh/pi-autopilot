@@ -577,6 +577,13 @@ export interface BlockedReceipt {
   cancellation_set_digest: Digest;
 }
 
+export interface BlockedReconcileRecord {
+  schema: SchemaId;
+  blocked_receipt: BlockedReceipt;
+  blocked_gate: ChildControlBlockedGate;
+  reporter_observed: boolean;
+}
+
 export interface BlockedReport {
   schema: SchemaId;
   reason_code: BlockedReasonCode;
@@ -1835,6 +1842,11 @@ export interface WorkMapRecoveryV2 {
   repair_evidence_refs: Ref[];
 }
 
+export interface CoreToHostBlockedReconcilePayload {
+  schema: SchemaId;
+  records: BlockedReconcileRecord[];
+}
+
 export interface CoreToHostBlockedResultObservedPayload {
   schema: SchemaId;
   receipt_id: Uuidv7;
@@ -1899,6 +1911,11 @@ export interface HostToCoreAttestedTaskObservationPayload {
   sidecar_source_path: Path;
 }
 
+export interface HostToCoreBlockedReconcilePayload {
+  schema: SchemaId;
+  broker_capability: string;
+}
+
 export interface HostToCoreBlockedResultObservedPayload {
   schema: SchemaId;
   broker_capability: string;
@@ -1945,5 +1962,5 @@ export interface HostToCoreTaskCompletedPayload {
   status: string;
 }
 
-export type HostToCoreFrame = { v: 1; id: number; kind: "agent-result"; payload: HostToCoreAgentResultPayload } | { v: 1; id: number; kind: "attested-task-observation"; payload: HostToCoreAttestedTaskObservationPayload } | { v: 1; id: number; kind: "blocked-result-observed"; payload: HostToCoreBlockedResultObservedPayload } | { v: 1; id: number; kind: "child-control"; payload: HostToCoreChildControlPayload } | { v: 1; id: number; kind: "command"; payload: HostToCoreCommandPayload } | { v: 1; id: number; kind: "operator-answer"; payload: HostToCoreOperatorAnswerPayload } | { v: 1; id: number; kind: "shutdown"; payload: HostToCoreShutdownPayload } | { v: 1; id: number; kind: "spawn-result"; payload: HostToCoreSpawnResultPayload } | { v: 1; id: number; kind: "task-completed"; payload: HostToCoreTaskCompletedPayload };
-export type CoreToHostFrame = { v: 1; id: number; kind: "blocked-result-observed"; payload: CoreToHostBlockedResultObservedPayload } | { v: 1; id: number; kind: "child-control"; payload: CoreToHostChildControlPayload } | { v: 1; id: number; kind: "done"; payload: CoreToHostDonePayload } | { v: 1; id: number; kind: "log"; payload: CoreToHostLogPayload } | { v: 1; id: number; kind: "reconcile-attested"; payload: CoreToHostReconcileAttestedPayload } | { v: 1; id: number; kind: "session"; payload: CoreToHostSessionPayload } | { v: 1; id: number; kind: "spawn"; payload: CoreToHostSpawnPayload } | { v: 1; id: number; kind: "spawn-attested"; payload: CoreToHostSpawnAttestedPayload } | { v: 1; id: number; kind: "spawn-wave"; payload: CoreToHostSpawnWavePayload } | { v: 1; id: number; kind: "ui"; payload: CoreToHostUiPayload };
+export type HostToCoreFrame = { v: 1; id: number; kind: "agent-result"; payload: HostToCoreAgentResultPayload } | { v: 1; id: number; kind: "attested-task-observation"; payload: HostToCoreAttestedTaskObservationPayload } | { v: 1; id: number; kind: "blocked-reconcile"; payload: HostToCoreBlockedReconcilePayload } | { v: 1; id: number; kind: "blocked-result-observed"; payload: HostToCoreBlockedResultObservedPayload } | { v: 1; id: number; kind: "child-control"; payload: HostToCoreChildControlPayload } | { v: 1; id: number; kind: "command"; payload: HostToCoreCommandPayload } | { v: 1; id: number; kind: "operator-answer"; payload: HostToCoreOperatorAnswerPayload } | { v: 1; id: number; kind: "shutdown"; payload: HostToCoreShutdownPayload } | { v: 1; id: number; kind: "spawn-result"; payload: HostToCoreSpawnResultPayload } | { v: 1; id: number; kind: "task-completed"; payload: HostToCoreTaskCompletedPayload };
+export type CoreToHostFrame = { v: 1; id: number; kind: "blocked-reconcile"; payload: CoreToHostBlockedReconcilePayload } | { v: 1; id: number; kind: "blocked-result-observed"; payload: CoreToHostBlockedResultObservedPayload } | { v: 1; id: number; kind: "child-control"; payload: CoreToHostChildControlPayload } | { v: 1; id: number; kind: "done"; payload: CoreToHostDonePayload } | { v: 1; id: number; kind: "log"; payload: CoreToHostLogPayload } | { v: 1; id: number; kind: "reconcile-attested"; payload: CoreToHostReconcileAttestedPayload } | { v: 1; id: number; kind: "session"; payload: CoreToHostSessionPayload } | { v: 1; id: number; kind: "spawn"; payload: CoreToHostSpawnPayload } | { v: 1; id: number; kind: "spawn-attested"; payload: CoreToHostSpawnAttestedPayload } | { v: 1; id: number; kind: "spawn-wave"; payload: CoreToHostSpawnWavePayload } | { v: 1; id: number; kind: "ui"; payload: CoreToHostUiPayload };

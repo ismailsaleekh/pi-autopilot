@@ -86,7 +86,8 @@ fn malformed_runner_binding_ref_fails_closed_after_broker_authentication() {
             "token":"not-a-capability","run_id":"run-52","assignment_id":"assignment-52",
             "attempt":1,"tool_call_id":"tool-call-52","kind":"submit",
             "tool_name":"autopilot_emit_status","profile_id":"delivery-status.v2",
-            "raw_payload":{"unexpected":true}
+            "raw_payload":{"unexpected":true},
+            "runtime_evidence":{"schema":"autopilot.child_control_runtime_evidence.v1","delivery_policy_denials":null,"approved_command_executions":null}
         }}
     });
     let frame = handle_line(&line.to_string(), &mut state).expect("closed retry");
@@ -112,6 +113,18 @@ fn generated_route_identity_names_current_dispatch_adapters() {
             .unwrap()
             .adapter,
         "blocked-result-observed"
+    );
+    assert_eq!(
+        tables::host_to_core_route("blocked-reconcile")
+            .unwrap()
+            .payload,
+        "HostToCoreBlockedReconcilePayload"
+    );
+    assert_eq!(
+        tables::core_to_host_effect("blocked-reconcile")
+            .unwrap()
+            .payload,
+        "CoreToHostBlockedReconcilePayload"
     );
     assert_eq!(
         tables::host_to_core_route("command").unwrap().adapter,

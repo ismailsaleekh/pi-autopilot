@@ -8,17 +8,21 @@ use std::time::Duration;
 
 use kernel::boundary::Rejection;
 use kernel::generated::{
-    AllocationLaneProposal, AutopilotEventRef, BackgroundAction, CONTRACT_VERSION,
-    ChildControlAcceptReceipt, ChildControlRequest, ChildControlRequestKind, ChildControlResponse,
-    ChildControlRuntimeEvidence, CoreToHostChildControlPayload, CoreToHostDonePayload,
-    CoreToHostSpawnPayload, CoreToHostSpawnWavePayload, CoreToHostUiPayload, DeferredHostEffectV1,
-    DeliveryBoundary, DeliveryResult, Digest, EventKind, EventRow, HostToCoreAgentResultPayload,
-    HostToCoreBlockedResultObservedPayload, HostToCoreChildControlPayload,
-    HostToCoreCommandPayload, HostToCoreSpawnResultPayload, HostToCoreTaskCompletedPayload, Id,
-    ModeId, Nullable, PreparedSubmitArtifactRef, PreparedSubmitIssuedAction,
-    PreparedSubmitTransitionV1, Ref, SchemaId, SeamEnvelope, Sha, SubmitDiagnostic,
-    SubmitDiagnosticActual, SubmitDiagnosticError, SubmitReceipt, SubmitReceiptEventRef,
-    SubmitReceiptValidatorVersion, TestId, UiKind,
+    AllocationLaneProposal, AutopilotEventRef, BackgroundAction, BlockedCancellationRecord,
+    BlockedLatch, BlockedLatchEventRef, BlockedReceipt, BlockedReconcileRecord,
+    BlockedResultObservedAckStatus, CONTRACT_VERSION, ChildControlAcceptReceipt,
+    ChildControlBlockedCancellation, ChildControlBlockedGate, ChildControlRequest,
+    ChildControlRequestKind, ChildControlResponse, ChildControlRuntimeEvidence,
+    CoreToHostBlockedReconcilePayload, CoreToHostBlockedResultObservedPayload,
+    CoreToHostChildControlPayload, CoreToHostDonePayload, CoreToHostSpawnPayload,
+    CoreToHostSpawnWavePayload, CoreToHostUiPayload, DeferredHostEffectV1, DeliveryBoundary,
+    DeliveryResult, Digest, EventKind, EventRow, HostToCoreAgentResultPayload,
+    HostToCoreBlockedReconcilePayload, HostToCoreBlockedResultObservedPayload,
+    HostToCoreChildControlPayload, HostToCoreCommandPayload, HostToCoreSpawnResultPayload,
+    HostToCoreTaskCompletedPayload, Id, ModeId, Nullable, PreparedSubmitArtifactRef,
+    PreparedSubmitIssuedAction, PreparedSubmitTransitionV1, Ref, SchemaId, SeamEnvelope, Sha,
+    SubmitDiagnostic, SubmitDiagnosticActual, SubmitDiagnosticError, SubmitReceipt,
+    SubmitReceiptEventRef, SubmitReceiptValidatorVersion, TestId, UiKind,
 };
 use kernel::schedule::ResourceFacts;
 use kernel::state::{State, apply};
@@ -49,11 +53,20 @@ const MAX_VALIDATION_BOUND_ARTIFACT_BYTES: usize = 2 << 20;
 const MAX_TOOL_AUDIT_BYTES: usize = 256 << 10;
 const COMMAND_BOUNDARY_ID: &str = "seam.operator-command.v1";
 const COMMANDS_KDL: &str = include_str!("../../../data/commands.kdl");
+const BLOCKED_PROFILE_ID: &str = "autopilot.blocked_report.v1:autopilot_report_blocked";
+const BLOCKED_TOOL_NAME: &str = "autopilot_report_blocked";
+const BLOCKED_ARTIFACT_MAX_BYTES: usize = 2 << 20;
 type AnyError = Box<dyn std::error::Error>;
 
 #[derive(Debug)]
 pub struct CoreState {
     event_path: Option<PathBuf>,
+    /// Rebuilt only from exact blocked root/event-ref pairs; this is a
+    /// projection, never a directory or loose-ref discovery mechanism.
+    blocked_latches: BTreeMap<(String, String), BlockedLatchState>,
+    /// Current-process broker correlation for a live child tool call. Durable
+    /// restart authorization comes from the Host's reconciled pending receipt.
+    blocked_reporter_tool_calls: BTreeMap<String, String>,
     state: State,
     /// Exact rows are retained alongside the aggregate State because V2
     /// ready authority is one event-scoped root, never a join across refs.
@@ -62,6 +75,13 @@ pub struct CoreState {
     /// roots hash this durable representation, never a synthetic projection.
     event_bytes: Vec<Vec<u8>>,
 }
+#[derive(Clone, Debug)]
+struct BlockedLatchState {
+    receipt: BlockedReceipt,
+    latch: BlockedLatch,
+    reporter_observed: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct Route {
     name: String,
@@ -81,12 +101,17 @@ impl CoreState {
             Some(path) => replay_path(path)?,
             None => (State::EMPTY, Vec::new(), Vec::new()),
         };
-        Ok(Self {
+        let mut opened = Self {
             event_path,
             state,
             events,
             event_bytes,
-        })
+            blocked_latches: BTreeMap::new(),
+            blocked_reporter_tool_calls: BTreeMap::new(),
+        };
+        opened.repair_blocked_latch_event_refs()?;
+        opened.rebuild_blocked_latches()?;
+        Ok(opened)
     }
     fn append(&mut self, kind: EventKind, artifact_refs: Vec<Ref>) -> Result<(), AnyError> {
         let event = EventRow {
@@ -104,7 +129,10 @@ impl CoreState {
             kind,
             artifact_refs,
         };
-        let bytes = if event.kind.0 == "submit:accepted" {
+        let bytes = if matches!(
+            event.kind.0.as_str(),
+            "submit:accepted" | "blocked:accepted"
+        ) {
             crate::evidence::canonical_json(&event)?
         } else {
             serde_json::to_vec(&event)?
@@ -124,6 +152,52 @@ impl CoreState {
             self.state.revision,
             self.state.state_hash().0
         )
+    }
+
+    fn rebuild_blocked_latches(&mut self) -> Result<(), AnyError> {
+        self.blocked_latches = project_blocked_latches(self)?;
+        Ok(())
+    }
+
+    /// The accepted root is already the durable latch publication boundary.
+    /// If a crash follows it but precedes the non-circular event-reference
+    /// row, finish only that deterministic row; never remint either artifact.
+    fn repair_blocked_latch_event_refs(&mut self) -> Result<(), AnyError> {
+        let roots = self
+            .events
+            .iter()
+            .filter(|event| event.kind.0 == "blocked:accepted")
+            .map(|event| {
+                event
+                    .artifact_refs
+                    .iter()
+                    .map(decode_blocked_latch_root)
+                    .collect::<Result<Vec<_>, _>>()
+                    .and_then(|roots| {
+                        let roots = roots.into_iter().flatten().collect::<Vec<_>>();
+                        match roots.as_slice() {
+                            [root] => Ok(root.clone()),
+                            _ => Err("blocked accepted event lacks exactly one canonical root".to_owned()),
+                        }
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for root in roots {
+            let receipt = read_blocked_receipt_at(Path::new(&root.blocked_receipt_ref.0))?
+                .ok_or("blocked root receipt is absent")?;
+            let latch = read_blocked_latch_at(Path::new(&root.latch_ref.0))?
+                .ok_or("blocked root latch is absent")?;
+            let binding = blocked_binding_for_receipt(self, &receipt)?;
+            if blocked_root(&receipt, &latch, &binding)? != root {
+                return Err("blocked root artifact digest/path drift".into());
+            }
+            let accepted_index = blocked_accepted_root_index(self, &root)?
+                .ok_or("blocked accepted root disappeared during repair")?;
+            if blocked_event_ref_for_root(self, &root, accepted_index)?.is_none() {
+                append_blocked_latch_event_ref(self, &root, accepted_index)?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -154,6 +228,11 @@ pub fn handle_line(line: &str, state: &mut CoreState) -> Result<SeamEnvelope, An
         Ok(route) => dispatch(id, route, state),
         Err(SeamAdmissionError::Payload { kind, .. }) if kind == "child-control" => {
             child_control_payload_retry(id, &envelope.payload)
+        }
+        Err(SeamAdmissionError::Payload { kind, error })
+            if matches!(kind, "blocked-result-observed" | "blocked-reconcile") =>
+        {
+            Err(format!("rejection:{kind}:payload-mismatch:{error}").into())
         }
         Err(error) => done(id, seam_admission_status(error)),
     }
@@ -215,6 +294,7 @@ fn dispatch(
         HostToCoreRoute::BlockedResultObserved(payload) => {
             route_blocked_result_observed(id, payload, state)
         }
+        HostToCoreRoute::BlockedReconcile(payload) => route_blocked_reconcile(id, payload, state),
         HostToCoreRoute::OperatorAnswer(_) => done(id, "ok:recorded".to_owned()),
         HostToCoreRoute::Shutdown(_) => done(id, "ok:shutdown".to_owned()),
     }
@@ -236,17 +316,9 @@ fn route_child_control(
         return child_control_redacted_retry(id, request_id);
     }
     match admit_child_control_request(&request, state) {
-        Ok(ChildControlAdmission::BlockedPreflight) => child_control_retry(
-            id,
-            request_id,
-            child_control_diagnostic(
-                "submit.blocked_wave6_pending",
-                "/kind",
-                "authenticated blocked report held for the Wave 6 latch consumer",
-                &serde_json::json!("blocked"),
-                "Continue only after the Wave 6 blocked-latch consumer is available.",
-            ),
-        ),
+        Ok(ChildControlAdmission::Blocked { receipt, latch }) => {
+            child_control_accept_blocked(id, request_id, receipt, latch)
+        }
         Ok(ChildControlAdmission::Replay { receipt, binding }) => {
             match root_or_verify_submit_receipt(state, &receipt, &binding) {
                 Ok(()) => child_control_accept(id, request_id, receipt),
@@ -277,7 +349,10 @@ fn route_child_control(
 }
 
 enum ChildControlAdmission {
-    BlockedPreflight,
+    Blocked {
+        receipt: BlockedReceipt,
+        latch: BlockedLatch,
+    },
     Replay {
         receipt: SubmitReceipt,
         binding: runner::ReceiptV1RunnerBinding,
@@ -294,7 +369,7 @@ enum ChildControlAdmission {
 
 fn admit_child_control_request(
     request: &ChildControlRequest,
-    state: &CoreState,
+    state: &mut CoreState,
 ) -> Result<ChildControlAdmission, SubmitDiagnostic> {
     if request.schema.0 != "autopilot.child_control_request.v1" {
         return Err(child_control_diagnostic(
@@ -438,16 +513,22 @@ fn admit_child_control_request(
             "Retry with the current issued runner binding.",
         ));
     }
-    if request.run_id != binding.run_id
-        || request.assignment_id != binding.assignment_id
-        || request.attempt != binding.attempt
-        || request.profile_id != binding.profile_id
-        || request.tool_name != binding.tool_name
-    {
+    let request_identity_matches = request.run_id == binding.run_id
+        && request.assignment_id == binding.assignment_id
+        && request.attempt == binding.attempt
+        && match request.kind {
+            ChildControlRequestKind::Submit => {
+                request.profile_id == binding.profile_id && request.tool_name == binding.tool_name
+            }
+            ChildControlRequestKind::Blocked => {
+                request.profile_id == BLOCKED_PROFILE_ID && request.tool_name.0 == BLOCKED_TOOL_NAME
+            }
+        };
+    if !request_identity_matches {
         return Err(child_control_diagnostic(
             "submit.request_identity",
             "",
-            "issued run, assignment, attempt, profile, and tool identity",
+            "issued run, assignment, attempt, and exact terminal tool identity",
             &serde_json::json!({
                 "run_id": request.run_id,
                 "assignment_id": request.assignment_id,
@@ -461,6 +542,15 @@ fn admit_child_control_request(
     validate_child_control_runtime_evidence(request, &facade)?;
     match request.kind {
         ChildControlRequestKind::Blocked => {
+            let raw = crate::evidence::canonical_json(&request.raw_payload).map_err(|error| {
+                child_control_diagnostic(
+                    "submit.canonical_json",
+                    "/raw_payload",
+                    "canonical JSON payload bytes",
+                    &serde_json::json!(error.to_string()),
+                    "Resubmit a JSON-compatible terminal payload.",
+                )
+            })?;
             let report: kernel::generated::BlockedReport =
                 serde_json::from_value(request.raw_payload.clone()).map_err(|error| {
                     child_control_diagnostic(
@@ -471,16 +561,10 @@ fn admit_child_control_request(
                         "Correct the blocked report payload and resubmit.",
                     )
                 })?;
-            if report.schema.0 != "autopilot.blocked_report.v1" {
-                return Err(child_control_diagnostic(
-                    "submit.blocked_schema",
-                    "/raw_payload/schema",
-                    "autopilot.blocked_report.v1",
-                    &serde_json::json!(report.schema.0),
-                    "Set the blocked report schema to autopilot.blocked_report.v1.",
-                ));
-            }
-            Ok(ChildControlAdmission::BlockedPreflight)
+            validate_blocked_report(&report)?;
+            let (receipt, latch) =
+                admit_or_replay_blocked_latch(state, request, &binding, &raw, &report)?;
+            Ok(ChildControlAdmission::Blocked { receipt, latch })
         }
         ChildControlRequestKind::Submit => {
             let raw = crate::evidence::canonical_json(&request.raw_payload).map_err(|error| {
@@ -665,6 +749,562 @@ fn receipt_authority_digest(
     spec: &kernel::generated::AgentRunSpecV5,
 ) -> Result<String, String> {
     runner::receipt_authority_digest_for_binding(binding, spec).map_err(|error| error.to_string())
+}
+
+const BLOCKED_RECEIPT_ROOT_PREFIX: &str = "blocked-latch-root:";
+const BLOCKED_LATCH_EVENT_REF_PREFIX: &str = "blocked-latch-event:";
+const BLOCKED_OBSERVED_REF_PREFIX: &str = "blocked-observed:";
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct BlockedLatchRootV1 {
+    schema: String,
+    blocked_receipt_ref: Ref,
+    blocked_receipt_sha256: Digest,
+    latch_ref: Ref,
+    latch_sha256: Digest,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct BlockedObservedRefV1 {
+    schema: String,
+    receipt_id: kernel::generated::Uuidv7,
+    latch_id: kernel::generated::Uuidv7,
+    reporter_task_id: Id,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct LaunchAckTaskBindingV1 {
+    task_id: Id,
+    action_id: Id,
+    assignment_id: Id,
+    run_revision: u64,
+}
+
+fn validate_blocked_report(
+    report: &kernel::generated::BlockedReport,
+) -> Result<(), SubmitDiagnostic> {
+    if report.schema.0 != "autopilot.blocked_report.v1" {
+        return Err(child_control_diagnostic(
+            "submit.blocked_schema",
+            "/raw_payload/schema",
+            "autopilot.blocked_report.v1",
+            &serde_json::json!(report.schema.0),
+            "Set the blocked report schema to autopilot.blocked_report.v1.",
+        ));
+    }
+    let bounded = |value: &str, max: usize| !value.is_empty() && value.len() <= max;
+    if !bounded(&report.summary, 2000) {
+        return Err(child_control_diagnostic(
+            "submit.blocked_summary",
+            "/raw_payload/summary",
+            "a nonempty summary of at most 2000 UTF-8 bytes",
+            &serde_json::json!(report.summary),
+            "Provide the bounded blocked-report summary.",
+        ));
+    }
+    if !bounded(&report.last_attempted_action, 2000) {
+        return Err(child_control_diagnostic(
+            "submit.blocked_last_attempted_action",
+            "/raw_payload/last_attempted_action",
+            "a nonempty last attempted action of at most 2000 UTF-8 bytes",
+            &serde_json::json!(report.last_attempted_action),
+            "Provide the bounded last attempted action.",
+        ));
+    }
+    if report.evidence.is_empty() {
+        return Err(child_control_diagnostic(
+            "submit.blocked_evidence",
+            "/raw_payload/evidence",
+            "at least one blocked evidence record",
+            &serde_json::json!(report.evidence),
+            "Provide at least one bounded blocked evidence record.",
+        ));
+    }
+    for (index, evidence) in report.evidence.iter().enumerate() {
+        if !bounded(&evidence.value, 4096) {
+            return Err(child_control_diagnostic(
+                "submit.blocked_evidence_value",
+                &format!("/raw_payload/evidence/{index}/value"),
+                "a nonempty evidence value of at most 4096 UTF-8 bytes",
+                &serde_json::json!(evidence.value),
+                "Provide the bounded evidence value.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn blocked_admission_retry(code: &str, detail: impl Into<String>) -> SubmitDiagnostic {
+    child_control_diagnostic(
+        code,
+        "",
+        "one exact durable blocked-latch transaction",
+        &serde_json::json!(detail.into()),
+        "Retry through the exact issued blocked-report capability without changing an accepted report.",
+    )
+}
+
+fn blocked_receipt_path(binding: &runner::ReceiptV1RunnerBinding) -> Result<PathBuf, String> {
+    let root = submit_root_for_carrier(Path::new(&binding.carrier_path))?;
+    let key = sha256_hex_local(
+        format!(
+            "blocked-receipt.v1\\0{}\\0{}\\0{}\\0{}",
+            binding.run_id.0, binding.action_id.0, binding.assignment_id.0, binding.run_revision
+        )
+        .as_bytes(),
+    );
+    Ok(root.join("blocked-receipts").join(format!("{key}.json")))
+}
+
+fn blocked_latch_path(binding: &runner::ReceiptV1RunnerBinding) -> Result<PathBuf, String> {
+    let root = submit_root_for_carrier(Path::new(&binding.carrier_path))?;
+    let key = sha256_hex_local(
+        format!(
+            "blocked-latch.v1\\0{}\\0{}\\0{}\\0{}",
+            binding.run_id.0, binding.action_id.0, binding.assignment_id.0, binding.run_revision
+        )
+        .as_bytes(),
+    );
+    Ok(root.join("blocked-latches").join(format!("{key}.json")))
+}
+
+fn read_blocked_receipt_at(path: &Path) -> Result<Option<BlockedReceipt>, String> {
+    let Some(bytes) = runner::read_bounded_file_optional(path, BLOCKED_ARTIFACT_MAX_BYTES)
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(None);
+    };
+    let receipt: BlockedReceipt =
+        serde_json::from_slice(&bytes).map_err(|error| format!("blocked receipt JSON: {error}"))?;
+    let canonical = crate::evidence::canonical_json(&receipt)
+        .map_err(|error| format!("blocked receipt canonical JSON: {error}"))?;
+    if canonical != bytes || receipt.schema.0 != "autopilot.blocked_receipt.v1" {
+        return Err("blocked receipt bytes/schema are not canonical".to_owned());
+    }
+    Ok(Some(receipt))
+}
+
+fn read_blocked_latch_at(path: &Path) -> Result<Option<BlockedLatch>, String> {
+    let Some(bytes) = runner::read_bounded_file_optional(path, BLOCKED_ARTIFACT_MAX_BYTES)
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(None);
+    };
+    let latch: BlockedLatch =
+        serde_json::from_slice(&bytes).map_err(|error| format!("blocked latch JSON: {error}"))?;
+    let canonical = crate::evidence::canonical_json(&latch)
+        .map_err(|error| format!("blocked latch canonical JSON: {error}"))?;
+    if canonical != bytes || latch.schema.0 != "autopilot.blocked_latch.v1" {
+        return Err("blocked latch bytes/schema are not canonical".to_owned());
+    }
+    Ok(Some(latch))
+}
+
+fn blocked_receipt_matches_binding(
+    receipt: &BlockedReceipt,
+    binding: &runner::ReceiptV1RunnerBinding,
+    raw: &[u8],
+) -> bool {
+    receipt.schema.0 == "autopilot.blocked_receipt.v1"
+        && receipt.run_id == binding.run_id
+        && receipt.run_revision == binding.run_revision
+        && receipt.workstream == binding.workstream
+        && receipt.action_id == binding.action_id
+        && receipt.assignment_id == binding.assignment_id
+        && receipt.attempt == binding.attempt
+        && receipt.profile_id == BLOCKED_PROFILE_ID
+        && receipt.tool_name.0 == BLOCKED_TOOL_NAME
+        && receipt.report_digest.0 == sha256_hex_local(raw)
+        && is_lower_hex_sha256(&receipt.cancellation_set_digest.0)
+}
+
+fn is_lower_hex_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn cancellation_digest(records: &[BlockedCancellationRecord]) -> Result<Digest, String> {
+    let records = records.to_vec();
+    Ok(Digest(sha256_hex_local(
+        &crate::evidence::canonical_json(&records)
+            .map_err(|error| format!("blocked cancellations canonical JSON: {error}"))?,
+    )))
+}
+
+fn validate_blocked_latch(receipt: &BlockedReceipt, latch: &BlockedLatch) -> Result<(), String> {
+    if receipt.schema.0 != "autopilot.blocked_receipt.v1"
+        || latch.schema.0 != "autopilot.blocked_latch.v1"
+        || receipt.receipt_id.0.trim().is_empty()
+        || receipt.request_id.0.trim().is_empty()
+        || receipt.tool_call_id.trim().is_empty()
+        || receipt.profile_id != BLOCKED_PROFILE_ID
+        || receipt.tool_name.0 != BLOCKED_TOOL_NAME
+        || latch.latch_id.0.trim().is_empty()
+        || latch.blocked_receipt_id != receipt.receipt_id
+        || latch.run_id != receipt.run_id
+        || latch.run_revision != receipt.run_revision
+        || latch.workstream != receipt.workstream
+        || latch.cancellation_set_digest != receipt.cancellation_set_digest
+        || !is_lower_hex_sha256(&receipt.report_digest.0)
+        || !is_lower_hex_sha256(&receipt.cancellation_set_digest.0)
+        || latch.cancellations.is_empty()
+    {
+        return Err("blocked receipt/latch identity drift".to_owned());
+    }
+    let mut task_ids = BTreeSet::new();
+    let mut action_ids = BTreeSet::new();
+    let mut assignment_ids = BTreeSet::new();
+    let mut reporter_count = 0usize;
+    for (index, cancellation) in latch.cancellations.iter().enumerate() {
+        if cancellation.cancellation_index != index as u32
+            || cancellation.task_id.0.trim().is_empty()
+            || cancellation.action_id.0.trim().is_empty()
+            || cancellation.assignment_id.0.trim().is_empty()
+            || !task_ids.insert(cancellation.task_id.0.clone())
+            || !action_ids.insert(cancellation.action_id.0.clone())
+            || !assignment_ids.insert(cancellation.assignment_id.0.clone())
+        {
+            return Err("blocked cancellation identity/index drift".to_owned());
+        }
+        if cancellation.reporter {
+            reporter_count += 1;
+            if index + 1 != latch.cancellations.len()
+                || cancellation.assignment_id != latch.reporter_assignment_id
+                || cancellation.assignment_id != receipt.assignment_id
+                || cancellation.action_id != receipt.action_id
+            {
+                return Err("blocked reporter ordering/identity drift".to_owned());
+            }
+        }
+    }
+    if reporter_count != 1
+        || cancellation_digest(&latch.cancellations)? != latch.cancellation_set_digest
+    {
+        return Err("blocked cancellation reporter/digest drift".to_owned());
+    }
+    Ok(())
+}
+
+fn exact_launch_ack_task_binding(
+    event: &EventRow,
+) -> Result<Option<LaunchAckTaskBindingV1>, String> {
+    if event.kind.0 != "background:launch-ack" {
+        return Ok(None);
+    }
+    if event.artifact_refs.len() != 6 {
+        return Err("background launch acknowledgement ref count drift".to_owned());
+    }
+    let task_binding = event.artifact_refs[4]
+        .0
+        .strip_prefix("task-binding:")
+        .ok_or_else(|| "background launch acknowledgement lacks task binding".to_owned())?;
+    let parsed: LaunchAckTaskBindingV1 = serde_json::from_str(task_binding)
+        .map_err(|error| format!("background launch task binding JSON: {error}"))?;
+    let expected = serde_json::json!({
+        "task_id": parsed.task_id,
+        "action_id": parsed.action_id,
+        "assignment_id": parsed.assignment_id,
+        "run_revision": parsed.run_revision,
+    });
+    if event.artifact_refs
+        != vec![
+            Ref(parsed.task_id.0.clone()),
+            Ref(parsed.action_id.0.clone()),
+            Ref(parsed.assignment_id.0.clone()),
+            Ref(parsed.run_revision.to_string()),
+            Ref(format!("task-binding:{expected}")),
+            Ref(format!(
+                "launch-ack:{}:{}:{}",
+                parsed.action_id.0, parsed.assignment_id.0, parsed.run_revision
+            )),
+        ]
+    {
+        return Err("background launch acknowledgement identity drift".to_owned());
+    }
+    Ok(Some(parsed))
+}
+
+fn derive_blocked_cancellations(
+    state: &CoreState,
+    reporter: &runner::ReceiptV1RunnerBinding,
+) -> Result<Vec<BlockedCancellationRecord>, String> {
+    let mut bindings = BTreeMap::new();
+    for versioned in strict_versioned_runner_bindings(state)? {
+        let VersionedRunnerBinding::ReceiptV1(binding) = versioned else {
+            continue;
+        };
+        if binding.run_id != reporter.run_id || binding.workstream != reporter.workstream {
+            continue;
+        }
+        let key = (
+            binding.action_id.0.clone(),
+            binding.assignment_id.0.clone(),
+            binding.run_revision,
+        );
+        if bindings.insert(key, binding).is_some() {
+            return Err("ambiguous receipt_v1 binding in blocked workstream".to_owned());
+        }
+    }
+    let reporter_key = (
+        reporter.action_id.0.clone(),
+        reporter.assignment_id.0.clone(),
+        reporter.run_revision,
+    );
+    if !bindings.contains_key(&reporter_key) {
+        return Err("blocked reporter binding is absent from its durable workstream".to_owned());
+    }
+    let mut found = BTreeMap::<String, (runner::ReceiptV1RunnerBinding, Id)>::new();
+    for event in &state.events {
+        let Some(task) = exact_launch_ack_task_binding(event)? else {
+            continue;
+        };
+        let key = (
+            task.action_id.0.clone(),
+            task.assignment_id.0.clone(),
+            task.run_revision,
+        );
+        let Some(binding) = bindings.get(&key) else {
+            continue;
+        };
+        if terminal_consumed(state, &runner::receipt_v1_validator_facade(binding)) {
+            continue;
+        }
+        if found
+            .insert(task.task_id.0.clone(), (binding.clone(), task.task_id))
+            .is_some()
+        {
+            return Err("duplicate durable task id in blocked cancellation scope".to_owned());
+        }
+    }
+    let mut candidates = found.into_values().collect::<Vec<_>>();
+    let reporter_count = candidates
+        .iter()
+        .filter(|(binding, _)| {
+            binding.action_id == reporter.action_id
+                && binding.assignment_id == reporter.assignment_id
+                && binding.run_revision == reporter.run_revision
+        })
+        .count();
+    if reporter_count != 1 {
+        return Err(
+            "blocked reporter requires exactly one durable launch acknowledgement".to_owned(),
+        );
+    }
+    candidates.sort_by(|(left_binding, left_task), (right_binding, right_task)| {
+        (
+            left_task.0.as_bytes(),
+            left_binding.action_id.0.as_bytes(),
+            left_binding.assignment_id.0.as_bytes(),
+        )
+            .cmp(&(
+                right_task.0.as_bytes(),
+                right_binding.action_id.0.as_bytes(),
+                right_binding.assignment_id.0.as_bytes(),
+            ))
+    });
+    let mut nonreporters = Vec::new();
+    let mut reporter_record = None;
+    for (binding, task_id) in candidates {
+        let record = BlockedCancellationRecord {
+            task_id,
+            action_id: binding.action_id.clone(),
+            assignment_id: binding.assignment_id.clone(),
+            cancellation_index: 0,
+            reporter: binding.action_id == reporter.action_id
+                && binding.assignment_id == reporter.assignment_id
+                && binding.run_revision == reporter.run_revision,
+        };
+        if record.reporter {
+            reporter_record = Some(record);
+        } else {
+            nonreporters.push(record);
+        }
+    }
+    let reporter_record = reporter_record
+        .ok_or_else(|| "blocked reporter launch acknowledgement disappeared".to_owned())?;
+    nonreporters.push(reporter_record);
+    for (index, record) in nonreporters.iter_mut().enumerate() {
+        record.cancellation_index = index as u32;
+    }
+    Ok(nonreporters)
+}
+
+fn validate_blocked_latch_launch_scope(
+    state: &CoreState,
+    receipt: &BlockedReceipt,
+    latch: &BlockedLatch,
+) -> Result<(), String> {
+    let mut bindings = BTreeMap::new();
+    for versioned in strict_versioned_runner_bindings(state)? {
+        let VersionedRunnerBinding::ReceiptV1(binding) = versioned else {
+            continue;
+        };
+        if binding.run_id == receipt.run_id && binding.workstream == receipt.workstream {
+            let key = (
+                binding.action_id.0.clone(),
+                binding.assignment_id.0.clone(),
+                binding.run_revision,
+            );
+            if bindings.insert(key, binding).is_some() {
+                return Err("ambiguous blocked launch binding".to_owned());
+            }
+        }
+    }
+    let mut acknowledgements = BTreeMap::new();
+    for event in &state.events {
+        let Some(task) = exact_launch_ack_task_binding(event)? else {
+            continue;
+        };
+        let key = (
+            task.action_id.0.clone(),
+            task.assignment_id.0.clone(),
+            task.run_revision,
+        );
+        if !bindings.contains_key(&key) {
+            continue;
+        }
+        if acknowledgements
+            .insert(task.task_id.0.clone(), key)
+            .is_some()
+        {
+            return Err("duplicate task id in durable blocked launch scope".to_owned());
+        }
+    }
+    for cancellation in &latch.cancellations {
+        let key = acknowledgements
+            .get(&cancellation.task_id.0)
+            .ok_or_else(|| "blocked cancellation task lacks launch acknowledgement".to_owned())?;
+        if key.0 != cancellation.action_id.0 || key.1 != cancellation.assignment_id.0 {
+            return Err("blocked cancellation task/binding drift".to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn admit_or_replay_blocked_latch(
+    state: &mut CoreState,
+    request: &ChildControlRequest,
+    binding: &runner::ReceiptV1RunnerBinding,
+    raw: &[u8],
+    report: &kernel::generated::BlockedReport,
+) -> Result<(BlockedReceipt, BlockedLatch), SubmitDiagnostic> {
+    if let Some(existing) = blocked_latch_for_workstream(state, &binding.workstream.0)
+        && (existing.receipt.run_id != binding.run_id
+            || existing.receipt.action_id != binding.action_id
+            || existing.receipt.assignment_id != binding.assignment_id
+            || existing.receipt.run_revision != binding.run_revision)
+    {
+        return Err(blocked_admission_retry(
+            "submit.blocked_workstream_conflict",
+            "this durable workstream is already latched by a different reporting binding",
+        ));
+    }
+    let cancellations = derive_blocked_cancellations(state, binding)
+        .map_err(|error| blocked_admission_retry("submit.blocked_cancellation_scope", error))?;
+    let cancellation_set_digest = cancellation_digest(&cancellations)
+        .map_err(|error| blocked_admission_retry("submit.blocked_cancellation_digest", error))?;
+    let receipt_path = blocked_receipt_path(binding)
+        .map_err(|error| blocked_admission_retry("submit.blocked_receipt_path", error))?;
+    let latch_path = blocked_latch_path(binding)
+        .map_err(|error| blocked_admission_retry("submit.blocked_latch_path", error))?;
+    let existing_receipt = read_blocked_receipt_at(&receipt_path)
+        .map_err(|error| blocked_admission_retry("submit.blocked_receipt_read", error))?;
+    let existing_latch = read_blocked_latch_at(&latch_path)
+        .map_err(|error| blocked_admission_retry("submit.blocked_latch_read", error))?;
+    if existing_receipt.is_none() && existing_latch.is_some() {
+        return Err(blocked_admission_retry(
+            "submit.blocked_latch_orphan",
+            "blocked latch exists without its create-once receipt",
+        ));
+    }
+    let receipt = match existing_receipt {
+        Some(receipt) => {
+            if !blocked_receipt_matches_binding(&receipt, binding, raw)
+                || receipt.reason_code != report.reason_code
+                || receipt.cancellation_set_digest != cancellation_set_digest
+            {
+                return Err(blocked_admission_retry(
+                    "submit.blocked_receipt_conflict",
+                    "the binding already has a different blocked report or cancellation set",
+                ));
+            }
+            receipt
+        }
+        None => BlockedReceipt {
+            schema: SchemaId("autopilot.blocked_receipt.v1".to_owned()),
+            receipt_id: crate::state_root::fresh_uuid_v7().map_err(|error| {
+                blocked_admission_retry("submit.blocked_receipt_id", error.to_string())
+            })?,
+            run_id: binding.run_id.clone(),
+            run_revision: binding.run_revision,
+            workstream: binding.workstream.clone(),
+            action_id: binding.action_id.clone(),
+            assignment_id: binding.assignment_id.clone(),
+            attempt: binding.attempt,
+            profile_id: BLOCKED_PROFILE_ID.to_owned(),
+            tool_name: kernel::generated::ToolName(BLOCKED_TOOL_NAME.to_owned()),
+            request_id: request.request_id.clone(),
+            tool_call_id: request.tool_call_id.clone(),
+            report_digest: Digest(sha256_hex_local(raw)),
+            reason_code: report.reason_code.clone(),
+            cancellation_set_digest: cancellation_set_digest.clone(),
+        },
+    };
+    let receipt_bytes = crate::evidence::canonical_json(&receipt).map_err(|error| {
+        blocked_admission_retry("submit.blocked_receipt_canonical", error.to_string())
+    })?;
+    runner::write_bounded_file_create_once(
+        &receipt_path,
+        &receipt_bytes,
+        BLOCKED_ARTIFACT_MAX_BYTES,
+    )
+    .map_err(|error| blocked_admission_retry("submit.blocked_receipt_write", error.to_string()))?;
+    let latch = match existing_latch {
+        Some(latch) => {
+            if validate_blocked_latch(&receipt, &latch).is_err()
+                || latch.cancellations != cancellations
+                || latch.cancellation_set_digest != cancellation_set_digest
+            {
+                return Err(blocked_admission_retry(
+                    "submit.blocked_latch_conflict",
+                    "the binding already has a different blocked latch",
+                ));
+            }
+            latch
+        }
+        None => BlockedLatch {
+            schema: SchemaId("autopilot.blocked_latch.v1".to_owned()),
+            latch_id: crate::state_root::fresh_uuid_v7().map_err(|error| {
+                blocked_admission_retry("submit.blocked_latch_id", error.to_string())
+            })?,
+            blocked_receipt_id: receipt.receipt_id.clone(),
+            run_id: binding.run_id.clone(),
+            run_revision: binding.run_revision,
+            workstream: binding.workstream.clone(),
+            reporter_assignment_id: binding.assignment_id.clone(),
+            cancellation_set_digest: cancellation_set_digest.clone(),
+            cancellations,
+        },
+    };
+    let latch_bytes = crate::evidence::canonical_json(&latch).map_err(|error| {
+        blocked_admission_retry("submit.blocked_latch_canonical", error.to_string())
+    })?;
+    runner::write_bounded_file_create_once(&latch_path, &latch_bytes, BLOCKED_ARTIFACT_MAX_BYTES)
+        .map_err(|error| blocked_admission_retry("submit.blocked_latch_write", error.to_string()))?;
+    root_or_verify_blocked_latch(state, &receipt, &latch, binding)
+        .map_err(|error| blocked_admission_retry("submit.blocked_latch_root", error))?;
+    state.rebuild_blocked_latches().map_err(|error| {
+        blocked_admission_retry("submit.blocked_latch_replay", error.to_string())
+    })?;
+    state
+        .blocked_reporter_tool_calls
+        .insert(receipt.receipt_id.0.clone(), request.tool_call_id.clone());
+    Ok((receipt, latch))
 }
 
 const SUBMIT_RECEIPT_ROOT_PREFIX: &str = "submit-receipt-root:";
@@ -3454,7 +4094,9 @@ fn staged_validation_done_effect(
     let mut artifacts = Vec::new();
     let finalization = if status.starts_with("lifecycle:close:result_ref=") {
         let (finalization, path, bytes) = read_prepared_validation_finalization(receipt_binding)?
-            .ok_or_else(|| "fresh Validator close lacks prepared finalization intent".to_owned())?;
+            .ok_or_else(|| {
+            "fresh Validator close lacks prepared finalization intent".to_owned()
+        })?;
         if finalization.workstream != binding.workstream.0 {
             return Err("fresh Validator finalization workstream drift".to_owned());
         }
@@ -3499,6 +4141,8 @@ fn stage_next_delivery_after_validation_integration(
         state: state.state.clone(),
         events: state.events.clone(),
         event_bytes: state.event_bytes.clone(),
+        blocked_latches: state.blocked_latches.clone(),
+        blocked_reporter_tool_calls: state.blocked_reporter_tool_calls.clone(),
     };
     // The current Validator is terminal for all post-integration predicates
     // even though the real terminal row is deliberately deferred until the
@@ -3533,8 +4177,9 @@ fn stage_next_delivery_after_validation_integration(
             result_ref: finalization.result_ref.clone(),
             gate_digest: finalization.gate_digest.clone(),
         };
-        let result = publish_prepared_result_ref(&binding.workstream.0, &publication, &mut projected)
-            .map_err(|error| error.to_string())?;
+        let result =
+            publish_prepared_result_ref(&binding.workstream.0, &publication, &mut projected)
+                .map_err(|error| error.to_string())?;
         return staged_validation_done_effect(
             integration_refs,
             exact_close_signal(&result.name),
@@ -3596,7 +4241,12 @@ fn stage_next_delivery_after_validation_integration(
         )
         .map_err(|error| error.to_string())?
         {
-            return staged_validation_done_effect(integration_refs, status, receipt_binding, binding);
+            return staged_validation_done_effect(
+                integration_refs,
+                status,
+                receipt_binding,
+                binding,
+            );
         }
         let status = if active_or_unknown_work(&projected) || queued_candidates(&projected) > 0 {
             format!(
@@ -3795,7 +4445,9 @@ fn commit_staged_validation_submit(
                 &integration_prepared,
                 continuation,
             )
-            .map_err(|error| validation_staging_retry("submit.validation_next_effect", "", error))?;
+            .map_err(|error| {
+                validation_staging_retry("submit.validation_next_effect", "", error)
+            })?;
             let mut refs = next.refs.clone();
             append_unique_refs(
                 &mut refs,
@@ -3964,7 +4616,9 @@ fn commit_staged_validation_submit(
                 &integration_prepared,
                 continuation,
             )
-            .map_err(|error| validation_staging_retry("submit.validation_next_effect", "", error))?;
+            .map_err(|error| {
+                validation_staging_retry("submit.validation_next_effect", "", error)
+            })?;
             let mut refs = next.refs.clone();
             append_unique_refs(
                 &mut refs,
@@ -4537,6 +5191,8 @@ fn staged_planning_effect(
         state: state.state.clone(),
         events: state.events.clone(),
         event_bytes: state.event_bytes.clone(),
+        blocked_latches: state.blocked_latches.clone(),
+        blocked_reporter_tool_calls: state.blocked_reporter_tool_calls.clone(),
     };
     // Every sibling issued from this receipt receives the parent's immutable
     // receipt_v1 binding generation plus one. Projection rows and durable
@@ -5593,6 +6249,500 @@ fn root_or_verify_submit_receipt(
     Ok(())
 }
 
+fn blocked_binding_for_receipt(
+    state: &CoreState,
+    receipt: &BlockedReceipt,
+) -> Result<runner::ReceiptV1RunnerBinding, String> {
+    let mut matches = strict_versioned_runner_bindings(state)?
+        .into_iter()
+        .filter_map(|binding| match binding {
+            VersionedRunnerBinding::ReceiptV1(binding)
+                if binding.run_id == receipt.run_id
+                    && binding.action_id == receipt.action_id
+                    && binding.assignment_id == receipt.assignment_id
+                    && binding.run_revision == receipt.run_revision
+                    && binding.workstream == receipt.workstream
+                    && binding.attempt == receipt.attempt =>
+            {
+                Some(binding)
+            }
+            VersionedRunnerBinding::ReceiptV1(_) | VersionedRunnerBinding::ReplayV0(_) => None,
+        })
+        .collect::<Vec<_>>();
+    match matches.len() {
+        1 => Ok(matches.remove(0)),
+        0 => Err("blocked receipt has no exact receipt_v1 binding".to_owned()),
+        count => Err(format!(
+            "blocked receipt has ambiguous receipt_v1 binding:{count}"
+        )),
+    }
+}
+
+fn blocked_root(
+    receipt: &BlockedReceipt,
+    latch: &BlockedLatch,
+    binding: &runner::ReceiptV1RunnerBinding,
+) -> Result<BlockedLatchRootV1, String> {
+    if receipt.schema.0 != "autopilot.blocked_receipt.v1"
+        || receipt.run_id != binding.run_id
+        || receipt.run_revision != binding.run_revision
+        || receipt.workstream != binding.workstream
+        || receipt.action_id != binding.action_id
+        || receipt.assignment_id != binding.assignment_id
+        || receipt.attempt != binding.attempt
+        || receipt.profile_id != BLOCKED_PROFILE_ID
+        || receipt.tool_name.0 != BLOCKED_TOOL_NAME
+    {
+        return Err("blocked receipt/binding identity drift".to_owned());
+    }
+    validate_blocked_latch(receipt, latch)?;
+    let receipt_path = blocked_receipt_path(binding)?;
+    let latch_path = blocked_latch_path(binding)?;
+    let receipt_bytes = crate::evidence::canonical_json(receipt)
+        .map_err(|error| format!("blocked receipt canonical JSON: {error}"))?;
+    let latch_bytes = crate::evidence::canonical_json(latch)
+        .map_err(|error| format!("blocked latch canonical JSON: {error}"))?;
+    Ok(BlockedLatchRootV1 {
+        schema: "autopilot.blocked_latch_root.v1".to_owned(),
+        blocked_receipt_ref: Ref(receipt_path.display().to_string()),
+        blocked_receipt_sha256: Digest(sha256_hex_local(&receipt_bytes)),
+        latch_ref: Ref(latch_path.display().to_string()),
+        latch_sha256: Digest(sha256_hex_local(&latch_bytes)),
+    })
+}
+
+fn encode_blocked_latch_root(root: &BlockedLatchRootV1) -> Result<Ref, String> {
+    let bytes = crate::evidence::canonical_json(root)
+        .map_err(|error| format!("blocked latch root canonical JSON: {error}"))?;
+    let text =
+        String::from_utf8(bytes).map_err(|error| format!("blocked latch root UTF-8: {error}"))?;
+    Ok(Ref(format!("{BLOCKED_RECEIPT_ROOT_PREFIX}{text}")))
+}
+
+fn decode_blocked_latch_root(reference: &Ref) -> Result<Option<BlockedLatchRootV1>, String> {
+    let Some(value) = reference.0.strip_prefix(BLOCKED_RECEIPT_ROOT_PREFIX) else {
+        return Ok(None);
+    };
+    let root: BlockedLatchRootV1 =
+        serde_json::from_str(value).map_err(|error| format!("blocked latch root JSON: {error}"))?;
+    let canonical = crate::evidence::canonical_json(&root)
+        .map_err(|error| format!("blocked latch root canonical JSON: {error}"))?;
+    if canonical != value.as_bytes() || root.schema != "autopilot.blocked_latch_root.v1" {
+        return Err("blocked latch root ref canonical/schema drift".to_owned());
+    }
+    Ok(Some(root))
+}
+
+fn encode_blocked_latch_event_ref(reference: &BlockedLatchEventRef) -> Result<Ref, String> {
+    let bytes = crate::evidence::canonical_json(reference)
+        .map_err(|error| format!("blocked latch event ref canonical JSON: {error}"))?;
+    let text = String::from_utf8(bytes)
+        .map_err(|error| format!("blocked latch event ref UTF-8: {error}"))?;
+    Ok(Ref(format!("{BLOCKED_LATCH_EVENT_REF_PREFIX}{text}")))
+}
+
+fn decode_blocked_latch_event_ref(reference: &Ref) -> Result<Option<BlockedLatchEventRef>, String> {
+    let Some(value) = reference.0.strip_prefix(BLOCKED_LATCH_EVENT_REF_PREFIX) else {
+        return Ok(None);
+    };
+    let event_ref: BlockedLatchEventRef = serde_json::from_str(value)
+        .map_err(|error| format!("blocked latch event ref JSON: {error}"))?;
+    let canonical = crate::evidence::canonical_json(&event_ref)
+        .map_err(|error| format!("blocked latch event ref canonical JSON: {error}"))?;
+    if canonical != value.as_bytes() || event_ref.schema.0 != "autopilot.blocked_latch_event_ref.v1"
+    {
+        return Err("blocked latch event ref canonical/schema drift".to_owned());
+    }
+    Ok(Some(event_ref))
+}
+
+fn blocked_accepted_root_index(
+    state: &CoreState,
+    root: &BlockedLatchRootV1,
+) -> Result<Option<usize>, String> {
+    let encoded = encode_blocked_latch_root(root)?;
+    let mut matches = Vec::new();
+    for (index, event) in state.events.iter().enumerate() {
+        if event.kind.0 != "blocked:accepted" {
+            continue;
+        }
+        let roots = event
+            .artifact_refs
+            .iter()
+            .map(decode_blocked_latch_root)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        let roots = roots.into_iter().flatten().collect::<Vec<_>>();
+        if roots.len() != 1 {
+            return Err("blocked accepted event lacks exactly one root".to_owned());
+        }
+        let decoded = roots.into_iter().next().expect("one checked root");
+        if decoded.blocked_receipt_ref == root.blocked_receipt_ref {
+            if event.artifact_refs
+                != vec![
+                    encoded.clone(),
+                    root.blocked_receipt_ref.clone(),
+                    root.latch_ref.clone(),
+                ]
+            {
+                return Err("blocked accepted event root drift".to_owned());
+            }
+            matches.push((index, decoded));
+        }
+    }
+    match matches.len() {
+        0 => Ok(None),
+        1 => {
+            let (index, found) = matches.remove(0);
+            if found != *root {
+                return Err("conflicting duplicate blocked accepted root".to_owned());
+            }
+            Ok(Some(index))
+        }
+        _ => Err("duplicate blocked accepted roots".to_owned()),
+    }
+}
+
+fn blocked_event_ref_for_root(
+    state: &CoreState,
+    root: &BlockedLatchRootV1,
+    accepted_index: usize,
+) -> Result<Option<BlockedLatchEventRef>, String> {
+    let blocked_event = actual_event_ref(state, accepted_index)?;
+    if blocked_event.kind.0 != "blocked:accepted" {
+        return Err("blocked accepted event kind drift".to_owned());
+    }
+    let expected = BlockedLatchEventRef {
+        schema: SchemaId("autopilot.blocked_latch_event_ref.v1".to_owned()),
+        blocked_receipt_ref: root.blocked_receipt_ref.clone(),
+        blocked_receipt_sha256: root.blocked_receipt_sha256.clone(),
+        latch_ref: root.latch_ref.clone(),
+        latch_sha256: root.latch_sha256.clone(),
+        blocked_event,
+    };
+    let encoded = encode_blocked_latch_event_ref(&expected)?;
+    let mut matches = Vec::new();
+    for event in &state.events {
+        if event.kind.0 != "blocked:latch-event-ref" {
+            continue;
+        }
+        let refs = event
+            .artifact_refs
+            .iter()
+            .map(decode_blocked_latch_event_ref)
+            .collect::<Result<Vec<_>, _>>()?;
+        for decoded in refs.into_iter().flatten() {
+            if decoded.blocked_receipt_ref == root.blocked_receipt_ref {
+                if decoded != expected
+                    || event.artifact_refs
+                        != vec![
+                            encoded.clone(),
+                            root.blocked_receipt_ref.clone(),
+                            root.latch_ref.clone(),
+                        ]
+                {
+                    return Err("blocked latch event reference drift".to_owned());
+                }
+                matches.push(decoded);
+            }
+        }
+    }
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(matches.pop()),
+        _ => Err("duplicate blocked latch event references".to_owned()),
+    }
+}
+
+fn verify_durable_blocked_latch_transaction(
+    receipt: &BlockedReceipt,
+    latch: &BlockedLatch,
+    binding: &runner::ReceiptV1RunnerBinding,
+) -> Result<BlockedLatchRootV1, String> {
+    let root = blocked_root(receipt, latch, binding)?;
+    let durable_receipt = read_blocked_receipt_at(Path::new(&root.blocked_receipt_ref.0))?
+        .ok_or_else(|| "create-once blocked receipt is absent".to_owned())?;
+    let durable_latch = read_blocked_latch_at(Path::new(&root.latch_ref.0))?
+        .ok_or_else(|| "create-once blocked latch is absent".to_owned())?;
+    if durable_receipt != *receipt
+        || durable_latch != *latch
+        || root.blocked_receipt_sha256.0
+            != sha256_hex_local(
+                &crate::evidence::canonical_json(&durable_receipt)
+                    .map_err(|error| error.to_string())?,
+            )
+        || root.latch_sha256.0
+            != sha256_hex_local(
+                &crate::evidence::canonical_json(&durable_latch)
+                    .map_err(|error| error.to_string())?,
+            )
+    {
+        return Err("create-once blocked receipt/latch bytes drift".to_owned());
+    }
+    Ok(root)
+}
+
+fn append_blocked_latch_event_ref(
+    state: &mut CoreState,
+    root: &BlockedLatchRootV1,
+    accepted_index: usize,
+) -> Result<(), String> {
+    let reference = BlockedLatchEventRef {
+        schema: SchemaId("autopilot.blocked_latch_event_ref.v1".to_owned()),
+        blocked_receipt_ref: root.blocked_receipt_ref.clone(),
+        blocked_receipt_sha256: root.blocked_receipt_sha256.clone(),
+        latch_ref: root.latch_ref.clone(),
+        latch_sha256: root.latch_sha256.clone(),
+        blocked_event: actual_event_ref(state, accepted_index)?,
+    };
+    let encoded = encode_blocked_latch_event_ref(&reference)?;
+    state
+        .append(
+            EventKind("blocked:latch-event-ref".to_owned()),
+            vec![
+                encoded,
+                root.blocked_receipt_ref.clone(),
+                root.latch_ref.clone(),
+            ],
+        )
+        .map_err(|error| error.to_string())
+}
+
+fn root_or_verify_blocked_latch(
+    state: &mut CoreState,
+    receipt: &BlockedReceipt,
+    latch: &BlockedLatch,
+    binding: &runner::ReceiptV1RunnerBinding,
+) -> Result<(), String> {
+    let root = verify_durable_blocked_latch_transaction(receipt, latch, binding)?;
+    if let Some(index) = blocked_accepted_root_index(state, &root)? {
+        if blocked_event_ref_for_root(state, &root, index)?.is_none() {
+            append_blocked_latch_event_ref(state, &root, index)?;
+        }
+    } else {
+        let encoded = encode_blocked_latch_root(&root)?;
+        state
+            .append(
+                EventKind("blocked:accepted".to_owned()),
+                vec![
+                    encoded,
+                    root.blocked_receipt_ref.clone(),
+                    root.latch_ref.clone(),
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        let index = state
+            .events
+            .len()
+            .checked_sub(1)
+            .ok_or_else(|| "blocked accepted event append lost its row".to_owned())?;
+        append_blocked_latch_event_ref(state, &root, index)?;
+    }
+    Ok(())
+}
+
+fn encode_blocked_observed_ref(reference: &BlockedObservedRefV1) -> Result<Ref, String> {
+    let bytes = crate::evidence::canonical_json(reference)
+        .map_err(|error| format!("blocked observed ref canonical JSON: {error}"))?;
+    let text =
+        String::from_utf8(bytes).map_err(|error| format!("blocked observed ref UTF-8: {error}"))?;
+    Ok(Ref(format!("{BLOCKED_OBSERVED_REF_PREFIX}{text}")))
+}
+
+fn decode_blocked_observed_ref(reference: &Ref) -> Result<Option<BlockedObservedRefV1>, String> {
+    let Some(value) = reference.0.strip_prefix(BLOCKED_OBSERVED_REF_PREFIX) else {
+        return Ok(None);
+    };
+    let observed: BlockedObservedRefV1 = serde_json::from_str(value)
+        .map_err(|error| format!("blocked observed ref JSON: {error}"))?;
+    let canonical = crate::evidence::canonical_json(&observed)
+        .map_err(|error| format!("blocked observed ref canonical JSON: {error}"))?;
+    if canonical != value.as_bytes() || observed.schema != "autopilot.blocked_result_observed.v1" {
+        return Err("blocked observed ref canonical/schema drift".to_owned());
+    }
+    Ok(Some(observed))
+}
+
+fn project_blocked_latches(
+    state: &CoreState,
+) -> Result<BTreeMap<(String, String), BlockedLatchState>, AnyError> {
+    let mut projected = BTreeMap::new();
+    let mut by_receipt = BTreeMap::<String, (String, String)>::new();
+    let mut rooted_receipt_refs = BTreeSet::new();
+    for event in &state.events {
+        if event.kind.0 != "blocked:accepted" {
+            continue;
+        }
+        let roots = event
+            .artifact_refs
+            .iter()
+            .map(decode_blocked_latch_root)
+            .collect::<Result<Vec<_>, _>>()?;
+        let roots = roots.into_iter().flatten().collect::<Vec<_>>();
+        if roots.len() != 1 {
+            return Err("blocked accepted event lacks exactly one canonical root".into());
+        }
+        let root = roots.into_iter().next().expect("one checked root");
+        let Some(index) = blocked_accepted_root_index(state, &root)? else {
+            return Err("blocked accepted root disappeared during projection".into());
+        };
+        if blocked_event_ref_for_root(state, &root, index)?.is_none() {
+            return Err("blocked accepted root lacks its event reference".into());
+        }
+        if !rooted_receipt_refs.insert(root.blocked_receipt_ref.0.clone()) {
+            return Err("duplicate blocked root receipt reference".into());
+        }
+        let receipt = read_blocked_receipt_at(Path::new(&root.blocked_receipt_ref.0))?
+            .ok_or("blocked root receipt is absent")?;
+        let latch = read_blocked_latch_at(Path::new(&root.latch_ref.0))?
+            .ok_or("blocked root latch is absent")?;
+        let binding = blocked_binding_for_receipt(state, &receipt)?;
+        let expected = blocked_root(&receipt, &latch, &binding)?;
+        validate_blocked_latch_launch_scope(state, &receipt, &latch)?;
+        if expected != root {
+            return Err("blocked root artifact digest/path drift".into());
+        }
+        let key = (receipt.run_id.0.clone(), receipt.workstream.0.clone());
+        if projected
+            .insert(
+                key.clone(),
+                BlockedLatchState {
+                    receipt: receipt.clone(),
+                    latch,
+                    reporter_observed: false,
+                },
+            )
+            .is_some()
+            || by_receipt
+                .insert(receipt.receipt_id.0.clone(), key)
+                .is_some()
+        {
+            return Err("duplicate blocked workstream or receipt root".into());
+        }
+    }
+    for event in &state.events {
+        if event.kind.0 != "blocked:latch-event-ref" {
+            continue;
+        }
+        if event.artifact_refs.len() != 3 {
+            return Err("blocked latch event reference count drift".into());
+        }
+        let reference = decode_blocked_latch_event_ref(&event.artifact_refs[0])?
+            .ok_or("blocked latch event lacks canonical reference")?;
+        if !rooted_receipt_refs.contains(&reference.blocked_receipt_ref.0) {
+            return Err("orphan blocked latch event reference".into());
+        }
+    }
+    for event in &state.events {
+        if event.kind.0 != "blocked:result-observed" {
+            continue;
+        }
+        if event.artifact_refs.len() != 1 {
+            return Err("blocked observed event ref count drift".into());
+        }
+        let observed = decode_blocked_observed_ref(&event.artifact_refs[0])?
+            .ok_or("blocked observed event lacks canonical reference")?;
+        if event.artifact_refs != vec![encode_blocked_observed_ref(&observed)?] {
+            return Err("blocked observed event reference drift".into());
+        }
+        let key = by_receipt
+            .get(&observed.receipt_id.0)
+            .ok_or("blocked observed receipt is not rooted")?
+            .clone();
+        let latch_state = projected
+            .get_mut(&key)
+            .ok_or("blocked observed workstream is absent")?;
+        let reporter = latch_state
+            .latch
+            .cancellations
+            .last()
+            .ok_or("blocked observed latch reporter is absent")?;
+        if latch_state.receipt.receipt_id != observed.receipt_id
+            || latch_state.latch.latch_id != observed.latch_id
+            || !reporter.reporter
+            || reporter.task_id != observed.reporter_task_id
+            || latch_state.reporter_observed
+        {
+            return Err("blocked observed identity/duplicate drift".into());
+        }
+        latch_state.reporter_observed = true;
+    }
+    Ok(projected)
+}
+
+fn blocked_gate(latch: &BlockedLatch) -> ChildControlBlockedGate {
+    ChildControlBlockedGate {
+        schema: SchemaId("autopilot.child_control_blocked_gate.v1".to_owned()),
+        latch_id: latch.latch_id.clone(),
+        run_id: latch.run_id.clone(),
+        cancellations: latch
+            .cancellations
+            .iter()
+            .map(|record| ChildControlBlockedCancellation {
+                task_id: record.task_id.clone(),
+                reporter: record.reporter,
+            })
+            .collect(),
+    }
+}
+
+fn blocked_latch_for_workstream<'a>(
+    state: &'a CoreState,
+    workstream: &str,
+) -> Option<&'a BlockedLatchState> {
+    state
+        .blocked_latches
+        .iter()
+        .find_map(|((_, candidate), latch)| (candidate == workstream).then_some(latch))
+}
+
+fn ensure_workstream_unblocked(state: &CoreState, workstream: &str) -> Result<(), AnyError> {
+    if let Some(latch) = blocked_latch_for_workstream(state, workstream) {
+        return Err(format!(
+            "blocked-latch:workstream={workstream};receipt={};latch={}",
+            latch.receipt.receipt_id.0, latch.latch.latch_id.0
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn workstream_for_background_action(
+    state: &CoreState,
+    action: &BackgroundAction,
+) -> Result<String, AnyError> {
+    let mut matches = strict_versioned_runner_bindings(state)?
+        .into_iter()
+        .filter_map(|versioned| match versioned {
+            VersionedRunnerBinding::ReceiptV1(binding)
+                if binding.action_id == action.action_id
+                    && binding.assignment_id == action.assignment_id
+                    && binding.run_revision == action.run_revision =>
+            {
+                Some(binding.workstream.0)
+            }
+            VersionedRunnerBinding::ReceiptV1(_) | VersionedRunnerBinding::ReplayV0(_) => None,
+        })
+        .collect::<Vec<_>>();
+    match matches.len() {
+        1 => Ok(matches.remove(0)),
+        0 => Err(format!(
+            "blocked-latch:unbound-background-action:{}:{}:{}",
+            action.action_id.0, action.assignment_id.0, action.run_revision
+        )
+        .into()),
+        count => Err(format!(
+            "blocked-latch:ambiguous-background-action:{}:{}:{}:{count}",
+            action.action_id.0, action.assignment_id.0, action.run_revision
+        )
+        .into()),
+    }
+}
+
+fn ensure_action_unblocked(state: &CoreState, action: &BackgroundAction) -> Result<(), AnyError> {
+    ensure_workstream_unblocked(state, &workstream_for_background_action(state, action)?)
+}
+
 fn child_control_accept(
     id: u64,
     request_id: Id,
@@ -5616,59 +6766,146 @@ fn child_control_accept(
     })
 }
 
+fn child_control_accept_blocked(
+    id: u64,
+    request_id: Id,
+    receipt: BlockedReceipt,
+    latch: BlockedLatch,
+) -> Result<SeamEnvelope, AnyError> {
+    validate_blocked_latch(&receipt, &latch)
+        .map_err(|error| format!("blocked acceptance drift:{error}"))?;
+    Ok(SeamEnvelope {
+        v: CONTRACT_VERSION as u32,
+        id,
+        kind: "child-control".to_owned(),
+        payload: serde_json::to_value(CoreToHostChildControlPayload {
+            response: ChildControlResponse::Accept {
+                schema: SchemaId("autopilot.child_control_response.v1".to_owned()),
+                request_id,
+                receipt: ChildControlAcceptReceipt::Blocked {
+                    schema: SchemaId("autopilot.child_control_accept_receipt.v1".to_owned()),
+                    receipt,
+                },
+            },
+            blocked_gate: Nullable(Some(blocked_gate(&latch))),
+        })?,
+    })
+}
+
+fn blocked_observation_ack(id: u64, state: &BlockedLatchState) -> Result<SeamEnvelope, AnyError> {
+    let reporter = state
+        .latch
+        .cancellations
+        .last()
+        .filter(|record| record.reporter)
+        .ok_or("blocked latch has no reporter")?;
+    Ok(SeamEnvelope {
+        v: CONTRACT_VERSION as u32,
+        id,
+        kind: "blocked-result-observed".to_owned(),
+        payload: serde_json::to_value(CoreToHostBlockedResultObservedPayload {
+            schema: SchemaId("autopilot.blocked_result_observed_ack.v1".to_owned()),
+            receipt_id: state.receipt.receipt_id.clone(),
+            latch_id: state.latch.latch_id.clone(),
+            reporter_task_id: reporter.task_id.clone(),
+            status: BlockedResultObservedAckStatus::Acknowledged,
+        })?,
+    })
+}
+
 fn route_blocked_result_observed(
     id: u64,
     payload: HostToCoreBlockedResultObservedPayload,
     state: &mut CoreState,
 ) -> Result<SeamEnvelope, AnyError> {
-    if !host_broker_authorized(&payload.broker_capability) {
-        return done(id, rejection("blocked-result-observed", "unauthenticated"));
+    if !host_broker_authorized(&payload.broker_capability)
+        || payload.schema.0 != "autopilot.blocked_result_observed.v1"
+        || payload.tool_call_id.trim().is_empty()
+    {
+        return Err("rejection:blocked-result-observed:unauthenticated-or-malformed".into());
     }
-    let request = ChildControlRequest {
-        schema: SchemaId("autopilot.child_control_request.v1".to_owned()),
-        request_id: Id("blocked-result-observed".to_owned()),
-        token: payload.token,
-        run_id: payload.run_id,
-        assignment_id: payload.assignment_id,
-        attempt: payload.attempt,
-        tool_call_id: payload.tool_call_id,
-        kind: ChildControlRequestKind::Blocked,
-        tool_name: kernel::generated::ToolName("autopilot_report_blocked".to_owned()),
-        profile_id: "autopilot.blocked_report.v1:autopilot_report_blocked".to_owned(),
-        raw_payload: serde_json::json!({
-            "schema": "autopilot.blocked_report.v1",
-            "reason_code": "infrastructure",
-            "summary": "blocked result observed",
-            "evidence": [{"kind":"observation","value":"outer runner correlation"}],
-            "last_attempted_action": "blocked-result-observed",
-        }),
-        runtime_evidence: ChildControlRuntimeEvidence {
-            schema: SchemaId("autopilot.child_control_runtime_evidence.v1".to_owned()),
-            delivery_policy_denials: Nullable(None),
-            approved_command_executions: Nullable(None),
-        },
+    // Re-read the event-root projection before releasing the reporter; an
+    // in-memory latch is never authority after artifact corruption.
+    state.rebuild_blocked_latches()?;
+    let latch_state = state
+        .blocked_latches
+        .values()
+        .find(|entry| entry.receipt.receipt_id == payload.receipt_id)
+        .cloned()
+        .ok_or("rejection:blocked-result-observed:unknown-receipt")?;
+    let binding = blocked_binding_for_receipt(state, &latch_state.receipt)
+        .map_err(|error| format!("rejection:blocked-result-observed:{error}"))?;
+    if payload.run_id != latch_state.receipt.run_id
+        || payload.assignment_id != latch_state.receipt.assignment_id
+        || payload.attempt != latch_state.receipt.attempt
+        || !runner::constant_time_hex_digest_matches(&payload.token, &binding.run_capability_digest)
+        || state
+            .blocked_reporter_tool_calls
+            .get(&payload.receipt_id.0)
+            .is_some_and(|current| current != &payload.tool_call_id)
+    {
+        return Err("rejection:blocked-result-observed:identity-or-capability-drift".into());
+    }
+    if latch_state.reporter_observed {
+        return blocked_observation_ack(id, &latch_state);
+    }
+    let reporter = latch_state
+        .latch
+        .cancellations
+        .last()
+        .filter(|record| record.reporter)
+        .ok_or("rejection:blocked-result-observed:missing-reporter")?;
+    let observed = BlockedObservedRefV1 {
+        schema: "autopilot.blocked_result_observed.v1".to_owned(),
+        receipt_id: latch_state.receipt.receipt_id.clone(),
+        latch_id: latch_state.latch.latch_id.clone(),
+        reporter_task_id: reporter.task_id.clone(),
     };
-    // Wave 6 owns latch lookup and reporter release. Until then an
-    // authenticated observation is idempotently recognized, while invalid
-    // observations fail closed without creating a latch or transition.
-    match admit_child_control_request(&request, state) {
-        Ok(ChildControlAdmission::BlockedPreflight) => done(
-            id,
-            rejection("blocked-result-observed", "wave6-pending-idempotent"),
-        ),
-        Ok(ChildControlAdmission::Staged { .. }) => done(
-            id,
-            rejection("blocked-result-observed", "unexpected-submit-stage"),
-        ),
-        Ok(ChildControlAdmission::Replay { .. }) => done(
-            id,
-            rejection("blocked-result-observed", "unexpected-submit-replay"),
-        ),
-        Err(_) => done(
-            id,
-            rejection("blocked-result-observed", "unauthenticated-or-drift"),
-        ),
+    state.append(
+        EventKind("blocked:result-observed".to_owned()),
+        vec![encode_blocked_observed_ref(&observed)?],
+    )?;
+    state.rebuild_blocked_latches()?;
+    let acknowledged = state
+        .blocked_latches
+        .get(&(
+            payload.run_id.0.clone(),
+            latch_state.receipt.workstream.0.clone(),
+        ))
+        .ok_or("rejection:blocked-result-observed:projection-lost-latch")?;
+    blocked_observation_ack(id, acknowledged)
+}
+
+fn route_blocked_reconcile(
+    id: u64,
+    payload: HostToCoreBlockedReconcilePayload,
+    state: &mut CoreState,
+) -> Result<SeamEnvelope, AnyError> {
+    if !host_broker_authorized(&payload.broker_capability)
+        || payload.schema.0 != "autopilot.blocked_reconcile.v1"
+    {
+        return Err("rejection:blocked-reconcile:unauthenticated-or-malformed".into());
     }
+    state.rebuild_blocked_latches()?;
+    let records = state
+        .blocked_latches
+        .values()
+        .map(|entry| BlockedReconcileRecord {
+            schema: SchemaId("autopilot.blocked_reconcile_record.v1".to_owned()),
+            blocked_receipt: entry.receipt.clone(),
+            blocked_gate: blocked_gate(&entry.latch),
+            reporter_observed: entry.reporter_observed,
+        })
+        .collect();
+    Ok(SeamEnvelope {
+        v: CONTRACT_VERSION as u32,
+        id,
+        kind: "blocked-reconcile".to_owned(),
+        payload: serde_json::to_value(CoreToHostBlockedReconcilePayload {
+            schema: SchemaId("autopilot.blocked_reconcile_response.v1".to_owned()),
+            records,
+        })?,
+    })
 }
 
 fn host_broker_authorized(supplied: &str) -> bool {
@@ -5979,6 +7216,9 @@ fn legacy_command(
 
 fn route_plan(id: u64, args: &[String], state: &mut CoreState) -> Result<SeamEnvelope, AnyError> {
     let workstream = &args[0];
+    if let Err(error) = ensure_workstream_unblocked(state, workstream) {
+        return done(id, rejection("blocked-latch", &error.to_string()));
+    }
     let source = TaskFiles(args[1..].iter().map(PathBuf::from).collect());
     let input_set = source
         .input_set()
@@ -6014,7 +7254,7 @@ fn route_plan(id: u64, args: &[String], state: &mut CoreState) -> Result<SeamEnv
                 return done(id, planning_waiting_status(&wave_id, &active, state));
             }
             validate_spawn_wave_actions(&actions)?;
-            spawn_wave(id, actions)
+            spawn_wave(id, actions, state)
         }
         planning::PlanningWaveOutcome::Complete => {
             if assignments.is_empty() {
@@ -6039,6 +7279,9 @@ fn route_plan(id: u64, args: &[String], state: &mut CoreState) -> Result<SeamEnv
 }
 
 fn route_run(id: u64, workstream: &str, state: &mut CoreState) -> Result<SeamEnvelope, AnyError> {
+    if let Err(error) = ensure_workstream_unblocked(state, workstream) {
+        return done(id, rejection("blocked-latch", &error.to_string()));
+    }
     if let Some(status) =
         advance_lifecycle_if_ready(workstream, None, ClosureTrigger::RunCommand, state)?
     {
@@ -6158,6 +7401,9 @@ fn resume_pending_validation_recovery(
     workstream: &str,
     state: &mut CoreState,
 ) -> Result<Option<SeamEnvelope>, AnyError> {
+    if blocked_latch_for_workstream(state, workstream).is_some() {
+        return Ok(None);
+    }
     let mut validation_ids = state
         .state
         .refs
@@ -6253,6 +7499,9 @@ fn resume_pending_delivery_recovery(
     workstream: &str,
     state: &mut CoreState,
 ) -> Result<Option<SeamEnvelope>, AnyError> {
+    if blocked_latch_for_workstream(state, workstream).is_some() {
+        return Ok(None);
+    }
     let mut source_ids = state
         .state
         .refs
@@ -6350,10 +7599,14 @@ fn lane_has_live_delivery(state: &CoreState, lane_id: &Id) -> Result<bool, Strin
             .map_err(|error| format!("live-delivery namespaced binding decode: {error}"))?
         {
             VersionedRunnerBinding::ReplayV0(binding) => binding,
-            VersionedRunnerBinding::ReceiptV1(binding) => runner::receipt_v1_validator_facade(&binding),
+            VersionedRunnerBinding::ReceiptV1(binding) => {
+                runner::receipt_v1_validator_facade(&binding)
+            }
         };
-        if matches!(binding.role_id.0.as_str(), "implementer" | "recovery-engineer")
-            && binding.lane_id.as_ref() == Some(lane_id)
+        if matches!(
+            binding.role_id.0.as_str(),
+            "implementer" | "recovery-engineer"
+        ) && binding.lane_id.as_ref() == Some(lane_id)
             && !terminal_consumed(state, &binding)
         {
             return Ok(true);
@@ -6878,7 +8131,7 @@ fn accept_planning_carrier(
                 return done(id, planning_waiting_status(&wave_id, &active, state));
             }
             validate_spawn_wave_actions(&actions)?;
-            return spawn_wave(id, actions);
+            return spawn_wave(id, actions, state);
         }
         planning::PlanningWaveOutcome::Complete => {}
         planning::PlanningWaveOutcome::Blocked(blocked) => {
@@ -7616,7 +8869,12 @@ fn route_receipt_v1_task_completed(
         }
     };
     if consumed {
-        return deferred_effect_envelope(id, &receipt.prepared_transition.deferred_host_effect);
+        return deferred_effect_envelope(
+            id,
+            &receipt.prepared_transition.deferred_host_effect,
+            state,
+            &binding.workstream.0,
+        );
     }
     let refs = if let Some(transition) = planning_transition.as_ref() {
         match receipt_consumption_refs(&receipt, &binding, &rooted, transition) {
@@ -7673,13 +8931,25 @@ fn route_receipt_v1_task_completed(
     // crash-after-consume/response. Final Host integration must dedupe by the
     // existing action id before applying a repeated spawn effect; Core cannot
     // invent task enumeration or status authority here.
-    deferred_effect_envelope(id, &receipt.prepared_transition.deferred_host_effect)
+    deferred_effect_envelope(
+        id,
+        &receipt.prepared_transition.deferred_host_effect,
+        state,
+        &binding.workstream.0,
+    )
 }
 
 fn deferred_effect_envelope(
     id: u64,
     effect: &DeferredHostEffectV1,
+    state: &CoreState,
+    workstream: &str,
 ) -> Result<SeamEnvelope, AnyError> {
+    if !matches!(effect, DeferredHostEffectV1::Done { .. })
+        && let Err(error) = ensure_workstream_unblocked(state, workstream)
+    {
+        return done(id, rejection("blocked-latch", &error.to_string()));
+    }
     match effect {
         DeferredHostEffectV1::Done { payload } => Ok(SeamEnvelope {
             v: CONTRACT_VERSION as u32,
@@ -8497,6 +9767,9 @@ fn route_onboard(id: u64, args: &[String]) -> Result<SeamEnvelope, AnyError> {
 }
 
 fn route_abort(id: u64, workstream: &str, state: &mut CoreState) -> Result<SeamEnvelope, AnyError> {
+    if let Err(error) = ensure_workstream_unblocked(state, workstream) {
+        return done(id, rejection("blocked-latch", &error.to_string()));
+    }
     let cwd = std::env::current_dir()?;
     let report = LocalLifecycle::new(&cwd, &cwd, cwd.join(".pi/autopilot/archive"))
         .abort(AbortRequest {
@@ -8517,6 +9790,9 @@ fn route_close(id: u64, args: &[String], state: &mut CoreState) -> Result<SeamEn
         Ok(value) => value,
         Err(error) => return done(id, rejection("seam.operator-command.v1", &error)),
     };
+    if let Err(error) = ensure_workstream_unblocked(state, &request.workstream) {
+        return done(id, rejection("blocked-latch", &error.to_string()));
+    }
     match advance_lifecycle_if_ready(
         &request.workstream,
         Some(&request),
@@ -8760,7 +10036,8 @@ fn done(id: u64, status: String) -> Result<SeamEnvelope, AnyError> {
         payload: serde_json::to_value(CoreToHostDonePayload { status })?,
     })
 }
-fn spawn(id: u64, action: BackgroundAction) -> Result<SeamEnvelope, AnyError> {
+fn spawn(id: u64, action: BackgroundAction, state: &CoreState) -> Result<SeamEnvelope, AnyError> {
+    ensure_action_unblocked(state, &action)?;
     Ok(SeamEnvelope {
         v: CONTRACT_VERSION as u32,
         id,
@@ -8768,7 +10045,14 @@ fn spawn(id: u64, action: BackgroundAction) -> Result<SeamEnvelope, AnyError> {
         payload: serde_json::to_value(CoreToHostSpawnPayload { action })?,
     })
 }
-fn spawn_wave(id: u64, actions: Vec<BackgroundAction>) -> Result<SeamEnvelope, AnyError> {
+fn spawn_wave(
+    id: u64,
+    actions: Vec<BackgroundAction>,
+    state: &CoreState,
+) -> Result<SeamEnvelope, AnyError> {
+    for action in &actions {
+        ensure_action_unblocked(state, action)?;
+    }
     Ok(SeamEnvelope {
         v: CONTRACT_VERSION as u32,
         id,
@@ -8851,6 +10135,7 @@ fn controlled_spawn(
     state: &mut CoreState,
     trigger: &str,
 ) -> Result<SeamEnvelope, AnyError> {
+    ensure_action_unblocked(state, &action)?;
     let mut guard = crate::control::BgRunGuard::new(vec![action.clone()]);
     guard
         .admit(&action.bg_run)
@@ -8891,7 +10176,7 @@ fn controlled_spawn(
         refs.push(action_ref(&watchdog)?);
     }
     state.append(EventKind("control:frame".to_owned()), refs)?;
-    spawn(id, action)
+    spawn(id, action, state)
 }
 
 fn controlled_spawn_wave(
@@ -8902,6 +10187,7 @@ fn controlled_spawn_wave(
 ) -> Result<SeamEnvelope, AnyError> {
     validate_spawn_wave_actions(&actions)?;
     for action in &actions {
+        ensure_action_unblocked(state, action)?;
         crate::control::admit_exact_bg_run((action, &action.bg_run))
             .map_err(|error| format!("control:bg-run:{}", error.actual()))?;
     }
@@ -8941,7 +10227,7 @@ fn controlled_spawn_wave(
         refs.extend(record_context_prompt_for_action(state, action));
     }
     state.append(EventKind("control:frame".to_owned()), refs)?;
-    spawn_wave(id, actions)
+    spawn_wave(id, actions, state)
 }
 
 fn validate_spawn_wave_actions(actions: &[BackgroundAction]) -> Result<(), AnyError> {
@@ -9975,7 +11261,8 @@ fn integrate_validated_candidate(
     queue.complete_active();
     // Fresh receipt staging and replay_v0 integration deliberately share the
     // same staleness, closure, repair, lane-close, and forward-gate predicate.
-    let integration_refs = validation_integration_semantic_refs(state, binding, verdict, &prepared)?;
+    let integration_refs =
+        validation_integration_semantic_refs(state, binding, verdict, &prepared)?;
     state.append(
         EventKind("integration:forward-integrated".to_owned()),
         integration_refs,
@@ -11082,13 +12369,7 @@ fn advance_lifecycle_if_ready(
     trigger: ClosureTrigger,
     state: &mut CoreState,
 ) -> Result<Option<String>, AnyError> {
-    advance_lifecycle_if_ready_with_finalization(
-        workstream,
-        request,
-        trigger,
-        state,
-        None,
-    )
+    advance_lifecycle_if_ready_with_finalization(workstream, request, trigger, state, None)
 }
 
 /// The fresh Validator path persists its immutable close facts before the
@@ -11101,6 +12382,9 @@ fn advance_lifecycle_if_ready_with_finalization(
     state: &mut CoreState,
     validation_receipt: Option<&runner::ReceiptV1RunnerBinding>,
 ) -> Result<Option<String>, AnyError> {
+    if let Err(error) = ensure_workstream_unblocked(state, workstream) {
+        return Ok(Some(rejection("blocked-latch", &error.to_string())));
+    }
     if let Some(prepared) = read_publication_prepared(workstream)? {
         return publish_prepared_result_ref(workstream, &prepared, state)
             .map(|result| Some(exact_close_signal(&result.name)));

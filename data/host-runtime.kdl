@@ -52,6 +52,7 @@ env_deny "AUTOPILOT_CHILD_CONTROL_BROKER_CAPABILITY"
 
 effect "child-control" operator_level_default="info" fail_closed=#true acknowledge=#false
 effect "blocked-result-observed" operator_level_default="info" fail_closed=#true acknowledge=#false
+effect "blocked-reconcile" operator_level_default="info" fail_closed=#true acknowledge=#false
 effect "ui" operator_level_default="info" fail_closed=#false acknowledge=#false
 effect "spawn" operator_level_default="info" fail_closed=#false acknowledge=#false
 effect "spawn-wave" operator_level_default="info" fail_closed=#false acknowledge=#true max_items=64
