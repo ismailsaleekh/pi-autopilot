@@ -1353,6 +1353,8 @@ fn fresh_v5_submit_accept_precedes_an_observed_checkpoint_request() {
             "function afterSteer(cmd) {{ if (++steerCount !== 1) process.exit(106); const details=submitReceipt; const callId='call-v5-submit-precedes-checkpoint'; ",
             "send({{type:'tool_execution_end',toolCallId:callId,toolName:'autopilot_submit_atoms',result:{{content:[],details,terminate:true}},isError:false}}); ",
             "send({{type:'message_end',message:{{role:'toolResult',toolCallId:callId,toolName:'autopilot_submit_atoms',content:[],details,isError:false}}}}); ",
+            "send({{type:'message_start'}}); send({{type:'message_end',message:{{role:'user',content:[{{type:'text',text:cmd.message}}]}}}}); ",
+            "send({{type:'message_start'}}); send({{type:'message_end',message:{{role:'assistant',content:[{{type:'text',text:'late checkpoint instruction cannot replace ACCEPT'}}],stopReason:'stop'}}}}); ",
             "send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}}); }}"
         ),
         commands = commands,
