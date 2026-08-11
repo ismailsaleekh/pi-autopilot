@@ -518,7 +518,7 @@ fn run_v5_child_control_session(
     let mut checkpoint_instruction_dispatched = false;
     let mut latest_budget: Option<(u64, ContextBudget)> = None;
     let mut stats_sequence = 0_u64;
-    let mut terminal_checkpoint_drain = false;
+    let mut terminal_accept_drain = false;
     let mut cycle = V5CycleState::new(runner.send_v5_prompt(prompt)?);
 
     loop {
@@ -527,31 +527,15 @@ fn run_v5_child_control_session(
             .next_frame()
             .map_err(|error| format!("agent-run V5 rpc stream failed: {error}"))?
             .ok_or_else(|| "agent-run V5 rpc stream ended before agent_settled".to_owned())?;
-        if terminal_checkpoint_drain {
-            if matches!(&frame, RpcFrame::Event(RpcEvent::AgentSettled)) {
-                let accepted = cycle.successful.as_ref().ok_or_else(|| {
-                    "agent-run V5 terminal checkpoint drain lost pending ACCEPT".to_owned()
-                })?;
-                if !accepted.message_correlated {
-                    return Err(format!(
-                        "agent-run V5 terminating tool missing correlated toolResult details for {}",
-                        accepted.tool_call_id
-                    ));
-                }
-                if let V5AcceptedControl::Terminal(terminal) = &accepted.accepted {
-                    return Ok(terminal.clone());
-                }
-                return Err(
-                    "agent-run V5 checkpoint ACCEPT cannot enter terminal precedence drain"
-                        .to_owned(),
-                );
+        if terminal_accept_drain {
+            // A generated, current-call-correlated terminal ACCEPT locks the outcome.
+            // Pi may still emit already-queued turns/tools before agent_settled; drain
+            // them without letting model output overturn accepted Core authority. The
+            // normal settlement path still drains outstanding telemetry responses.
+            if !matches!(&frame, RpcFrame::Event(RpcEvent::AgentSettled)) {
+                continue;
             }
-            if let RpcFrame::Event(RpcEvent::CompactionStart { reason }) = &frame {
-                return Err(format!(
-                    "agent-run V5 Pi attempted automatic compaction after terminal ACCEPT: {reason:?}"
-                ));
-            }
-            continue;
+            terminal_accept_drain = false;
         }
         match frame {
             RpcFrame::Response(response) => runner.handle_v5_runtime_response(
@@ -669,6 +653,10 @@ fn run_v5_child_control_session(
                         });
                     }
                 }
+                terminal_accept_drain = cycle.successful.as_ref().is_some_and(|accepted| {
+                    accepted.message_correlated
+                        && matches!(accepted.accepted, V5AcceptedControl::Terminal(_))
+                });
                 if cycle.successful.is_none() {
                     runner.request_v5_stats(&mut cycle, &mut stats_sequence)?;
                 }
@@ -722,22 +710,15 @@ fn run_v5_child_control_session(
                         &result_message,
                     )?;
                     accepted.message_correlated = true;
+                    terminal_accept_drain =
+                        matches!(accepted.accepted, V5AcceptedControl::Terminal(_));
                 }
             }
-            RpcFrame::Event(RpcEvent::MessageEnd { message }) => {
-                if let Some(accepted) = cycle.successful.as_ref() {
-                    let expected_checkpoint_prompt = runner.checkpoint_prompt(facade)?;
-                    if accepted.message_correlated
-                        && matches!(accepted.accepted, V5AcceptedControl::Terminal(_))
-                        && checkpoint_instruction_dispatched
-                        && message.role == "user"
-                        && message.text.as_deref() == Some(expected_checkpoint_prompt.as_str())
-                    {
-                        terminal_checkpoint_drain = true;
-                        continue;
-                    }
+            RpcFrame::Event(RpcEvent::MessageEnd { .. }) => {
+                if cycle.successful.is_some() {
                     return Err(
-                        "agent-run V5 assistant message followed a pending ACCEPT".to_owned()
+                        "agent-run V5 non-toolResult message followed a pending checkpoint ACCEPT"
+                            .to_owned(),
                     );
                 }
                 runner.request_v5_stats(&mut cycle, &mut stats_sequence)?;
