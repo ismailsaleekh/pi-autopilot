@@ -120,7 +120,10 @@ pub(crate) fn stage_approved_plan_v2(
                 | kernel::generated::RecoveryDisposition::UnsafeBlocked
         )
     ) {
-        return Err("approved-plan-v2 blocked recovery disposition is not promotable as an executable plan".to_owned());
+        return Err(
+            "approved-plan-v2 blocked recovery disposition is not promotable as an executable plan"
+                .to_owned(),
+        );
     }
     let admitted_actual = admitted.source_actual_authority().ok_or_else(|| {
         "approved-plan-v2 promotion requires an actual V2 planning carrier admission".to_owned()
@@ -150,10 +153,16 @@ pub(crate) fn stage_approved_plan_v2(
         result_contract: APPROVED_PLAN_V2_BOUNDARY.to_owned(),
         atom_registry_path: path_string(admitted.atom_registry_path())?,
         atom_registry_digest: admitted.atom_registry_digest().to_owned(),
-        recovery_subject: Nullable(admitted.recovery_subject().map(recovery_subject_binding_from_admitted).transpose()?),
+        recovery_subject: Nullable(
+            admitted
+                .recovery_subject()
+                .map(recovery_subject_binding_from_admitted)
+                .transpose()?,
+        ),
     };
     validate_binding_shape(&binding)?;
-    let binding_bytes = crate::evidence::canonical_json(&binding).map_err(|error| error.to_string())?;
+    let binding_bytes =
+        crate::evidence::canonical_json(&binding).map_err(|error| error.to_string())?;
     if binding_bytes.len() > APPROVED_PLAN_V2_BINDING_MAX_BYTES {
         return Err("approved-plan-v2 binding exceeds byte ceiling".to_owned());
     }

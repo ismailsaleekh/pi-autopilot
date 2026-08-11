@@ -6983,7 +6983,7 @@ pub fn establish_delivery_package_v4(
     verify_distinct_git_worktree(&worktree, &expected.base_commit)
         .map_err(|_| DeliveryRejection::GitState)?;
     let paths = v4_current_package_delta(result, expected, artifact, &worktree)?;
-    if !v4_status_is_exact(&worktree, &paths, artifact)
+    if !v4_git_visible_status_is_exact(&worktree, &paths)
         || !v4_targets_are_regular(&worktree, &paths)
     {
         return Err(DeliveryRejection::GitState);
@@ -7038,7 +7038,7 @@ pub fn accept_delivery_v4_with_package_facts(
         &paths,
         false,
     )?;
-    if !v4_status_is_exact(&worktree, &[], artifact) {
+    if !v4_git_visible_status_is_exact(&worktree, &[]) {
         return Err(DeliveryRejection::GitState);
     }
     Ok(AcceptedDelivery {
@@ -7138,11 +7138,7 @@ fn v4_baseline_leaf_needs_stage(
 }
 
 #[cfg(unix)]
-fn v4_status_is_exact(
-    worktree: &Path,
-    paths: &[String],
-    artifact: &DeliveryAssignmentArtifactV4,
-) -> bool {
+fn v4_git_visible_status_is_exact(worktree: &Path, paths: &[String]) -> bool {
     let mut actual =
         match git_stdout_bytes_checked(worktree, &["diff", "--name-only", "-z", "HEAD", "--"]) {
             Ok(paths) => git_nul_paths(&paths),
@@ -7159,18 +7155,6 @@ fn v4_status_is_exact(
     actual.sort();
     actual.dedup();
     let mut expected = path_bytes(paths);
-    for path in [
-        &artifact.materialization.intention_path,
-        &artifact.materialization.receipt_path,
-    ] {
-        let Ok(path) = Path::new(path).strip_prefix(worktree) else {
-            return false;
-        };
-        let Some(path) = path.to_str() else {
-            return false;
-        };
-        expected.push(path.as_bytes().to_vec());
-    }
     expected.sort();
     expected.dedup();
     actual == expected

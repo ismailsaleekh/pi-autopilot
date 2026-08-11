@@ -174,7 +174,12 @@ fn validate_child_control_tools(contracts: &Contracts) -> Result<()> {
     let universal = contracts
         .artifacts
         .iter()
-        .flat_map(|artifact| artifact.submit_tools.iter().map(move |tool| (artifact, tool)))
+        .flat_map(|artifact| {
+            artifact
+                .submit_tools
+                .iter()
+                .map(move |tool| (artifact, tool))
+        })
         .filter(|(_, tool)| tool.universal)
         .collect::<Vec<_>>();
     require(
@@ -189,13 +194,21 @@ fn validate_child_control_tools(contracts: &Contracts) -> Result<()> {
     });
     require(
         checkpoint.is_some_and(|(_, tool)| {
-            !tool.closed && tool.description.as_deref().is_some_and(|text| !text.is_empty())
+            !tool.closed
+                && tool
+                    .description
+                    .as_deref()
+                    .is_some_and(|text| !text.is_empty())
         }),
         "universal checkpoint tool contract drift",
     )?;
     require(
         blocked.is_some_and(|(_, tool)| {
-            tool.closed && tool.description.as_deref().is_some_and(|text| !text.is_empty())
+            tool.closed
+                && tool
+                    .description
+                    .as_deref()
+                    .is_some_and(|text| !text.is_empty())
         }),
         "universal blocked tool contract drift",
     )
@@ -205,7 +218,10 @@ fn validate_tagged_union(artifact: &Artifact) -> Result<()> {
     let Some(tag) = &artifact.union_tag else {
         require(
             artifact.items.iter().all(|item| item.variant.is_none()),
-            format!("artifact `{}` has variant records without union_tag", artifact.name),
+            format!(
+                "artifact `{}` has variant records without union_tag",
+                artifact.name
+            ),
         )?;
         return Ok(());
     };
@@ -215,18 +231,18 @@ fn validate_tagged_union(artifact: &Artifact) -> Result<()> {
     )?;
     require(
         !artifact.items.is_empty()
-            && artifact
-                .items
-                .iter()
-                .all(|item| {
-                    item.kind == ItemKind::Record
-                        && item.variant.is_some()
-                        && item
-                            .items
-                            .iter()
-                            .all(|member| matches!(member.kind, ItemKind::Field | ItemKind::List))
-                }),
-        format!("artifact `{}` tagged union must contain only variant records", artifact.name),
+            && artifact.items.iter().all(|item| {
+                item.kind == ItemKind::Record
+                    && item.variant.is_some()
+                    && item
+                        .items
+                        .iter()
+                        .all(|member| matches!(member.kind, ItemKind::Field | ItemKind::List))
+            }),
+        format!(
+            "artifact `{}` tagged union must contain only variant records",
+            artifact.name
+        ),
     )?;
     unique(
         artifact
@@ -248,7 +264,13 @@ fn parse_artifact(doc: &SourceDoc, node: &KdlNode) -> Result<Artifact> {
     doc.entries(
         node,
         1,
-        &["schema", "producer", "model_produced", "max_bytes", "union_tag"],
+        &[
+            "schema",
+            "producer",
+            "model_produced",
+            "max_bytes",
+            "union_tag",
+        ],
     )?;
     let artifact_name = doc.arg_string(node, 0)?.to_owned();
     let schema = doc.prop_string(node, "schema")?.to_owned();
@@ -317,7 +339,14 @@ fn parse_tool(
     doc.entries(
         node,
         1,
-        &["label", "description", "profile", "result_contract", "closed", "universal"],
+        &[
+            "label",
+            "description",
+            "profile",
+            "result_contract",
+            "closed",
+            "universal",
+        ],
     )?;
     let name = doc.arg_string(node, 0)?.to_owned();
     require(

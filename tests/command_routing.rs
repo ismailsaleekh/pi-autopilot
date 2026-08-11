@@ -1593,8 +1593,8 @@ fn send_planning_completion_inner(
         accepted.payload["response"]["outcome"], "ACCEPT",
         "planning submit response: {accepted:?}"
     );
-    let deferred_effect = accepted.payload["response"]["receipt"]["receipt"]
-        ["prepared_transition"]["deferred_host_effect"]
+    let deferred_effect = accepted.payload["response"]["receipt"]["receipt"]["prepared_transition"]
+        ["deferred_host_effect"]
         .clone();
     let completed = send_frame(
         serde_json::json!({
@@ -1617,8 +1617,7 @@ fn send_planning_completion_inner(
         "receipt-only completion must relay the stored deferred effect: {completed:?}"
     );
     assert_eq!(
-        completed.payload,
-        deferred_effect["payload"],
+        completed.payload, deferred_effect["payload"],
         "receipt-only completion must relay the stored deferred payload: {completed:?}"
     );
     completed

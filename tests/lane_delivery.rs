@@ -1977,7 +1977,10 @@ fn receipt_v1_delivery_child_control_stages_v4_package_and_consumes_without_carr
     );
     assert_eq!(
         receipt["prepared_transition"]["issued_actions"][0]["action"]["run_revision"],
-        fresh.run_revision.checked_add(1).expect("continuation revision")
+        fresh
+            .run_revision
+            .checked_add(1)
+            .expect("continuation revision")
     );
     let exact_submit_replay = core.send_json(serde_json::json!({
         "v": 1,
@@ -2085,19 +2088,22 @@ fn receipt_v1_validator_child_control_seals_final_close_and_replays_without_auth
         .payload,
     )
     .expect("Validator spawn");
-    let validation_spec_path = runner::validation_paths(
-        &worktree,
-        "main",
-        &validator_spawn.action.assignment_id,
-    )
-    .spec_path;
-    let validation: kernel::generated::AgentRunSpecV5 = serde_json::from_slice(
-        &fs::read(&validation_spec_path).expect("fresh Validator V5 spec"),
-    )
-    .expect("fresh Validator V5 JSON");
+    let validation_spec_path =
+        runner::validation_paths(&worktree, "main", &validator_spawn.action.assignment_id)
+            .spec_path;
+    let validation: kernel::generated::AgentRunSpecV5 =
+        serde_json::from_slice(&fs::read(&validation_spec_path).expect("fresh Validator V5 spec"))
+            .expect("fresh Validator V5 JSON");
     let assignment: kernel::generated::ValidationAssignmentV4 = serde_json::from_slice(
-        &fs::read(validation.assignment_path.as_ref().expect("assignment path").0.as_str())
-            .expect("V4 assignment"),
+        &fs::read(
+            validation
+                .assignment_path
+                .as_ref()
+                .expect("assignment path")
+                .0
+                .as_str(),
+        )
+        .expect("V4 assignment"),
     )
     .expect("V4 assignment JSON");
     let context: kernel::generated::ValidationContextV3 = serde_json::from_slice(
@@ -2156,7 +2162,10 @@ fn receipt_v1_validator_child_control_seals_final_close_and_replays_without_auth
         "payload":{"broker_capability":TEST_BROKER_CAPABILITY,"request":validation_request.clone()}
     }));
     assert_eq!(accepted.kind, "child-control");
-    assert_eq!(accepted.payload["response"]["outcome"], "ACCEPT", "{accepted:?}");
+    assert_eq!(
+        accepted.payload["response"]["outcome"], "ACCEPT",
+        "{accepted:?}"
+    );
     let receipt = &accepted.payload["response"]["receipt"]["receipt"];
     assert_eq!(
         receipt["prepared_transition"]["deferred_host_effect"]["kind"],
@@ -2169,12 +2178,14 @@ fn receipt_v1_validator_child_control_seals_final_close_and_replays_without_auth
             .starts_with("lifecycle:close:result_ref="),
         "{receipt}"
     );
-    assert!(receipt["prepared_transition"]["artifact_refs"]
-        .as_array()
-        .expect("receipt artifacts")
-        .iter()
-        .any(|artifact| artifact["artifact_schema"]
-            == "autopilot.prepared_validation_finalization.v1"));
+    assert!(
+        receipt["prepared_transition"]["artifact_refs"]
+            .as_array()
+            .expect("receipt artifacts")
+            .iter()
+            .any(|artifact| artifact["artifact_schema"]
+                == "autopilot.prepared_validation_finalization.v1")
+    );
     let exact_replay = core.send_json(serde_json::json!({
         "v":1,"id":6,"kind":"child-control",
         "payload":{"broker_capability":TEST_BROKER_CAPABILITY,"request":validation_request.clone()}
@@ -2207,10 +2218,12 @@ fn receipt_v1_validator_child_control_seals_final_close_and_replays_without_auth
             "status":"completed"
         }
     }));
-    assert_eq!(completed.kind, "done", "receipt-only completion: {completed:?}");
     assert_eq!(
-        completed.payload,
-        receipt["prepared_transition"]["deferred_host_effect"]["payload"],
+        completed.kind, "done",
+        "receipt-only completion: {completed:?}"
+    );
+    assert_eq!(
+        completed.payload, receipt["prepared_transition"]["deferred_host_effect"]["payload"],
         "completion returns the stored final close effect"
     );
     let replay = core.send_json(serde_json::json!({
@@ -2221,7 +2234,10 @@ fn receipt_v1_validator_child_control_seals_final_close_and_replays_without_auth
             "status":"completed"
         }
     }));
-    assert_eq!(replay.payload, completed.payload, "stored completion replay");
+    assert_eq!(
+        replay.payload, completed.payload,
+        "stored completion replay"
+    );
     core.shutdown();
 }
 

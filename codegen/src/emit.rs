@@ -215,8 +215,16 @@ fn row_literal(
     format!(
         "    SeamRouteRow {{\n        kind: \"{}\",\n        direction: SeamDirection::{},\n        posture: SeamPosture::{},\n        payload: \"{}\",\n        adapter: \"{}\",\n        effect: \"{}\",\n    }},",
         escape_rust_string(kind),
-        if direction == "host-to-core" { "HostToCore" } else { "CoreToHost" },
-        if posture == "supported" { "Supported" } else { "Unsupported" },
+        if direction == "host-to-core" {
+            "HostToCore"
+        } else {
+            "CoreToHost"
+        },
+        if posture == "supported" {
+            "Supported"
+        } else {
+            "Unsupported"
+        },
         escape_rust_string(payload),
         escape_rust_string(adapter),
         escape_rust_string(effect),
@@ -238,14 +246,28 @@ fn emit_frame_validation(contracts: &Contracts, seam: &TableDoc) -> Result<Strin
             continue;
         }
         let name = type_name(&artifact.name);
-        collect_shape(&mut shapes, &name, &artifact.items, &name, &records, &artifacts)?;
+        collect_shape(
+            &mut shapes,
+            &name,
+            &artifact.items,
+            &name,
+            &records,
+            &artifacts,
+        )?;
     }
     for frame in &contracts.frames {
         if frame.direction != "core-to-host" {
             continue;
         }
         let name = frame_type_name(frame);
-        collect_shape(&mut shapes, &name, &frame.items, &name, &records, &artifacts)?;
+        collect_shape(
+            &mut shapes,
+            &name,
+            &frame.items,
+            &name,
+            &records,
+            &artifacts,
+        )?;
     }
     let enums = contracts
         .enums
@@ -640,10 +662,14 @@ fn emit_tagged_union(
             escape_rust_string(value),
             variant_name(&variant.name)
         ));
-        ts.push_str(&format!("  | {{\n    {}: \"{}\";\n", quote_ts_key(tag), escape_ts_string(value)));
+        ts.push_str(&format!(
+            "  | {{\n    {}: \"{}\";\n",
+            quote_ts_key(tag),
+            escape_ts_string(value)
+        ));
         for item in &variant.items {
-            let (rust_ty, ts_ty) = member_types(item, ty_name)
-                .expect("validated tagged-union member");
+            let (rust_ty, ts_ty) =
+                member_types(item, ty_name).expect("validated tagged-union member");
             let mut rust_member = String::new();
             let mut ts_member = String::new();
             emit_member_with_visibility(
@@ -785,14 +811,9 @@ pub fn emit_tool_schemas(contracts: &Contracts) -> Result<String> {
     let enum_values = enum_map(contracts);
     let shapes = schema_items_by_name(contracts);
     let mut descriptors = Vec::new();
-    for artifact in contracts
-        .artifacts
-        .iter()
-        .filter(|artifact| {
-            artifact.model_produced
-                && artifact.submit_tools.iter().any(|tool| !tool.universal)
-        })
-    {
+    for artifact in contracts.artifacts.iter().filter(|artifact| {
+        artifact.model_produced && artifact.submit_tools.iter().any(|tool| !tool.universal)
+    }) {
         let default_closed = artifact
             .submit_tools
             .iter()
@@ -889,15 +910,9 @@ fn emit_child_control_bridge(contracts: &Contracts) -> Result<String> {
                 ))
             })?;
             let parameters = json_schema_for_items(&artifact.items, &shapes, &enums, tool.closed)?;
-            let schema_digest = sha256_hex(
-                json_string(&parameters, "child-control schema digest")?.as_bytes(),
-            );
-            validate_child_control_placeholder(
-                &tool.profile,
-                &template.value,
-                &slot,
-                &parameters,
-            )?;
+            let schema_digest =
+                sha256_hex(json_string(&parameters, "child-control schema digest")?.as_bytes());
+            validate_child_control_placeholder(&tool.profile, &template.value, &slot, &parameters)?;
             if !tool.universal {
                 terminal_profiles += 1;
             }
@@ -919,7 +934,11 @@ fn emit_child_control_bridge(contracts: &Contracts) -> Result<String> {
             }));
         }
     }
-    rows.sort_by(|left, right| left["profile_id"].as_str().cmp(&right["profile_id"].as_str()));
+    rows.sort_by(|left, right| {
+        left["profile_id"]
+            .as_str()
+            .cmp(&right["profile_id"].as_str())
+    });
     require(
         terminal_profiles == 14,
         "child-control terminal profile metadata count drift; expected 14",
@@ -1626,9 +1645,9 @@ fn set_placeholder_marker(value: &mut JsonValue, pointer: &str, marker: &str) ->
     for (index, segment) in segments.iter().enumerate() {
         let last = index + 1 == segments.len();
         current = match current {
-            JsonValue::Object(object) => object.get_mut(segment).ok_or_else(|| {
-                Error::input("generated child-control placeholder pointer drift")
-            })?,
+            JsonValue::Object(object) => object
+                .get_mut(segment)
+                .ok_or_else(|| Error::input("generated child-control placeholder pointer drift"))?,
             JsonValue::Array(items) => {
                 let offset = segment.parse::<usize>().map_err(|_| {
                     Error::input("generated child-control placeholder pointer drift")
@@ -1637,7 +1656,11 @@ fn set_placeholder_marker(value: &mut JsonValue, pointer: &str, marker: &str) ->
                     Error::input("generated child-control placeholder pointer drift")
                 })?
             }
-            _ => return Err(Error::input("generated child-control placeholder pointer drift")),
+            _ => {
+                return Err(Error::input(
+                    "generated child-control placeholder pointer drift",
+                ));
+            }
         };
         if last {
             *current = JsonValue::String(marker.to_owned());
@@ -1659,31 +1682,47 @@ fn validate_placeholder_schema(
         {
             return Ok(());
         }
-        return Err(placeholder_schema_error(profile, pointer, "matches no anyOf branch"));
+        return Err(placeholder_schema_error(
+            profile,
+            pointer,
+            "matches no anyOf branch",
+        ));
     }
     if let Some(constant) = schema.get("const") {
         if constant != value {
-            return Err(placeholder_schema_error(profile, pointer, "does not match const"));
+            return Err(placeholder_schema_error(
+                profile,
+                pointer,
+                "does not match const",
+            ));
         }
     }
     if let Some(values) = schema.get("enum").and_then(JsonValue::as_array) {
         if !values.iter().any(|candidate| candidate == value) {
-            return Err(placeholder_schema_error(profile, pointer, "does not match enum"));
+            return Err(placeholder_schema_error(
+                profile,
+                pointer,
+                "does not match enum",
+            ));
         }
     }
     match schema.get("type").and_then(JsonValue::as_str) {
         None => Ok(()),
         Some("string") => {
-            let text = value.as_str().ok_or_else(|| {
-                placeholder_schema_error(profile, pointer, "is not a string")
-            })?;
+            let text = value
+                .as_str()
+                .ok_or_else(|| placeholder_schema_error(profile, pointer, "is not a string"))?;
             validate_schema_length(schema, text.chars().count(), profile, pointer, "Length")
         }
         Some("integer") => {
             if value.as_u64().is_some() {
                 Ok(())
             } else {
-                Err(placeholder_schema_error(profile, pointer, "is not a non-negative integer"))
+                Err(placeholder_schema_error(
+                    profile,
+                    pointer,
+                    "is not a non-negative integer",
+                ))
             }
         }
         Some("boolean") if value.is_boolean() => Ok(()),
@@ -1714,7 +1753,11 @@ fn validate_schema_length(
             .and_then(JsonValue::as_u64)
             .is_some_and(|min| length < min as usize)
     {
-        return Err(placeholder_schema_error(profile, pointer, &format!("{label} is below minimum")));
+        return Err(placeholder_schema_error(
+            profile,
+            pointer,
+            &format!("{label} is below minimum"),
+        ));
     }
     if schema
         .get("maxLength")
@@ -1725,7 +1768,11 @@ fn validate_schema_length(
             .and_then(JsonValue::as_u64)
             .is_some_and(|max| length > max as usize)
     {
-        return Err(placeholder_schema_error(profile, pointer, &format!("{label} exceeds maximum")));
+        return Err(placeholder_schema_error(
+            profile,
+            pointer,
+            &format!("{label} exceeds maximum"),
+        ));
     }
     Ok(())
 }
@@ -1745,7 +1792,13 @@ fn validate_placeholder_object(
         None if schema.get("additionalProperties") != Some(&JsonValue::Bool(false)) => {
             &empty_properties
         }
-        None => return Err(placeholder_schema_error(profile, pointer, "has no properties")),
+        None => {
+            return Err(placeholder_schema_error(
+                profile,
+                pointer,
+                "has no properties",
+            ));
+        }
     };
     for required in schema
         .get("required")
@@ -1753,17 +1806,25 @@ fn validate_placeholder_object(
         .into_iter()
         .flatten()
     {
-        let name = required
-            .as_str()
-            .ok_or_else(|| placeholder_schema_error(profile, pointer, "has non-string required key"))?;
+        let name = required.as_str().ok_or_else(|| {
+            placeholder_schema_error(profile, pointer, "has non-string required key")
+        })?;
         if !object.contains_key(name) {
-            return Err(placeholder_schema_error(profile, pointer, "is missing required key"));
+            return Err(placeholder_schema_error(
+                profile,
+                pointer,
+                "is missing required key",
+            ));
         }
     }
     if schema.get("additionalProperties") == Some(&JsonValue::Bool(false))
         && object.keys().any(|key| !properties.contains_key(key))
     {
-        return Err(placeholder_schema_error(profile, pointer, "contains an unknown key"));
+        return Err(placeholder_schema_error(
+            profile,
+            pointer,
+            "contains an unknown key",
+        ));
     }
     for (name, child) in object {
         if let Some(child_schema) = properties.get(name) {
@@ -1799,7 +1860,11 @@ fn validate_placeholder_array(
         for item in items {
             let canonical = json_string(item, "placeholder unique item")?;
             if !unique.insert(canonical) {
-                return Err(placeholder_schema_error(profile, pointer, "has duplicate items"));
+                return Err(placeholder_schema_error(
+                    profile,
+                    pointer,
+                    "has duplicate items",
+                ));
             }
         }
     }
@@ -1892,12 +1957,15 @@ fn placeholder_for_type(
             (JsonValue::Object(JsonMap::new()), None)
         }
         _ => {
-            let can_hold_nonce = max_bytes.is_none_or(|max| {
-                max >= (CHILD_CONTROL_PLACEHOLDER_SENTINEL.len() + 64) as u64
-            });
+            let can_hold_nonce = max_bytes
+                .is_none_or(|max| max >= (CHILD_CONTROL_PLACEHOLDER_SENTINEL.len() + 64) as u64);
             (
                 JsonValue::String("x".to_owned()),
-                if can_hold_nonce { Some(String::new()) } else { None },
+                if can_hold_nonce {
+                    Some(String::new())
+                } else {
+                    None
+                },
             )
         }
     };
@@ -1910,10 +1978,9 @@ fn placeholder_constant(type_id: &str, value: &str) -> Result<JsonValue> {
             .parse::<bool>()
             .map(JsonValue::Bool)
             .map_err(|error| Error::input(format!("invalid placeholder bool constant: {error}"))),
-        "u8" | "u32" | "u64" => value
-            .parse::<u64>()
-            .map(JsonValue::from)
-            .map_err(|error| Error::input(format!("invalid placeholder integer constant: {error}"))),
+        "u8" | "u32" | "u64" => value.parse::<u64>().map(JsonValue::from).map_err(|error| {
+            Error::input(format!("invalid placeholder integer constant: {error}"))
+        }),
         _ => Ok(JsonValue::String(value.to_owned())),
     }
 }
@@ -1937,10 +2004,13 @@ fn emit_universal_child_tools(
             let schema = json_schema_for_items(&artifact.items, shapes, enums, tool.closed)?;
             let schema_json = serde_json::to_string_pretty(&schema)
                 .map_err(|error| Error::input(format!("json schema emit failed: {error}")))?;
-            let digest = sha256_hex(json_string(&schema, "universal tool schema digest")?.as_bytes());
+            let digest =
+                sha256_hex(json_string(&schema, "universal tool schema digest")?.as_bytes());
             let const_name = format!("{}_TOOL_PARAMETERS", screaming_name(&artifact.name));
             let digest_name = format!("{}_TOOL_SCHEMA_DIGEST", screaming_name(&artifact.name));
-            out.push_str(&format!("\nexport const {const_name} = {schema_json} as TSchema;\n"));
+            out.push_str(&format!(
+                "\nexport const {const_name} = {schema_json} as TSchema;\n"
+            ));
             out.push_str(&format!("export const {digest_name} = \"{digest}\";\n"));
             rows.push(format!(
                 "  {{ profile_id: \"{}\", name: \"{}\", label: \"{}\", description: \"{}\", boundary_id: \"{}\", result_contract: \"{}\", schema_digest: {digest_name}, parameters: {const_name} }},",

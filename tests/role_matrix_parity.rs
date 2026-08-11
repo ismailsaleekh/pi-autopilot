@@ -171,11 +171,30 @@ fn active_submit_role_prose_requires_same_session_retry_for_all_eleven_roles() {
         ("fixer-integrator", "autopilot_emit_status"),
         ("validator", "autopilot_emit_status"),
     ] {
-        let prose = fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("roles").join(role).join("base.md")).expect("active role prose");
-        assert!(prose.contains(&format!("Call `{tool}` when the payload is ready.")), "{role}");
-        assert!(prose.contains("If it returns `RETRY`, correct the reported diagnostic"), "{role}");
-        assert!(prose.contains("again in this same session. Only `ACCEPT` terminalizes."), "{role}");
-        assert!(prose.contains("Do not return the payload as assistant prose or markdown."), "{role}");
+        let prose = fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("roles")
+                .join(role)
+                .join("base.md"),
+        )
+        .expect("active role prose");
+        assert!(
+            prose.contains(&format!("Call `{tool}` when the payload is ready.")),
+            "{role}"
+        );
+        assert!(
+            prose.contains("If it returns `RETRY`, correct the reported diagnostic"),
+            "{role}"
+        );
+        assert!(
+            prose.contains("again in this same session. Only `ACCEPT` terminalizes."),
+            "{role}"
+        );
+        assert!(
+            prose.contains("Do not return the payload as assistant prose or markdown."),
+            "{role}"
+        );
     }
 }
 
@@ -191,12 +210,10 @@ fn validator_role_is_mechanically_read_only_and_context_modes_are_registered() {
             "autopilot_emit_status".to_owned(),
         ]
     );
-    assert!(
-        !validator
-            .tools
-            .iter()
-            .any(|tool| matches!(tool.as_str(), "bash" | "edit" | "write" | "autopilot_set_executable"))
-    );
+    assert!(!validator.tools.iter().any(|tool| matches!(
+        tool.as_str(),
+        "bash" | "edit" | "write" | "autopilot_set_executable"
+    )));
     let policy = include_str!("../data/context-policy.kdl");
     assert!(!policy.contains("forward-validation"));
     let registry = drivers::context::policy::ContextPolicyRegistry::package()

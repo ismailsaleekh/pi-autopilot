@@ -421,9 +421,7 @@ fn child_control_runtime_evidence_is_closed_and_separate_from_raw_payload() {
     assert!(rust.contains(
         "pub enum DeliveryPolicyDenialKind {\n    #[serde(rename = \"cwd-mismatch\")]\n    CwdMismatch,"
     ));
-    assert!(rust.contains(
-        "#[serde(rename = \"unapproved-command\")]\n    UnapprovedCommand,"
-    ));
+    assert!(rust.contains("#[serde(rename = \"unapproved-command\")]\n    UnapprovedCommand,"));
     assert!(rust.contains(
         "pub enum ApprovedCommandExecutionOutcome {\n    #[serde(rename = \"failed\")]\n    Failed,\n    #[serde(rename = \"succeeded\")]\n    Succeeded,"
     ));
@@ -445,15 +443,17 @@ fn child_control_runtime_evidence_is_closed_and_separate_from_raw_payload() {
     assert!(typescript.contains(
         "export type DeliveryPolicyDenialKind = \"unapproved-command\" | \"cwd-mismatch\" | \"malformed-mutation\" | \"unapproved-mutation-path\" | \"unapproved-parent-directory\" | \"outside-worktree\" | \"reserved-path\" | \"topology-refusal\";"
     ));
-    assert!(typescript.contains(
-        "export type ApprovedCommandExecutionOutcome = \"succeeded\" | \"failed\";"
-    ));
+    assert!(
+        typescript
+            .contains("export type ApprovedCommandExecutionOutcome = \"succeeded\" | \"failed\";")
+    );
     assert!(typescript.contains(
         "export interface ChildControlRuntimeEvidence {\n  schema: SchemaId;\n  delivery_policy_denials: DeliveryPolicyDenialLedger | null;\n  approved_command_executions: ApprovedCommandExecutionLedger | null;\n}"
     ));
-    assert!(typescript.contains(
-        "  raw_payload: unknown;\n  runtime_evidence: ChildControlRuntimeEvidence;"
-    ));
+    assert!(
+        typescript
+            .contains("  raw_payload: unknown;\n  runtime_evidence: ChildControlRuntimeEvidence;")
+    );
 
     let contracts = fs::read_to_string(temp.path().join("data/contracts.kdl"))
         .expect("read contract authority");
@@ -487,9 +487,18 @@ fn min_bytes_emits_closed_blocked_tool_bounds_and_rejects_inversion() {
         .0;
     let schema: serde_json::Value = serde_json::from_str(schema_json).expect("blocked schema JSON");
     assert_eq!(schema["additionalProperties"], serde_json::json!(false));
-    assert_eq!(schema["properties"]["summary"]["minLength"], serde_json::json!(1));
-    assert_eq!(schema["properties"]["summary"]["maxLength"], serde_json::json!(2000));
-    assert_eq!(schema["properties"]["evidence"]["minItems"], serde_json::json!(1));
+    assert_eq!(
+        schema["properties"]["summary"]["minLength"],
+        serde_json::json!(1)
+    );
+    assert_eq!(
+        schema["properties"]["summary"]["maxLength"],
+        serde_json::json!(2000)
+    );
+    assert_eq!(
+        schema["properties"]["evidence"]["minItems"],
+        serde_json::json!(1)
+    );
 
     let temp = fixture();
     let contracts = temp.path().join("data/contracts.kdl");
@@ -543,7 +552,10 @@ fn unified_submit_contracts_emit_closed_frames_and_non_fifo_placeholder_metadata
     assert!(bridge.contains("isSubmitReceipt(value"));
     assert!(bridge.contains("isCheckpointReceipt(value"));
     assert!(bridge.contains("isAgentHandoff(value"));
-    assert!(bridge.contains("Buffer.compare(Buffer.from(left, \"utf8\"), Buffer.from(right, \"utf8\"))"));
+    assert!(
+        bridge
+            .contains("Buffer.compare(Buffer.from(left, \"utf8\"), Buffer.from(right, \"utf8\"))")
+    );
     assert!(bridge.contains("isBlockedReceipt(value"));
     assert!(bridge.contains("isActionKind(value.kind)"));
     assert!(bridge.contains("value.payload.actions.length > 0"));
@@ -554,7 +566,9 @@ fn unified_submit_contracts_emit_closed_frames_and_non_fifo_placeholder_metadata
         .expect("read generated TypeBox schemas");
     assert_eq!(ts.matches("profile_id: \"").count(), 16);
     assert!(ts.contains("export const SUBMIT_TOOLS: readonly SubmitToolDescriptor[] = ["));
-    assert!(ts.contains("export const UNIVERSAL_CHILD_TOOLS: readonly UniversalChildToolDescriptor[] = ["));
+    assert!(ts.contains(
+        "export const UNIVERSAL_CHILD_TOOLS: readonly UniversalChildToolDescriptor[] = ["
+    ));
     let submit_tools = ts
         .split_once("export const SUBMIT_TOOLS")
         .expect("submit tools")
@@ -587,7 +601,10 @@ fn unified_submit_contracts_emit_closed_frames_and_non_fifo_placeholder_metadata
         "86052745eff30b746b44366bd1a9dc54aeee74aba63c1d6be80a187efc691545",
         "755c5d282fc7c1b1dcbec38f68a0b6096879b142c33e41375673b8d5f116245a",
     ] {
-        assert!(ts.contains(digest), "existing model-facing schema digest drift: {digest}");
+        assert!(
+            ts.contains(digest),
+            "existing model-facing schema digest drift: {digest}"
+        );
     }
 
     let rust = fs::read_to_string(temp.path().join("kernel/src/generated/mod.rs"))
@@ -599,7 +616,9 @@ fn unified_submit_contracts_emit_closed_frames_and_non_fifo_placeholder_metadata
         .split_once("/// Create-once close archive manifest")
         .expect("next generated artifact")
         .0;
-    assert!(rust.contains("#[serde(tag = \"outcome\", deny_unknown_fields)]\npub enum ChildControlResponse"));
+    assert!(rust.contains(
+        "#[serde(tag = \"outcome\", deny_unknown_fields)]\npub enum ChildControlResponse"
+    ));
     assert_eq!(response.matches("#[serde(rename = \"ACCEPT\")]").count(), 1);
     assert_eq!(response.matches("#[serde(rename = \"RETRY\")]").count(), 1);
     assert!(!response.contains("#[serde(rename = \"FATAL\")]"));
@@ -631,7 +650,14 @@ fn unified_submit_contracts_emit_closed_frames_and_non_fifo_placeholder_metadata
         .split_once("artifact \"run_identity\"")
         .expect("next V5 artifact")
         .0;
-    assert_eq!(v5_contract.matches("field \"required_pi_version\" type=\"string\" required=#true constant=\"0.84.1\"").count(), 1);
+    assert_eq!(
+        v5_contract
+            .matches(
+                "field \"required_pi_version\" type=\"string\" required=#true constant=\"0.84.1\""
+            )
+            .count(),
+        1
+    );
     let v4_contract = contracts
         .split_once("artifact \"agent_run_spec\"")
         .expect("V4 contract")
@@ -668,12 +694,19 @@ fn unified_submit_routes_are_generated_row_driven_and_receipt_complete() {
     assert!(tables.contains("kind: \"child-control\",\n        direction: SeamDirection::CoreToHost,\n        posture: SeamPosture::Supported"));
     assert!(tables.contains("kind: \"blocked-result-observed\",\n        direction: SeamDirection::CoreToHost,\n        posture: SeamPosture::Supported,\n        payload: \"CoreToHostBlockedResultObservedPayload\",\n        adapter: \"none\",\n        effect: \"blocked-result-observed\","));
     assert!(tables.contains("\"child-control\" => decode::<HostToCoreChildControlPayload>"));
-    assert!(tables.contains("\"blocked-result-observed\" => decode::<HostToCoreBlockedResultObservedPayload>"));
+    assert!(tables.contains(
+        "\"blocked-result-observed\" => decode::<HostToCoreBlockedResultObservedPayload>"
+    ));
 
-    let frame_validation = fs::read_to_string(temp.path().join("src/generated/frame-validation.ts"))
-        .expect("read frame validation");
-    assert!(frame_validation.contains("\"child-control\": {\n      \"effect\": \"child-control\","));
-    assert!(frame_validation.contains("\"blocked-result-observed\": {\n      \"effect\": \"blocked-result-observed\","));
+    let frame_validation =
+        fs::read_to_string(temp.path().join("src/generated/frame-validation.ts"))
+            .expect("read frame validation");
+    assert!(
+        frame_validation.contains("\"child-control\": {\n      \"effect\": \"child-control\",")
+    );
+    assert!(frame_validation.contains(
+        "\"blocked-result-observed\": {\n      \"effect\": \"blocked-result-observed\","
+    ));
     assert!(frame_validation.contains("\"CoreToHostBlockedResultObservedPayload\": {"));
     let host_tables = fs::read_to_string(temp.path().join("src/generated/host-runtime-tables.ts"))
         .expect("read host effect table");
@@ -682,9 +715,13 @@ fn unified_submit_routes_are_generated_row_driven_and_receipt_complete() {
 
     let ts = fs::read_to_string(temp.path().join("src/generated/index.ts"))
         .expect("read generated TypeScript contracts");
-    assert!(ts.contains("export type ChildControlRequestKind = \"submit\" | \"blocked\" | \"checkpoint\";"));
+    assert!(ts.contains(
+        "export type ChildControlRequestKind = \"submit\" | \"blocked\" | \"checkpoint\";"
+    ));
     assert!(ts.contains("export interface HostToCoreBlockedResultObservedPayload {\n  schema: SchemaId;\n  broker_capability: string;"));
-    assert!(ts.contains("export interface HostToCoreChildControlPayload {\n  broker_capability: string;"));
+    assert!(ts.contains(
+        "export interface HostToCoreChildControlPayload {\n  broker_capability: string;"
+    ));
     assert!(ts.contains("export type BlockedResultObservedAckStatus = \"acknowledged\";"));
     assert!(ts.contains("export interface CoreToHostBlockedResultObservedPayload {\n  schema: SchemaId;\n  receipt_id: Uuidv7;\n  latch_id: Uuidv7;\n  reporter_task_id: Id;\n  status: BlockedResultObservedAckStatus;\n}"));
     assert!(ts.contains("export interface CoreToHostChildControlPayload"));
@@ -701,9 +738,17 @@ fn unified_submit_routes_are_generated_row_driven_and_receipt_complete() {
         "AUTOPILOT_CHILD_CONTROL_SOCKET_PATH",
         "AUTOPILOT_CHILD_CONTROL_BROKER_CAPABILITY",
     ] {
-        assert_eq!(rpc.matches(&format!("\"{name}\"",)).count(), 1, "{name} must be generated once");
+        assert_eq!(
+            rpc.matches(&format!("\"{name}\"",)).count(),
+            1,
+            "{name} must be generated once"
+        );
     }
-    assert_eq!(rpc.matches("\"AUTOPILOT_CONTROL_").count(), 5, "only the five nested-Pi control variables are denied");
+    assert_eq!(
+        rpc.matches("\"AUTOPILOT_CONTROL_").count(),
+        5,
+        "only the five nested-Pi control variables are denied"
+    );
 
     let rust = fs::read_to_string(temp.path().join("kernel/src/generated/mod.rs"))
         .expect("read generated Rust contracts");
@@ -730,13 +775,22 @@ fn unified_submit_routes_are_generated_row_driven_and_receipt_complete() {
         .split_once("pub struct DeliveryResult")
         .expect("next generated artifact")
         .0;
-    assert!(deferred.contains("Done {\n        #[serde(rename = \"payload\")]\n        payload: CoreToHostDonePayload"));
-    assert!(deferred.contains("Spawn {\n        #[serde(rename = \"payload\")]\n        payload: CoreToHostSpawnPayload"));
+    assert!(deferred.contains(
+        "Done {\n        #[serde(rename = \"payload\")]\n        payload: CoreToHostDonePayload"
+    ));
+    assert!(deferred.contains(
+        "Spawn {\n        #[serde(rename = \"payload\")]\n        payload: CoreToHostSpawnPayload"
+    ));
     assert!(deferred.contains("SpawnWave {\n        #[serde(rename = \"payload\")]\n        payload: CoreToHostSpawnWavePayload"));
     assert!(!deferred.contains("CoreToHostUiPayload"));
     assert!(!deferred.contains("CoreToHostSessionPayload"));
 
-    for type_name in ["SubmitReceipt", "CheckpointReceipt", "BlockedReceipt", "BlockedLatch"] {
+    for type_name in [
+        "SubmitReceipt",
+        "CheckpointReceipt",
+        "BlockedReceipt",
+        "BlockedLatch",
+    ] {
         let body = rust
             .split_once(&format!("pub struct {type_name}"))
             .unwrap_or_else(|| panic!("missing {type_name}"))
@@ -744,8 +798,14 @@ fn unified_submit_routes_are_generated_row_driven_and_receipt_complete() {
             .split_once("\n}\n")
             .expect("closed struct terminator")
             .0;
-        assert!(!body.contains("receipt_sha256"), "{type_name} must not self-hash");
-        assert!(!body.contains("latch_sha256"), "{type_name} must not self-hash");
+        assert!(
+            !body.contains("receipt_sha256"),
+            "{type_name} must not self-hash"
+        );
+        assert!(
+            !body.contains("latch_sha256"),
+            "{type_name} must not self-hash"
+        );
     }
     assert!(rust.contains("pub struct SubmitReceiptEventRef"));
     assert!(rust.contains("pub struct BlockedLatchEventRef"));
@@ -785,13 +845,19 @@ fn unified_submit_routes_are_generated_row_driven_and_receipt_complete() {
     let expanded = fs::read_to_string(temp.path().join("drivers/src/generated/tables.rs"))
         .expect("read row-driven seam tables");
     assert!(expanded.contains("RouteCardinalityProbe(HostToCoreRouteCardinalityProbePayload)"));
-    assert!(expanded.contains("\"route-cardinality-probe\" => decode::<HostToCoreRouteCardinalityProbePayload>"));
+    assert!(expanded.contains(
+        "\"route-cardinality-probe\" => decode::<HostToCoreRouteCardinalityProbePayload>"
+    ));
     assert!(expanded.contains("kind: \"core-route-cardinality-probe\",\n        direction: SeamDirection::CoreToHost,\n        posture: SeamPosture::Supported"));
-    let expanded_validation = fs::read_to_string(temp.path().join("src/generated/frame-validation.ts"))
-        .expect("read row-driven frame validation");
-    assert!(expanded_validation.contains("\"core-route-cardinality-probe\": {\n      \"effect\": \"core-route-cardinality-probe\","));
-    let expanded_host = fs::read_to_string(temp.path().join("src/generated/host-runtime-tables.ts"))
-        .expect("read row-driven host effects");
+    let expanded_validation =
+        fs::read_to_string(temp.path().join("src/generated/frame-validation.ts"))
+            .expect("read row-driven frame validation");
+    assert!(expanded_validation.contains(
+        "\"core-route-cardinality-probe\": {\n      \"effect\": \"core-route-cardinality-probe\","
+    ));
+    let expanded_host =
+        fs::read_to_string(temp.path().join("src/generated/host-runtime-tables.ts"))
+            .expect("read row-driven host effects");
     assert!(expanded_host.contains("\"kind\":\"core-route-cardinality-probe\""));
 }
 

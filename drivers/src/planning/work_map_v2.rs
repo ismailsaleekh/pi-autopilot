@@ -520,7 +520,8 @@ pub(crate) fn admit_work_map_v2_staged_carrier(
     expected_spec_digest: &str,
     context: WorkMapV2AdmissionContext<'_>,
 ) -> Result<ApprovedWorkMapV2, String> {
-    let (source, authority) = parse_work_map_v2_actual_carrier_bytes(carrier_path, carrier_bytes.to_vec())?;
+    let (source, authority) =
+        parse_work_map_v2_actual_carrier_bytes(carrier_path, carrier_bytes.to_vec())?;
     if !is_lower_sha256(expected_spec_digest)
         || authority.carrier_path != path_string(carrier_path)?
         || authority.spec_path != spec.spec_path.0
@@ -543,16 +544,28 @@ pub(crate) fn admit_work_map_v2_staged_carrier(
         || spec.context_digest.0 != authority.context_digest
         || spec.skills_digest.0 != authority.skills_digest
         || spec.subscription_digest.0 != authority.subscription_digest
-        || spec.runtime_extension_digest.as_ref().map(|value| value.0.as_str())
+        || spec
+            .runtime_extension_digest
+            .as_ref()
+            .map(|value| value.0.as_str())
             != Some(authority.runtime_extension_digest.as_str())
-        || spec.runtime_extension_digest.as_ref().map(|value| value.0.as_str())
+        || spec
+            .runtime_extension_digest
+            .as_ref()
+            .map(|value| value.0.as_str())
             != Some(kernel::generated::CHILD_ADDON_DIGEST)
         || spec.carrier_path.0 != authority.carrier_path
         || spec.terminal_route.as_ref() != Some(&authority.terminal_route)
         || spec.terminal_profile_id.as_deref() != Some(authority.terminal_route.profile_id.as_str())
-        || spec.atom_registry_path.as_ref().map(|value| value.0.as_str())
+        || spec
+            .atom_registry_path
+            .as_ref()
+            .map(|value| value.0.as_str())
             != Some(authority.atom_registry_path.as_str())
-        || spec.atom_registry_digest.as_ref().map(|value| value.0.as_str())
+        || spec
+            .atom_registry_digest
+            .as_ref()
+            .map(|value| value.0.as_str())
             != Some(authority.atom_registry_digest.as_str())
         || spec.session_continuity != kernel::generated::SessionContinuity::Fresh
         || authority.carrier_binding != runner::child::carrier_binding(spec)
@@ -564,7 +577,6 @@ pub(crate) fn admit_work_map_v2_staged_carrier(
     approved.source_actual_authority = Some(authority);
     Ok(approved)
 }
-
 
 pub fn admit_work_map_v2(
     raw: &[u8],

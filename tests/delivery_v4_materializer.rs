@@ -165,6 +165,15 @@ fn git_text(root: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
+fn git_succeeds(root: &Path, args: &[&str]) -> bool {
+    Command::new("git")
+        .current_dir(root)
+        .args(args)
+        .status()
+        .unwrap()
+        .success()
+}
+
 fn set_exact_special_mode(path: &Path, mode: u32) {
     let group_probe = std::env::temp_dir().join(format!(
         "autopilot-v4-mode-group-{}-{}",
@@ -211,6 +220,7 @@ fn repository() -> PathBuf {
     .unwrap();
     fs::write(root.join("src/authored.rs"), b"before materialization\n").unwrap();
     fs::write(root.join("foreign-tracked.txt"), b"foreign\n").unwrap();
+    fs::write(root.join(".gitignore"), b"/.pi/*\n").unwrap();
     git(&root, &["init", "--quiet"]);
     git(&root, &["config", "user.email", "v4@example.invalid"]);
     git(&root, &["config", "user.name", "V4"]);
@@ -545,6 +555,170 @@ fn submission(path: &str) -> DeliverySubmissionV2 {
 
 fn receipt_exists(binding: &CoreMaterializationBindingV1) -> bool {
     Path::new(&binding.receipt_path).exists()
+}
+
+#[test]
+fn v4_package_git_state_excludes_ignored_core_private_materialization_authority() {
+    let fixture = fixture(true);
+    let artifact = ordinary_artifact(&fixture, materialize(&fixture));
+    let private_paths = [
+        &artifact.materialization.intention_path,
+        &artifact.materialization.receipt_path,
+    ];
+    for private_path in private_paths {
+        let relative = Path::new(private_path)
+            .strip_prefix(&fixture.worktree)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            git_succeeds(
+                &fixture.worktree,
+                &["check-ignore", "--quiet", "--", relative]
+            ),
+            "Core-private materialization authority must be ignored by Git: {relative}"
+        );
+    }
+    let visible_untracked = git_text(
+        &fixture.worktree,
+        &["ls-files", "--others", "--exclude-standard", "--"],
+    );
+    assert!(
+        private_paths.iter().all(|path| !visible_untracked
+            .contains(Path::new(path).file_name().unwrap().to_str().unwrap())),
+        "ignored Core-private authority leaked into Git-visible package state: {visible_untracked:?}"
+    );
+
+    fs::write(
+        fixture.worktree.join("src/authored.rs"),
+        b"package only the authored leaf\n",
+    )
+    .unwrap();
+    let expected = expectation(&fixture.worktree, &fixture.base, false);
+    let delivery = result(&expected, "src/authored.rs");
+    let package = runner::establish_delivery_package_v4(&delivery, &expected, &artifact).unwrap();
+    let accepted =
+        runner::accept_delivery_v4_with_package_facts(&delivery, &expected, &artifact, &package)
+            .unwrap();
+    assert_eq!(accepted.changed_paths, vec!["src/authored.rs"]);
+    assert_eq!(
+        git_text(
+            &fixture.worktree,
+            &[
+                "diff-tree",
+                "--no-commit-id",
+                "--name-only",
+                "-r",
+                &package.package_commit.0,
+            ],
+        )
+        .lines()
+        .collect::<Vec<_>>(),
+        ["src/authored.rs"]
+    );
+    let package_tree = git_text(&fixture.worktree, &["ls-tree", "-r", "--name-only", "HEAD"]);
+    assert!(!package_tree.contains("core-materialization"));
+    assert!(
+        runner::materializer_v4::replay_v4_materialization(&artifact).is_ok(),
+        "private authority remains independently replayed after package commit"
+    );
+}
+
+#[test]
+fn v4_package_fails_when_private_materialization_authority_is_missing_or_tampered() {
+    for (label, target, remove) in [
+        ("missing-intention", "intention", true),
+        ("missing-receipt", "receipt", true),
+        ("tampered-intention", "intention", false),
+        ("tampered-receipt", "receipt", false),
+    ] {
+        let fixture = fixture(true);
+        let artifact = ordinary_artifact(&fixture, materialize(&fixture));
+        let target = if target == "intention" {
+            &artifact.materialization.intention_path
+        } else {
+            &artifact.materialization.receipt_path
+        };
+        if remove {
+            fs::remove_file(target).unwrap();
+        } else {
+            let mut bytes = fs::read(target).unwrap();
+            bytes.extend_from_slice(b" \n");
+            fs::write(target, bytes).unwrap();
+        }
+        fs::write(
+            fixture.worktree.join("src/authored.rs"),
+            format!("{label}\n"),
+        )
+        .unwrap();
+        let expected = expectation(&fixture.worktree, &fixture.base, false);
+        let delivery = result(&expected, "src/authored.rs");
+        assert!(
+            runner::materializer_v4::replay_v4_materialization(&artifact).is_err(),
+            "{label} must fail private replay authority"
+        );
+        assert_eq!(
+            runner::establish_delivery_package_v4(&delivery, &expected, &artifact),
+            Err(runner::DeliveryRejection::GitState),
+            "{label} must fail before package establishment"
+        );
+    }
+}
+
+#[test]
+fn v4_package_rejects_a_core_private_artifact_that_becomes_git_visible() {
+    let mut fixture = fixture(true);
+    let intention =
+        ".pi/autopilot/runner/core-materialization/assignment-main-L1.intention.v1.json";
+    fs::write(
+        fixture.worktree.join(".gitignore"),
+        format!(
+            "/.pi/*\n!/.pi/autopilot/\n/.pi/autopilot/*\n!/.pi/autopilot/runner/\n/.pi/autopilot/runner/*\n!/.pi/autopilot/runner/core-materialization/\n/.pi/autopilot/runner/core-materialization/*\n!/{intention}\n"
+        ),
+    )
+    .unwrap();
+    git(&fixture.worktree, &["add", ".gitignore"]);
+    git(
+        &fixture.worktree,
+        &[
+            "commit",
+            "--quiet",
+            "-m",
+            "make one private artifact visible",
+        ],
+    );
+    fixture.base = Sha(git_text(&fixture.worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned());
+    fixture.request.base_commit = fixture.base.clone();
+
+    let artifact = ordinary_artifact(&fixture, materialize(&fixture));
+    assert!(runner::materializer_v4::replay_v4_materialization(&artifact).is_ok());
+    assert!(
+        !git_succeeds(
+            &fixture.worktree,
+            &["check-ignore", "--quiet", "--", intention],
+        ),
+        "the intention fixture must be Git-visible"
+    );
+    let visible_untracked = git_text(
+        &fixture.worktree,
+        &["ls-files", "--others", "--exclude-standard", "--"],
+    );
+    assert!(visible_untracked.lines().any(|path| path == intention));
+
+    fs::write(
+        fixture.worktree.join("src/authored.rs"),
+        b"authorized authored change\n",
+    )
+    .unwrap();
+    let expected = expectation(&fixture.worktree, &fixture.base, false);
+    let delivery = result(&expected, "src/authored.rs");
+    assert_eq!(
+        runner::establish_delivery_package_v4(&delivery, &expected, &artifact),
+        Err(runner::DeliveryRejection::GitState),
+        "Git-visible Core-private residue must remain an unexpected package path"
+    );
 }
 
 #[test]
@@ -1999,6 +2173,7 @@ fn w0_repository() -> PathBuf {
         )
         .unwrap();
     }
+    fs::write(root.join(".gitignore"), b"/.pi/*\n").unwrap();
     git(&root, &["init", "--quiet"]);
     git(&root, &["config", "user.email", "w0@example.invalid"]);
     git(&root, &["config", "user.name", "W0"]);
