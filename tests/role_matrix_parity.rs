@@ -195,7 +195,7 @@ fn validator_role_is_mechanically_read_only_and_context_modes_are_registered() {
         !validator
             .tools
             .iter()
-            .any(|tool| matches!(tool.as_str(), "bash" | "edit" | "write"))
+            .any(|tool| matches!(tool.as_str(), "bash" | "edit" | "write" | "autopilot_set_executable"))
     );
     let policy = include_str!("../data/context-policy.kdl");
     assert!(!policy.contains("forward-validation"));
@@ -297,6 +297,7 @@ fn recovery_engineer_planning_profile_is_mechanically_read_only_but_delivery_can
         "autopilot_run_approved_command",
         "edit",
         "write",
+        "autopilot_set_executable",
         "autopilot_emit_status",
     ] {
         assert!(delivery.active.iter().any(|tool| tool == required));
@@ -310,6 +311,12 @@ fn recovery_engineer_planning_profile_is_mechanically_read_only_but_delivery_can
                 .active
                 .iter()
                 .any(|tool| tool == "autopilot_run_approved_command")
+        );
+        assert!(
+            tools
+                .active
+                .iter()
+                .any(|tool| tool == "autopilot_set_executable")
         );
         assert!(!tools.active.iter().any(|tool| tool == "bash"));
     }

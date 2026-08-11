@@ -1650,6 +1650,7 @@ fn validate_delivery_policy_receipt(
                 super::APPROVED_COMMAND_TOOL.to_owned(),
                 "edit".to_owned(),
                 "write".to_owned(),
+                super::SET_EXECUTABLE_TOOL.to_owned(),
             ];
     match super::read_delivery_assignment_artifact(&bytes)? {
         super::DeliveryAssignmentArtifactReader::V3(artifact) => {
@@ -5156,7 +5157,12 @@ fn package_tool_result(
                 "worktree": worktree.0,
                 "cwd": spec.cwd.0,
                 "policy_digest": policy_digest,
-                "active_overrides": [super::APPROVED_COMMAND_TOOL, "edit", "write"],
+                "active_overrides": [
+                    super::APPROVED_COMMAND_TOOL,
+                    "edit",
+                    "write",
+                    super::SET_EXECUTABLE_TOOL,
+                ],
                 "denials": denial_ledger.expect("validated delivery denial ledger"),
                 "command_executions": execution_ledger.expect("validated delivery command execution ledger"),
             }),

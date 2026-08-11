@@ -24,6 +24,7 @@ import {
   deliveryPolicyDigest,
   loadDeliveryPolicyFromEnv,
   registerDeliveryPolicyTools,
+  SET_EXECUTABLE_TOOL,
   type DeliveryPolicy,
 } from "../../child-runtime/child-extension-runtime.ts";
 
@@ -166,9 +167,14 @@ test("V5 binds canonical V4 receipt, protected union snapshots, and empty vendor
   try {
     const write = fixture.tools.get("write")!, edit = fixture.tools.get("edit")!;
     const protectedPath = join(fixture.worktree, "vendor/a.bin"), before = readFileSync(protectedPath);
+    const protectedMode = lstatSync(protectedPath).mode & 0o7777;
     await assert.rejects(() => write.execute("protected-write", { path: "vendor/a.bin", content: "bad" }), /blocked/);
     await assert.rejects(() => edit.execute("protected-edit", { path: "vendor/a.bin", edits: [{ oldText: "A", newText: "B" }] }), /blocked/);
+    await assert.rejects(() => fixture.tools.get(SET_EXECUTABLE_TOOL)!.execute("protected-mode", {
+      path: "vendor/a.bin", executable: true,
+    }), /blocked/);
     assert.deepEqual(readFileSync(protectedPath), before, "protected bytes remain unchanged before effect");
+    assert.equal(lstatSync(protectedPath).mode & 0o7777, protectedMode);
     await write.execute("mutable-write", { path: "src/authored.rs", content: "authored\n" });
     const command = await fixture.tools.get(APPROVED_COMMAND_TOOL)!.execute("v5-noop", { command_id: "CMD-U1-1" }) as { content: Array<{ text: string }> };
     assert.equal(command.content[0]!.text, "v5", "snapshot reads mutable and protected exact union");
@@ -221,6 +227,115 @@ test("V5 binds canonical V4 receipt, protected union snapshots, and empty vendor
     await empty.tools.get(APPROVED_COMMAND_TOOL)!.execute("empty-vendor-noop", { command_id: "CMD-U1-1" });
     assert.equal(empty.policy.receipt().protected_core_leaf_count, 0);
   } finally { cleanup(); }
+});
+
+test("delivery workers set exact executable state before W0-shaped verification", { concurrency: false }, async () => {
+  const fixture = makeUnitFixture([
+    "products/depthprint/contracts/run_fixtures.sh",
+    "products/depthprint/ops/ci/run_local.sh",
+  ], {
+    commands: [
+      "products/depthprint/contracts/run_fixtures.sh && products/depthprint/ops/ci/run_local.sh",
+    ],
+  });
+  try {
+    const write = fixture.tools.get("write")!;
+    const setExecutable = fixture.tools.get(SET_EXECUTABLE_TOOL)!;
+    const approvedCommand = fixture.tools.get(APPROVED_COMMAND_TOOL)!;
+    const scripts = [
+      ["products/depthprint/contracts/run_fixtures.sh", "fixtures"],
+      ["products/depthprint/ops/ci/run_local.sh", "local"],
+    ] as const;
+    for (const [relativePath, output] of scripts) {
+      await write.execute(`write-${output}`, {
+        path: relativePath,
+        content: `#!/bin/sh\nprintf '${output}\\n'\n`,
+      });
+      assert.equal(lstatSync(join(fixture.worktree, relativePath)).mode & 0o111, 0);
+      const result = await setExecutable.execute(`mode-${output}`, {
+        path: relativePath,
+        executable: true,
+      }) as { details: { path: string; executable: boolean; mode: string } };
+      assert.deepEqual(result.details, { path: relativePath, executable: true, mode: "100755" });
+      assert.equal(lstatSync(join(fixture.worktree, relativePath)).mode & 0o7777, 0o755);
+    }
+    await setExecutable.execute("mode-idempotent-true", {
+      path: scripts[0][0],
+      executable: true,
+    });
+    assert.equal(lstatSync(join(fixture.worktree, scripts[0][0])).mode & 0o7777, 0o755);
+
+    const command = await approvedCommand.execute("direct-scripts", {
+      command_id: "CMD-U1-1",
+    }) as { content: Array<{ text: string }> };
+    assert.match(command.content[0]!.text, /fixtures/);
+    assert.match(command.content[0]!.text, /local/);
+    const execution = fixture.policy.executionLedger().entries.at(-1);
+    assert.equal(execution?.outcome, "succeeded");
+    assert.match(execution?.scope_snapshot_digest ?? "", /^[0-9a-f]{64}$/);
+    for (const [relativePath] of scripts) {
+      assert.equal(lstatSync(join(fixture.worktree, relativePath)).mode & 0o7777, 0o755);
+    }
+
+    await setExecutable.execute("mode-false", { path: scripts[0][0], executable: false });
+    await setExecutable.execute("mode-idempotent-false", { path: scripts[0][0], executable: false });
+    assert.equal(lstatSync(join(fixture.worktree, scripts[0][0])).mode & 0o7777, 0o644);
+  } finally {
+    cleanup();
+  }
+});
+
+test("delivery executable authority rejects malformed or non-file targets before effect", { concurrency: false }, async () => {
+  const fixture = makeFixture();
+  try {
+    const setExecutable = fixture.tools.get(SET_EXECUTABLE_TOOL)!;
+    const foreignFile = join(fixture.foreign, "operator.txt");
+    const beforeForeign = readFileSync(foreignFile, "utf8");
+    symlinkSync(foreignFile, join(fixture.worktree, "link.txt"));
+    symlinkSync(fixture.foreign, join(fixture.worktree, "linked"));
+    mkdirSync(join(fixture.worktree, "special.txt"));
+    const denied: Array<[string, Record<string, unknown>]> = [
+      ["missing", { path: "new/allowed.txt", executable: true }],
+      ["absolute", { path: foreignFile, executable: true }],
+      ["traversal", { path: "../foreign/operator.txt", executable: true }],
+      ["unapproved", { path: "other.txt", executable: true }],
+      ["symlink", { path: "link.txt", executable: true }],
+      ["symlink-parent", { path: "linked/file.txt", executable: true }],
+      ["directory", { path: "special.txt", executable: true }],
+      ["non-boolean", { path: "src/lib.rs", executable: "yes" }],
+      ["extra-field", { path: "src/lib.rs", executable: true, mode: "100755" }],
+    ];
+    const originalMode = lstatSync(join(fixture.worktree, "src/lib.rs")).mode & 0o7777;
+    for (const [label, params] of denied) {
+      await assert.rejects(() => setExecutable.execute(`mode-denied-${label}`, params));
+      assert.equal(readFileSync(foreignFile, "utf8"), beforeForeign, label);
+      assert.equal(lstatSync(join(fixture.worktree, "src/lib.rs")).mode & 0o7777, originalMode, label);
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test("approved commands still reject executable-state implementation", { concurrency: false }, async () => {
+  const command = `node -e ${JSON.stringify("require('node:fs').chmodSync('bin/script.sh',0o755)")}`;
+  const fixture = makeUnitFixture(["bin/script.sh"], { commands: [command] });
+  try {
+    await fixture.tools.get("write")!.execute("write-script", {
+      path: "bin/script.sh",
+      content: "#!/bin/sh\nexit 0\n",
+    });
+    assert.equal(lstatSync(join(fixture.worktree, "bin/script.sh")).mode & 0o111, 0);
+    await assert.rejects(
+      () => fixture.tools.get(APPROVED_COMMAND_TOOL)!.execute("command-mode-mutation", {
+        command_id: "CMD-U1-1",
+      }),
+      /approved command changed the declared delivery snapshot/i,
+    );
+    assert.equal(fixture.policy.executionLedger().entries.at(-1)?.outcome, "failed");
+    assert.equal(lstatSync(join(fixture.worktree, "bin/script.sh")).mode & 0o7777, 0o755);
+  } finally {
+    cleanup();
+  }
 });
 
 test("BUG-186 approved commands cannot receive success for authoring delivery files", { concurrency: false }, async () => {
@@ -344,7 +459,7 @@ test("approved-command execution ledger is bounded and reports overflow", { conc
   }
 });
 
-test("delivery policy serializes parallel approved-command/edit/write race attempts", { concurrency: false }, async () => {
+test("delivery policy serializes parallel command/edit/write/mode race attempts", { concurrency: false }, async () => {
   const fixture = makeFixture();
   try {
     const raceDir = join(fixture.worktree, "race");
@@ -355,15 +470,18 @@ test("delivery policy serializes parallel approved-command/edit/write race attem
     const approvedCommand = fixture.tools.get(APPROVED_COMMAND_TOOL)!;
     const write = fixture.tools.get("write")!;
     const edit = fixture.tools.get("edit")!;
+    const setExecutable = fixture.tools.get(SET_EXECUTABLE_TOOL)!;
 
     const results = await Promise.allSettled([
       approvedCommand.execute("race-command", { command_id: "CMD-U1-2" }),
       write.execute("race-write", { path: "race/file.txt", content: "escaped\n" }),
       edit.execute("race-edit", { path: "race/file.txt", edits: [{ oldText: "foreign", newText: "escaped" }] }),
+      setExecutable.execute("race-mode", { path: "race/file.txt", executable: true }),
     ]);
     assert.equal(results[0]!.status, "rejected", "unsafe command-created topology must fail closed");
     assert.equal(results[1]!.status, "rejected");
     assert.equal(results[2]!.status, "rejected");
+    assert.equal(results[3]!.status, "rejected");
     assert.equal(readFileSync(foreignRaceFile, "utf8"), "foreign\n");
   } finally {
     cleanup();

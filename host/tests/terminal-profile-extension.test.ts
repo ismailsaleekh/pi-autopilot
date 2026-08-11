@@ -173,7 +173,7 @@ test("fresh child-control registration exposes every submit profile plus both ex
       assert.equal(checkpoint?.description, CHECKPOINT_TOOL.description, descriptor.profile_id);
       assert.deepEqual(checkpoint?.promptGuidelines, [CHECKPOINT_TOOL.description], descriptor.profile_id);
       assert.equal(blocked?.description, BLOCKED_REPORT_TOOL.description, descriptor.profile_id);
-      assert.equal(tools.length, descriptor.profile_id === "delivery-status.v2" ? 6 : descriptor.profile_id === "validation-status.v3" ? 4 : 3);
+      assert.equal(tools.length, descriptor.profile_id === "delivery-status.v2" ? 7 : descriptor.profile_id === "validation-status.v3" ? 4 : 3);
     }
   } finally {
     for (const [key, value] of prior) {
@@ -449,7 +449,7 @@ test("selected terminal profile registers exactly one same-name schema", { concu
       assert.equal(tools.map((tool) => tool.name).includes(expected.name), true);
       assert.equal(
         tools.length,
-        expected.profile_id === "delivery-status.v2" ? 4 : expected.profile_id === "validation-status.v3" ? 2 : 1,
+        expected.profile_id === "delivery-status.v2" ? 5 : expected.profile_id === "validation-status.v3" ? 2 : 1,
       );
       const submitTool = tools.find((tool) => tool.name === expected.name)!;
       await hooks.get("session_start")!();
@@ -459,7 +459,7 @@ test("selected terminal profile registers exactly one same-name schema", { concu
       assert.equal(entries[0]!.data.boundary_id, expected.boundary_id);
       assert.equal(entries[0]!.data.result_contract, expected.result_contract);
       if (deliveryEnv) {
-        assert.deepEqual(entries[0]!.data.active_tools, ["autopilot_emit_status", "autopilot_run_approved_command", "edit", "read", "write"]);
+        assert.deepEqual(entries[0]!.data.active_tools, ["autopilot_emit_status", "autopilot_run_approved_command", "autopilot_set_executable", "edit", "read", "write"]);
         assert.deepEqual(entries[0]!.data.delivery_policy, {
           version: DELIVERY_POLICY_VERSION,
           assignment_path: deliveryEnv.assignmentPath,
@@ -469,7 +469,7 @@ test("selected terminal profile registers exactly one same-name schema", { concu
           policy_digest: deliveryEnv.policyDigest,
           allowed_unit_file_count: 1,
           approved_command_count: 1,
-          active_overrides: ["autopilot_run_approved_command", "edit", "write"],
+          active_overrides: ["autopilot_run_approved_command", "edit", "write", "autopilot_set_executable"],
         });
       }
       if (validationEnv) {

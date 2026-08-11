@@ -211,7 +211,7 @@ async function loadRegisterInvokeChildren(factory) {
         process.chdir(factoryCwd);
       }
       const expectedTools = profile === 'delivery-status.v2'
-        ? ['autopilot_run_approved_command', 'edit', 'write', expectedTool]
+        ? ['autopilot_run_approved_command', 'edit', 'write', 'autopilot_set_executable', expectedTool]
         : profile === 'validation-status.v3' ? ['read', expectedTool] : [expectedTool];
       const actualTools = tools.map((tool) => tool.name);
       if (JSON.stringify(actualTools) !== JSON.stringify(expectedTools)) fail(`child profile ${profile} registered ${actualTools.join(',')}, expected ${expectedTools.join(',')}`);
@@ -231,21 +231,22 @@ async function loadRegisterInvokeChildren(factory) {
           cwd: deliveryFixture.worktree,
           policy_digest: deliveryFixture.policyDigest,
           approved_command_count: 1,
-          active_overrides: ['autopilot_run_approved_command', 'edit', 'write'],
+          active_overrides: ['autopilot_run_approved_command', 'edit', 'write', 'autopilot_set_executable'],
           allowed_unit_file_count: 1,
           mutable_authored_leaf_count: 1,
           protected_core_leaf_count: 0,
           baseline_digest: deliveryFixture.receiptDigest,
         };
         if (JSON.stringify(receipt.delivery_policy) !== JSON.stringify(expectedDeliveryReceipt)) fail(`delivery child V5 materialization authority receipt drift: ${JSON.stringify(receipt.delivery_policy)}`);
-        if (JSON.stringify(receipt.active_tools) !== JSON.stringify(['autopilot_emit_status', 'autopilot_run_approved_command', 'edit', 'read', 'write'])) fail(`delivery child active tools drift: ${JSON.stringify(receipt.active_tools)}`);
+        if (JSON.stringify(receipt.active_tools) !== JSON.stringify(['autopilot_emit_status', 'autopilot_run_approved_command', 'autopilot_set_executable', 'edit', 'read', 'write'])) fail(`delivery child active tools drift: ${JSON.stringify(receipt.active_tools)}`);
         const byName = new Map(tools.map((tool) => [tool.name, tool]));
-        const write = byName.get('write'); const edit = byName.get('edit'); const approvedCommand = byName.get('autopilot_run_approved_command');
-        if (write === undefined || edit === undefined || approvedCommand === undefined) fail('delivery child omitted a V5 policy tool');
+        const write = byName.get('write'); const edit = byName.get('edit'); const approvedCommand = byName.get('autopilot_run_approved_command'); const setExecutable = byName.get('autopilot_set_executable');
+        if (write === undefined || edit === undefined || approvedCommand === undefined || setExecutable === undefined) fail('delivery child omitted a V5 policy tool');
         await write.execute('packed-delivery-write', { path: 'src/authored.rs', content: 'written\n' });
         await edit.execute('packed-delivery-edit', { path: 'src/authored.rs', edits: [{ oldText: 'written', newText: 'edited' }] });
+        await setExecutable.execute('packed-delivery-mode', { path: 'src/authored.rs', executable: true });
         await approvedCommand.execute('packed-delivery-command', { command_id: 'CMD-U1-1' });
-        if (readFileSync(join(deliveryFixture.worktree, 'src/authored.rs'), 'utf8') !== 'edited\n') fail('delivery V5 policy tools did not effect the sole mutable authored leaf exactly');
+        if (readFileSync(join(deliveryFixture.worktree, 'src/authored.rs'), 'utf8') !== 'edited\n' || (lstatSync(join(deliveryFixture.worktree, 'src/authored.rs')).mode & 0o7777) !== 0o755) fail('delivery V5 policy tools did not effect the sole mutable authored leaf exactly');
       }
       const raw = validPayload(expectedBoundary);
       let prepared;

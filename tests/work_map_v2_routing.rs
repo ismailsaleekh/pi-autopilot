@@ -65,7 +65,13 @@ fn planning_recovery_profiles_are_exactly_read_only_without_changing_other_route
         let resolved = drivers::runner::resolve_role_tools("recovery-engineer", profile)
             .expect("planning recovery tools");
         assert_eq!(resolved.active, read_only, "{profile} active tools");
-        for forbidden in ["autopilot_run_approved_command", "edit", "write", "bash"] {
+        for forbidden in [
+            "autopilot_run_approved_command",
+            "autopilot_set_executable",
+            "edit",
+            "write",
+            "bash",
+        ] {
             assert!(
                 !resolved.active.iter().any(|tool| tool == forbidden),
                 "{profile} must not activate {forbidden}"
@@ -85,6 +91,7 @@ fn planning_recovery_profiles_are_exactly_read_only_without_changing_other_route
             "autopilot_run_approved_command",
             "edit",
             "write",
+            "autopilot_set_executable",
             "autopilot_emit_status",
         ]
     );

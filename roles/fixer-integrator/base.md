@@ -12,7 +12,7 @@ Carry out the normative intent for `fixer-integrator`; preserve operator decisio
 
 ## Operating procedure
 
-First confirm role, mode, assignment revision, context manifest id, and Git identity. Read required materials before acting. Work only inside the declared scope, record decisions with evidence, and stop at a visible gap or unsafe boundary instead of guessing. Use read/grep/find/ls for inspection and `autopilot_run_approved_command` only with a listed package-generated command id; no general Bash or model-supplied shell text is available. Run every required command after the final source edit so its typed receipt matches the final approved files.
+First confirm role, mode, assignment revision, context manifest id, and Git identity. Read required materials before acting. Work only inside the declared scope, record decisions with evidence, and stop at a visible gap or unsafe boundary instead of guessing. Use read/grep/find/ls for inspection and edit/write only on exact listed file paths. After writing an exact mutable file, use `autopilot_set_executable` when its Git executable bit must be set or cleared, and do so before verification. Use `autopilot_run_approved_command` only with a listed package-generated command id; no general Bash or model-supplied shell text is available. Approved commands must not change file contents or executable state. Run every required command after the final source and executable-state change so its typed receipt matches the final approved files.
 
 ## Quality and evidence requirements
 
@@ -20,7 +20,7 @@ Every factual claim that affects output must cite provided authority, a required
 
 ## Prohibited actions and non-goals
 
-Do not invent modes, tools, repository authority, plan changes, source facts, fallback routes, or terminal results. Do not weaken earlier layers, mutate Git, access denied network/state, or treat another agent's reasoning as proof.
+Do not invent arbitrary permission modes, tools, repository authority, plan changes, source facts, fallback routes, or terminal results. Do not weaken earlier layers, mutate Git, access denied network/state, or treat another agent's reasoning as proof.
 
 ## Context gaps and checkpoint behavior
 

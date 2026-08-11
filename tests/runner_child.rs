@@ -3244,7 +3244,12 @@ fn delivery_child_first_terminal_blocked_attempt_writes_blocked_carrier_without_
     assert_eq!(audit["delivery_policy"]["cwd"], spec_json["cwd"]);
     assert_eq!(
         audit["delivery_policy"]["active_overrides"],
-        json!(["autopilot_run_approved_command", "edit", "write"])
+        json!([
+            "autopilot_run_approved_command",
+            "edit",
+            "write",
+            "autopilot_set_executable"
+        ])
     );
     assert_eq!(
         audit["delivery_policy"]["denials"],
@@ -6349,7 +6354,7 @@ function deliveryPolicyReceipt() {{
     policy_digest:sha256HexBytes(Buffer.from(`autopilot.delivery_tool_policy.v4\0${{assignmentPath}}\0${{assignmentDigest}}\0${{worktree}}\0${{cwd}}`, 'utf8')),
     allowed_unit_file_count:new Set(artifact.ordered_units.flatMap(unit => unit.files)).size,
     approved_command_count:artifact.approved_commands.length,
-    active_overrides:['autopilot_run_approved_command','edit','write'],
+    active_overrides:['autopilot_run_approved_command','edit','write','autopilot_set_executable'],
   }};
   if (typeof driftDeliveryPolicyReceiptAuthority !== 'undefined' && driftDeliveryPolicyReceiptAuthority) receipt.assignment_digest = `drift-${{assignmentDigest}}`;
   return receipt;

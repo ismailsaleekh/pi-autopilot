@@ -4894,7 +4894,7 @@ pub struct HostToCoreTaskCompletedPayload {
 pub const CONTRACT_SCHEMA: &str = "autopilot.contracts.v1";
 pub const CONTRACT_VERSION: u64 = 1;
 pub const CHILD_ADDON_DIGEST: &str =
-    "12a7a176e69eccf5912c1ad8f652cd085c2f1eaaa374f232b7ac8b913cdc3bc9";
+    "e502d559b2ae7548f1de09f759bcbab9e3eea794729f38aa4a34a630fb741ab8";
 
 pub const CHILD_RUNTIME_ENTRY: &str = "child-runtime/child-extension-runtime.ts";
 

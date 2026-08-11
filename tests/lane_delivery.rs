@@ -325,6 +325,41 @@ fn lane_delivery_packages_quoted_unicode_space_and_nested_paths_exactly() {
     assert_eq!(actual, expected_paths);
 }
 
+#[cfg(unix)]
+#[test]
+fn lane_delivery_packages_worker_authored_executable_as_git_mode_100755() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = fixture("worker-authored-executable");
+    let vcs = GitVcs::new(&fixture.root);
+    let source = fixture.root.join("source");
+    let base = Sha(vcs.init_fixture(&source).expect("seed repo"));
+    let worktree = fixture.root.join("worktree");
+    vcs.prepare(&worktree, &source, &base.0, &["bin/run.sh"])
+        .expect("runner worktree");
+    let worktree = fs::canonicalize(worktree).expect("canonical worktree");
+    fs::create_dir_all(worktree.join("bin")).expect("script parent");
+    let script = worktree.join("bin/run.sh");
+    fs::write(&script, "#!/bin/sh\nexit 0\n").expect("script bytes");
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("script mode");
+
+    let expected = expectation(&worktree, &base, 2);
+    let mut result = delivery(&expected, None, None);
+    result.actual_changed_paths = vec![ContractPath("bin/run.sh".to_owned())];
+    let package = establish_delivery_package(&result, &expected).expect("executable package");
+    let tree_entry = git_stdout(
+        &worktree,
+        &["ls-tree", &package.package_commit.0, "--", "bin/run.sh"],
+    );
+    assert!(
+        tree_entry.starts_with("100755 blob "),
+        "worker-authored executable mode was not preserved: {tree_entry}"
+    );
+    let accepted = accept_delivery_with_package_facts(&[result], &expected, &package)
+        .expect("executable delivery accepted");
+    assert_eq!(accepted.changed_paths, ["bin/run.sh"]);
+}
+
 #[test]
 fn lane_delivery_agent_git_mutation_and_incomplete_delivery_are_refused_without_side_effects() {
     let fixture = fixture("negative-delivery");
@@ -817,8 +852,13 @@ fn lane_delivery_core_rejects_tool_audit_policy_authority_drift_after_digest_upd
     );
     let mut audit: serde_json::Value =
         serde_json::from_slice(&original_audit_bytes).expect("tool audit json");
-    audit["delivery_policy"]["active_overrides"] =
-        serde_json::json!(["autopilot_run_approved_command", "edit", "write", "read"]);
+    audit["delivery_policy"]["active_overrides"] = serde_json::json!([
+        "autopilot_run_approved_command",
+        "edit",
+        "write",
+        "autopilot_set_executable",
+        "read"
+    ]);
     let mutated_audit_bytes = serde_json::to_vec_pretty(&audit).expect("mutated audit");
     fs::write(&audit_path, &mutated_audit_bytes).expect("audit rewrite");
     carrier["tool_audit_digest"] = serde_json::json!(sha256_hex(&mutated_audit_bytes));
@@ -2789,7 +2829,7 @@ fn delivery_carrier_for_core_path(
                 &typed.worktree.as_ref().expect("worktree").0,
                 &typed.cwd.0,
             ),
-            "active_overrides":[drivers::runner::APPROVED_COMMAND_TOOL,"edit","write"],
+            "active_overrides":[drivers::runner::APPROVED_COMMAND_TOOL,"edit","write",drivers::runner::SET_EXECUTABLE_TOOL],
             "denials":{"schema":"autopilot.delivery_policy_denials.v2","overflowed":false,"entries":[]},
             "command_executions":command_executions,
         },
@@ -2892,7 +2932,7 @@ fn delivery_blocked_carrier_for_core_with_class_and_denials(
                 &typed.worktree.as_ref().expect("worktree").0,
                 &typed.cwd.0,
             ),
-            "active_overrides":[drivers::runner::APPROVED_COMMAND_TOOL,"edit","write"],
+            "active_overrides":[drivers::runner::APPROVED_COMMAND_TOOL,"edit","write",drivers::runner::SET_EXECUTABLE_TOOL],
             "denials":{"schema":"autopilot.delivery_policy_denials.v2","overflowed":false,"entries":denials},
             "command_executions":{"schema":"autopilot.approved_command_executions.v1","overflowed":false,"entries":[]},
         },

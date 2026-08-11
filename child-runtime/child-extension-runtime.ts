@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync } from "node:fs";
+import { closeSync, constants, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync } from "node:fs";
 import { access, readFile, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,7 +13,8 @@ import type { SubmitToolDescriptor, UniversalChildToolDescriptor } from "../src/
 
 export const CHILD_RECEIPT_ENTRY = "pi-autopilot:child-tools"; export const DELIVERY_POLICY_VERSION = "autopilot.delivery_tool_policy.v4";
 export const DELIVERY_POLICY_V5_VERSION = "autopilot.delivery_tool_policy.v5"; export const APPROVED_COMMAND_TOOL = "autopilot_run_approved_command";
-export const DELIVERY_POLICY_OVERRIDES = [APPROVED_COMMAND_TOOL, "edit", "write"] as const;
+export const SET_EXECUTABLE_TOOL = "autopilot_set_executable";
+export const DELIVERY_POLICY_OVERRIDES = [APPROVED_COMMAND_TOOL, "edit", "write", SET_EXECUTABLE_TOOL] as const;
 
 const DELIVERY_PROFILE_ID = "delivery-status.v2", VALIDATION_PROFILE_ID = "validation-status.v3";
 const MAX_DELIVERY_ASSIGNMENT_BYTES = 256 * 1024, MAX_CORE_MATERIALIZATION_RECEIPT_BYTES = 512 * 1024, MAX_DELIVERY_POLICY_DENIALS = 32, MAX_APPROVED_COMMAND_EXECUTIONS = 64, MAX_SCOPE_SNAPSHOT_FILE_BYTES = 64 * 1024 * 1024, MAX_SCOPE_SNAPSHOT_TOTAL_BYTES = 256 * 1024 * 1024;
@@ -47,15 +48,10 @@ type DeliveryEnv = Record<(typeof DELIVERY_ENV_KEYS)[number], string>;
 type ValidationEnv = Record<(typeof VALIDATION_ENV_KEYS)[number], string>;
 type ValidationCitation = {
   evidence_ref: string; kind: string; source_path?: string | null; blob_digest?: string | null;
-  line_count?: number | null; diff_digest?: string | null; diff_path?: string | null;
-};
-type ValidationContext = {
-  schema: string; authority_digest: string; citation_records: ValidationCitation[];
-};
+  line_count?: number | null; diff_digest?: string | null; diff_path?: string | null };
+type ValidationContext = { schema: string; authority_digest: string; citation_records: ValidationCitation[] };
 type ValidationEvidenceReceipt = {
-  context_path: string; context_digest: string; cwd: string; evidence_count: number;
-  active_override: "read";
-};
+  context_path: string; context_digest: string; cwd: string; evidence_count: number; active_override: "read" };
 
 type CoreBaselineLeaf = { destination: string; unit_id: string; kind: string; binding_id: string | null; mode: string; bytes_sha256: string; origin_path: string | null };
 type VendorBinding = { binding_id: string; origin_path: string; destination: string };
@@ -70,65 +66,38 @@ type DeliveryAssignmentArtifact = {
 };
 
 type DeliveryApprovedCommandBinding = {
-  command_id: string;
-  unit_id: string;
-  command_ordinal: number;
-  command_digest: string;
+  command_id: string; unit_id: string; command_ordinal: number; command_digest: string;
 };
 
-type ApprovedCommand = DeliveryApprovedCommandBinding & {
-  command: string;
-  expected: string;
-};
+type ApprovedCommand = DeliveryApprovedCommandBinding & { command: string; expected: string };
 
 type DeliveryPackageCheck = { check_id: string; kind: "clean-exact-package-tip";
   criterion_ordinals: number[]; expected: string };
 type DeliveryUnit = {
-  id: string; kind: string;
-  files: string[]; commands: Array<{ command: string; expected: string }>;
+  id: string; kind: string; files: string[]; commands: Array<{ command: string; expected: string }>;
   package_checks: DeliveryPackageCheck[];
 };
 
 type DeliveryPolicyDenial = {
-  denial_id: string;
-  kind: "unapproved-command";
-  tool: typeof APPROVED_COMMAND_TOOL;
-  request_digest: string;
-  effected: false;
-};
-
-type DeliveryPolicyDenialLedger = {
-  schema: "autopilot.delivery_policy_denials.v2";
-  overflowed: boolean;
-  entries: DeliveryPolicyDenial[];
-};
-
+  denial_id: string; kind: "unapproved-command"; tool: typeof APPROVED_COMMAND_TOOL;
+  request_digest: string; effected: false };
+type DeliveryPolicyDenialLedger = { schema: "autopilot.delivery_policy_denials.v2"; overflowed: boolean;
+  entries: DeliveryPolicyDenial[] };
 type ApprovedCommandExecution = {
-  execution_id: string;
-  command_id: string;
-  command_digest: string;
-  outcome: "succeeded" | "failed";
-  result_digest: string;
-  scope_snapshot_digest: string;
-};
-
+  execution_id: string; command_id: string; command_digest: string;
+  outcome: "succeeded" | "failed"; result_digest: string; scope_snapshot_digest: string };
 type ApprovedCommandExecutionLedger = {
-  schema: "autopilot.approved_command_executions.v1";
-  overflowed: boolean;
-  entries: ApprovedCommandExecution[];
+  schema: "autopilot.approved_command_executions.v1"; overflowed: boolean; entries: ApprovedCommandExecution[];
 };
 
 type DeliveryPolicyReceipt = {
   version: string; assignment_path: string; assignment_digest: string; worktree: string; cwd: string;
   policy_digest: string; allowed_unit_file_count: number; approved_command_count: number; active_overrides: string[];
-  mutable_authored_leaf_count?: number; protected_core_leaf_count?: number; baseline_digest?: string;
-};
+  mutable_authored_leaf_count?: number; protected_core_leaf_count?: number; baseline_digest?: string };
 
 export class ValidationReadPolicy {
-  readonly files: Map<string, string>;
-  readonly contextPath: string;
-  readonly contextDigest: string;
-  readonly cwd: string;
+  readonly files: Map<string, string>; readonly contextPath: string;
+  readonly contextDigest: string; readonly cwd: string;
   constructor(contextPath: string, contextDigest: string, cwd: string, citations: ValidationCitation[]) {
     this.contextPath = contextPath;
     this.contextDigest = contextDigest;
@@ -183,51 +152,32 @@ export class ValidationReadPolicy {
 
 class SerialPolicyQueue {
   private current: Promise<void> = Promise.resolve();
-
   run<T>(operation: () => T | Promise<T>): Promise<T> {
     const next = this.current.catch(() => undefined).then(() => Promise.resolve(operation()));
-    this.current = next.then(
-      () => undefined,
-      () => undefined,
-    );
+    this.current = next.then(() => undefined, () => undefined);
     return next;
   }
 }
 
 export class DeliveryPolicy {
-  readonly assignmentPath: string;
-  readonly assignmentDigest: string;
-  readonly worktree: string;
-  readonly cwd: string;
-  readonly policyDigest: string;
-  readonly version: string;
-  readonly allowedRelativePaths: Set<string>;
-  readonly protectedRelativePaths: Set<string>;
-  readonly snapshotRelativePaths: Set<string>;
-  readonly baselineDigest: string | undefined;
+  readonly assignmentPath: string; readonly assignmentDigest: string;
+  readonly worktree: string; readonly cwd: string; readonly policyDigest: string; readonly version: string;
+  readonly allowedRelativePaths: Set<string>; readonly protectedRelativePaths: Set<string>;
+  readonly snapshotRelativePaths: Set<string>; readonly baselineDigest: string | undefined;
   readonly allowedAbsolutePaths: Set<string>; readonly allowedParentDirectories: Set<string>;
   readonly snapshotAbsolutePaths: Set<string>; readonly snapshotParentDirectories: Set<string>;
-  readonly approvedCommands: Map<string, ApprovedCommand>;
-  readonly approvedCommandBytes: Set<string>;
+  readonly approvedCommands: Map<string, ApprovedCommand>; readonly approvedCommandBytes: Set<string>;
   readonly queue = new SerialPolicyQueue();
-  readonly denialEntries: DeliveryPolicyDenial[] = [];
-  readonly executionEntries: ApprovedCommandExecution[] = [];
-  denialOverflowed = false;
-  executionOverflowed = false;
+  readonly denialEntries: DeliveryPolicyDenial[] = []; readonly executionEntries: ApprovedCommandExecution[] = [];
+  denialOverflowed = false; executionOverflowed = false;
 
   constructor(input: {
-    assignmentPath: string;
-    assignmentDigest: string;
-    worktree: string;
-    cwd: string;
+    assignmentPath: string; assignmentDigest: string; worktree: string; cwd: string;
     policyDigest: string; version: string; allowedRelativePaths: Set<string>;
-    protectedRelativePaths: Set<string>; baselineDigest?: string;
-    approvedCommands: Map<string, ApprovedCommand>;
+    protectedRelativePaths: Set<string>; baselineDigest?: string; approvedCommands: Map<string, ApprovedCommand>;
   }) {
-    this.assignmentPath = input.assignmentPath;
-    this.assignmentDigest = input.assignmentDigest;
-    this.worktree = input.worktree;
-    this.cwd = input.cwd;
+    this.assignmentPath = input.assignmentPath; this.assignmentDigest = input.assignmentDigest;
+    this.worktree = input.worktree; this.cwd = input.cwd;
     this.policyDigest = input.policyDigest;
     this.version = input.version;
     this.allowedRelativePaths = input.allowedRelativePaths;
@@ -367,7 +317,7 @@ export function registerDeliveryPolicyTools(pi: ExtensionAPI, policy: DeliveryPo
     promptGuidelines: [
       "Pass only a command_id listed in the delivery assignment; never provide shell text.",
       "Use read, grep, find, and ls for inspection. This tool is only for approved verification commands.",
-      "Verification only: never bootstrap, author, copy, vendor, regenerate, repair, or implement files.",
+      "Verification only: never bootstrap, author, copy, vendor, regenerate, repair, change executable state, or implement files.",
     ],
     parameters: Type.Object(
       { command_id: Type.String({ description: "Package-generated approved command identifier" }) },
@@ -447,6 +397,33 @@ export function registerDeliveryPolicyTools(pi: ExtensionAPI, policy: DeliveryPo
       return policy.queue.run(() => writeTool.execute(id, params, signal, onUpdate, ctx));
     },
   });
+  pi.registerTool(defineTool({
+    name: SET_EXECUTABLE_TOOL,
+    label: "Set executable",
+    description: "Set or clear the Git executable bit on one exact mutable delivery file.",
+    promptSnippet: "Set an authored delivery file executable or non-executable before verification",
+    promptGuidelines: [
+      "Write the exact authorized file first, then set its executable state during implementation.",
+      "Never use a verification command or script to change file permissions.",
+    ],
+    parameters: Type.Object({
+      path: Type.String({ description: "Exact assignment-relative mutable file path" }),
+      executable: Type.Boolean({ description: "true for 100755; false for 100644" }),
+    }, { additionalProperties: false }),
+    async execute(_id, params) {
+      if (params === null || typeof params !== "object" || Object.keys(params).length !== 2 ||
+        typeof params.path !== "string" || typeof params.executable !== "boolean") {
+        throw new Error("Executable tool requires exactly path and executable");
+      }
+      const relativePath = params.path, executable = params.executable;
+      assertRawMutationPath(policy, { path: relativePath });
+      return policy.queue.run(() => {
+        const mode = setExecutableMode(policy, relativePath, executable);
+        return { content: [{ type: "text" as const, text: `Set ${relativePath} to ${mode}` }],
+          details: { path: relativePath, executable, mode } };
+      });
+    },
+  }));
 }
 
 function selectedTerminalTool(tools: SubmitTools): SubmitToolDescriptor {
@@ -723,6 +700,28 @@ export function createDeliveryWriteOperations(policy: DeliveryPolicy): WriteOper
       await writeFile(absolutePath, content, "utf8");
     },
   };
+}
+
+function setExecutableMode(policy: DeliveryPolicy, relativePath: string, executable: boolean): string {
+  const absolutePath = path.resolve(policy.worktree, relativePath);
+  assertMutationTopology(policy, absolutePath, true);
+  const descriptor = openSync(absolutePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const targetMode = executable ? 0o755 : 0o644;
+  try {
+    const opened = fstatSync(descriptor);
+    if (!opened.isFile()) throw new Error("Executable tool requires a regular file");
+    assertMutationTopology(policy, absolutePath, true);
+    const current = lstatSync(absolutePath);
+    if (opened.dev !== current.dev || opened.ino !== current.ino)
+      throw new Error("Executable tool target changed during authorization");
+    fchmodSync(descriptor, targetMode);
+    if ((fstatSync(descriptor).mode & 0o7777) !== targetMode) {
+      throw new Error("Executable tool could not establish the exact Git mode");
+    }
+    return executable ? "100755" : "100644";
+  } finally {
+    closeSync(descriptor);
+  }
 }
 
 function assertRawMutationPath(policy: DeliveryPolicy, params: unknown): void {

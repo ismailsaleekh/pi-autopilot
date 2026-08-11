@@ -10236,7 +10236,13 @@ fn validate_delivery_tool_audit_policy(
         || policy.worktree != worktree.0
         || policy.cwd != spec.cwd.0
         || policy.policy_digest != expected_policy_digest
-        || policy.active_overrides != [runner::APPROVED_COMMAND_TOOL, "edit", "write"]
+        || policy.active_overrides
+            != [
+                runner::APPROVED_COMMAND_TOOL,
+                "edit",
+                "write",
+                runner::SET_EXECUTABLE_TOOL,
+            ]
     {
         return Err("delivery tool audit policy authority drift".to_owned());
     }
