@@ -18,14 +18,14 @@
         "builtBinaryPath": "/Users/lizavasilyeva/work/ai-pipeline/packages/pi-autopilot/target/aarch64-apple-darwin/release/autopilot-core",
         "method": "current-host-target-release-only",
         "packagedBinaryPath": "/Users/lizavasilyeva/work/ai-pipeline/packages/pi-autopilot/binaries/darwin-arm64/autopilot-core",
-        "sourceHash": "1b102f5986acbd74ad6a575bd047c05cac9500ac2c57a561bf86ec37c9f77523",
-        "stderrSha256": "ba6060f62de6f2d2f80ecfee405db45acb89c1529663d063fcc70e94215a6afb",
+        "sourceHash": "3fe417b158c6a8d7155e892cf9beeb43d2789ec7c6e7b52b48c4caeb89bcbd4c",
+        "stderrSha256": "876ca643962f692ced0e63235e15ab223535f352ef22519c9d2e4b2719d657ee",
         "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
       },
       "path": "binaries/darwin-arm64/autopilot-core",
-      "sha256": "e957f69049b94b9a33cd388daa985210591a56c6b14e9dec460146b191b75ea0",
-      "sizeBytes": 9740016,
-      "sourceHash": "1b102f5986acbd74ad6a575bd047c05cac9500ac2c57a561bf86ec37c9f77523",
+      "sha256": "b1d1849f5ebc8fe2320928fcbfaa06ae411bac290df31febe75f491ec4fa6751",
+      "sizeBytes": 9739536,
+      "sourceHash": "3fe417b158c6a8d7155e892cf9beeb43d2789ec7c6e7b52b48c4caeb89bcbd4c",
       "target": "aarch64-apple-darwin"
     },
     "darwin-x64": {
@@ -53,7 +53,7 @@
       "target": "x86_64-unknown-linux-musl"
     }
   },
-  "generatedAt": "2026-08-11T09:34:36Z",
+  "generatedAt": "2026-08-11T09:51:36Z",
   "schema": 1,
   "source": {
     "directories": [
@@ -69,7 +69,7 @@
       "Cargo.lock",
       "rust-toolchain.toml"
     ],
-    "hash": "1b102f5986acbd74ad6a575bd047c05cac9500ac2c57a561bf86ec37c9f77523",
+    "hash": "3fe417b158c6a8d7155e892cf9beeb43d2789ec7c6e7b52b48c4caeb89bcbd4c",
     "hashAlgorithm": "sha256(path-nul-content-nul over build-affecting tracked and untracked inputs)"
   }
 }
