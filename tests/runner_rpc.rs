@@ -601,6 +601,54 @@ pathlib.Path({launch:?}).write_text('launched')
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn runner_rpc_v5_refuses_a_session_directory_symlink_before_controlled_spawn() {
+    use std::os::unix::fs::symlink;
+
+    let root = temp_root("runner-rpc-v5-session-symlink");
+    let (_listener, socket) = control_socket();
+    let launch = root.join("launch-should-not-exist");
+    write_fake_pi(
+        &root,
+        &format!(
+            r#"#!/usr/bin/env python3
+import pathlib, sys
+if '--version' in sys.argv:
+    print('0.84.1')
+    sys.exit(0)
+pathlib.Path({launch:?}).write_text('launched')
+"#
+        ),
+    );
+    let redirected = root.join("redirected-sessions");
+    fs::create_dir(&redirected).expect("redirected session directory");
+    let linked = root.join("linked-sessions");
+    symlink(&redirected, &linked).expect("session directory symlink");
+    let mut config = test_spawn_config(&root);
+    config.session_dir = linked;
+    config.pi_executable = root.join("pi").into_os_string();
+    config.runtime_addon = Some(root.join("child-addon.ts"));
+    config.terminal_profile = Some("planning.task-atoms.v1:autopilot_submit_atoms".to_owned());
+    config.carrier_binding = Some("binding".to_owned());
+    config.child_control = Some(ChildControlLaunchConfig {
+        socket_path: socket,
+        token: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
+        run_id: "019fa883-1eaf-75f9-99af-6aa246736f72".to_owned(),
+        assignment_id: "planning-main-task-extractor-01".to_owned(),
+        attempt: NonZeroU32::new(1).expect("nonzero"),
+        required_pi_version: "0.84.1".to_owned(),
+    });
+    assert!(matches!(
+        RpcClient::spawn(config),
+        Err(RpcError::Io(detail)) if detail.contains("path link component refused")
+    ));
+    assert!(
+        !launch.exists(),
+        "session symlink launched a controlled child"
+    );
+}
+
 #[test]
 fn launch_arguments_include_explicit_child_addon_once() {
     let root = temp_root("runner-launch-addon");

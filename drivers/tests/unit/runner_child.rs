@@ -1,6 +1,32 @@
 use super::*;
 
 #[test]
+fn checkpoint_store_pins_the_session_parent_and_pending_scope_uses_the_assignment() {
+    let source = include_str!("../../src/runner/child.rs");
+    assert!(source.contains("let run_root = fs::canonicalize(session_parent)"));
+    assert!(!source.contains("fs::canonicalize(session_path)"));
+    assert!(
+        source.contains("format!(\"{}\\0{}\", spec.run_id.0, spec.assignment_id.0).as_bytes()")
+    );
+    assert!(
+        !source
+            .contains("format!(\"{}\\0{}\", spec.assignment_id.0, spec.session_id.0).as_bytes()")
+    );
+}
+
+#[test]
+fn checkpoint_pending_rename_not_found_restarts_the_whole_authority_scan() {
+    let source = include_str!("../../src/runner/child.rs");
+    assert!(
+        source.contains(
+            "if error.kind() == std::io::ErrorKind::NotFound && pending_scope.is_some() =>"
+        )
+    );
+    assert!(source.contains("continue 'rescan;"));
+    assert!(!source.contains("pending_scope.is_some() => continue,"));
+}
+
+#[test]
 fn terminal_byte_override_cannot_widen_the_generated_hard_ceiling() {
     let ceiling = crate::generated::pi_rpc::DEFAULT_MAX_TERMINAL_BYTES;
     assert_eq!(bounded_terminal_limit(1), Ok(1));
@@ -133,7 +159,10 @@ fn blocked_observation_emits_exact_wire_and_accepts_only_clean_eof() {
             result.expect("clean EOF is private-peer completion");
         } else {
             let error = result.expect_err("child-visible payload is protocol drift");
-            assert!(error.contains("child-visible protocol payload"), "{label}: {error}");
+            assert!(
+                error.contains("child-visible protocol payload"),
+                "{label}: {error}"
+            );
         }
         server.join().expect("observation server");
         std::fs::remove_file(socket).expect("observation socket cleanup");

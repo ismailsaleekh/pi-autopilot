@@ -124,12 +124,20 @@ impl RpcClient {
         } else {
             None
         };
+        if config.child_control.is_some() {
+            super::reject_link_components_for_path(&config.session_dir)
+                .map_err(|error| RpcError::Io(error.to_string()))?;
+        }
         std::fs::create_dir_all(&config.session_dir).map_err(|error| {
             RpcError::Io(format!(
                 "run-owned pi session directory unavailable at {}: {error}",
                 config.session_dir.display()
             ))
         })?;
+        if config.child_control.is_some() {
+            super::reject_link_components_for_path(&config.session_dir)
+                .map_err(|error| RpcError::Io(error.to_string()))?;
+        }
         let mut command = Command::new(&config.pi_executable);
         command
             .current_dir(&config.cwd)

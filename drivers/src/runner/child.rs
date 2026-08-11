@@ -374,7 +374,7 @@ pub fn main(args: &[String]) -> Result<(), String> {
         let control = super::v5_child_control_launch_config(&fresh)
             .map_err(|error| format!("agent-run V5 child-control authority drift: {error}"))?;
         validate_receipt_v1_spec(&facade, &spec_path)?;
-        validate_v5_checkpoint_startup(&fresh)?;
+        let checkpoint_store = validate_v5_checkpoint_startup(&fresh)?;
         let prompt_path = PathBuf::from(&facade.prompt_path.0);
         let prompt = read_bounded_utf8(
             &prompt_path,
@@ -389,7 +389,8 @@ pub fn main(args: &[String]) -> Result<(), String> {
             ));
         }
         let mut runner = RpcAssignment::spawn_and_configure_v5(&facade, control.clone())?;
-        let result = run_v5_child_control_session(&mut runner, &facade, &fresh, &prompt);
+        let result =
+            run_v5_child_control_session(&mut runner, &facade, &fresh, &checkpoint_store, &prompt);
         match result {
             Ok(V5AcceptedTerminal::Submit) => runner.shutdown_v5(),
             Ok(V5AcceptedTerminal::Blocked {
@@ -474,6 +475,12 @@ struct V5CheckpointRef {
     digest: String,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct V5CheckpointStore {
+    run_root: PathBuf,
+    directory: PathBuf,
+}
+
 impl V5CycleState {
     fn new(prompt_id: String) -> Self {
         Self {
@@ -502,6 +509,7 @@ fn run_v5_child_control_session(
     runner: &mut RpcAssignment,
     facade: &AgentRunSpec,
     fresh: &AgentRunSpecV5,
+    checkpoint_store: &V5CheckpointStore,
     prompt: &str,
 ) -> Result<V5AcceptedTerminal, String> {
     let mut warning_sent = false;
@@ -763,7 +771,8 @@ fn run_v5_child_control_session(
                             }
                             runner.verify_settled_queue_state(facade)?;
                             let checkpoint = runner.checkpoint_record(facade, observed, handoff)?;
-                            let checkpoint_ref = persist_v5_checkpoint(fresh, &receipt)?;
+                            let checkpoint_ref =
+                                persist_v5_checkpoint(checkpoint_store, fresh, &receipt)?;
                             runner.manual_compact(&checkpoint)?;
                             runner.verify_post_compact_state(facade)?;
                             let resume = runner.resume_prompt(
@@ -1116,78 +1125,41 @@ fn context_budget_from_stats(
     }
 }
 
-fn validate_v5_checkpoint_startup(spec: &AgentRunSpecV5) -> Result<(), String> {
+fn validate_v5_checkpoint_startup(spec: &AgentRunSpecV5) -> Result<V5CheckpointStore, String> {
     let session_path = Path::new(&spec.session_dir.0);
-    let run_root = match fs::canonicalize(session_path) {
-        Ok(session_dir) => session_dir
-            .parent()
-            .ok_or_else(|| "agent-run V5 checkpoint session directory has no run root".to_owned())?
-            .to_path_buf(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let parent = session_path.parent().ok_or_else(|| {
-                "agent-run V5 checkpoint session directory has no run root".to_owned()
-            })?;
-            fs::canonicalize(parent).map_err(|parent_error| {
-                format!(
-                    "agent-run V5 checkpoint run root unavailable at {}: {parent_error}",
-                    parent.display()
-                )
-            })?
-        }
-        Err(error) => {
-            return Err(format!(
-                "agent-run V5 checkpoint session directory unavailable at {}: {error}",
-                spec.session_dir.0
-            ));
-        }
-    };
-    let directory = run_root.join("checkpoints");
-    super::reject_link_components_for_path(&directory).map_err(|error| error.to_string())?;
-    match fs::symlink_metadata(&directory) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Ok(metadata) if metadata.file_type().is_dir() => {
-            let continuity = match &spec.session_continuity {
-                SessionContinuity::Fresh => "fresh",
-                SessionContinuity::Resume => "resume",
-            };
-            Err(format!(
-                "agent-run V5 {continuity} startup found prior checkpoint authority; refusing original-prompt replay and requiring an explicit checkpoint-derived recovery path"
-            ))
-        }
-        Ok(_) => Err(format!(
-            "agent-run V5 checkpoint root is not a directory: {}",
-            directory.display()
-        )),
-        Err(error) => Err(format!(
-            "agent-run V5 checkpoint root metadata failed {}: {error}",
-            directory.display()
-        )),
-    }
-}
-
-fn persist_v5_checkpoint(
-    spec: &AgentRunSpecV5,
-    receipt: &CheckpointReceipt,
-) -> Result<V5CheckpointRef, String> {
-    if !is_uuid_v7(&receipt.receipt_id.0) {
-        return Err("agent-run V5 checkpoint persistence requires a UUIDv7 receipt".to_owned());
-    }
-    let bytes = crate::evidence::canonical_json(receipt)
-        .map_err(|error| format!("agent-run V5 checkpoint canonicalization failed: {error}"))?;
-    let digest = sha256_hex(&bytes);
-    let session_dir = fs::canonicalize(Path::new(&spec.session_dir.0)).map_err(|error| {
-        format!(
-            "agent-run V5 checkpoint session directory unavailable at {}: {error}",
-            spec.session_dir.0
-        )
-    })?;
-    let run_root = session_dir
+    validate_v5_session_path(session_path)?;
+    let session_parent = session_path
         .parent()
         .ok_or_else(|| "agent-run V5 checkpoint session directory has no run root".to_owned())?;
+    super::reject_link_components_for_path(session_parent).map_err(|error| error.to_string())?;
+    let run_root = fs::canonicalize(session_parent).map_err(|error| {
+        format!(
+            "agent-run V5 checkpoint run root unavailable at {}: {error}",
+            session_parent.display()
+        )
+    })?;
     let directory = run_root.join("checkpoints");
-    super::reject_link_components_for_path(&directory).map_err(|error| error.to_string())?;
-    let mut created_directory = false;
-    match fs::symlink_metadata(&directory) {
+    let store = V5CheckpointStore {
+        run_root,
+        directory: directory.clone(),
+    };
+    ensure_v5_checkpoint_root(&store)?;
+    if !v5_checkpoint_root_contains_assignment_authority(&directory, spec)? {
+        return Ok(store);
+    }
+    let continuity = match &spec.session_continuity {
+        SessionContinuity::Fresh => "fresh",
+        SessionContinuity::Resume => "resume",
+    };
+    Err(format!(
+        "agent-run V5 {continuity} startup found prior checkpoint authority for this assignment; refusing original-prompt replay and requiring an explicit checkpoint-derived recovery path"
+    ))
+}
+
+fn ensure_v5_checkpoint_root(store: &V5CheckpointStore) -> Result<(), String> {
+    let directory = &store.directory;
+    super::reject_link_components_for_path(directory).map_err(|error| error.to_string())?;
+    match fs::symlink_metadata(directory) {
         Ok(metadata) if metadata.file_type().is_dir() => {}
         Ok(_) => {
             return Err(format!(
@@ -1199,13 +1171,16 @@ fn persist_v5_checkpoint(
             let mut builder = fs::DirBuilder::new();
             #[cfg(unix)]
             builder.mode(0o700);
-            builder.create(&directory).map_err(|error| {
-                format!(
-                    "agent-run V5 checkpoint root create failed {}: {error}",
-                    directory.display()
-                )
-            })?;
-            created_directory = true;
+            match builder.create(directory) {
+                Ok(()) => {}
+                Err(create_error) if create_error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(create_error) => {
+                    return Err(format!(
+                        "agent-run V5 checkpoint root create failed {}: {create_error}",
+                        directory.display()
+                    ));
+                }
+            }
         }
         Err(error) => {
             return Err(format!(
@@ -1214,39 +1189,265 @@ fn persist_v5_checkpoint(
             ));
         }
     }
-    super::reject_link_components_for_path(&directory).map_err(|error| error.to_string())?;
-    if created_directory {
-        fs::File::open(run_root)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|error| {
-                format!(
-                    "agent-run V5 checkpoint run-root fsync failed {}: {error}",
-                    run_root.display()
-                )
-            })?;
+    super::reject_link_components_for_path(directory).map_err(|error| error.to_string())?;
+    let metadata = fs::symlink_metadata(directory).map_err(|error| {
+        format!(
+            "agent-run V5 checkpoint root verification failed {}: {error}",
+            directory.display()
+        )
+    })?;
+    if !metadata.file_type().is_dir() {
+        return Err(format!(
+            "agent-run V5 checkpoint root is not a directory: {}",
+            directory.display()
+        ));
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).map_err(|error| {
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).map_err(|error| {
             format!(
                 "agent-run V5 checkpoint root private mode failed {}: {error}",
                 directory.display()
             )
         })?;
     }
+    fs::File::open(&store.run_root)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| {
+            format!(
+                "agent-run V5 checkpoint run-root fsync failed {}: {error}",
+                store.run_root.display()
+            )
+        })
+}
+
+fn validate_v5_session_path(session_path: &Path) -> Result<(), String> {
+    super::reject_link_components_for_path(session_path).map_err(|error| error.to_string())?;
+    match fs::symlink_metadata(session_path) {
+        Ok(metadata) if metadata.file_type().is_dir() => Ok(()),
+        Ok(_) => Err(format!(
+            "agent-run V5 session path is not a directory: {}",
+            session_path.display()
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let parent = session_path
+                .parent()
+                .ok_or_else(|| "agent-run V5 session path has no parent".to_owned())?;
+            super::reject_link_components_for_path(parent).map_err(|error| error.to_string())?;
+            let metadata = fs::symlink_metadata(parent).map_err(|parent_error| {
+                format!(
+                    "agent-run V5 session parent unavailable at {}: {parent_error}",
+                    parent.display()
+                )
+            })?;
+            if metadata.file_type().is_dir() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "agent-run V5 session parent is not a directory: {}",
+                    parent.display()
+                ))
+            }
+        }
+        Err(error) => Err(format!(
+            "agent-run V5 session path metadata failed {}: {error}",
+            session_path.display()
+        )),
+    }
+}
+
+fn v5_checkpoint_assignment_scope_digest(spec: &AgentRunSpecV5) -> String {
+    sha256_hex(format!("{}\0{}", spec.run_id.0, spec.assignment_id.0).as_bytes())
+}
+
+fn v5_checkpoint_pending_scope(file_name: &str) -> Option<&str> {
+    let value = file_name.strip_prefix(".pending-")?.strip_suffix(".json")?;
+    let (scope, receipt_id) = value.split_once('-')?;
+    (scope.len() == 64
+        && scope
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        && is_uuid_v7(receipt_id))
+    .then_some(scope)
+}
+
+fn v5_checkpoint_root_contains_assignment_authority(
+    directory: &Path,
+    spec: &AgentRunSpecV5,
+) -> Result<bool, String> {
+    'rescan: loop {
+        let entries = fs::read_dir(directory).map_err(|error| {
+            format!(
+                "agent-run V5 checkpoint root read failed {}: {error}",
+                directory.display()
+            )
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                format!(
+                    "agent-run V5 checkpoint root entry failed {}: {error}",
+                    directory.display()
+                )
+            })?;
+            let path = entry.path();
+            let file_name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| {
+                    format!(
+                        "agent-run V5 checkpoint root contains a non-UTF-8 entry: {}",
+                        path.display()
+                    )
+                })?;
+            let pending_scope = v5_checkpoint_pending_scope(file_name);
+            super::reject_link_components_for_path(&path).map_err(|error| error.to_string())?;
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::NotFound && pending_scope.is_some() =>
+                {
+                    continue 'rescan;
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "agent-run V5 checkpoint entry metadata failed {}: {error}",
+                        path.display()
+                    ));
+                }
+            };
+            if !metadata.file_type().is_file() {
+                return Err(format!(
+                    "agent-run V5 checkpoint root contains a non-file entry: {}",
+                    path.display()
+                ));
+            }
+            if let Some(scope) = pending_scope {
+                if scope == v5_checkpoint_assignment_scope_digest(spec) {
+                    return Ok(true);
+                }
+                continue;
+            }
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                return Err(format!(
+                    "agent-run V5 checkpoint root contains an invalid entry: {}",
+                    path.display()
+                ));
+            }
+            let bytes = super::read_bounded_file(&path, 128 * 1024).map_err(|error| {
+                format!(
+                    "agent-run V5 checkpoint authority read failed {}: {error}",
+                    path.display()
+                )
+            })?;
+            let receipt: CheckpointReceipt = serde_json::from_slice(&bytes).map_err(|error| {
+                format!(
+                    "agent-run V5 checkpoint authority malformed {}: {error}",
+                    path.display()
+                )
+            })?;
+            let canonical = crate::evidence::canonical_json(&receipt).map_err(|error| {
+                format!(
+                    "agent-run V5 checkpoint authority canonicalization failed {}: {error}",
+                    path.display()
+                )
+            })?;
+            let expected_name = format!("{}.json", receipt.receipt_id.0);
+            let canonical_handoff =
+                crate::evidence::canonical_json(&receipt.handoff).map_err(|error| {
+                    format!(
+                        "agent-run V5 checkpoint handoff canonicalization failed {}: {error}",
+                        path.display()
+                    )
+                })?;
+            if bytes != canonical
+                || file_name != expected_name
+                || receipt.schema.0 != "autopilot.checkpoint_receipt.v1"
+                || !is_uuid_v7(&receipt.receipt_id.0)
+                || receipt.run_id != spec.run_id
+                || receipt.attempt == 0
+                || receipt.handoff_digest.0 != sha256_hex(&canonical_handoff)
+            {
+                return Err(format!(
+                    "agent-run V5 checkpoint authority identity drift: {}",
+                    path.display()
+                ));
+            }
+            if receipt.assignment_id == spec.assignment_id || receipt.session_id == spec.session_id
+            {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
+    }
+}
+
+fn persist_v5_checkpoint(
+    store: &V5CheckpointStore,
+    spec: &AgentRunSpecV5,
+    receipt: &CheckpointReceipt,
+) -> Result<V5CheckpointRef, String> {
+    if !is_uuid_v7(&receipt.receipt_id.0) {
+        return Err("agent-run V5 checkpoint persistence requires a UUIDv7 receipt".to_owned());
+    }
+    let bytes = crate::evidence::canonical_json(receipt)
+        .map_err(|error| format!("agent-run V5 checkpoint canonicalization failed: {error}"))?;
+    let digest = sha256_hex(&bytes);
+    let directory = &store.directory;
+    super::reject_link_components_for_path(directory).map_err(|error| error.to_string())?;
+    let metadata = fs::symlink_metadata(directory).map_err(|error| {
+        format!(
+            "agent-run V5 checkpoint root disappeared after durable startup {}: {error}",
+            directory.display()
+        )
+    })?;
+    if !metadata.file_type().is_dir() {
+        return Err(format!(
+            "agent-run V5 checkpoint root changed after durable startup: {}",
+            directory.display()
+        ));
+    }
     let path = directory.join(format!("{}.json", receipt.receipt_id.0));
+    let pending_path = directory.join(format!(
+        ".pending-{}-{}.json",
+        v5_checkpoint_assignment_scope_digest(spec),
+        receipt.receipt_id.0
+    ));
     super::reject_link_components_for_path(&path).map_err(|error| error.to_string())?;
+    super::reject_link_components_for_path(&pending_path).map_err(|error| error.to_string())?;
+    match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) => {
+            return Err(format!(
+                "agent-run V5 checkpoint final path already exists: {}",
+                path.display()
+            ));
+        }
+        Err(error) => {
+            return Err(format!(
+                "agent-run V5 checkpoint final metadata failed {}: {error}",
+                path.display()
+            ));
+        }
+    }
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     options.mode(0o600);
-    let mut file = options.open(&path).map_err(|error| {
+    let mut file = options.open(&pending_path).map_err(|error| {
         format!(
-            "agent-run V5 checkpoint create failed {}: {error}",
-            path.display()
+            "agent-run V5 checkpoint pending create failed {}: {error}",
+            pending_path.display()
         )
     })?;
+    fs::File::open(&directory)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| {
+            format!(
+                "agent-run V5 checkpoint pending-entry fsync failed {}: {error}",
+                directory.display()
+            )
+        })?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1254,19 +1455,27 @@ fn persist_v5_checkpoint(
             .map_err(|error| {
                 format!(
                     "agent-run V5 checkpoint private mode failed {}: {error}",
-                    path.display()
+                    pending_path.display()
                 )
             })?;
     }
     file.write_all(&bytes).map_err(|error| {
         format!(
-            "agent-run V5 checkpoint write failed {}: {error}",
-            path.display()
+            "agent-run V5 checkpoint pending write failed {}: {error}",
+            pending_path.display()
         )
     })?;
     file.sync_all().map_err(|error| {
         format!(
-            "agent-run V5 checkpoint fsync failed {}: {error}",
+            "agent-run V5 checkpoint pending fsync failed {}: {error}",
+            pending_path.display()
+        )
+    })?;
+    drop(file);
+    fs::rename(&pending_path, &path).map_err(|error| {
+        format!(
+            "agent-run V5 checkpoint atomic publish failed {} -> {}: {error}",
+            pending_path.display(),
             path.display()
         )
     })?;
@@ -1274,7 +1483,7 @@ fn persist_v5_checkpoint(
         .and_then(|directory| directory.sync_all())
         .map_err(|error| {
             format!(
-                "agent-run V5 checkpoint directory fsync failed {}: {error}",
+                "agent-run V5 checkpoint publication fsync failed {}: {error}",
                 directory.display()
             )
         })?;
@@ -1719,6 +1928,7 @@ impl RpcAssignment {
         if let Some(delay) = subscription_startup_delay(startup_stagger, spec) {
             std::thread::sleep(delay);
         }
+        validate_v5_session_path(Path::new(&spec.session_dir.0))?;
         let client = RpcClient::spawn(config).map_err(|error| error.to_string())?;
         let mut runner = Self {
             client,

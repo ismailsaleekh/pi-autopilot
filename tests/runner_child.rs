@@ -408,9 +408,12 @@ fn fresh_v5_restart_with_checkpoint_authority_refuses_original_prompt_replay() {
     fs::create_dir(&checkpoint_root).expect("prior checkpoint root");
     fs::set_permissions(&checkpoint_root, fs::Permissions::from_mode(0o700))
         .expect("checkpoint root mode");
+    let checkpoint =
+        v5_checkpoint_accept_receipt(&spec, valid_handoff(), "call-v5-prior-checkpoint-authority");
     fs::write(
         checkpoint_root.join("019fa883-1eaf-75f9-99af-6aa246736f74.json"),
-        b"{}",
+        drivers::evidence::canonical_json(&checkpoint["receipt"])
+            .expect("canonical prior checkpoint authority"),
     )
     .expect("prior checkpoint witness");
     fs::write(
@@ -442,6 +445,180 @@ fn fresh_v5_restart_with_checkpoint_authority_refuses_original_prompt_replay() {
     })
     .expect_err("V5 restart may not replay the original prompt over checkpoint authority");
     assert!(error.contains("refusing original-prompt replay"), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_checkpoint_root_is_durable_before_the_first_prompt() {
+    let root = temp_root("runner-v5-checkpoint-root-before-prompt");
+    let socket = test_broker_socket();
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&spec, &socket);
+    let submit = v5_submit_accept_receipt(&spec);
+    let accepted = v5_accept_events(
+        &submit,
+        "autopilot_submit_atoms",
+        "call-v5-durable-root-submit",
+        "call-v5-durable-root-submit",
+        true,
+    );
+    let setup = "if (!existsSync(resolve(sessionDir, '..', 'checkpoints'))) process.exit(143);";
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(setup, &accepted).replace("fake-pi-v2", "0.84.1"),
+    );
+
+    with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect("the durable checkpoint root must exist before Pi receives its first prompt");
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_checkpoint_startup_rejects_the_original_session_path_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let root = temp_root("runner-v5-checkpoint-session-symlink");
+    let socket = test_broker_socket();
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&spec, &socket);
+    let value: Value =
+        serde_json::from_slice(&fs::read(&spec).expect("V5 spec bytes")).expect("V5 spec JSON");
+    let session_dir = PathBuf::from(value["session_dir"].as_str().expect("session dir"));
+    fs::remove_dir(&session_dir).expect("remove original session directory");
+    let redirected = root.join("redirected-session-directory");
+    fs::create_dir(&redirected).expect("redirected session directory");
+    symlink(&redirected, &session_dir).expect("session directory symlink");
+    let submit = v5_submit_accept_receipt(&spec);
+    let accepted = v5_accept_events(
+        &submit,
+        "autopilot_submit_atoms",
+        "call-v5-session-symlink-submit",
+        "call-v5-session-symlink-submit",
+        true,
+    );
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi("", &accepted).replace("fake-pi-v2", "0.84.1"),
+    );
+
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("the original V5 session path may not relocate through a symlink");
+    assert!(error.contains("path link component refused"), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_interrupted_pending_checkpoint_blocks_only_its_own_assignment() {
+    let root = temp_root("runner-v5-checkpoint-pending-scope");
+    let socket = test_broker_socket();
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&spec, &socket);
+    let fresh: kernel::generated::AgentRunSpecV5 =
+        serde_json::from_slice(&fs::read(&spec).expect("V5 spec bytes")).expect("V5 spec JSON");
+    let checkpoint_root = fs::canonicalize(&fresh.session_dir.0)
+        .expect("canonical session directory")
+        .parent()
+        .expect("run root")
+        .join("checkpoints");
+    fs::create_dir(&checkpoint_root).expect("checkpoint root");
+    let scope = sha256_hex(format!("{}\0{}", fresh.run_id.0, fresh.assignment_id.0).as_bytes());
+    fs::write(
+        checkpoint_root.join(format!(
+            ".pending-{scope}-019fa883-1eaf-75f9-99af-6aa246736f75.json"
+        )),
+        b"interrupted",
+    )
+    .expect("interrupted pending checkpoint");
+    let submit = v5_submit_accept_receipt(&spec);
+    let accepted = v5_accept_events(
+        &submit,
+        "autopilot_submit_atoms",
+        "call-v5-pending-replay-submit",
+        "call-v5-pending-replay-submit",
+        true,
+    );
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi("", &accepted).replace("fake-pi-v2", "0.84.1"),
+    );
+
+    let error = with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect_err("an interrupted checkpoint publication must block its own assignment replay");
+    assert!(error.contains("refusing original-prompt replay"), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_checkpoint_authority_is_scoped_to_its_exact_assignment() {
+    let root = temp_root("runner-v5-checkpoint-assignment-scope");
+    let socket = test_broker_socket();
+    let first = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&first, &socket);
+    let checkpoint = v5_checkpoint_accept_receipt(
+        &first,
+        valid_handoff(),
+        "call-v5-other-assignment-checkpoint",
+    );
+    let first_spec: kernel::generated::AgentRunSpecV5 =
+        serde_json::from_slice(&fs::read(&first).expect("first V5 spec bytes"))
+            .expect("first V5 spec JSON");
+    let checkpoint_root = fs::canonicalize(&first_spec.session_dir.0)
+        .expect("canonical shared session directory")
+        .parent()
+        .expect("run root")
+        .join("checkpoints");
+    fs::create_dir(&checkpoint_root).expect("checkpoint root");
+    fs::set_permissions(&checkpoint_root, fs::Permissions::from_mode(0o700))
+        .expect("checkpoint root mode");
+    fs::write(
+        checkpoint_root.join("019fa883-1eaf-75f9-99af-6aa246736f74.json"),
+        drivers::evidence::canonical_json(&checkpoint["receipt"])
+            .expect("canonical checkpoint receipt"),
+    )
+    .expect("other assignment checkpoint receipt");
+    let first_scope =
+        sha256_hex(format!("{}\0{}", first_spec.run_id.0, first_spec.assignment_id.0).as_bytes());
+    fs::write(
+        checkpoint_root.join(format!(
+            ".pending-{first_scope}-019fa883-1eaf-75f9-99af-6aa246736f75.json"
+        )),
+        b"partial other-assignment checkpoint",
+    )
+    .expect("other assignment interrupted pending checkpoint");
+
+    let second = write_planning_spec_inner_for_assignment(
+        &root,
+        "019fa883-1eaf-75f9-99af-6aa246736f72",
+        "planning-main-task-extractor-02",
+        |value| value,
+        "planning.task-atoms.v1",
+        "gpt-5.5",
+        "second assignment prompt with independent authority",
+    );
+    upgrade_to_v5_spec(&second, &socket);
+    let submit = v5_submit_accept_receipt(&second);
+    let accepted = v5_accept_events(
+        &submit,
+        "autopilot_submit_atoms",
+        "call-v5-second-assignment-submit",
+        "call-v5-second-assignment-submit",
+        true,
+    );
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi("", &accepted).replace("fake-pi-v2", "0.84.1"),
+    );
+
+    with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), second.display().to_string()])
+    })
+    .expect("a checkpoint from another assignment in the same run must not block fresh startup");
 }
 
 #[cfg(unix)]
@@ -711,6 +888,17 @@ fn fresh_v5_checkpoint_accept_settles_compacts_and_resumes_the_same_session() {
         .expect("run root")
         .join("checkpoints/019fa883-1eaf-75f9-99af-6aa246736f74.json");
     let persisted = fs::read(&checkpoint_path).expect("persisted canonical checkpoint receipt");
+    let checkpoint_entries = fs::read_dir(checkpoint_path.parent().expect("checkpoint root"))
+        .expect("checkpoint root entries")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("checkpoint entry rows");
+    assert_eq!(checkpoint_entries.len(), 1, "{checkpoint_entries:?}");
+    assert!(
+        !checkpoint_entries[0]
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".pending-")
+    );
     assert_eq!(
         fs::metadata(checkpoint_path.parent().expect("checkpoint root"))
             .expect("checkpoint root metadata")
@@ -755,6 +943,71 @@ fn fresh_v5_checkpoint_accept_settles_compacts_and_resumes_the_same_session() {
     assert!(
         !carrier_path(&root).exists(),
         "checkpoint path must not create a legacy carrier"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_v5_checkpoint_publication_stays_on_the_startup_pinned_run_root() {
+    let root = temp_root("runner-v5-checkpoint-pinned-run-root");
+    let socket = test_broker_socket();
+    let spec = write_planning_spec(&root, |value| value, "planning.task-atoms.v1", "gpt-5.5");
+    upgrade_to_v5_spec(&spec, &socket);
+    let fresh: kernel::generated::AgentRunSpecV5 =
+        serde_json::from_slice(&fs::read(&spec).expect("V5 spec bytes")).expect("V5 spec JSON");
+    let original_session = PathBuf::from(&fresh.session_dir.0);
+    let original_checkpoint = original_session
+        .parent()
+        .expect("startup-pinned run root")
+        .join("checkpoints/019fa883-1eaf-75f9-99af-6aa246736f74.json");
+    let backup_session = root.join("original-session-backup");
+    let redirected_session = root.join("redirected-run/pi-sessions");
+    let checkpoint_call = "call-v5-relocated-session-checkpoint";
+    let checkpoint = v5_checkpoint_accept_receipt(&spec, valid_handoff(), checkpoint_call);
+    let submit = v5_submit_accept_receipt(&spec);
+    let submit_events = v5_accept_events(
+        &submit,
+        "autopilot_submit_atoms",
+        "call-v5-pinned-root-submit",
+        "call-v5-pinned-root-submit",
+        true,
+    );
+    let setup = format!(
+        concat!(
+            "contextPercent=76; const checkpointReceipt={checkpoint}; ",
+            "function afterSteer(cmd) {{ if (String(cmd.message).includes('context warning')) {{ contextPercent=86; emitReadTool(); return; }} ",
+            "if (!String(cmd.message).includes('autopilot_checkpoint')) process.exit(141); ",
+            "renameSync(sessionDir, {backup_session:?}); mkdirSync({redirected_session:?}, {{recursive:true}}); symlinkSync({redirected_session:?}, sessionDir); ",
+            "const details=checkpointReceipt; const callId={checkpoint_call:?}; send({{type:'tool_execution_start',toolCallId:callId,toolName:'autopilot_checkpoint'}}); ",
+            "send({{type:'tool_execution_end',toolCallId:callId,toolName:'autopilot_checkpoint',result:{{content:[],details,terminate:true}},isError:false}}); ",
+            "send({{type:'message_end',message:{{role:'toolResult',toolCallId:callId,toolName:'autopilot_checkpoint',content:[],details,isError:false}}}}); ",
+            "send({{type:'agent_end',willRetry:false}}); send({{type:'agent_settled'}}); }}"
+        ),
+        checkpoint = serde_json::to_string(&checkpoint).expect("checkpoint receipt JSON"),
+        checkpoint_call = checkpoint_call,
+        backup_session = backup_session,
+        redirected_session = redirected_session,
+    );
+    let on_prompt = format!(
+        "if (promptCount === 1) {{ send({{type:'agent_start'}}); emitReadTool(); }} else if (promptCount === 2) {{ {submit_events} }} else {{ process.exit(142); }}"
+    );
+    write_fake_pi(
+        &root,
+        &rpc_fake_pi(&setup, &on_prompt).replace("fake-pi-v2", "0.84.1"),
+    );
+
+    with_fake_path(&root, || {
+        child::main(&["--spec".to_owned(), spec.display().to_string()])
+    })
+    .expect("checkpoint publication must retain the startup-pinned run root");
+    assert!(original_checkpoint.is_file(), "{original_checkpoint:?}");
+    assert!(
+        !redirected_session
+            .parent()
+            .expect("redirected run root")
+            .join("checkpoints")
+            .exists(),
+        "checkpoint authority followed a post-spawn session relocation"
     );
 }
 
@@ -1039,13 +1292,18 @@ fn fresh_v5_ordinary_tool_after_checkpoint_accept_is_rejected_before_persistence
     );
     let fresh: kernel::generated::AgentRunSpecV5 =
         serde_json::from_slice(&fs::read(&spec).expect("V5 spec bytes")).expect("V5 spec JSON");
-    assert!(
-        !fs::canonicalize(&fresh.session_dir.0)
-            .expect("session dir")
-            .parent()
-            .expect("run root")
-            .join("checkpoints")
-            .exists()
+    let checkpoint_root = fs::canonicalize(&fresh.session_dir.0)
+        .expect("session dir")
+        .parent()
+        .expect("run root")
+        .join("checkpoints");
+    assert!(checkpoint_root.is_dir());
+    assert_eq!(
+        fs::read_dir(checkpoint_root)
+            .expect("durable checkpoint root")
+            .count(),
+        0,
+        "invalidated checkpoint ACCEPT persisted receipt authority"
     );
 }
 
@@ -1125,9 +1383,13 @@ fn fresh_v5_submit_accept_precedes_an_observed_checkpoint_request() {
         .parent()
         .expect("run root")
         .join("checkpoints");
-    assert!(
-        !checkpoint_root.exists(),
-        "submit precedence persisted a checkpoint"
+    assert!(checkpoint_root.is_dir());
+    assert_eq!(
+        fs::read_dir(checkpoint_root)
+            .expect("durable checkpoint root")
+            .count(),
+        0,
+        "submit precedence persisted a checkpoint receipt"
     );
 }
 
@@ -5210,7 +5472,29 @@ fn write_planning_spec_inner(
     model: &str,
     prompt: &str,
 ) -> PathBuf {
-    let assignment_id = Id("planning-main-task-extractor-01".to_owned());
+    write_planning_spec_inner_for_assignment(
+        root,
+        run_id,
+        "planning-main-task-extractor-01",
+        mutate,
+        boundary,
+        model,
+        prompt,
+    )
+}
+
+fn write_planning_spec_inner_for_assignment(
+    root: &Path,
+    run_id: &str,
+    assignment: &str,
+    mutate: impl Fn(Value) -> Value,
+    boundary: &str,
+    model: &str,
+    prompt: &str,
+) -> PathBuf {
+    let assignment_id = Id(assignment.to_owned());
+    let action_id = format!("action-{assignment}");
+    let atom_id_prefix = format!("{assignment}-atom-");
     // Session directories are run-owned in production; mirror that here so the
     // test cannot pass by accident when two runs share one directory.
     let session_dir = root.join("run-sessions").join(run_id);
@@ -5243,8 +5527,8 @@ fn write_planning_spec_inner(
     let spec = json!({
         "schema":"autopilot.agent_run_spec.v4",
         "assignment_kind":"planning-review",
-        "action_id":"action-planning-main-task-extractor-01",
-        "assignment_id":"planning-main-task-extractor-01",
+        "action_id":action_id,
+        "assignment_id":assignment_id.0,
         "run_id":run_id,
         "run_revision":1,
         "workstream":"main",
@@ -5271,7 +5555,7 @@ fn write_planning_spec_inner(
         "context_digest":context_digest,
         "skills_digest":sha256_hex(SKILLS_IDENTITY.as_bytes()),
         "subscription_digest":subscription_digest("openai-codex", model, "high"),
-        "atom_id_prefix":"planning-main-task-extractor-01-atom-",
+        "atom_id_prefix":atom_id_prefix,
         "authority_set_id":"set-a",
         "authority_documents":authority_documents,
         "context_document":context_document,
@@ -5963,7 +6247,7 @@ fn rpc_fake_pi(setup: &str, on_prompt: &str) -> String {
         r#"#!/usr/bin/env node
 import {{ createHash }} from 'node:crypto';
 import {{ spawn }} from 'node:child_process';
-import {{ appendFileSync, readFileSync, writeFileSync }} from 'node:fs';
+import {{ appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, symlinkSync, writeFileSync }} from 'node:fs';
 import {{ dirname, resolve }} from 'node:path';
 if (process.argv[2] === '--version') {{ console.log('fake-pi-v2'); process.exit(0); }}
 let promptCount = 0;
