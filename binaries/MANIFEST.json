@@ -15,15 +15,15 @@
       "buildMethod": "native cargo build --release --target aarch64-apple-darwin -p drivers --bin autopilot-core",
       "evidence": {
         "buildExitCode": 0,
-        "builtBinaryPath": "/private/tmp/pi-autopilot-v5-checkpoint-resume/target/aarch64-apple-darwin/release/autopilot-core",
+        "builtBinaryPath": "/Users/lizavasilyeva/work/ai-pipeline/packages/pi-autopilot/target/aarch64-apple-darwin/release/autopilot-core",
         "method": "current-host-target-release-only",
-        "packagedBinaryPath": "/private/tmp/pi-autopilot-v5-checkpoint-resume/binaries/darwin-arm64/autopilot-core",
+        "packagedBinaryPath": "/Users/lizavasilyeva/work/ai-pipeline/packages/pi-autopilot/binaries/darwin-arm64/autopilot-core",
         "sourceHash": "0872b7e8eddfee4243baf661ad858f9e4cf4cbc6c1c8fdf194ee769fc77afb9a",
-        "stderrSha256": "93c9604a11e2f0101133f3c754693564d62f5b0aa740a297002b43c630da4ef0",
+        "stderrSha256": "7a2de3ffb1bcd029203a274ceae9527016cbe2f3a99919291b311f37998fede6",
         "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
       },
       "path": "binaries/darwin-arm64/autopilot-core",
-      "sha256": "f211b69952ba277fc9a6dc2c5787682fced2e4e3370315f2f94b0980bbda9d05",
+      "sha256": "60dc476a60112cf1cd397d560bab8b3840a15127e385cdaa54fd35a98738de54",
       "sizeBytes": 9738096,
       "sourceHash": "0872b7e8eddfee4243baf661ad858f9e4cf4cbc6c1c8fdf194ee769fc77afb9a",
       "target": "aarch64-apple-darwin"
@@ -53,7 +53,7 @@
       "target": "x86_64-unknown-linux-musl"
     }
   },
-  "generatedAt": "2026-08-11T04:08:32Z",
+  "generatedAt": "2026-08-11T04:13:54Z",
   "schema": 1,
   "source": {
     "directories": [
