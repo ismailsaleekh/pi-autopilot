@@ -1131,13 +1131,12 @@ pub fn delivery_issue_with_facts(
     write_parent_file(&paths.prompt_path, prompt.as_bytes())?;
     let prompt_digest = sha256_hex(prompt.as_bytes());
     let binding_digests = delivery_binding_digests(
-        assignment,
         &route,
-        &worktree_text,
         &delivery_boundary.0,
         &delivery_contract.0,
         &assignment_path,
         &assignment_digest,
+        &assignment_artifact,
     )?;
     let spec = AgentRunSpec {
         schema: kernel::generated::SchemaId("autopilot.agent_run_spec.v4".to_owned()),
@@ -1363,9 +1362,7 @@ pub fn delivery_issue_v4_with_facts(
     write_parent_file(&paths.prompt_path, prompt.as_bytes())?;
     let prompt_digest = sha256_hex(prompt.as_bytes());
     let digests = delivery_binding_digests_v4(
-        &legacy,
         &route,
-        &worktree_text,
         &boundary.0,
         &contract.0,
         &assignment_path,
@@ -4029,56 +4026,43 @@ fn delivery_policy_digest_for_version(
 
 #[cfg(unix)]
 fn delivery_binding_digests_v4(
-    assignment: &RunnerAssignment,
     route: &roster::Route,
-    worktree: &str,
     boundary: &str,
     result_contract: &str,
     assignment_path: &Path,
     assignment_digest: &str,
     artifact: &DeliveryAssignmentArtifactV4,
 ) -> Result<BindingDigests, RunnerError> {
-    let mut digests = delivery_binding_digests(
-        assignment,
-        route,
-        worktree,
-        boundary,
-        result_contract,
-        assignment_path,
-        assignment_digest,
-    )?;
-    digests.context_digest = sha_json(&serde_json::json!({
-        "delivery_v4": true, "workstream": assignment.workstream, "lane_id": assignment.lane_id,
-        "attempt": assignment.attempt, "base_commit": assignment.base_commit, "worktree": worktree,
-        "assignment_path": to_contract_path(assignment_path)?, "assignment_digest": assignment_digest,
-        "approved_plan_binding_path": artifact.approved_plan_binding_path,
-        "approved_plan_binding_digest": artifact.approved_plan_binding_digest,
-        "approved_image_digest": artifact.approved_image_digest,
-        "selected_vendoring": artifact.selected_vendoring,
-        "materialization": artifact.materialization,
-    }))?;
-    Ok(digests)
+    let assignment_path = to_contract_path(assignment_path)?;
+    let context_digest =
+        delivery_context_digest_v4(artifact, &assignment_path.0, assignment_digest)?;
+    delivery_binding_digests_from_context(route, boundary, result_contract, context_digest)
 }
 
 fn delivery_binding_digests(
-    assignment: &RunnerAssignment,
     route: &roster::Route,
-    worktree: &str,
     boundary: &str,
     result_contract: &str,
     assignment_path: &Path,
     assignment_digest: &str,
+    artifact: &DeliveryAssignmentArtifact,
 ) -> Result<BindingDigests, RunnerError> {
-    let context_digest = sha_json(&serde_json::json!({
-        "workstream": assignment.workstream,
-        "lane_id": assignment.lane_id,
-        "attempt": assignment.attempt,
-        "base_commit": assignment.base_commit,
-        "worktree": worktree,
-        "required_focused_evidence": DEFAULT_REQUIRED_FOCUSED_EVIDENCE,
-        "assignment_path": to_contract_path(assignment_path)?,
-        "assignment_digest": assignment_digest,
-    }))?;
+    let assignment_path = to_contract_path(assignment_path)?;
+    let context_digest = delivery_context_digest_v3(
+        artifact,
+        DEFAULT_REQUIRED_FOCUSED_EVIDENCE,
+        &assignment_path.0,
+        assignment_digest,
+    )?;
+    delivery_binding_digests_from_context(route, boundary, result_contract, context_digest)
+}
+
+fn delivery_binding_digests_from_context(
+    route: &roster::Route,
+    boundary: &str,
+    result_contract: &str,
+    context_digest: String,
+) -> Result<BindingDigests, RunnerError> {
     Ok(BindingDigests {
         boundary_digest: contract_digest(boundary)?,
         result_contract_digest: contract_digest(result_contract)?,
@@ -4087,6 +4071,47 @@ fn delivery_binding_digests(
         skills_digest: sha256_hex(SKILLS_IDENTITY.as_bytes()),
         subscription_digest: subscription_digest(route),
     })
+}
+
+pub(crate) fn delivery_context_digest_v3(
+    artifact: &DeliveryAssignmentArtifact,
+    required_focused_evidence: u32,
+    assignment_path: &str,
+    assignment_digest: &str,
+) -> Result<String, RunnerError> {
+    sha_json(&serde_json::json!({
+        "workstream": artifact.workstream,
+        "lane_id": artifact.lane_id,
+        "attempt": artifact.attempt,
+        "base_commit": artifact.base_commit,
+        "worktree": artifact.worktree,
+        "required_focused_evidence": required_focused_evidence,
+        "assignment_path": assignment_path,
+        "assignment_digest": assignment_digest,
+    }))
+}
+
+#[cfg(unix)]
+pub(crate) fn delivery_context_digest_v4(
+    artifact: &DeliveryAssignmentArtifactV4,
+    assignment_path: &str,
+    assignment_digest: &str,
+) -> Result<String, RunnerError> {
+    sha_json(&serde_json::json!({
+        "delivery_v4": true,
+        "workstream": artifact.workstream,
+        "lane_id": artifact.lane_id,
+        "attempt": artifact.attempt,
+        "base_commit": artifact.base_commit,
+        "worktree": artifact.worktree,
+        "assignment_path": assignment_path,
+        "assignment_digest": assignment_digest,
+        "approved_plan_binding_path": artifact.approved_plan_binding_path,
+        "approved_plan_binding_digest": artifact.approved_plan_binding_digest,
+        "approved_image_digest": artifact.approved_image_digest,
+        "selected_vendoring": artifact.selected_vendoring,
+        "materialization": artifact.materialization,
+    }))
 }
 
 pub(crate) fn contract_digest(contract_id: &str) -> Result<String, RunnerError> {
@@ -8116,6 +8141,64 @@ mod bounded_io_tests {
             .to_string(),
             "recovery delivery attempt 2 exceeds package maximum 1"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delivery_context_digest_has_one_exact_owner_per_assignment_version() {
+        let v3_path = "/tmp/v3-worktree/.pi/autopilot/runner/assignments/assignment-main-L1.json";
+        let v3_assignment_digest = "b".repeat(64);
+        let v3 = DeliveryAssignmentArtifact {
+            schema: "autopilot.delivery_assignment.v3".to_owned(),
+            workstream: Id("main".to_owned()),
+            assignment_id: Id("assignment-main-L1".to_owned()),
+            lane_id: Id("L1".to_owned()),
+            attempt: 1,
+            base_commit: Sha("a".repeat(40)),
+            worktree: "/tmp/v3-worktree".to_owned(),
+            ordered_units: vec![],
+            approved_commands: vec![],
+            recovery: None,
+        };
+        let v3_digest = delivery_context_digest_v3(&v3, 2, v3_path, &v3_assignment_digest)
+            .expect("V3 context digest");
+        assert_eq!(
+            v3_digest,
+            "6e5fd69f47e0f6cebdd9e71daacdaef04ebf508179832b524cea4f2e342f7b5a"
+        );
+
+        let v4_path = "/tmp/v4-worktree/.pi/autopilot/runner/assignments/assignment-main-L1.json";
+        let v4_assignment_digest = "d".repeat(64);
+        let v4 = DeliveryAssignmentArtifactV4 {
+            schema: DELIVERY_ASSIGNMENT_V4_SCHEMA.to_owned(),
+            workstream: Id("main".to_owned()),
+            assignment_id: Id("assignment-main-L1".to_owned()),
+            lane_id: Id("L1".to_owned()),
+            attempt: 1,
+            base_commit: Sha("c".repeat(40)),
+            worktree: "/tmp/v4-worktree".to_owned(),
+            ordered_units: vec![],
+            approved_commands: vec![],
+            recovery: None,
+            approved_plan_binding_path: "/tmp/approved-plan.v2-binding.json".to_owned(),
+            approved_plan_binding_digest: "e".repeat(64),
+            approved_image_digest: "f".repeat(64),
+            selected_vendoring: vec![],
+            materialization: CoreMaterializationBindingV1 {
+                intention_path: "/tmp/intention.json".to_owned(),
+                intention_digest: "1".repeat(64),
+                receipt_path: "/tmp/receipt.json".to_owned(),
+                receipt_digest: "2".repeat(64),
+                baseline: vec![],
+            },
+        };
+        let v4_digest = delivery_context_digest_v4(&v4, v4_path, &v4_assignment_digest)
+            .expect("V4 context digest");
+        assert_eq!(
+            v4_digest,
+            "24e3e10cd6b6d30fafe64688eb2530b28a085155983b67f0cb3c477ed0b3c331"
+        );
+        assert_ne!(v3_digest, v4_digest);
     }
 
     #[test]

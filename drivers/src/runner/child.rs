@@ -2963,40 +2963,28 @@ fn validate_digests(strict: &AgentRunSpec) -> Result<(), String> {
     {
         return Err("agent-run authority/settings/subscription digest drift".to_owned());
     }
-    let context_digest = if matches!(
-        strict.assignment_kind,
-        kernel::generated::ValidationAssignmentKind::Delivery
-    ) {
-        sha_json(&serde_json::json!({
-            "workstream": strict.workstream.0,
-            "lane_id": strict.lane_id.as_ref().map(|id| id.0.as_str()),
-            "attempt": strict.attempt,
-            "base_commit": strict.base_commit.as_ref().map(|sha| sha.0.as_str()),
-            "worktree": strict.worktree.as_ref().map(|path| path.0.as_str()),
-            "required_focused_evidence": strict.required_focused_evidence,
-            "assignment_path": strict.assignment_path,
-            "assignment_digest": strict.assignment_digest.as_ref().map(|digest| digest.0.as_str()),
-        }))?
-    } else if matches!(
-        strict.assignment_kind,
-        kernel::generated::ValidationAssignmentKind::PlanningReview
-    ) {
-        let authority_set_id = strict
-            .authority_set_id
-            .as_deref()
-            .ok_or_else(|| "agent-run missing authority_set_id".to_owned())?;
-        let authority_documents = strict
-            .authority_documents
-            .as_ref()
-            .ok_or_else(|| "agent-run missing authority documents".to_owned())?;
-        let context_documents = strict
-            .context_documents
-            .as_ref()
-            .ok_or_else(|| "agent-run missing context_documents".to_owned())?;
-        super::planning_context_digest(authority_set_id, authority_documents, context_documents)
-            .map_err(|error| error.to_string())?
-    } else {
-        sha_json(&serde_json::json!({
+    let context_digest = match &strict.assignment_kind {
+        // Delivery context is schema-versioned assignment authority. Its one
+        // producer/consumer owner runs only after the digest-bound assignment
+        // has selected the exact V3 or V4 parser in validate_delivery_identity.
+        kernel::generated::ValidationAssignmentKind::Delivery => return Ok(()),
+        kernel::generated::ValidationAssignmentKind::PlanningReview => {
+            let authority_set_id = strict
+                .authority_set_id
+                .as_deref()
+                .ok_or_else(|| "agent-run missing authority_set_id".to_owned())?;
+            let authority_documents = strict
+                .authority_documents
+                .as_ref()
+                .ok_or_else(|| "agent-run missing authority documents".to_owned())?;
+            let context_documents = strict
+                .context_documents
+                .as_ref()
+                .ok_or_else(|| "agent-run missing context_documents".to_owned())?;
+            super::planning_context_digest(authority_set_id, authority_documents, context_documents)
+                .map_err(|error| error.to_string())?
+        }
+        kernel::generated::ValidationAssignmentKind::Validation => sha_json(&serde_json::json!({
             "assignment_path": strict.assignment_path,
             "assignment_digest": strict.assignment_digest,
             "context_manifest_path": strict.context_manifest_path,
@@ -3005,7 +2993,7 @@ fn validate_digests(strict: &AgentRunSpec) -> Result<(), String> {
             "validation_id": strict.validation_id,
             "validation_attempt": strict.validation_attempt,
             "semantic_round": strict.semantic_round,
-        }))?
+        }))?,
     };
     if strict.context_digest.0 != context_digest {
         return Err("agent-run context digest drift".to_owned());
@@ -3103,7 +3091,15 @@ fn validate_delivery_identity(strict: &AgentRunSpec) -> Result<(), String> {
     if sha256_hex(&bytes) != assignment_digest.0 {
         return Err("agent-run delivery assignment digest drift".to_owned());
     }
-    match super::read_delivery_assignment_artifact(&bytes)? {
+    let artifact = super::read_delivery_assignment_artifact(&bytes)?;
+    validate_delivery_context_digest(
+        &strict.context_digest.0,
+        &artifact,
+        required,
+        &assignment_path.0,
+        &assignment_digest.0,
+    )?;
+    match artifact {
         super::DeliveryAssignmentArtifactReader::V3(artifact) => {
             validate_delivery_assignment_artifact(
                 strict,
@@ -3133,6 +3129,36 @@ fn validate_delivery_identity(strict: &AgentRunSpec) -> Result<(), String> {
             )?;
             super::materializer_v4::replay_v4_materialization(&artifact)?;
         }
+    }
+    Ok(())
+}
+
+fn validate_delivery_context_digest(
+    actual: &str,
+    artifact: &super::DeliveryAssignmentArtifactReader,
+    required_focused_evidence: u32,
+    assignment_path: &str,
+    assignment_digest: &str,
+) -> Result<(), String> {
+    let (version, expected) = match artifact {
+        super::DeliveryAssignmentArtifactReader::V3(artifact) => (
+            "V3",
+            super::delivery_context_digest_v3(
+                artifact,
+                required_focused_evidence,
+                assignment_path,
+                assignment_digest,
+            )
+            .map_err(|error| error.to_string())?,
+        ),
+        super::DeliveryAssignmentArtifactReader::V4(artifact) => (
+            "V4",
+            super::delivery_context_digest_v4(artifact, assignment_path, assignment_digest)
+                .map_err(|error| error.to_string())?,
+        ),
+    };
+    if actual != expected {
+        return Err(format!("agent-run {version} delivery context digest drift"));
     }
     Ok(())
 }

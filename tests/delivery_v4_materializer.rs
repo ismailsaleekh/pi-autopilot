@@ -77,6 +77,37 @@ fn with_fixture_cwd<T>(root: &Path, issue: impl FnOnce() -> T) -> T {
     issue()
 }
 
+fn with_fake_pi_path<T>(root: &Path, run: impl FnOnce() -> T) -> T {
+    let _environment_lock = CWD_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("environment lock");
+    let bin = root.join("wrong-version-pi");
+    fs::create_dir_all(&bin).expect("fake Pi directory");
+    let pi = bin.join("pi");
+    fs::write(&pi, "#!/bin/sh\nprintf '0.0.0\\n'\n").expect("fake Pi");
+    fs::set_permissions(&pi, fs::Permissions::from_mode(0o755)).expect("fake Pi mode");
+    let previous = std::env::var_os("PATH");
+    let path = previous.as_ref().map_or_else(
+        || bin.as_os_str().to_os_string(),
+        |previous| {
+            let mut path = bin.as_os_str().to_os_string();
+            path.push(":");
+            path.push(previous);
+            path
+        },
+    );
+    unsafe {
+        std::env::set_var("PATH", path);
+    }
+    let result = run();
+    match previous {
+        Some(previous) => unsafe { std::env::set_var("PATH", previous) },
+        None => unsafe { std::env::remove_var("PATH") },
+    }
+    result
+}
+
 struct Fixture {
     root: PathBuf,
     worktree: PathBuf,
@@ -1889,6 +1920,46 @@ fn actual_v2_rooted_admission_and_issue_require_complete_materialization_pair() 
             .worktree
             .join(".pi/autopilot/runner/assignments/assignment-main-L1.json")
             .exists()
+    );
+}
+
+#[test]
+fn issued_v4_context_passes_child_admission_and_tampering_remains_rejected() {
+    let rooted = fixture(true);
+    let binding = materialize(&rooted);
+    let issue = with_fixture_cwd(&rooted.root, || {
+        runner::delivery_issue_v4_with_facts(
+            &assignment_v4(&rooted, binding),
+            &transport(&rooted.root),
+        )
+    })
+    .expect("V4 delivery issue");
+    let spec_path = PathBuf::from(&issue.binding.spec_path);
+
+    let post_admission = with_fake_pi_path(&rooted.root, || {
+        runner::child::main(&["--spec".to_owned(), spec_path.display().to_string()])
+    })
+    .expect_err("wrong Pi version must stop after spec admission");
+    assert!(
+        post_admission.contains("Pi --version does not match the required V5 runtime"),
+        "correct V4 context did not reach the post-admission version check: {post_admission}"
+    );
+    assert!(!post_admission.contains("context digest drift"));
+
+    let mut spec: serde_json::Value =
+        serde_json::from_slice(&fs::read(&spec_path).expect("V4 spec bytes"))
+            .expect("V4 spec JSON");
+    spec["context_digest"] = serde_json::Value::String("0".repeat(64));
+    fs::write(
+        &spec_path,
+        serde_json::to_vec_pretty(&spec).expect("tampered V4 spec bytes"),
+    )
+    .expect("tampered V4 spec");
+    let rejected = runner::child::main(&["--spec".to_owned(), spec_path.display().to_string()])
+        .expect_err("tampered V4 context must remain rejected");
+    assert!(
+        rejected.contains("agent-run V4 delivery context digest drift"),
+        "{rejected}"
     );
 }
 
