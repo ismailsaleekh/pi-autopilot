@@ -157,6 +157,37 @@ fn role_matrix_matches_d76_section_2_3_exactly() {
 }
 
 #[test]
+fn planning_roles_bind_verification_to_state_available_at_the_unit_boundary() {
+    let package = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    for role in ["plan-compiler", "plan-synthesizer", "plan-reviewer"] {
+        let prose = fs::read_to_string(package.join("roles").join(role).join("base.md"))
+            .expect("planning role prose");
+        assert!(
+            prose.contains("repository base state")
+                && prose.contains("Core-materialized state")
+                && prose.contains("declared transitive predecessors"),
+            "{role} must state the closed availability set for unit verification"
+        );
+        assert!(
+            prose.contains("successor") && prose.contains("parent directory"),
+            "{role} must reject successor-derived directory availability"
+        );
+        assert!(
+            prose.contains("final closure") && prose.contains("redundant") && prose.contains("early check"),
+            "{role} must move or discard broad early verification"
+        );
+    }
+
+    let recovery = fs::read_to_string(
+        package
+            .join("roles/recovery-engineer/modes/planning-repair.md"),
+    )
+    .expect("planning recovery prose");
+    assert!(recovery.contains("must reject commands that depend on successor-produced state before approval"));
+    assert!(recovery.contains("do not defer that scheduling defect to recovery"));
+}
+
+#[test]
 fn active_submit_role_prose_requires_same_session_retry_for_all_eleven_roles() {
     for (role, tool) in [
         ("task-extractor", "autopilot_submit_atoms"),

@@ -52,10 +52,12 @@ test("CoreTransport sanitizes then re-adds only exact broker facts and reuses th
   try {
     await assert.rejects(transport.request("shutdown", {}), /before activation binds private child-control broker facts/u);
     transport.bindChildControlBroker({ socketPath, capability });
-    await transport.request("shutdown", {});
-    transport.close();
+    await transport.send({ v: 1, id: 10, kind: "command", payload: {} } as never);
+    const firstChild = (transport as unknown as { child?: { kill(): void } }).child;
+    assert.ok(firstChild);
+    firstChild.kill();
     await new Promise((resolve) => setTimeout(resolve, 10));
-    await transport.request("shutdown", {});
+    await transport.send({ v: 1, id: 11, kind: "command", payload: {} } as never);
     await new Promise((resolve) => setTimeout(resolve, 10));
 
     const launches = readFileSync(output, "utf8").trim().split("\n").map((line) => JSON.parse(line));
@@ -71,6 +73,44 @@ test("CoreTransport sanitizes then re-adds only exact broker facts and reuses th
     }
     assert.doesNotMatch(transport.lastDiagnostics(), new RegExp(capability, "u"));
     assert.match(transport.lastDiagnostics(), /core-stderr/u);
+  } finally {
+    transport.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("CoreTransport contains only closed-pipe errors from its owned graceful shutdown", async () => {
+  const root = mkdtempSync(join(tmpdir(), "autopilot-core-shutdown-pipe-"));
+  const child = join(root, "core-child.cjs");
+  const launcher = join(root, "core-child");
+  writeFileSync(child, "process.stdin.destroy(); setTimeout(() => process.exit(0), 25);\n", "utf8");
+  writeFileSync(launcher, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(child)}\n`, "utf8");
+  chmodSync(launcher, 0o700);
+  const transport = new CoreTransport({ binaryPath: launcher });
+  transport.bindChildControlBroker({ socketPath: "/tmp/.pi-ap/0123456789/s", capability: "c".repeat(64) });
+  try {
+    await assert.rejects(transport.request("shutdown", {}, 100), /timed out|exited/u);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+  } finally {
+    transport.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("CoreTransport keeps active-run closed pipes typed fatal", async () => {
+  const root = mkdtempSync(join(tmpdir(), "autopilot-core-active-pipe-"));
+  const child = join(root, "core-child.cjs");
+  const launcher = join(root, "core-child");
+  writeFileSync(child, "process.stdin.destroy(); setTimeout(() => process.exit(0), 25);\n", "utf8");
+  writeFileSync(launcher, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(child)}\n`, "utf8");
+  chmodSync(launcher, 0o700);
+  const transport = new CoreTransport({ binaryPath: launcher });
+  transport.bindChildControlBroker({ socketPath: "/tmp/.pi-ap/0123456789/s", capability: "d".repeat(64) });
+  try {
+    await assert.rejects(
+      transport.send({ v: 1, id: 99, kind: "command", payload: {} } as never, 100),
+      /write EPIPE|exited|timed out/u,
+    );
   } finally {
     transport.close();
     rmSync(root, { recursive: true, force: true });

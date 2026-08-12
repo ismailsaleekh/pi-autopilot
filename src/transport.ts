@@ -16,6 +16,7 @@ export interface CoreTransportOptions {
 /** Host/Core-only broker facts; never include these in model-visible frames or diagnostics. */
 export interface ChildControlBrokerLaunchFacts { readonly socketPath: string; readonly capability: string; }
 interface PendingRequest { resolve: (frame: CoreToHostFrame) => void; reject: (error: Error) => void; timer?: NodeJS.Timeout; }
+type CoreTransportState = "active" | "graceful-shutdown" | "closed";
 export class CoreUnavailableError extends Error { constructor(message: string) { super(message); this.name = "CoreUnavailableError"; } }
 export class CoreTimeoutError extends Error { constructor(message: string) { super(message); this.name = "CoreTimeoutError"; } }
 
@@ -45,6 +46,7 @@ export class CoreTransport {
   private diagnostics: string[] = [];
   private readonly options: CoreTransportOptions;
   private childControlBroker: ChildControlBrokerLaunchFacts | undefined;
+  private state: CoreTransportState = "active";
 
   constructor(options: CoreTransportOptions = {}) {
     this.options = options;
@@ -56,13 +58,23 @@ export class CoreTransport {
 
   send(frame: HostToCoreFrame, timeoutMs?: number): Promise<CoreToHostFrame> {
     return new Promise((resolve, reject) => {
+      if (this.state === "closed") { reject(new CoreUnavailableError("autopilot-core transport is closed")); return; }
+      if (this.state === "graceful-shutdown") { reject(new CoreUnavailableError("autopilot-core shutdown is already in progress")); return; }
       let child: ChildProcessWithoutNullStreams;
-      try { child = this.ensureChild(); } catch (error) { reject(new CoreUnavailableError(errorMessage(error))); return; }
+      try { child = this.ensureChild(); } catch (error) {
+        reject(new CoreUnavailableError(errorMessage(error)));
+        return;
+      }
+      if (frame.kind === "shutdown") this.state = "graceful-shutdown";
       const pending: PendingRequest = { resolve, reject };
-      if (timeoutMs !== undefined) pending.timer = setTimeout(() => { this.pending.delete(frame.id); reject(new CoreTimeoutError(`autopilot-core timed out after ${timeoutMs}ms`)); }, timeoutMs);
+      if (timeoutMs !== undefined) pending.timer = setTimeout(() => {
+        this.rejectPending(frame.id, pending, new CoreTimeoutError(`autopilot-core timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
       this.pending.set(frame.id, pending);
       child.stdin.write(`${JSON.stringify(frame)}\n`, (error) => {
-        if (error) { this.pending.delete(frame.id); if (pending.timer !== undefined) clearTimeout(pending.timer); reject(new CoreUnavailableError(error.message)); }
+        if (error !== null && error !== undefined && !this.containsOwnedShutdownPipeError(child, error)) {
+          this.rejectPending(frame.id, pending, new CoreUnavailableError(error.message));
+        }
       });
     });
   }
@@ -86,7 +98,15 @@ export class CoreTransport {
 
   lastDiagnostics(): string { return this.diagnostics.join("\n"); }
   hasLiveChild(): boolean { return this.child !== undefined && this.child.exitCode === null && !this.child.killed; }
-  close(): void { if (this.child !== undefined) { this.child.kill(); this.child = undefined; } }
+  close(): void {
+    this.state = "closed";
+    if (this.child !== undefined) {
+      this.child.stdin.destroy();
+      this.child.kill();
+      this.child = undefined;
+    }
+    this.failPending(new CoreUnavailableError("autopilot-core transport closed"));
+  }
 
   private ensureChild(): ChildProcessWithoutNullStreams {
     if (this.hasLiveChild() && this.child !== undefined) return this.child;
@@ -105,12 +125,17 @@ export class CoreTransport {
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => this.receive(chunk));
     child.stderr.on("data", (chunk: string) => this.noteDiagnostics(chunk));
+    child.stdin.on("error", (error) => {
+      if (this.containsOwnedShutdownPipeError(child, error)) return;
+      if (this.child === child) this.failPending(new CoreUnavailableError(error.message));
+    });
     child.on("error", (error) => {
       if (this.child === child) this.failPending(new CoreUnavailableError(error.message));
     });
     child.on("exit", (code, signal) => {
       if (this.child !== child) return;
       this.child = undefined;
+      if (this.state === "graceful-shutdown") this.state = "closed";
       this.failPending(new CoreUnavailableError(`autopilot-core exited code=${code ?? "null"} signal=${signal ?? "null"}; diagnostics=${this.lastDiagnostics()}`));
     });
     return child;
@@ -143,6 +168,21 @@ export class CoreTransport {
     this.diagnostics.push("core-stderr");
     if (this.diagnostics.length > 20) this.diagnostics = this.diagnostics.slice(-20);
   }
+
+  private containsOwnedShutdownPipeError(child: ChildProcessWithoutNullStreams, error: Error): boolean {
+    if (this.state !== "graceful-shutdown" && this.state !== "closed") return false;
+    if (this.child !== child && this.state !== "closed") return false;
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "EPIPE" || code === "ERR_STREAM_DESTROYED";
+  }
+
+  private rejectPending(id: number, pending: PendingRequest, error: Error): void {
+    if (this.pending.get(id) !== pending) return;
+    this.pending.delete(id);
+    if (pending.timer !== undefined) clearTimeout(pending.timer);
+    pending.reject(error);
+  }
+
   private failPending(error: Error): void { for (const [id, pending] of this.pending) { this.pending.delete(id); if (pending.timer !== undefined) clearTimeout(pending.timer); pending.reject(error); } }
 }
 
