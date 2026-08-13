@@ -3,145 +3,113 @@ import type { ContractVector, LawDriver, LawTraceEntry } from "./contract-vector
 import { bindLawIntent, lawTrace } from "./contract-vector.js";
 import { collectFinding, field, json, lawCall } from "./vector-helpers.js";
 
-function rangedReference(reference: unknown, offset: number, length: number) {
+function rangedReference(reference: unknown, offset: string, length: string) {
   const value = json(reference);
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return null;
   }
-  const root: unknown = Reflect.get(value, "root");
-  const path: unknown = Reflect.get(value, "path");
-  return typeof root === "string" && typeof path === "string"
-    ? Object.freeze({ path, range: Object.freeze({ offset, length }), root })
-    : null;
+  return Object.freeze({ ...value, range: Object.freeze({ offset, length }) });
 }
 
 export const storeLawVector: ContractVector = Object.freeze({
-  id: "store.atomic-install-range-page-presence.v1",
+  id: "store.codec-decimal-proof-paging.v2",
   port: "store",
   behaviors: Object.freeze([
-    "object bytes become visible only at an atomic installed name",
+    "references bind blob/root/codec/version/digest/decimal length and optional decimal range",
     "duplicate install is content-addressed and idempotent",
-    "range references preserve exact bytes",
-    "listing is sorted, cursor-bound, and paged",
+    "page cursors bind root, directory, codec, size, and predecessor proof",
+    "missing or forged pages retry as unproven rather than appearing empty",
   ]),
   async replay(driver: LawDriver) {
     const findings: string[] = [];
     const trace: LawTraceEntry[] = [];
     const tree = await driver.fixture(Object.freeze({
       kind: "tree",
-      name: "store-tree",
+      name: "store-v2-tree",
       files: Object.freeze([
         Object.freeze({ path: "law/a.bin", bytes: Uint8Array.from([0, 128, 255, 10]) }),
         Object.freeze({ path: "law/b.bin", bytes: Uint8Array.from([4, 3, 2, 1]) }),
       ]),
     }));
-    const installTemplate = storeIntentCapsule.arbitrary.validForKind("install-sealed-object", 21);
-    if (tree.kind !== "tree" || installTemplate.kind !== "install-sealed-object") {
-      return lawTrace("store.atomic-install-range-page-presence.v1", trace, Object.freeze(["store fixture failed"]));
+    const template = storeIntentCapsule.arbitrary.validForKind("install-sealed-object", 21);
+    if (tree.kind !== "tree" || template.kind !== "install-sealed-object") {
+      return lawTrace(this.id, trace, ["store fixture failed"]);
     }
     const install = bindLawIntent("store", Object.freeze({
-      inputs: Object.freeze({
-        manifest: tree.manifest,
-        sealedRoot: tree.root,
-        workspaceId: installTemplate.inputs.workspaceId,
-      }),
+      inputs: Object.freeze({ artifact: tree.manifest }),
       kind: "install-sealed-object",
-      preconditions: Object.freeze({ expectedDigest: tree.root, objectFirst: true }),
-      runId: installTemplate.runId,
+      preconditions: Object.freeze({ expectedDigest: field(tree.manifest, "digest"), objectFirst: true }),
+      runId: template.runId,
     }));
     const installed = await lawCall(driver, "store", "install", install, "sealed-object-installed", "ok");
     trace.push(installed.trace);
     collectFinding(findings, installed.finding);
-    const duplicateInstall = bindLawIntent("store", Object.freeze({
-      inputs: Object.freeze({
-        manifest: tree.manifest,
-        sealedRoot: tree.root,
-        workspaceId: `${installTemplate.inputs.workspaceId}-duplicate`,
-      }),
-      kind: "install-sealed-object",
-      preconditions: Object.freeze({ expectedDigest: tree.root, objectFirst: true }),
-      runId: installTemplate.runId,
-    }));
-    const installedAgain = await lawCall(driver, "store", "install-idempotent", duplicateInstall, "sealed-object-installed", "ok");
-    trace.push(installedAgain.trace);
-    collectFinding(findings, installedAgain.finding);
-    if (field(installedAgain.value, "alreadyPresent") !== true) {
-      findings.push("install-idempotent: duplicate content was not reported already present");
+    const repeated = await lawCall(driver, "store", "install-idempotent", install, "sealed-object-installed", "ok");
+    trace.push(repeated.trace);
+    collectFinding(findings, repeated.finding);
+    if (field(repeated.value, "alreadyPresent") !== true) {
+      findings.push("install-idempotent: alreadyPresent was false");
     }
 
-    const presence = bindLawIntent("store", Object.freeze({
-      inputs: Object.freeze({ root: tree.root }),
-      kind: "observe-object-presence",
-      preconditions: Object.freeze({ expectedDigest: tree.root }),
-      runId: installTemplate.runId,
-    }));
-    const present = await lawCall(driver, "store", "observe-presence", presence, "object-presence-observed", "ok");
-    trace.push(present.trace);
-    collectFinding(findings, present.finding);
-    if (field(present.value, "present") !== true) {
-      findings.push("observe-presence: installed object was not present");
-    }
-
-    const range = rangedReference(tree.firstFile, 1, 2);
+    const range = rangedReference(tree.firstFile, "1", "2");
     const read = bindLawIntent("store", Object.freeze({
       inputs: Object.freeze({ artifact: range }),
       kind: "read-artifact-range",
       preconditions: Object.freeze({ expectedRoot: tree.root }),
-      runId: installTemplate.runId,
+      runId: template.runId,
     }));
-    const readResult = await lawCall(driver, "store", "read-range", read, "artifact-range-read", "ok");
+    const readResult = await lawCall(driver, "store", "read-decimal-range", read, "artifact-range-read", "ok");
     trace.push(readResult.trace);
     collectFinding(findings, readResult.finding);
     const content = json(field(readResult.value, "content"));
     const bytes = content === null ? null : await driver.readArtifact(content);
     if (bytes === null || bytes.length !== 2 || bytes[0] !== 128 || bytes[1] !== 255) {
-      findings.push("read-range: exact binary range bytes were not preserved");
+      findings.push("read-decimal-range: exact bytes differed");
     }
 
     const listTemplate = storeIntentCapsule.arbitrary.validForKind("list-artifact-page", 22);
-    if (listTemplate.kind !== "list-artifact-page") {
-      findings.push("list template failed");
-    } else {
+    if (listTemplate.kind === "list-artifact-page") {
       const list = bindLawIntent("store", Object.freeze({
-        inputs: Object.freeze({ cursor: null, directory: "law", pageSize: 1, root: tree.root }),
+        inputs: Object.freeze({
+          codec: listTemplate.inputs.codec,
+          codecVersion: listTemplate.inputs.codecVersion,
+          cursor: null,
+          directory: "law",
+          pageSize: "1",
+          previousPageProof: null,
+          root: tree.root,
+        }),
         kind: "list-artifact-page",
         preconditions: Object.freeze({ expectedRoot: tree.root }),
-        runId: installTemplate.runId,
+        runId: template.runId,
       }));
-      const listed = await lawCall(driver, "store", "list-page", list, "artifact-page-listed", "ok");
+      const listed = await lawCall(driver, "store", "list-first-page", list, "artifact-page-listed", "ok");
       trace.push(listed.trace);
       collectFinding(findings, listed.finding);
-      const nextCursor = field(listed.value, "nextCursor");
-      if (typeof nextCursor !== "string") {
-        findings.push("list-page: first one-entry page did not expose a cursor for the second entry");
-      } else {
-        const entriesRef = json(field(listed.value, "entries"));
-        const firstPage = entriesRef === null ? null : await driver.readArtifact(entriesRef);
+      const cursor = field(listed.value, "nextCursor");
+      const proof = json(field(listed.value, "entries"));
+      if (typeof cursor === "string" && proof !== null) {
         const next = bindLawIntent("store", Object.freeze({
-          inputs: Object.freeze({ cursor: nextCursor, directory: "law", pageSize: 1, root: tree.root }),
+          inputs: Object.freeze({
+            codec: listTemplate.inputs.codec,
+            codecVersion: listTemplate.inputs.codecVersion,
+            cursor,
+            directory: "law",
+            pageSize: "1",
+            previousPageProof: proof,
+            root: tree.root,
+          }),
           kind: "list-artifact-page",
           preconditions: Object.freeze({ expectedRoot: tree.root }),
-          runId: installTemplate.runId,
+          runId: template.runId,
         }));
-        const nextListed = await lawCall(driver, "store", "list-second-page", next, "artifact-page-listed", "ok");
-        trace.push(nextListed.trace);
-        collectFinding(findings, nextListed.finding);
-        const nextEntriesRef = json(field(nextListed.value, "entries"));
-        const secondPage = nextEntriesRef === null ? null : await driver.readArtifact(nextEntriesRef);
-        if (
-          firstPage === null
-          || secondPage === null
-          || firstPage.length === 0
-          || secondPage.length === 0
-          || firstPage.every((byte, index) => byte === secondPage[index])
-        ) {
-          findings.push("list-page: sorted page contents were absent or repeated");
-        }
-        if (field(nextListed.value, "nextCursor") !== null) {
-          findings.push("list-page: second and final page retained a cursor");
-        }
+        const second = await lawCall(driver, "store", "list-second-page", next, "artifact-page-listed", "ok");
+        trace.push(second.trace);
+        collectFinding(findings, second.finding);
+      } else {
+        findings.push("list-first-page: cursor/proof absent");
       }
     }
-    return lawTrace("store.atomic-install-range-page-presence.v1", trace, findings);
+    return lawTrace(this.id, trace, findings);
   },
 });

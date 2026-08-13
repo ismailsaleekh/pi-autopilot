@@ -1,5 +1,6 @@
 import {
   actionIdSchema,
+  decimalNaturalSchema,
   digestSchema,
   kindIdSchema,
   runIdSchema,
@@ -7,7 +8,6 @@ import {
 import {
   defineCapsule,
   literal,
-  natural,
   object,
   union,
 } from "../../authority/protocol/schema.js";
@@ -17,24 +17,21 @@ import { defineIntentCapsule } from "./intent-capsule.js";
 
 export const observeClockSchema = object({
   actionId: actionIdSchema,
-  inputs: object({
-    clockId: kindIdSchema,
-  }),
+  inputs: object({ clockId: kindIdSchema }),
   kind: literal("observe-clock"),
   preconditions: object({
-    notBeforeTick: natural(),
+    notBeforeTick: decimalNaturalSchema,
+    sourceDigest: digestSchema,
   }),
   runId: runIdSchema,
 });
 
-export const clockIntentSchema = union([
-  observeClockSchema,
-]);
+export const clockIntentSchema = union([observeClockSchema]);
 
 const clockResultSchema = object({
   clockId: kindIdSchema,
   sourceDigest: digestSchema,
-  tick: natural(),
+  tick: decimalNaturalSchema,
 });
 
 export const clockObservedSchema = object({
@@ -44,9 +41,7 @@ export const clockObservedSchema = object({
   runId: runIdSchema,
 });
 
-export const clockObservationSchema = union([
-  clockObservedSchema,
-]);
+export const clockObservationSchema = union([clockObservedSchema]);
 
 export type ObserveClock = Infer<typeof observeClockSchema>;
 export type ClockIntent = Infer<typeof clockIntentSchema>;

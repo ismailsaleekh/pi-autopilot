@@ -42,7 +42,7 @@ function expectedActionId(port: string, value: unknown): string | null {
     return null;
   }
   const digest = canonicalDigestUnknown(Object.freeze({
-    domain: "pi-autopilot.action.v1",
+    domain: "pi-autopilot.action.v2",
     inputs,
     kind,
     port,
@@ -113,7 +113,7 @@ export function defineIntentCapsule<
 ): SchemaCapsule<Name, Infer<ValueSchema>> {
   const base = defineCapsule(name, valueSchema);
   const fingerprint: Digest = canonicalDigestUnknown(Object.freeze({
-    actionIdDerivation: "pi-autopilot.action.v1",
+    actionIdDerivation: "pi-autopilot.action.v2",
     name,
     port,
     schema: valueSchema,

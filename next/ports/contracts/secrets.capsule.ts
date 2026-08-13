@@ -18,10 +18,16 @@ import type { Infer } from "../../authority/protocol/schema.js";
 import { toolResultSchemaFor } from "../../authority/protocol/tool-result.capsule.js";
 import { defineIntentCapsule } from "./intent-capsule.js";
 
+export const secretDestinationSchema = union([
+  object({ kind: literal("process-environment"), variable: kindIdSchema }),
+  object({ kind: literal("process-stdin") }),
+]);
+
 export const authorizeSecretUseSchema = object({
   actionId: actionIdSchema,
   inputs: object({
     childId: childIdSchema,
+    destination: secretDestinationSchema,
     purposeId: kindIdSchema,
     secretHandle: secretHandleSchema,
   }),
@@ -40,29 +46,22 @@ export const revokeSecretUseSchema = object({
     secretHandle: secretHandleSchema,
   }),
   kind: literal("revoke-secret-use"),
-  preconditions: object({
-    childEpoch: childEpochSchema,
-  }),
+  preconditions: object({ childEpoch: childEpochSchema }),
   runId: runIdSchema,
 });
 
-export const secretsIntentSchema = union([
-  authorizeSecretUseSchema,
-  revokeSecretUseSchema,
-]);
+export const secretsIntentSchema = union([authorizeSecretUseSchema, revokeSecretUseSchema]);
 
 const authorizedSecretResultSchema = object({
+  destination: secretDestinationSchema,
   leaseId: leaseIdSchema,
-  policyDigest: digestSchema,
+  purposeId: kindIdSchema,
   secretHandle: secretHandleSchema,
 });
 const revokedSecretResultSchema = object({
   leaseId: leaseIdSchema,
   secretHandle: secretHandleSchema,
-  state: union([
-    literal("revoked"),
-    literal("already-revoked"),
-  ]),
+  state: union([literal("revoked"), literal("already-revoked")]),
 });
 
 export const secretUseAuthorizedSchema = object({
@@ -78,11 +77,9 @@ export const secretUseRevokedSchema = object({
   runId: runIdSchema,
 });
 
-export const secretsObservationSchema = union([
-  secretUseAuthorizedSchema,
-  secretUseRevokedSchema,
-]);
+export const secretsObservationSchema = union([secretUseAuthorizedSchema, secretUseRevokedSchema]);
 
+export type SecretDestination = Infer<typeof secretDestinationSchema>;
 export type AuthorizeSecretUse = Infer<typeof authorizeSecretUseSchema>;
 export type RevokeSecretUse = Infer<typeof revokeSecretUseSchema>;
 export type SecretsIntent = Infer<typeof secretsIntentSchema>;

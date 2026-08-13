@@ -1,91 +1,105 @@
 import { workspaceIntentCapsule } from "../contracts/workspace.capsule.js";
 import type { ContractVector, LawDriver, LawTraceEntry } from "./contract-vector.js";
 import { bindLawIntent, lawTrace } from "./contract-vector.js";
-import { collectFinding, lawCall } from "./vector-helpers.js";
+import { collectFinding, field, lawCall } from "./vector-helpers.js";
 
 export const workspaceLawVector: ContractVector = Object.freeze({
-  id: "workspace.allocate-isolate-inspect-dispose.v1",
+  id: "workspace.empty-reservation-lease-epoch.v2",
   port: "workspace",
   behaviors: Object.freeze([
-    "attempt allocation is exclusive",
-    "isolation binds the observed root and policy digest",
-    "inspection reflects ready then absent",
-    "epoch-fenced disposal preserves immutable roots",
+    "allocation creates an empty private reservation and duplicate allocation retries",
+    "lease, capability, root, and child epoch are checked on every transition",
+    "isolation success carries an enforcement attestation",
+    "disposal requires a fenced epoch and inspection proves absence",
   ]),
   async replay(driver: LawDriver) {
     const findings: string[] = [];
     const trace: LawTraceEntry[] = [];
-    const tree = await driver.fixture(Object.freeze({
-      kind: "tree",
-      name: "workspace-base",
-      files: Object.freeze([
-        Object.freeze({ path: "law/base.bin", bytes: Uint8Array.from([0, 255, 17]) }),
-      ]),
-    }));
     const allocateTemplate = workspaceIntentCapsule.arbitrary.validForKind("allocate-attempt-directory", 11);
-    if (tree.kind !== "tree" || allocateTemplate.kind !== "allocate-attempt-directory") {
-      return lawTrace("workspace.allocate-isolate-inspect-dispose.v1", trace, Object.freeze(["workspace fixture failed"]));
+    if (allocateTemplate.kind !== "allocate-attempt-directory") {
+      return lawTrace(this.id, trace, ["allocation template failed"]);
     }
     const allocate = bindLawIntent("workspace", Object.freeze({
-      inputs: Object.freeze({ baseRoot: tree.root, workspaceId: allocateTemplate.inputs.workspaceId }),
-      kind: "allocate-attempt-directory",
+      inputs: allocateTemplate.inputs,
+      kind: allocateTemplate.kind,
       preconditions: allocateTemplate.preconditions,
       runId: allocateTemplate.runId,
     }));
-    const allocated = await lawCall(driver, "workspace", "allocate", allocate, "attempt-directory-allocated", "ok");
+    const allocated = await lawCall(driver, "workspace", "allocate-empty", allocate, "attempt-directory-allocated", "ok");
     trace.push(allocated.trace);
     collectFinding(findings, allocated.finding);
+    if (field(allocated.value, "empty") !== true) {
+      findings.push("allocate-empty: reservation was not proved empty");
+    }
+    const duplicate = await lawCall(driver, "workspace", "allocate-duplicate", allocate, "attempt-directory-allocated", "retry");
+    trace.push(duplicate.trace);
+    collectFinding(findings, duplicate.finding);
 
     const inspectTemplate = workspaceIntentCapsule.arbitrary.validForKind("inspect-attempt-directory", 12);
-    if (inspectTemplate.kind !== "inspect-attempt-directory") {
-      findings.push("inspect template failed");
-    } else {
+    if (inspectTemplate.kind === "inspect-attempt-directory") {
       const inspect = bindLawIntent("workspace", Object.freeze({
-        inputs: Object.freeze({ workspaceId: allocateTemplate.inputs.workspaceId }),
+        inputs: allocateTemplate.inputs,
         kind: "inspect-attempt-directory",
-        preconditions: Object.freeze({ leaseId: allocateTemplate.preconditions.leaseId }),
+        preconditions: Object.freeze({
+          childEpoch: inspectTemplate.preconditions.childEpoch,
+          leaseId: allocateTemplate.preconditions.leaseId,
+        }),
         runId: allocateTemplate.runId,
       }));
-      const inspected = await lawCall(driver, "workspace", "inspect-ready", inspect, "attempt-directory-inspected", "ok");
+      const inspected = await lawCall(driver, "workspace", "inspect-empty", inspect, "attempt-directory-inspected", "ok");
       trace.push(inspected.trace);
       collectFinding(findings, inspected.finding);
+      if (field(inspected.value, "state") !== "empty-reserved") {
+        findings.push("inspect-empty: state was not empty-reserved");
+      }
     }
 
+    const materialized = await driver.fixture(Object.freeze({
+      kind: "workspace",
+      name: "workspace-isolation-target",
+      treeName: "workspace-law-tree",
+    }));
     const isolationTemplate = workspaceIntentCapsule.arbitrary.validForKind("apply-attempt-isolation", 13);
-    if (isolationTemplate.kind !== "apply-attempt-isolation") {
-      findings.push("isolation template failed");
-    } else {
+    if (materialized.kind === "workspace" && isolationTemplate.kind === "apply-attempt-isolation") {
       const isolation = bindLawIntent("workspace", Object.freeze({
         inputs: Object.freeze({
-          isolationPolicyRoot: tree.root,
-          workspaceId: allocateTemplate.inputs.workspaceId,
+          isolationPolicy: isolationTemplate.inputs.isolationPolicy,
+          workspaceCapability: materialized.workspaceCapability,
+          workspaceId: materialized.workspaceId,
         }),
         kind: "apply-attempt-isolation",
         preconditions: Object.freeze({
-          expectedPolicyDigest: tree.root,
-          expectedWorkspaceRoot: tree.root,
+          childEpoch: isolationTemplate.preconditions.childEpoch,
+          expectedPolicyDigest: isolationTemplate.preconditions.expectedPolicyDigest,
+          expectedWorkspaceRoot: materialized.root,
+          leaseId: materialized.leaseId,
         }),
-        runId: allocateTemplate.runId,
+        runId: isolationTemplate.runId,
       }));
       const isolated = await lawCall(driver, "workspace", "apply-isolation", isolation, "attempt-isolation-applied", "ok");
       trace.push(isolated.trace);
       collectFinding(findings, isolated.finding);
+      if (field(isolated.value, "attestation") === null) {
+        findings.push("apply-isolation: enforcement attestation was absent");
+      }
     }
 
     const disposeTemplate = workspaceIntentCapsule.arbitrary.validForKind("dispose-attempt-directory", 14);
-    if (disposeTemplate.kind !== "dispose-attempt-directory") {
-      findings.push("dispose template failed");
-    } else {
+    if (disposeTemplate.kind === "dispose-attempt-directory") {
       const dispose = bindLawIntent("workspace", Object.freeze({
-        inputs: Object.freeze({ workspaceId: allocateTemplate.inputs.workspaceId }),
+        inputs: allocateTemplate.inputs,
         kind: "dispose-attempt-directory",
-        preconditions: disposeTemplate.preconditions,
+        preconditions: Object.freeze({
+          fencedChildEpoch: disposeTemplate.preconditions.fencedChildEpoch,
+          leaseId: allocateTemplate.preconditions.leaseId,
+          preserveSealedRoots: true,
+        }),
         runId: allocateTemplate.runId,
       }));
-      const disposed = await lawCall(driver, "workspace", "dispose", dispose, "attempt-directory-disposed", "ok");
+      const disposed = await lawCall(driver, "workspace", "dispose-fenced", dispose, "attempt-directory-disposed", "ok");
       trace.push(disposed.trace);
       collectFinding(findings, disposed.finding);
     }
-    return lawTrace("workspace.allocate-isolate-inspect-dispose.v1", trace, findings);
+    return lawTrace(this.id, trace, findings);
   },
 });

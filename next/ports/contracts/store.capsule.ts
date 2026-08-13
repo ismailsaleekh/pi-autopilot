@@ -3,16 +3,16 @@ import {
   artifactPathSchema,
   artifactRefSchema,
   artifactRootSchema,
+  decimalNaturalSchema,
   digestSchema,
+  kindIdSchema,
   pageCursorSchema,
   runIdSchema,
-  workspaceIdSchema,
 } from "../../authority/protocol/identifiers.js";
 import {
   booleanValue,
   defineCapsule,
   literal,
-  natural,
   nullable,
   object,
   union,
@@ -23,11 +23,7 @@ import { defineIntentCapsule } from "./intent-capsule.js";
 
 export const installSealedObjectSchema = object({
   actionId: actionIdSchema,
-  inputs: object({
-    manifest: artifactRefSchema,
-    sealedRoot: artifactRootSchema,
-    workspaceId: workspaceIdSchema,
-  }),
+  inputs: object({ artifact: artifactRefSchema }),
   kind: literal("install-sealed-object"),
   preconditions: object({
     expectedDigest: digestSchema,
@@ -38,40 +34,33 @@ export const installSealedObjectSchema = object({
 
 export const readArtifactRangeSchema = object({
   actionId: actionIdSchema,
-  inputs: object({
-    artifact: artifactRefSchema,
-  }),
+  inputs: object({ artifact: artifactRefSchema }),
   kind: literal("read-artifact-range"),
-  preconditions: object({
-    expectedRoot: artifactRootSchema,
-  }),
+  preconditions: object({ expectedRoot: artifactRootSchema }),
   runId: runIdSchema,
 });
 
 export const listArtifactPageSchema = object({
   actionId: actionIdSchema,
   inputs: object({
+    codec: kindIdSchema,
+    codecVersion: kindIdSchema,
     cursor: nullable(pageCursorSchema),
     directory: artifactPathSchema,
-    pageSize: natural(),
+    pageSize: decimalNaturalSchema,
+    previousPageProof: nullable(artifactRefSchema),
     root: artifactRootSchema,
   }),
   kind: literal("list-artifact-page"),
-  preconditions: object({
-    expectedRoot: artifactRootSchema,
-  }),
+  preconditions: object({ expectedRoot: artifactRootSchema }),
   runId: runIdSchema,
 });
 
 export const observeObjectPresenceSchema = object({
   actionId: actionIdSchema,
-  inputs: object({
-    root: artifactRootSchema,
-  }),
+  inputs: object({ artifact: artifactRefSchema }),
   kind: literal("observe-object-presence"),
-  preconditions: object({
-    expectedDigest: digestSchema,
-  }),
+  preconditions: object({ expectedDigest: digestSchema }),
   runId: runIdSchema,
 });
 
@@ -84,20 +73,22 @@ export const storeIntentSchema = union([
 
 const installedObjectResultSchema = object({
   alreadyPresent: booleanValue(),
-  root: artifactRootSchema,
+  artifact: artifactRefSchema,
 });
 const readRangeResultSchema = object({
   content: artifactRefSchema,
-  root: artifactRootSchema,
+  requested: artifactRefSchema,
 });
 const listedPageResultSchema = object({
   entries: artifactRefSchema,
   nextCursor: nullable(pageCursorSchema),
+  pageSize: decimalNaturalSchema,
+  previousPageProof: nullable(artifactRefSchema),
   root: artifactRootSchema,
 });
 const objectPresenceResultSchema = object({
+  artifact: artifactRefSchema,
   present: booleanValue(),
-  root: artifactRootSchema,
 });
 
 export const sealedObjectInstalledSchema = object({

@@ -1,10 +1,12 @@
 import {
   actionIdSchema,
+  artifactRefSchema,
   artifactRootSchema,
   childEpochSchema,
   digestSchema,
   leaseIdSchema,
   runIdSchema,
+  workspaceCapabilitySchema,
   workspaceIdSchema,
 } from "../../authority/protocol/identifiers.js";
 import {
@@ -22,7 +24,7 @@ import { defineIntentCapsule } from "./intent-capsule.js";
 export const allocateAttemptDirectorySchema = object({
   actionId: actionIdSchema,
   inputs: object({
-    baseRoot: artifactRootSchema,
+    workspaceCapability: workspaceCapabilitySchema,
     workspaceId: workspaceIdSchema,
   }),
   kind: literal("allocate-attempt-directory"),
@@ -36,13 +38,16 @@ export const allocateAttemptDirectorySchema = object({
 export const applyAttemptIsolationSchema = object({
   actionId: actionIdSchema,
   inputs: object({
-    isolationPolicyRoot: artifactRootSchema,
+    isolationPolicy: artifactRefSchema,
+    workspaceCapability: workspaceCapabilitySchema,
     workspaceId: workspaceIdSchema,
   }),
   kind: literal("apply-attempt-isolation"),
   preconditions: object({
+    childEpoch: childEpochSchema,
     expectedPolicyDigest: digestSchema,
     expectedWorkspaceRoot: artifactRootSchema,
+    leaseId: leaseIdSchema,
   }),
   runId: runIdSchema,
 });
@@ -50,11 +55,13 @@ export const applyAttemptIsolationSchema = object({
 export const disposeAttemptDirectorySchema = object({
   actionId: actionIdSchema,
   inputs: object({
+    workspaceCapability: workspaceCapabilitySchema,
     workspaceId: workspaceIdSchema,
   }),
   kind: literal("dispose-attempt-directory"),
   preconditions: object({
-    childEpoch: childEpochSchema,
+    fencedChildEpoch: childEpochSchema,
+    leaseId: leaseIdSchema,
     preserveSealedRoots: literal(true),
   }),
   runId: runIdSchema,
@@ -63,10 +70,12 @@ export const disposeAttemptDirectorySchema = object({
 export const inspectAttemptDirectorySchema = object({
   actionId: actionIdSchema,
   inputs: object({
+    workspaceCapability: workspaceCapabilitySchema,
     workspaceId: workspaceIdSchema,
   }),
   kind: literal("inspect-attempt-directory"),
   preconditions: object({
+    childEpoch: childEpochSchema,
     leaseId: leaseIdSchema,
   }),
   runId: runIdSchema,
@@ -80,22 +89,30 @@ export const workspaceIntentSchema = union([
 ]);
 
 const allocationResultSchema = object({
-  materializedRoot: artifactRootSchema,
+  empty: literal(true),
+  leaseId: leaseIdSchema,
+  workspaceCapability: workspaceCapabilitySchema,
   workspaceId: workspaceIdSchema,
 });
 const isolationResultSchema = object({
+  attestation: artifactRefSchema,
   policyDigest: digestSchema,
+  workspaceRoot: artifactRootSchema,
   workspaceId: workspaceIdSchema,
 });
 const disposalResultSchema = object({
   disposed: booleanValue(),
+  fencedChildEpoch: childEpochSchema,
   workspaceId: workspaceIdSchema,
 });
 const inspectionResultSchema = object({
+  childEpoch: childEpochSchema,
+  leaseId: leaseIdSchema,
   observedRoot: nullable(artifactRootSchema),
   state: union([
     literal("absent"),
-    literal("ready"),
+    literal("empty-reserved"),
+    literal("materialized"),
     literal("occupied"),
   ]),
   workspaceId: workspaceIdSchema,

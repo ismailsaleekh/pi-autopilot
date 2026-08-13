@@ -1,19 +1,25 @@
+import { expectedRefStateSchema, gitCaptureSchema } from "../../authority/protocol/git-values.js";
 import {
   actionIdSchema,
   artifactRefSchema,
   artifactRootSchema,
   candidateIdSchema,
   childEpochSchema,
+  gitCommitIdSchema,
+  gitRefSchema,
+  gitTreeIdSchema,
   leaseIdSchema,
   publicationIdSchema,
-  revisionIdSchema,
+  repositoryCapabilitySchema,
   runIdSchema,
+  workspaceCapabilitySchema,
   workspaceIdSchema,
 } from "../../authority/protocol/identifiers.js";
 import {
   booleanValue,
   defineCapsule,
   literal,
+  nullable,
   object,
   union,
 } from "../../authority/protocol/schema.js";
@@ -21,17 +27,27 @@ import type { Infer } from "../../authority/protocol/schema.js";
 import { toolResultSchemaFor } from "../../authority/protocol/tool-result.capsule.js";
 import { defineIntentCapsule } from "./intent-capsule.js";
 
+export const observeRepositoryRefSchema = object({
+  actionId: actionIdSchema,
+  inputs: object({ publicationRef: gitRefSchema, repository: repositoryCapabilitySchema }),
+  kind: literal("observe-repository-ref"),
+  preconditions: object({ expected: expectedRefStateSchema }),
+  runId: runIdSchema,
+});
+
 export const materializeWorkspaceSchema = object({
   actionId: actionIdSchema,
   inputs: object({
-    baseRevision: revisionIdSchema,
-    repositorySnapshot: artifactRootSchema,
+    baseCommit: gitCommitIdSchema,
+    baseTree: gitTreeIdSchema,
+    repository: repositoryCapabilitySchema,
+    workspaceCapability: workspaceCapabilitySchema,
     workspaceId: workspaceIdSchema,
   }),
   kind: literal("materialize-workspace"),
   preconditions: object({
-    expectedAbsent: literal(true),
-    repositoryIdentity: artifactRootSchema,
+    expectedEmptyReservation: literal(true),
+    reservationLease: leaseIdSchema,
   }),
   runId: runIdSchema,
 });
@@ -39,12 +55,15 @@ export const materializeWorkspaceSchema = object({
 export const sealWorkspaceSchema = object({
   actionId: actionIdSchema,
   inputs: object({
+    repository: repositoryCapabilitySchema,
+    workspaceCapability: workspaceCapabilitySchema,
     workspaceId: workspaceIdSchema,
   }),
   kind: literal("seal-workspace"),
   preconditions: object({
     childEpoch: childEpochSchema,
     expectedInputRoot: artifactRootSchema,
+    reservationLease: leaseIdSchema,
   }),
   runId: runIdSchema,
 });
@@ -52,27 +71,30 @@ export const sealWorkspaceSchema = object({
 export const compareRootsSchema = object({
   actionId: actionIdSchema,
   inputs: object({
-    leftRoot: artifactRootSchema,
-    rightRoot: artifactRootSchema,
+    leftTree: gitTreeIdSchema,
+    repository: repositoryCapabilitySchema,
+    rightTree: gitTreeIdSchema,
   }),
   kind: literal("compare-roots"),
-  preconditions: object({
-    repositoryIdentity: artifactRootSchema,
-  }),
+  preconditions: object({ boundedCapture: literal(true) }),
   runId: runIdSchema,
 });
 
 export const integrateCandidateSchema = object({
   actionId: actionIdSchema,
   inputs: object({
-    acceptedOutputs: artifactRefSchema,
-    baseRevision: revisionIdSchema,
+    baseCommit: gitCommitIdSchema,
+    baseTree: gitTreeIdSchema,
+    candidateCommit: gitCommitIdSchema,
     candidateId: candidateIdSchema,
+    candidateTree: gitTreeIdSchema,
+    repository: repositoryCapabilitySchema,
+    workspaceCapability: workspaceCapabilitySchema,
   }),
   kind: literal("integrate-candidate"),
   preconditions: object({
     expectedIntegrationRoot: artifactRootSchema,
-    repositoryIdentity: artifactRootSchema,
+    oneCandidate: literal(true),
   }),
   runId: runIdSchema,
 });
@@ -80,20 +102,23 @@ export const integrateCandidateSchema = object({
 export const publishIfExpectedHeadSchema = object({
   actionId: actionIdSchema,
   inputs: object({
-    desiredHead: revisionIdSchema,
-    expectedHead: revisionIdSchema,
+    desiredHead: gitCommitIdSchema,
+    expected: expectedRefStateSchema,
     publicationId: publicationIdSchema,
+    publicationRef: gitRefSchema,
+    repository: repositoryCapabilitySchema,
   }),
   kind: literal("publish-if-expected-head"),
   preconditions: object({
-    candidateTree: artifactRootSchema,
+    candidateTree: gitTreeIdSchema,
     publicationLease: leaseIdSchema,
-    verifiedManifest: artifactRefSchema,
+    verifiedAttestation: artifactRefSchema,
   }),
   runId: runIdSchema,
 });
 
 export const gitIntentSchema = union([
+  observeRepositoryRefSchema,
   materializeWorkspaceSchema,
   sealWorkspaceSchema,
   compareRootsSchema,
@@ -101,39 +126,59 @@ export const gitIntentSchema = union([
   publishIfExpectedHeadSchema,
 ]);
 
+const observedRepositoryRefResultSchema = object({
+  observed: expectedRefStateSchema,
+  publicationRef: gitRefSchema,
+  repository: repositoryCapabilitySchema,
+  tree: nullable(gitTreeIdSchema),
+});
 const materializedWorkspaceResultSchema = object({
-  baseRevision: revisionIdSchema,
-  materializedRoot: artifactRootSchema,
+  baseCommit: gitCommitIdSchema,
+  baseTree: gitTreeIdSchema,
+  repository: repositoryCapabilitySchema,
   workspaceId: workspaceIdSchema,
 });
 const sealedWorkspaceResultSchema = object({
-  manifest: artifactRefSchema,
-  outputRoot: artifactRootSchema,
+  capture: gitCaptureSchema,
+  gitTree: gitTreeIdSchema,
   workspaceId: workspaceIdSchema,
 });
 const comparedRootsResultSchema = object({
-  diff: artifactRefSchema,
+  diff: gitCaptureSchema,
   equal: booleanValue(),
-  leftRoot: artifactRootSchema,
-  rightRoot: artifactRootSchema,
+  leftTree: gitTreeIdSchema,
+  rightTree: gitTreeIdSchema,
 });
-const integratedCandidateResultSchema = object({
-  candidateId: candidateIdSchema,
-  manifest: artifactRefSchema,
-  revision: revisionIdSchema,
-  tree: artifactRootSchema,
-});
+const integrationResultSchema = union([
+  object({
+    candidateId: candidateIdSchema,
+    commit: gitCommitIdSchema,
+    conflict: nullable(gitCaptureSchema),
+    diff: gitCaptureSchema,
+    kind: literal("integrated"),
+    manifest: gitCaptureSchema,
+    tree: gitTreeIdSchema,
+  }),
+  object({
+    candidateId: candidateIdSchema,
+    conflict: gitCaptureSchema,
+    kind: literal("conflict"),
+  }),
+]);
 const publishedHeadResultSchema = object({
-  desiredHead: revisionIdSchema,
-  observedHead: revisionIdSchema,
+  desiredHead: gitCommitIdSchema,
+  gitTree: gitTreeIdSchema,
+  observedHead: nullable(gitCommitIdSchema),
   publicationId: publicationIdSchema,
-  status: union([
-    literal("published"),
-    literal("already-published"),
-    literal("head-moved"),
-  ]),
+  status: union([literal("desired-head"), literal("head-moved")]),
 });
 
+export const repositoryRefObservedSchema = object({
+  actionId: actionIdSchema,
+  kind: literal("repository-ref-observed"),
+  result: toolResultSchemaFor(observedRepositoryRefResultSchema),
+  runId: runIdSchema,
+});
 export const workspaceMaterializedSchema = object({
   actionId: actionIdSchema,
   kind: literal("workspace-materialized"),
@@ -155,7 +200,7 @@ export const rootsComparedSchema = object({
 export const candidateIntegratedSchema = object({
   actionId: actionIdSchema,
   kind: literal("candidate-integrated"),
-  result: toolResultSchemaFor(integratedCandidateResultSchema),
+  result: toolResultSchemaFor(integrationResultSchema),
   runId: runIdSchema,
 });
 export const headPublicationObservedSchema = object({
@@ -166,6 +211,7 @@ export const headPublicationObservedSchema = object({
 });
 
 export const gitObservationSchema = union([
+  repositoryRefObservedSchema,
   workspaceMaterializedSchema,
   workspaceSealedSchema,
   rootsComparedSchema,
@@ -173,12 +219,14 @@ export const gitObservationSchema = union([
   headPublicationObservedSchema,
 ]);
 
+export type ObserveRepositoryRef = Infer<typeof observeRepositoryRefSchema>;
 export type MaterializeWorkspace = Infer<typeof materializeWorkspaceSchema>;
 export type SealWorkspace = Infer<typeof sealWorkspaceSchema>;
 export type CompareRoots = Infer<typeof compareRootsSchema>;
 export type IntegrateCandidate = Infer<typeof integrateCandidateSchema>;
 export type PublishIfExpectedHead = Infer<typeof publishIfExpectedHeadSchema>;
 export type GitIntent = Infer<typeof gitIntentSchema>;
+export type RepositoryRefObserved = Infer<typeof repositoryRefObservedSchema>;
 export type WorkspaceMaterialized = Infer<typeof workspaceMaterializedSchema>;
 export type WorkspaceSealed = Infer<typeof workspaceSealedSchema>;
 export type RootsCompared = Infer<typeof rootsComparedSchema>;
@@ -193,6 +241,7 @@ export const gitIntentExhaustive = Object.freeze({
   "compare-roots": true,
   "integrate-candidate": true,
   "materialize-workspace": true,
+  "observe-repository-ref": true,
   "publish-if-expected-head": true,
   "seal-workspace": true,
 }) satisfies Readonly<Record<GitIntent["kind"], true>>;
@@ -200,6 +249,7 @@ export const gitIntentExhaustive = Object.freeze({
 export const gitObservationExhaustive = Object.freeze({
   "candidate-integrated": true,
   "head-publication-observed": true,
+  "repository-ref-observed": true,
   "roots-compared": true,
   "workspace-materialized": true,
   "workspace-sealed": true,
