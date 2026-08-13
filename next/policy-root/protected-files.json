@@ -1,9 +1,9 @@
 {
   "format": 1,
   "files": {
-    "policy-root/architecture-checker.ts": "sha256:9607a9ae0d3b3ea2036aff7f4bc0b9502070d184b14800812ae550ec24ffbd97",
+    "policy-root/architecture-checker.ts": "sha256:6253efd12f8b7ac6369b2ada50c7ba0651382a0540f531d50778738613ae8b58",
     "policy-root/fingerprint-checker.ts": "sha256:791a5452424876fdafc2da654402beba4bde9f190d9db812e4c4ffe439654649",
-    "policy-root/gate-self-tests.ts": "sha256:d8046e5ea35458d7d5ea179a602d9f8ed0364a76ea9ff83fa0bdb7c8e70ca2d1",
+    "policy-root/gate-self-tests.ts": "sha256:3eb25e5777e74d22b5ec1d81a574553e7eb3d4ecdbe25796dbad9d08a13a030f",
     "policy-root/protocol-fingerprints.json": "sha256:f5878ad30a2f5ca4492603a43df81402505c96c6309a950cf458976fa2593737",
     "policy-root/protection-checker.ts": "sha256:6afee21d88108135b27a54d93945b9217331588b4c74155c77cec1aa0ab637df",
     "policy-root/required-suites.json": "sha256:e8a1dc6a04f795476e684652d15186b75154f31604745729931a9696fdca81b9",
