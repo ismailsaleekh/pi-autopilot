@@ -1,3 +1,4 @@
+import { indexKey, indexValues, lookupIndex } from "../model/authenticated-index.js";
 import type { RunState } from "../model/run-state.js";
 import type { EvidenceFact } from "../protocol/evidence-fact.capsule.js";
 import type {
@@ -8,7 +9,8 @@ import type {
   KindId,
   WorkItemId,
 } from "../protocol/identifiers.js";
-import { canonicalDigestUnknown as digestCanonicalValue } from "../protocol/schema.js";
+import { canonicalDigestUnknown } from "../protocol/schema.js";
+import type { ResolvedIndexPage } from "../protocol/state-index.capsule.js";
 
 export interface EvidenceClaim {
   readonly evidenceId: EvidenceId;
@@ -19,6 +21,7 @@ export interface EvidenceClaim {
 
 export type ClaimRejectionCode =
   | "evidence-not-found"
+  | "evidence-unproven"
   | "evidence-envelope-digest-mismatch"
   | "evidence-run-mismatch"
   | "evidence-tree-mismatch"
@@ -26,21 +29,9 @@ export type ClaimRejectionCode =
   | "evidence-output-mismatch";
 
 export type ClaimCheck =
-  | {
-      readonly kind: "accepted";
-      readonly evidence: EvidenceFact;
-    }
-  | {
-      readonly kind: "rejected";
-      readonly code: ClaimRejectionCode;
-      readonly diagnostic: string;
-    };
+  | { readonly kind: "accepted"; readonly evidence: EvidenceFact }
+  | { readonly kind: "rejected"; readonly code: ClaimRejectionCode; readonly diagnostic: string };
 
-/**
- * An obligation may identify one exact evidence fact, or allow any observed
- * evidence for one work item. A null output/kind leaves that field unconstrained;
- * every non-null assertion is matched exactly.
- */
 export interface EvidenceObligation {
   readonly evidenceId: EvidenceId | null;
   readonly workItemId: WorkItemId;
@@ -54,101 +45,79 @@ function rejected(code: ClaimRejectionCode, diagnostic: string): ClaimCheck {
   return Object.freeze({ kind: "rejected", code, diagnostic });
 }
 
-function sameRange(
-  left: ArtifactRef["range"],
-  right: ArtifactRef["range"],
-): boolean {
-  if (left === null || right === null) {
-    return left === right;
-  }
-  return left.offset === right.offset && left.length === right.length;
-}
-
 export function sameArtifactRef(left: ArtifactRef, right: ArtifactRef): boolean {
-  return left.root === right.root
-    && left.path === right.path
-    && sameRange(left.range, right.range);
+  return canonicalDigestUnknown(left) === canonicalDigestUnknown(right);
 }
 
 function sameExit(left: ExitObservation, right: ExitObservation): boolean {
-  if (left.kind !== right.kind) {
-    return false;
-  }
-  if (left.kind === "exited" && right.kind === "exited") {
-    return left.code === right.code;
-  }
-  if (left.kind === "signalled" && right.kind === "signalled") {
-    return left.signal === right.signal;
-  }
-  return false;
+  return canonicalDigestUnknown(left) === canonicalDigestUnknown(right);
 }
 
 function envelopeDigestMatches(evidence: EvidenceFact): boolean {
-  return evidence.envelopeDigest === digestCanonicalValue(evidence.envelope);
+  return evidence.envelopeDigest === canonicalDigestUnknown(evidence.envelope);
 }
 
 function successful(exit: ExitObservation): boolean {
-  return exit.kind === "exited" && exit.code === 0;
+  return exit.kind === "exited" && exit.code === "0";
 }
 
-/** Resolve an exact mechanical claim against host-observed journal facts. */
-export function checkClaim(state: RunState, claim: EvidenceClaim): ClaimCheck {
-  const record = state.evidenceRecords.find((entry) => entry.evidenceId === claim.evidenceId);
-  if (record === undefined) {
-    return rejected(
-      "evidence-not-found",
-      `evidence-not-found: no evidence-observed fact exists for ${claim.evidenceId}`,
-    );
-  }
-  if (!envelopeDigestMatches(record.evidence)) {
-    return rejected(
-      "evidence-envelope-digest-mismatch",
-      `evidence-envelope-digest-mismatch: ${claim.evidenceId} is not bound to its recorded envelope`,
-    );
-  }
-  const envelope = record.evidence.envelope;
-  if (envelope.runId !== state.identity.runId) {
-    return rejected(
-      "evidence-run-mismatch",
-      `evidence-run-mismatch: ${claim.evidenceId} belongs to ${envelope.runId}, not ${state.identity.runId}`,
-    );
-  }
-  if (envelope.tree !== claim.tree) {
-    return rejected(
-      "evidence-tree-mismatch",
-      `evidence-tree-mismatch: ${claim.evidenceId} covers ${envelope.tree}, not ${claim.tree}`,
-    );
-  }
-  if (!sameExit(envelope.exit, claim.exit)) {
-    return rejected(
-      "evidence-exit-mismatch",
-      `evidence-exit-mismatch: ${claim.evidenceId} does not have the asserted exit observation`,
-    );
-  }
-  if (!sameArtifactRef(envelope.output, claim.output)) {
-    return rejected(
-      "evidence-output-mismatch",
-      `evidence-output-mismatch: ${claim.evidenceId} does not have the asserted output reference`,
-    );
-  }
-  return Object.freeze({ kind: "accepted", evidence: record.evidence });
+function satisfiesFact(state: RunState, evidence: EvidenceFact, obligation: EvidenceObligation): boolean {
+  const envelope = evidence.envelope;
+  return (obligation.evidenceId === null || envelope.evidenceId === obligation.evidenceId)
+    && envelopeDigestMatches(evidence)
+    && envelope.runId === state.identity.runId
+    && envelope.workItemId === obligation.workItemId
+    && envelope.tree === obligation.tree
+    && (obligation.kindId === null || envelope.kindId === obligation.kindId)
+    && (obligation.output === null || sameArtifactRef(envelope.output, obligation.output))
+    && (!obligation.requireSuccessfulExit || successful(envelope.exit));
 }
 
-/** Pure C3 predicate used by coverage and terminal eligibility. */
-export function evidenceSatisfies(
+/** Exact evidence checks require a root-bound membership or absence witness. */
+export function checkClaim(
   state: RunState,
-  obligation: EvidenceObligation,
-): boolean {
-  return state.evidenceRecords.some((record) => {
-    const evidence = record.evidence;
-    const envelope = evidence.envelope;
-    return (obligation.evidenceId === null || record.evidenceId === obligation.evidenceId)
-      && envelopeDigestMatches(evidence)
-      && envelope.runId === state.identity.runId
-      && envelope.workItemId === obligation.workItemId
-      && envelope.tree === obligation.tree
-      && (obligation.kindId === null || envelope.kindId === obligation.kindId)
-      && (obligation.output === null || sameArtifactRef(envelope.output, obligation.output))
-      && (!obligation.requireSuccessfulExit || successful(envelope.exit));
-  });
+  claim: EvidenceClaim,
+  pages: readonly ResolvedIndexPage[] = Object.freeze([]),
+): ClaimCheck {
+  const found = lookupIndex(state.indexes.evidence, indexKey("evidence", claim.evidenceId), pages);
+  if (found.kind !== "proved") {
+    return rejected("evidence-unproven", found.diagnostic);
+  }
+  if (found.value === null || found.value.kind !== "evidence") {
+    return rejected("evidence-not-found", `no proved evidence exists for ${claim.evidenceId}`);
+  }
+  const evidence = found.value.evidence;
+  if (!envelopeDigestMatches(evidence)) {
+    return rejected("evidence-envelope-digest-mismatch", "evidence envelope digest is stale");
+  }
+  if (evidence.envelope.runId !== state.identity.runId) {
+    return rejected("evidence-run-mismatch", "evidence belongs to another run");
+  }
+  if (evidence.envelope.tree !== claim.tree) {
+    return rejected("evidence-tree-mismatch", "evidence covers another tree");
+  }
+  if (!sameExit(evidence.envelope.exit, claim.exit)) {
+    return rejected("evidence-exit-mismatch", "evidence exit observation differs");
+  }
+  if (!sameArtifactRef(evidence.envelope.output, claim.output)) {
+    return rejected("evidence-output-mismatch", "evidence output reference differs");
+  }
+  return Object.freeze({ kind: "accepted", evidence });
+}
+
+/** General searches are permitted only over a complete bounded hot index. */
+export function evidenceSatisfies(state: RunState, obligation: EvidenceObligation): boolean {
+  if (obligation.evidenceId !== null) {
+    const checked = lookupIndex(
+      state.indexes.evidence,
+      indexKey("evidence", obligation.evidenceId),
+      Object.freeze([]),
+    );
+    return checked.kind === "proved"
+      && checked.value !== null
+      && checked.value.kind === "evidence"
+      && satisfiesFact(state, checked.value.evidence, obligation);
+  }
+  const values = indexValues(state.indexes.evidence, "evidence");
+  return values !== null && values.some((value) => value.kind === "evidence" && satisfiesFact(state, value.evidence, obligation));
 }

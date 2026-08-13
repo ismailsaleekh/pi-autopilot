@@ -218,6 +218,27 @@ function validateEnvelope(state: RunState, record: JournalRecord): FoldResult | 
   return null;
 }
 
+export interface ActionTransitionDraft {
+  readonly kind: Exclude<JournalRecord["kind"], "run-genesis">;
+  readonly actionId: ActionId;
+  readonly sequence: DecimalNatural;
+  readonly pages: readonly ResolvedIndexPage[];
+}
+
+export type ActionTransitionResult =
+  | { readonly kind: "derived"; readonly state: RunState; readonly mutation: IndexMutation }
+  | IndexTransitionFailure;
+
+export function deriveActionTransition(
+  state: RunState,
+  draft: ActionTransitionDraft,
+): ActionTransitionResult {
+  const action = insertAction(state, draft.actionId, draft.kind, draft.sequence, draft.pages);
+  return action.kind === "applied"
+    ? Object.freeze({ kind: "derived", state: action.state, mutation: action.mutation })
+    : action;
+}
+
 export interface SemanticTransitionDraft {
   readonly kind: "decision-committed" | "command-settled" | "outcome-committed";
   readonly actionId: ActionId;
@@ -289,8 +310,8 @@ export function deriveSemanticTransition(
   }
   current = issued.state;
   mutations.push(...issued.mutations);
-  const action = insertAction(current, draft.actionId, draft.kind, draft.sequence, draft.pages);
-  if (action.kind !== "applied") {
+  const action = deriveActionTransition(current, draft);
+  if (action.kind !== "derived") {
     return action;
   }
   current = action.state;
@@ -329,18 +350,25 @@ function applySemanticRecord(
   }
   const outcome = recordOutcome(record);
   if (outcome !== null) {
+    if (record.kind === "decision-committed") {
+      return rejected(state, record, "outcome-record-family-invalid", "decision records cannot smuggle a terminal outcome");
+    }
     const eligibility = eligibleOutcomeForState(current, record.pages);
     const eligibilityDigest = stateDigest(current);
-    const committedDigest = record.kind === "command-settled" ? record.eligibilityStateDigest : record.eligibilityStateDigest;
-    if (eligibility.kind !== "eligible" || !sameOutcome(eligibility.outcome, outcome) || committedDigest !== eligibilityDigest) {
+    if (eligibility.kind !== "eligible" || !sameOutcome(eligibility.outcome, outcome) || record.eligibilityStateDigest !== eligibilityDigest) {
       return rejected(state, record, "outcome-ineligible", "replay recomputation rejects stale or forged outcome eligibility");
     }
     current = Object.freeze({
       ...current,
       terminal: Object.freeze({ actionId: record.actionId, sequence: record.sequence, outcome }),
     });
-  } else if (record.kind === "command-settled" && record.eligibilityStateDigest !== null) {
-    return rejected(state, record, "outcome-binding-without-outcome", "eligibility digest cannot appear without an atomic outcome");
+  } else {
+    if (record.kind === "command-settled" && record.eligibilityStateDigest !== null) {
+      return rejected(state, record, "outcome-binding-without-outcome", "eligibility digest cannot appear without an atomic outcome");
+    }
+    if (eligibleOutcomeForState(current, record.pages).kind === "eligible") {
+      return rejected(state, record, "eligible-outcome-omitted", "an eligible T1/T2 must commit atomically with its enabling consequences");
+    }
   }
   current = Object.freeze({ ...current, lastSequence: record.sequence });
   if (stateDigest(current) !== record.resultStateDigest) {

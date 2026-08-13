@@ -147,7 +147,7 @@ export const LEGAL_DISPOSITIONS = Object.freeze({
 export function dispositionIsLegal(atom: Atom, disposition: AtomDisposition): boolean {
   return atom.atomId === disposition.atomId
     && atom.runId === disposition.runId
-    && LEGAL_DISPOSITIONS[atom.kind].includes(disposition.meaning.kind);
+    && (LEGAL_DISPOSITIONS[atom.kind] as readonly DispositionMeaning["kind"][]).includes(disposition.meaning.kind);
 }
 
 void arrayOf;

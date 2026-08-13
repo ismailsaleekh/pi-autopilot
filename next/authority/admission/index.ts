@@ -1,3 +1,5 @@
+export { assemblePreparedCommit } from "./batch-assembly.js";
+
 import { stateDigest } from "../model/run-state.js";
 import type { RunState } from "../model/run-state.js";
 import { indexKey, lookupIndex } from "../model/authenticated-index.js";
@@ -62,7 +64,7 @@ function universalRejection(
   return null;
 }
 
-function requestFacts(state: RunState, stimulus: BoundaryRequestReceived): AdmissionResult {
+function requestFacts(stimulus: BoundaryRequestReceived): AdmissionResult {
   const payload = stimulus.requestPayload;
   let candidate: DomainFact | Feedback;
   switch (payload.kind) {
@@ -120,7 +122,7 @@ function requestFacts(state: RunState, stimulus: BoundaryRequestReceived): Admis
 
 export function admitBoundaryRequest(state: RunState, stimulus: BoundaryRequestReceived): AdmissionResult {
   const universal = universalRejection(state, stimulus);
-  return universal ?? requestFacts(state, stimulus);
+  return universal ?? requestFacts(stimulus);
 }
 
 function workValue(state: RunState, stimulus: SubmissionReady): IndexValue | Feedback {

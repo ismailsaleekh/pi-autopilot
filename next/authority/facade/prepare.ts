@@ -1,19 +1,14 @@
 import {
   admissionSeams,
-  assembleSemanticBatch,
+  assemblePreparedCommit,
 } from "../admission/index.js";
 import { foldDomainFact } from "../evolution/domain-fact-fold.js";
-import type { FoldError } from "../evolution/fold-result.js";
 import type { RunState } from "../model/run-state.js";
 import { determineTerminalOutcome } from "../outcome/index.js";
-import { mintAcceptedBatch } from "../protocol/accepted-batch.js";
-import type { AcceptedBatch } from "../protocol/accepted-batch.js";
-import type { JsonValue } from "../protocol/schema.js";
-import { stimulusCapsule } from "../protocol/stimulus.capsule.js";
-import { stateDigest } from "../model/run-state.js";
+import type { PreparedCommit } from "../protocol/accepted-batch.js";
 import type { Stimulus } from "../protocol/stimulus.capsule.js";
 import { deriveReaction } from "../reaction/index.js";
-import { invalidStimulusFeedback } from "./feedback.js";
+import { semanticFeedback } from "./feedback.js";
 import type { Feedback } from "./feedback.js";
 import type {
   AdmissionResult,
@@ -21,33 +16,14 @@ import type {
   SemanticSeams,
 } from "./seams.js";
 
-export type PrepareResult =
-  | { readonly kind: "accepted"; readonly batch: AcceptedBatch }
-  | Feedback;
+export type PrepareResult = PreparedCommit | Feedback;
 
 const productionSemanticSeams = Object.freeze({
   admission: admissionSeams,
   reaction: deriveReaction,
   outcome: determineTerminalOutcome,
-  assemble: assembleSemanticBatch,
+  assemble: assemblePreparedCommit,
 }) satisfies SemanticSeams;
-
-function invalidTransitionFeedback(error: FoldError): Feedback {
-  return Object.freeze({
-    kind: "feedback",
-    code: "invalid-domain-transition",
-    error: Object.freeze(error),
-    diagnostic: `proposed fact batch is not admissible: ${error.code}`,
-  });
-}
-
-function invalidAcceptedBatchFeedback(diagnostic: string): Feedback {
-  return Object.freeze({
-    kind: "feedback",
-    code: "invalid-accepted-batch",
-    diagnostic,
-  });
-}
 
 function dispatchAdmission(
   state: RunState,
@@ -70,6 +46,36 @@ function dispatchAdmission(
   }
 }
 
+function prospectiveFactsState(
+  state: RunState,
+  stimulus: Stimulus,
+  admission: Extract<AdmissionResult, { readonly kind: "proposed-facts" }>,
+): RunState | Feedback {
+  let current = state;
+  for (const fact of admission.facts) {
+    const transition = foldDomainFact(current, fact, stimulus.pages, null);
+    if (transition.kind === "rejected") {
+      return semanticFeedback(
+        "invalid-domain-transition",
+        "$.facts",
+        `${transition.code}: ${transition.diagnostic}`,
+      );
+    }
+    current = transition.state;
+  }
+  return current;
+}
+
+function isFeedback(value: RunState | Feedback): value is Feedback {
+  return "kind" in value && value.kind === "feedback";
+}
+
+function isReactionFeedback(
+  value: { readonly commands: readonly never[] } | Feedback | import("./seams.js").ReactionResult,
+): value is Feedback {
+  return "kind" in value && value.kind === "feedback";
+}
+
 function prepareDecoded(
   state: RunState,
   stimulus: Stimulus,
@@ -79,61 +85,38 @@ function prepareDecoded(
   if (proposed.kind !== "proposed-facts") {
     return proposed;
   }
-  let candidate = state;
-  for (const fact of proposed.facts) {
-    const transition = foldDomainFact(candidate, fact);
-    if (transition.kind === "rejected") {
-      return invalidTransitionFeedback(transition.error);
-    }
-    candidate = transition.state;
+  const prospective = prospectiveFactsState(state, stimulus, proposed);
+  if (isFeedback(prospective)) {
+    return prospective;
   }
-  const outcome = seams.outcome(state, proposed.facts);
-  const reaction = outcome === null
-    ? seams.reaction(state, proposed.facts)
+  const lifecycle = stimulus.kind === "operator-suspend-requested"
+    || stimulus.kind === "operator-resume-requested";
+  const outcome = lifecycle ? null : seams.outcome(prospective, stimulus);
+  const reaction = outcome === null && !lifecycle
+    ? seams.reaction(state, proposed.facts, stimulus)
     : Object.freeze({ commands: Object.freeze([]) });
-  const assembled = seams.assemble(
+  if (isReactionFeedback(reaction)) {
+    return reaction;
+  }
+  return seams.assemble(
     state,
     stimulus,
     proposed.facts,
     reaction.commands,
     outcome,
   );
-  if (assembled.kind !== "prepared-semantic-roots") {
-    return assembled;
-  }
-  const minted = mintAcceptedBatch(Object.freeze({
-    runId: state.identity.runId,
-    facts: proposed.facts,
-    commands: reaction.commands,
-    outcome,
-    factRoot: assembled.factRoot,
-    commandRoot: assembled.commandRoot,
-    stateDigest: stateDigest(state),
-  }));
-  if (minted.kind === "invalid") {
-    return invalidAcceptedBatchFeedback(minted.error.diagnostic);
-  }
-  return Object.freeze({ kind: "accepted", batch: minted.batch });
 }
 
-/** Production preparation through the exhaustive W2 semantic seams. */
-export function prepare(state: RunState, stimulus: JsonValue): PrepareResult {
-  const decoded = stimulusCapsule.decode(stimulus);
-  if (decoded.kind === "error") {
-    return invalidStimulusFeedback(decoded.error);
-  }
-  return prepareDecoded(state, decoded.value, productionSemanticSeams);
+/** Authority receives only a closed decoded Stimulus; hostile unknown stops in runtime. */
+export function prepare(state: RunState, stimulus: Stimulus): PrepareResult {
+  return prepareDecoded(state, stimulus, productionSemanticSeams);
 }
 
-/** W2 composition entry; policy-root permits this capability only in facade. */
+/** Test composition edge; production uses the fixed semantic seams above. */
 export function prepareWithSeams(
   state: RunState,
-  stimulus: JsonValue,
+  stimulus: Stimulus,
   seams: SemanticSeams,
 ): PrepareResult {
-  const decoded = stimulusCapsule.decode(stimulus);
-  if (decoded.kind === "error") {
-    return invalidStimulusFeedback(decoded.error);
-  }
-  return prepareDecoded(state, decoded.value, seams);
+  return prepareDecoded(state, stimulus, seams);
 }

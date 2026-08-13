@@ -1,50 +1,51 @@
 import type {
-  AcceptedPlanRootState,
-  CandidateState,
-  PublicationState,
+  CurrentPlanState,
   RunState,
-  WorkItemStatus,
 } from "../model/run-state.js";
+import { indexValues } from "../model/authenticated-index.js";
 import type { Finding } from "../protocol/finding.capsule.js";
+import type { ExpectedRefState } from "../protocol/git-values.js";
 import type {
   ArtifactRef,
   ArtifactRoot,
   CandidateId,
+  DecimalNatural,
   FindingId,
+  GitCommitId,
+  GitTreeId,
   OperatorRequestId,
   PlanRootId,
   PublicationId,
-  RequirementId,
-  RevisionId,
   RoleId,
   RunId,
   WorkItemId,
 } from "../protocol/identifiers.js";
 import type { TerminalOutcome } from "../protocol/terminal-outcome.capsule.js";
+import type { WorkItem } from "../protocol/work-item.capsule.js";
 
 export type RunViewPhase = "planning" | "execution" | "terminal";
 
 export interface WorkItemView {
   readonly workItemId: WorkItemId;
-  readonly kind: "produce-artifact" | "review-artifact" | "correct-artifact" | "integrate-candidate" | "verify-candidate";
+  readonly kind: WorkItem["kind"];
   readonly roleId: RoleId;
   readonly planRootId: PlanRootId;
-  readonly status: WorkItemStatus;
+  readonly status: "declared" | "accepted";
 }
 
 export interface OpenFindingView {
   readonly findingId: FindingId;
   readonly kind: Finding["kind"];
-  readonly ownerWorkItemId: WorkItemId;
+  readonly ownerWorkItemId: WorkItemId | null;
   readonly detail: ArtifactRef;
   readonly subjectRoot: ArtifactRoot | null;
 }
 
 export interface CoverageSummary {
-  readonly linkCount: number;
-  readonly evidencedLinkCount: number;
-  readonly requirementCount: number;
-  readonly workItemCount: number;
+  readonly declaredAtoms: DecimalNatural;
+  readonly dispositionedAtoms: DecimalNatural;
+  readonly declaredWork: DecimalNatural;
+  readonly acceptedWork: DecimalNatural;
 }
 
 export interface SuspensionView {
@@ -56,189 +57,122 @@ export interface CandidateView {
   readonly candidateId: CandidateId;
   readonly planRootId: PlanRootId;
   readonly tree: ArtifactRoot;
+  readonly gitRevision: GitCommitId;
+  readonly gitTree: GitTreeId;
   readonly manifest: ArtifactRef;
 }
 
 export interface PublicationView {
   readonly publicationId: PublicationId;
   readonly candidateId: CandidateId;
-  readonly expectedHead: RevisionId;
-  readonly desiredHead: RevisionId;
-  readonly observedHead: RevisionId | null;
-  readonly status: "pending" | "desired-head" | "head-moved";
+  readonly expected: ExpectedRefState;
+  readonly desiredHead: GitCommitId;
+  readonly observedHead: GitCommitId | null;
+  readonly status: "intended" | "desired-head" | "head-moved";
 }
 
 export interface TerminalView {
-  readonly sequence: number;
+  readonly sequence: DecimalNatural;
   readonly outcome: TerminalOutcome;
 }
 
 export interface RunView {
   readonly runId: RunId;
-  readonly lastSequence: number;
+  readonly lastSequence: DecimalNatural;
   readonly phase: RunViewPhase;
   readonly suspended: SuspensionView | null;
-  readonly currentPlanRoot: AcceptedPlanRootState | null;
+  readonly currentPlan: CurrentPlanState | null;
   readonly workItems: readonly WorkItemView[];
+  readonly workItemsComplete: boolean;
   readonly openFindings: readonly OpenFindingView[];
+  readonly findingsComplete: boolean;
   readonly coverage: CoverageSummary;
   readonly currentCandidate: CandidateView | null;
   readonly currentPublication: PublicationView | null;
   readonly terminal: TerminalView | null;
 }
 
-type FindingOfKind<Kind extends Finding["kind"]> = Extract<Finding, { readonly kind: Kind }>;
-type FindingProjectionMap = {
-  readonly [Kind in Finding["kind"]]: (finding: FindingOfKind<Kind>) => OpenFindingView;
-};
+function findingDetail(finding: Finding): ArtifactRef {
+  return finding.kind === "planning-gap" ? finding.explanation : finding.report;
+}
 
-const findingProjectors = Object.freeze({
-  advisory(finding) {
-    return Object.freeze({
-      findingId: finding.findingId,
-      kind: finding.kind,
-      ownerWorkItemId: finding.raisedByWorkItemId,
-      detail: finding.report,
-      subjectRoot: finding.subjectRoot,
-    });
-  },
-  "definition-of-done"(finding) {
-    return Object.freeze({
-      findingId: finding.findingId,
-      kind: finding.kind,
-      ownerWorkItemId: finding.correctionOwner,
-      detail: finding.report,
-      subjectRoot: finding.subjectRoot,
-    });
-  },
-  integrity(finding) {
-    return Object.freeze({
-      findingId: finding.findingId,
-      kind: finding.kind,
-      ownerWorkItemId: finding.correctionOwner,
-      detail: finding.report,
-      subjectRoot: finding.subjectRoot,
-    });
-  },
-  "planning-gap"(finding) {
-    return Object.freeze({
-      findingId: finding.findingId,
-      kind: finding.kind,
-      ownerWorkItemId: finding.planAuthorWorkItemId,
-      detail: finding.explanation,
-      subjectRoot: null,
-    });
-  },
-}) satisfies FindingProjectionMap;
+function findingSubject(finding: Finding): ArtifactRoot | null {
+  return finding.kind === "planning-gap" ? null : finding.subjectRoot;
+}
 
-function projectFinding(finding: Finding): OpenFindingView {
-  switch (finding.kind) {
-    case "advisory":
-      return findingProjectors.advisory(finding);
-    case "definition-of-done":
-      return findingProjectors["definition-of-done"](finding);
-    case "integrity":
-      return findingProjectors.integrity(finding);
-    case "planning-gap":
-      return findingProjectors["planning-gap"](finding);
+function findingOwner(state: RunState, finding: Finding): WorkItemId | null {
+  if (finding.kind === "advisory") {
+    return finding.raisedByWorkItemId;
   }
-}
-
-function uniqueCount<Value>(values: readonly Value[]): number {
-  const seen: Value[] = [];
-  for (const value of values) {
-    if (!seen.includes(value)) {
-      seen.push(value);
-    }
+  if (finding.kind === "planning-gap") {
+    return state.currentPlan?.planAuthorWorkItemId ?? null;
   }
-  return seen.length;
+  return finding.subjectWorkItemId ?? state.currentPlan?.integrationOwnerWorkItemId ?? null;
 }
 
-function currentPlan(state: RunState): AcceptedPlanRootState | null {
-  if (state.currentPlanRootId === null) {
-    return null;
-  }
-  return state.planRoots.find((entry) => entry.planRootId === state.currentPlanRootId) ?? null;
-}
-
-function candidateView(candidate: CandidateState | undefined): CandidateView | null {
-  if (candidate === undefined) {
-    return null;
-  }
-  return Object.freeze({
-    candidateId: candidate.candidateId,
-    planRootId: candidate.planRootId,
-    tree: candidate.tree,
-    manifest: candidate.manifest,
-  });
-}
-
-function publicationView(publication: PublicationState | undefined): PublicationView | null {
-  if (publication === undefined) {
-    return null;
-  }
-  return Object.freeze({
-    publicationId: publication.publicationId,
-    candidateId: publication.candidateId,
-    expectedHead: publication.expectedHead,
-    desiredHead: publication.desiredHead,
-    observedHead: publication.observation?.observedHead ?? null,
-    status: publication.observation?.status ?? "pending",
-  });
-}
-
-function phase(state: RunState): RunViewPhase {
-  return state.terminal === null ? state.phase : "terminal";
-}
-
-/** A deletable read model. No authority decision imports or consults this view. */
+/** Bounded deletable read model; incomplete hot pages are marked explicitly. */
 export function projectRunState(state: RunState): RunView {
-  const workItems = Object.freeze(state.workItems.map((entry): WorkItemView => Object.freeze({
-    workItemId: entry.workItemId,
-    kind: entry.workItem.kind,
-    roleId: entry.workItem.roleId,
-    planRootId: entry.workItem.planRootId,
-    status: entry.status,
-  })));
-  const openFindings = Object.freeze(
-    state.findings
-      .filter((entry) => entry.status === "open")
-      .map((entry) => projectFinding(entry.finding)),
-  );
-  const requirementIds: RequirementId[] = state.coverageLinks.map((link) => link.requirementId);
-  const coveredWorkItemIds: WorkItemId[] = state.coverageLinks.map((link) => link.workItemId);
-  const currentCandidate = state.currentCandidateId === null
-    ? undefined
-    : state.candidates.find((entry) => entry.candidateId === state.currentCandidateId);
-  const currentPublication = state.currentPublicationId === null
-    ? undefined
-    : state.publications.find((entry) => entry.publicationId === state.currentPublicationId);
+  const workValues = indexValues(state.indexes.work, "work");
+  const findingValues = indexValues(state.indexes.findings, "finding");
+  const workItems = Object.freeze((workValues ?? Object.freeze([]))
+    .filter((value) => value.kind === "work")
+    .map((value): WorkItemView => Object.freeze({
+      workItemId: value.workItem.workItemId,
+      kind: value.workItem.kind,
+      roleId: value.workItem.roleId,
+      planRootId: value.workItem.planRootId,
+      status: value.acceptedOutput === null ? "declared" : "accepted",
+    })));
+  const openFindings = Object.freeze((findingValues ?? Object.freeze([]))
+    .filter((value) => value.kind === "finding" && value.status === "open")
+    .map((value): OpenFindingView => {
+      if (value.kind !== "finding") {
+        throw new Error("closed index kind narrowing failed");
+      }
+      return Object.freeze({
+        findingId: value.finding.findingId,
+        kind: value.finding.kind,
+        ownerWorkItemId: findingOwner(state, value.finding),
+        detail: findingDetail(value.finding),
+        subjectRoot: findingSubject(value.finding),
+      });
+    }));
   return Object.freeze({
     runId: state.identity.runId,
     lastSequence: state.lastSequence,
-    phase: phase(state),
+    phase: state.terminal === null ? state.phase : "terminal",
     suspended: state.suspension.kind === "active"
       ? null
       : Object.freeze({
           operatorRequestId: state.suspension.operatorRequestId,
           reason: state.suspension.reason,
         }),
-    currentPlanRoot: currentPlan(state),
+    currentPlan: state.currentPlan,
     workItems,
+    workItemsComplete: workValues !== null,
     openFindings,
+    findingsComplete: findingValues !== null,
     coverage: Object.freeze({
-      linkCount: state.coverageLinks.length,
-      evidencedLinkCount: state.coverageLinks.filter((link) => link.evidence !== null).length,
-      requirementCount: uniqueCount(requirementIds),
-      workItemCount: uniqueCount(coveredWorkItemIds),
+      declaredAtoms: state.counters.declaredAtoms,
+      dispositionedAtoms: state.counters.dispositionedAtoms,
+      declaredWork: state.counters.declaredWork,
+      acceptedWork: state.counters.acceptedWork,
     }),
-    currentCandidate: candidateView(currentCandidate),
-    currentPublication: publicationView(currentPublication),
-    terminal: state.terminal === null
+    currentCandidate: state.currentCandidate === null
+      ? null
+      : Object.freeze({ ...state.currentCandidate }),
+    currentPublication: state.currentPublication === null
       ? null
       : Object.freeze({
-          sequence: state.terminal.sequence,
-          outcome: state.terminal.outcome,
+          publicationId: state.currentPublication.publicationId,
+          candidateId: state.currentPublication.candidateId,
+          expected: state.currentPublication.expected,
+          desiredHead: state.currentPublication.desiredHead,
+          observedHead: state.currentPublication.observedHead,
+          status: state.currentPublication.status,
         }),
+    terminal: state.terminal === null
+      ? null
+      : Object.freeze({ sequence: state.terminal.sequence, outcome: state.terminal.outcome }),
   });
 }

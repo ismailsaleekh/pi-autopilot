@@ -164,6 +164,18 @@ export interface CapsuleArbitraries<Value> {
   readonly arbitraryBytes: (seed: number, length: number) => Uint8Array;
 }
 
+export interface AggregateCapsule {
+  readonly name: string;
+  readonly schema: Schema;
+  readonly kinds: readonly string[];
+  readonly fingerprint: Digest;
+  readonly decode: (input: JsonValue) => DecodeResult<unknown>;
+  readonly decodeCanonical: (input: Uint8Array) => DecodeResult<unknown>;
+  readonly encodeUnknown: (value: unknown) => DecodeResult<Uint8Array>;
+  readonly digestUnknown: (value: unknown) => DecodeResult<Digest>;
+  readonly arbitrary: CapsuleArbitraries<unknown>;
+}
+
 export interface SchemaCapsule<Name extends string, Value> {
   readonly name: Name;
   readonly schema: Schema;

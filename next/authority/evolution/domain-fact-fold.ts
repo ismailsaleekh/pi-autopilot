@@ -4,7 +4,6 @@ import {
   decrementDecimalNatural,
   incrementDecimalNatural,
 } from "../protocol/identifiers.js";
-import type { Digest } from "../protocol/identifiers.js";
 import { indexMutationDigest } from "../protocol/state-index.capsule.js";
 import type {
   IndexMutation,

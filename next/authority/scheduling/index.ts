@@ -1,252 +1,125 @@
-import type {
-  FindingState,
-  RunState,
-  WorkItemState,
-} from "../model/run-state.js";
+import { indexValues } from "../model/authenticated-index.js";
+import type { RunState } from "../model/run-state.js";
 import type { Finding } from "../protocol/finding.capsule.js";
-import type { ArtifactRoot, WorkItemId } from "../protocol/identifiers.js";
+import type { FindingId, WorkItemId } from "../protocol/identifiers.js";
+import type { FindingIndexValue, WorkIndexValue } from "../protocol/state-index.capsule.js";
 
 export type CorrectionScope = "local" | "plan-wide" | "cross-lane";
 
 export interface FindingOwner {
-  readonly findingId: Finding["findingId"];
+  readonly findingId: FindingId;
   readonly scope: CorrectionScope;
   readonly ownerWorkItemId: WorkItemId;
 }
 
-type FindingOfKind<Kind extends Finding["kind"]> = Extract<Finding, { readonly kind: Kind }>;
-type OwnerHandlerMap = {
-  readonly [Kind in Finding["kind"]]: (
-    state: RunState,
-    finding: FindingOfKind<Kind>,
-  ) => FindingOwner;
-};
+export type ReadyWorkResult =
+  | { readonly kind: "ready"; readonly work: readonly WorkIndexValue[] }
+  | { readonly kind: "unproven"; readonly diagnostic: string };
 
 function compareText(left: string, right: string): number {
-  if (left < right) {
-    return -1;
-  }
-  return left > right ? 1 : 0;
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
-function activePlanWork(state: RunState): readonly WorkItemState[] {
-  if (state.phase === "planning") {
-    return Object.freeze(state.workItems.filter((entry) => !state.supersededPlanRoots.some(
-      (supersession) => supersession.priorPlanRootId === entry.workItem.planRootId,
-    )));
-  }
-  if (
-    state.currentPlanRootId === null
-    || state.supersededPlanRoots.some(
-      (supersession) => supersession.priorPlanRootId === state.currentPlanRootId,
-    )
-  ) {
-    return Object.freeze([]);
-  }
-  return Object.freeze(state.workItems.filter(
-    (entry) => (
-      entry.workItem.planRootId === state.currentPlanRootId
-      && !state.supersededPlanRoots.some(
-        (supersession) => supersession.priorPlanRootId === entry.workItem.planRootId,
-      )
-    ),
-  ));
+function completeWork(state: RunState): readonly WorkIndexValue[] | null {
+  const values = indexValues(state.indexes.work, "work");
+  return values === null
+    ? null
+    : Object.freeze(values.filter((value): value is WorkIndexValue => value.kind === "work"));
 }
 
-function priorWorkClosed(active: readonly WorkItemState[]): boolean {
-  return active.every((entry) => (
-    entry.workItem.kind === "integrate-candidate"
-    || entry.workItem.kind === "verify-candidate"
-    || entry.status === "submission-bound"
-  ));
+function completeFindings(state: RunState): readonly FindingIndexValue[] | null {
+  const values = indexValues(state.indexes.findings, "finding");
+  return values === null
+    ? null
+    : Object.freeze(values.filter((value): value is FindingIndexValue => value.kind === "finding"));
 }
 
-function integrationsClosed(active: readonly WorkItemState[]): boolean {
-  const integrations = active.filter((entry) => entry.workItem.kind === "integrate-candidate");
-  return integrations.length === 0 || integrations.every((entry) => entry.status === "submission-bound");
-}
-
-function workReady(
-  state: RunState,
-  active: readonly WorkItemState[],
-  entry: WorkItemState,
-): boolean {
-  if (entry.status !== "declared") {
-    return false;
-  }
-  switch (entry.workItem.kind) {
-    case "produce-artifact":
-    case "review-artifact":
-      return true;
-    case "correct-artifact": {
-      const findingId = entry.workItem.findingId;
-      const finding = state.findings.find(
-        (findingEntry) => findingEntry.findingId === findingId,
-      );
-      return finding !== undefined && finding.status === "open";
-    }
-    case "integrate-candidate":
-      return priorWorkClosed(active);
-    case "verify-candidate": {
-      if (!integrationsClosed(active)) {
-        return false;
-      }
-      const candidate = state.candidates.find(
-        (candidateEntry) => candidateEntry.candidateId === state.currentCandidateId,
-      );
-      return candidate !== undefined
-        && candidate.planRootId === entry.workItem.planRootId
-        && candidate.tree === entry.workItem.candidateRoot;
-    }
-  }
-}
-
-/**
- * Return the deterministic ready frontier. Tie-break is locale-independent
- * ascending WorkItemId. The frozen WorkItem contract has no dependency edges;
- * declaration is therefore the only dependency-ready signal available, with
- * explicit integration and verification barriers derived from current facts.
- */
-export function readyWork(state: RunState): readonly WorkItemState[] {
+/** Deterministic frontier; incomplete authenticated pages are loud, never empty. */
+export function readyWork(state: RunState): ReadyWorkResult {
   if (state.terminal !== null || state.suspension.kind === "suspended") {
-    return Object.freeze([]);
+    return Object.freeze({ kind: "ready", work: Object.freeze([]) });
   }
-  const active = activePlanWork(state);
-  return Object.freeze(
-    active
-      .filter((entry) => workReady(state, active, entry))
-      .slice()
-      .sort((left, right) => compareText(left.workItemId, right.workItemId)),
-  );
-}
-
-function submissionsForRoot(state: RunState, root: ArtifactRoot): readonly WorkItemId[] {
-  const active = activePlanWork(state);
-  return Object.freeze(
-    state.submissions
-      .filter((submission) => (
-        submission.outputRoot === root
-        && active.some((entry) => entry.workItemId === submission.workItemId)
-      ))
-      .map((submission) => submission.workItemId)
-      .sort(compareText),
-  );
-}
-
-function integratedOwner(state: RunState, fallback: WorkItemId): WorkItemId {
-  const candidates = activePlanWork(state)
-    .filter((entry) => entry.workItem.kind === "integrate-candidate")
-    .slice()
-    .sort((left, right) => compareText(left.workItemId, right.workItemId));
-  return candidates[0]?.workItemId ?? fallback;
-}
-
-function subjectScope(
-  state: RunState,
-  subjectRoot: ArtifactRoot,
-  fallback: WorkItemId,
-): FindingOwner["scope"] {
-  const currentPlan = state.planRoots.find((entry) => entry.planRootId === state.currentPlanRootId);
-  if (currentPlan?.planRoot === subjectRoot) {
-    return "plan-wide";
+  const work = completeWork(state);
+  const dependencies = indexValues(state.indexes.dependencies, "dependency");
+  const findings = completeFindings(state);
+  if (work === null || dependencies === null || findings === null) {
+    return Object.freeze({
+      kind: "unproven",
+      diagnostic: "ready frontier requires complete bounded work, dependency, and finding pages",
+    });
   }
-  const currentCandidate = state.candidates.find(
-    (entry) => entry.candidateId === state.currentCandidateId,
-  );
-  if (currentCandidate?.tree === subjectRoot) {
-    return "cross-lane";
+  const workById = new Map<WorkItemId, WorkIndexValue>();
+  for (const entry of work) {
+    workById.set(entry.workItem.workItemId, entry);
   }
-  const localOwners = submissionsForRoot(state, subjectRoot);
-  return localOwners.includes(fallback) || localOwners.length > 0 ? "local" : "cross-lane";
+  const result: WorkIndexValue[] = [];
+  for (const entry of work) {
+    if (entry.acceptedOutput !== null) {
+      continue;
+    }
+    if (state.phase === "execution" && entry.workItem.planRootId !== state.currentPlan?.planRootId) {
+      continue;
+    }
+    const prerequisites = dependencies.filter((value) => value.kind === "dependency" && value.dependent === entry.workItem.workItemId);
+    if (prerequisites.some((edge) => edge.kind === "dependency" && workById.get(edge.dependency)?.acceptedOutput === null)) {
+      continue;
+    }
+    const item = entry.workItem;
+    if (item.kind === "correct-artifact") {
+      const finding = findings.find((value) => value.finding.findingId === item.findingId);
+      if (finding?.status !== "open") {
+        continue;
+      }
+    }
+    if (entry.workItem.kind === "verify-candidate" && state.currentCandidate?.tree !== entry.workItem.candidateRoot) {
+      continue;
+    }
+    result.push(entry);
+  }
+  result.sort((left, right) => compareText(left.workItem.workItemId, right.workItem.workItemId));
+  return Object.freeze({ kind: "ready", work: Object.freeze(result) });
 }
 
-function ownerForPlanningGap(
-  _state: RunState,
-  finding: FindingOfKind<"planning-gap">,
-): FindingOwner {
+/** Owner selection is authority-derived solely from current plan and finding subject. */
+export function ownerForFinding(state: RunState, finding: Finding): FindingOwner | null {
+  if (finding.kind === "advisory") {
+    return Object.freeze({
+      findingId: finding.findingId,
+      scope: "local",
+      ownerWorkItemId: finding.raisedByWorkItemId,
+    });
+  }
+  if (finding.kind === "planning-gap") {
+    return state.currentPlan === null
+      ? null
+      : Object.freeze({
+          findingId: finding.findingId,
+          scope: "plan-wide",
+          ownerWorkItemId: state.currentPlan.planAuthorWorkItemId,
+        });
+  }
+  if (state.currentPlan === null) {
+    return null;
+  }
   return Object.freeze({
     findingId: finding.findingId,
-    scope: "plan-wide",
-    ownerWorkItemId: finding.planAuthorWorkItemId,
+    scope: finding.subjectWorkItemId === null ? "cross-lane" : "local",
+    ownerWorkItemId: finding.subjectWorkItemId ?? state.currentPlan.integrationOwnerWorkItemId,
   });
 }
 
-function ownerForIntegrity(
-  state: RunState,
-  finding: FindingOfKind<"integrity">,
-): FindingOwner {
-  const scope = subjectScope(state, finding.subjectRoot, finding.correctionOwner);
-  const localOwners = submissionsForRoot(state, finding.subjectRoot);
-  const localOwner = localOwners[0] ?? finding.correctionOwner;
-  return Object.freeze({
-    findingId: finding.findingId,
-    scope,
-    ownerWorkItemId: scope === "cross-lane"
-      ? integratedOwner(state, finding.correctionOwner)
-      : scope === "local"
-        ? localOwner
-        : finding.correctionOwner,
-  });
-}
-
-function ownerForDefinitionOfDone(
-  state: RunState,
-  finding: FindingOfKind<"definition-of-done">,
-): FindingOwner {
-  const scope = subjectScope(state, finding.subjectRoot, finding.correctionOwner);
-  const localOwners = submissionsForRoot(state, finding.subjectRoot);
-  const localOwner = localOwners[0] ?? finding.correctionOwner;
-  return Object.freeze({
-    findingId: finding.findingId,
-    scope,
-    ownerWorkItemId: scope === "cross-lane"
-      ? integratedOwner(state, finding.correctionOwner)
-      : scope === "local"
-        ? localOwner
-        : finding.correctionOwner,
-  });
-}
-
-function ownerForAdvisory(
-  state: RunState,
-  finding: FindingOfKind<"advisory">,
-): FindingOwner {
-  const scope = subjectScope(state, finding.subjectRoot, finding.raisedByWorkItemId);
-  const localOwners = submissionsForRoot(state, finding.subjectRoot);
-  const localOwner = localOwners[0] ?? finding.raisedByWorkItemId;
-  return Object.freeze({
-    findingId: finding.findingId,
-    scope,
-    ownerWorkItemId: scope === "cross-lane"
-      ? integratedOwner(state, finding.raisedByWorkItemId)
-      : localOwner,
-  });
-}
-
-const ownerHandlers = Object.freeze({
-  advisory: ownerForAdvisory,
-  "definition-of-done": ownerForDefinitionOfDone,
-  integrity: ownerForIntegrity,
-  "planning-gap": ownerForPlanningGap,
-}) satisfies OwnerHandlerMap;
-
-/** Every closed Finding variant maps to exactly one stable correction owner. */
-export function ownerForFinding(state: RunState, finding: Finding): FindingOwner {
-  switch (finding.kind) {
-    case "advisory":
-      return ownerHandlers.advisory(state, finding);
-    case "definition-of-done":
-      return ownerHandlers["definition-of-done"](state, finding);
-    case "integrity":
-      return ownerHandlers.integrity(state, finding);
-    case "planning-gap":
-      return ownerHandlers["planning-gap"](state, finding);
+export function ownersForFindings(state: RunState): readonly FindingOwner[] | null {
+  const findings = completeFindings(state);
+  if (findings === null) {
+    return null;
   }
-}
-
-/** Convenience query over journal-derived finding state, preserving key order. */
-export function ownersForFindings(state: RunState): readonly FindingOwner[] {
-  return Object.freeze(state.findings.map((entry: FindingState) => (
-    ownerForFinding(state, entry.finding)
-  )));
+  const output: FindingOwner[] = [];
+  for (const entry of findings) {
+    const owner = ownerForFinding(state, entry.finding);
+    if (owner !== null) {
+      output.push(owner);
+    }
+  }
+  output.sort((left, right) => compareText(left.findingId, right.findingId));
+  return Object.freeze(output);
 }

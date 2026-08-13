@@ -35,6 +35,10 @@ function stateAfterFacts(state: RunState, facts: readonly DomainFact[], stimulus
   return current;
 }
 
+function isFeedback(value: RunState | Feedback): value is Feedback {
+  return "kind" in value && value.kind === "feedback";
+}
+
 function commandKnown(state: RunState, command: Command, stimulus: Stimulus): boolean | Feedback {
   const found = lookupIndex(state.indexes.commands, indexKey("commands", command.commandId), stimulus.pages);
   if (found.kind !== "proved") {
@@ -114,7 +118,7 @@ export function deriveReaction(
   stimulus: Stimulus,
 ): ReactionResult | Feedback {
   const prospective = stateAfterFacts(state, facts, stimulus);
-  if ("kind" in prospective && prospective.kind === "feedback") {
+  if (isFeedback(prospective)) {
     return prospective;
   }
   if (prospective.suspension.kind === "suspended" || prospective.terminal !== null) {

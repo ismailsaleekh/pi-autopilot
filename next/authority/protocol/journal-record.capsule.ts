@@ -28,6 +28,7 @@ import {
   object,
   union,
 } from "./schema.js";
+import type { ArtifactRef } from "./identifiers.js";
 import type { Digest, Infer } from "./schema.js";
 import { indexMutationSchema, resolvedIndexPageSchema } from "./state-index.capsule.js";
 import { terminalOutcomeSchema } from "./terminal-outcome.capsule.js";
@@ -144,6 +145,28 @@ export function canonicalCommandsDigest(commands: readonly Command[]): Digest {
   return canonicalDigestUnknown(commands);
 }
 
+const commandArtifactCapsule = defineCapsule("CanonicalCommandArtifact", artifactRefSchema);
+
+/** Deterministic singleton CAS reference; runtime installs these exact bytes before append. */
+export function canonicalCommandArtifact(commands: readonly Command[]): ArtifactRef {
+  const bytes = canonicalEncodeUnknown(commands);
+  const digest = canonicalCommandsDigest(commands);
+  const decoded = commandArtifactCapsule.decode(Object.freeze({
+    blob: digest,
+    byteLength: String(bytes.byteLength),
+    codec: "codec:pi-autopilot-commands",
+    codecVersion: "version:2",
+    digest,
+    path: "semantic/commands.canonical.json",
+    range: null,
+    root: digest,
+  }));
+  if (decoded.kind === "error") {
+    throw new Error(`canonical command artifact invariant failed: ${decoded.error.diagnostic}`);
+  }
+  return decoded.value;
+}
+
 export function recordSemanticRootsMatch(
   record: DecisionCommitted | CommandSettled | OutcomeCommitted,
 ): boolean {
@@ -154,11 +177,14 @@ export function recordSemanticRootsMatch(
     return true;
   }
   const commandBytes = canonicalEncodeUnknown(record.commands);
+  const commandArtifact = canonicalCommandArtifact(record.commands);
+  const settlementMatches = record.kind !== "command-settled"
+    || (record.observationDigest === record.observation.digest
+      && String(record.observation.blob) === String(record.observationDigest));
   return record.commandDigest === canonicalCommandsDigest(record.commands)
-    && record.commandArtifact.digest === record.commandDigest
-    && String(record.commandArtifact.blob) === String(record.commandDigest)
+    && canonicalDigestUnknown(record.commandArtifact) === canonicalDigestUnknown(commandArtifact)
     && record.commandArtifact.byteLength === String(commandBytes.byteLength)
-    && record.commandArtifact.range === null;
+    && settlementMatches;
 }
 
 export function decisionFactsMatchRoot(
