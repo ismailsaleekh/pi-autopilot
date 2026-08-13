@@ -1,32 +1,47 @@
-import type { FoldError } from "../evolution/fold-result.js";
 import type { DecodeError } from "../protocol/schema.js";
-import type { Stimulus } from "../protocol/stimulus.capsule.js";
 
-export type Feedback =
-  | {
-      readonly kind: "feedback";
-      readonly code: "invalid-stimulus";
-      readonly schemaCode: DecodeError["code"];
-      readonly path: string;
-      readonly diagnostic: string;
-    }
-  | {
-      readonly kind: "feedback";
-      readonly code: "admission-not-implemented";
-      readonly stimulusKind: Stimulus["kind"];
-      readonly diagnostic: string;
-    }
-  | {
-      readonly kind: "feedback";
-      readonly code: "invalid-accepted-batch";
-      readonly diagnostic: string;
-    }
-  | {
-      readonly kind: "feedback";
-      readonly code: "invalid-domain-transition";
-      readonly error: FoldError;
-      readonly diagnostic: string;
-    };
+export type SemanticFeedbackCode =
+  | "action-already-committed"
+  | "already-suspended"
+  | "atom-inventory-invalid"
+  | "command-not-issued"
+  | "corrector-unavailable"
+  | "dependency-cycle"
+  | "duplicate-semantic-value"
+  | "evidence-invalid"
+  | "finding-invalid"
+  | "invalid-accepted-commit"
+  | "invalid-domain-transition"
+  | "invalid-stimulus"
+  | "noncurrent-plan-consequence"
+  | "not-suspended"
+  | "outcome-ineligible"
+  | "page-unproven"
+  | "plan-invalid"
+  | "replay-mismatch"
+  | "resume-binding-mismatch"
+  | "route-invalid"
+  | "run-already-terminal"
+  | "run-mismatch"
+  | "stale-input-root"
+  | "superseded-plan-root"
+  | "work-item-not-accepting";
+
+export interface Feedback {
+  readonly kind: "feedback";
+  readonly code: SemanticFeedbackCode;
+  readonly path: string;
+  readonly diagnostic: string;
+  readonly schemaCode: DecodeError["code"] | null;
+}
+
+export function semanticFeedback(
+  code: SemanticFeedbackCode,
+  path: string,
+  diagnostic: string,
+): Feedback {
+  return Object.freeze({ kind: "feedback", code, path, diagnostic, schemaCode: null });
+}
 
 export function invalidStimulusFeedback(error: DecodeError): Feedback {
   return Object.freeze({
@@ -35,14 +50,5 @@ export function invalidStimulusFeedback(error: DecodeError): Feedback {
     schemaCode: error.code,
     path: error.path,
     diagnostic: error.diagnostic,
-  });
-}
-
-export function unavailableAdmissionFeedback(stimulusKind: Stimulus["kind"]): Feedback {
-  return Object.freeze({
-    kind: "feedback",
-    code: "admission-not-implemented",
-    stimulusKind,
-    diagnostic: `not yet implemented: ${stimulusKind}`,
   });
 }
