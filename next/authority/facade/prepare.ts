@@ -1,7 +1,7 @@
 import {
   admissionSeams,
-  assemblePreparedCommit,
 } from "../admission/index.js";
+import { assemblePreparedCommit } from "./assembly.js";
 import { foldDomainFact } from "../evolution/domain-fact-fold.js";
 import type { RunState } from "../model/run-state.js";
 import { determineTerminalOutcome } from "../outcome/index.js";

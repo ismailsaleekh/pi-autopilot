@@ -1,5 +1,3 @@
-export { assemblePreparedCommit } from "./batch-assembly.js";
-
 import { stateDigest } from "../model/run-state.js";
 import type { RunState } from "../model/run-state.js";
 import { indexKey, lookupIndex } from "../model/authenticated-index.js";
