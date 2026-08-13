@@ -1,6 +1,5 @@
 export {
   GitAdapter,
-  gitArtifactRootForTreeOid,
   gitIntentHandlers,
 } from "./git-adapter.js";
 export type {
@@ -8,10 +7,6 @@ export type {
   GitAdapterDiagnostic,
   GitAdapterExecution,
   GitAdapterOptions,
+  GitRepositoryLocator,
   GitWorkspaceLocator,
-  GitCompareReadResult,
-  GitDiffEntry,
-  GitSealRead,
-  GitSealReadResult,
-  GitTreeEntry,
 } from "./git-adapter.js";
