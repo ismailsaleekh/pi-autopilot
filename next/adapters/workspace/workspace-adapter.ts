@@ -399,7 +399,9 @@ export class WorkspaceAdapter {
       return this.observation(intent, "attempt-directory-allocated", Object.freeze({
         kind: "ok",
         value: Object.freeze({
-          materializedRoot: intent.inputs.baseRoot,
+          empty: true,
+          leaseId: intent.preconditions.leaseId,
+          workspaceCapability: intent.inputs.workspaceCapability,
           workspaceId: intent.inputs.workspaceId,
         }),
       }));
@@ -432,7 +434,8 @@ export class WorkspaceAdapter {
     }
     if (
       !present
-      || String(intent.inputs.isolationPolicyRoot) !== String(intent.preconditions.expectedPolicyDigest)
+      || intent.inputs.isolationPolicy.digest !== intent.preconditions.expectedPolicyDigest
+      || intent.inputs.isolationPolicy.root !== intent.preconditions.expectedWorkspaceRoot
     ) {
       return this.observation(intent, "attempt-isolation-applied", Object.freeze({
         kind: "retry",
@@ -443,11 +446,11 @@ export class WorkspaceAdapter {
       }));
     }
     return this.observation(intent, "attempt-isolation-applied", Object.freeze({
-      kind: "ok",
-      value: Object.freeze({
-        policyDigest: intent.preconditions.expectedPolicyDigest,
-        workspaceId: intent.inputs.workspaceId,
-      }),
+      kind: "retry",
+      diagnostic: contractDiagnostic(
+        "workspace.isolation-enforcement-unavailable",
+        "filesystem adapter cannot claim OS isolation without an injected enforcement attestation",
+      ),
     }));
   }
 
@@ -475,8 +478,10 @@ export class WorkspaceAdapter {
       return this.observation(intent, "attempt-directory-inspected", Object.freeze({
         kind: "ok",
         value: Object.freeze({
+          childEpoch: intent.preconditions.childEpoch,
+          leaseId: intent.preconditions.leaseId,
           observedRoot: null,
-          state: "ready",
+          state: (await readdir(path)).length === 0 ? "empty-reserved" : "occupied",
           workspaceId: intent.inputs.workspaceId,
         }),
       }));
@@ -485,6 +490,8 @@ export class WorkspaceAdapter {
         return this.observation(intent, "attempt-directory-inspected", Object.freeze({
           kind: "ok",
           value: Object.freeze({
+            childEpoch: intent.preconditions.childEpoch,
+            leaseId: intent.preconditions.leaseId,
             observedRoot: null,
             state: "absent",
             workspaceId: intent.inputs.workspaceId,
@@ -571,7 +578,11 @@ export class WorkspaceAdapter {
       }
       return this.observation(intent, "attempt-directory-disposed", Object.freeze({
         kind: "ok",
-        value: Object.freeze({ disposed, workspaceId: intent.inputs.workspaceId }),
+        value: Object.freeze({
+          disposed,
+          fencedChildEpoch: intent.preconditions.fencedChildEpoch,
+          workspaceId: intent.inputs.workspaceId,
+        }),
       }));
     } catch {
       return this.observation(intent, "attempt-directory-disposed", Object.freeze({
