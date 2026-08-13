@@ -1,0 +1,8 @@
+# Protected governance layer of the pi-autopilot rebuild.
+# Any change to these paths requires explicit owner review.
+# See plans/active/autopilot-extension/final-redesign/step3b-software-design.md (F00 / protected enforcement).
+/next/policy-root/            @ismailsaleekh
+/next/authority/protocol/     @ismailsaleekh
+/next/ports/contracts/        @ismailsaleekh
+/next/package.json            @ismailsaleekh
+/next/tsconfig*.json          @ismailsaleekh
