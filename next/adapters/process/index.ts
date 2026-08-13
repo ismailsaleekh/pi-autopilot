@@ -1,0 +1,23 @@
+export { ProcessAdapter, ProcessHandle } from "./process-adapter.js";
+export type {
+  CaptureObservation,
+  PhysicalDiagnostic,
+  ProcessCaptureAcquireResult,
+  ProcessCaptureSink,
+  ProcessCaptureTarget,
+  ProcessGraceWaiter,
+  ProcessGroupObservation,
+  ProcessLifecycleObservation,
+  ProcessObservation,
+  ProcessObserveResult,
+  ProcessOutputObservation,
+  ProcessOutputReadRequest,
+  ProcessOutputReadResult,
+  ProcessSignal,
+  ProcessSignalResult,
+  ProcessStartRequest,
+  ProcessStartResult,
+  ProcessTerminationObservation,
+  ProcessTerminationResult,
+  SignalDeliveryObservation,
+} from "./types.js";

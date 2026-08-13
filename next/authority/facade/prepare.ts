@@ -1,16 +1,19 @@
+import {
+  admissionSeams,
+  assembleSemanticBatch,
+} from "../admission/index.js";
 import { foldDomainFact } from "../evolution/domain-fact-fold.js";
 import type { FoldError } from "../evolution/fold-result.js";
 import type { RunState } from "../model/run-state.js";
+import { determineTerminalOutcome } from "../outcome/index.js";
 import { mintAcceptedBatch } from "../protocol/accepted-batch.js";
 import type { AcceptedBatch } from "../protocol/accepted-batch.js";
 import type { JsonValue } from "../protocol/schema.js";
 import { stimulusCapsule } from "../protocol/stimulus.capsule.js";
 import { stateDigest } from "../model/run-state.js";
 import type { Stimulus } from "../protocol/stimulus.capsule.js";
-import {
-  invalidStimulusFeedback,
-  unavailableAdmissionFeedback,
-} from "./feedback.js";
+import { deriveReaction } from "../reaction/index.js";
+import { invalidStimulusFeedback } from "./feedback.js";
 import type { Feedback } from "./feedback.js";
 import type {
   AdmissionResult,
@@ -22,33 +25,12 @@ export type PrepareResult =
   | { readonly kind: "accepted"; readonly batch: AcceptedBatch }
   | Feedback;
 
-type StubAdmissionMap = {
-  readonly [Kind in Stimulus["kind"]]: (
-    state: RunState,
-    stimulus: Extract<Stimulus, { readonly kind: Kind }>,
-  ) => AdmissionResult;
-};
-
-const admissionSkeleton = Object.freeze({
-  "boundary-request-received"(_state, stimulus) {
-    return unavailableAdmissionFeedback(stimulus.kind);
-  },
-  "command-observation-received"(_state, stimulus) {
-    return unavailableAdmissionFeedback(stimulus.kind);
-  },
-  "operator-resume-requested"(_state, stimulus) {
-    return unavailableAdmissionFeedback(stimulus.kind);
-  },
-  "operator-suspend-requested"(_state, stimulus) {
-    return unavailableAdmissionFeedback(stimulus.kind);
-  },
-  "run-replay-completed"(_state, stimulus) {
-    return unavailableAdmissionFeedback(stimulus.kind);
-  },
-  "submission-ready"(_state, stimulus) {
-    return unavailableAdmissionFeedback(stimulus.kind);
-  },
-}) satisfies StubAdmissionMap;
+const productionSemanticSeams = Object.freeze({
+  admission: admissionSeams,
+  reaction: deriveReaction,
+  outcome: determineTerminalOutcome,
+  assemble: assembleSemanticBatch,
+}) satisfies SemanticSeams;
 
 function invalidTransitionFeedback(error: FoldError): Feedback {
   return Object.freeze({
@@ -105,8 +87,10 @@ function prepareDecoded(
     }
     candidate = transition.state;
   }
-  const reaction = seams.reaction(state, proposed.facts);
   const outcome = seams.outcome(state, proposed.facts);
+  const reaction = outcome === null
+    ? seams.reaction(state, proposed.facts)
+    : Object.freeze({ commands: Object.freeze([]) });
   const assembled = seams.assemble(
     state,
     stimulus,
@@ -132,20 +116,13 @@ function prepareDecoded(
   return Object.freeze({ kind: "accepted", batch: minted.batch });
 }
 
-/**
- * W1 skeleton: validates inert JSON and returns actionable typed feedback for
- * every closed stimulus kind. It never manufactures a decision.
- */
+/** Production preparation through the exhaustive W2 semantic seams. */
 export function prepare(state: RunState, stimulus: JsonValue): PrepareResult {
   const decoded = stimulusCapsule.decode(stimulus);
   if (decoded.kind === "error") {
     return invalidStimulusFeedback(decoded.error);
   }
-  const result = dispatchAdmission(state, decoded.value, admissionSkeleton);
-  if (result.kind !== "proposed-facts") {
-    return result;
-  }
-  return unavailableAdmissionFeedback(decoded.value.kind);
+  return prepareDecoded(state, decoded.value, productionSemanticSeams);
 }
 
 /** W2 composition entry; policy-root permits this capability only in facade. */

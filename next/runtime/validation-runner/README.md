@@ -1,3 +1,7 @@
 # runtime/validation-runner
 
-W2 owns mechanical-rule execution and isolated semantic-validator invocation.
+One-shot mechanical-rule execution skeleton. It accepts only a frozen
+`execute-validation-rule` command, invokes a supplied executor once, and strictly
+decodes the closed mechanical report. It contains executor failures and never
+retries, blocks, or constructs terminal meaning. Semantic-validator orchestration
+belongs to W3.

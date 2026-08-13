@@ -41,7 +41,17 @@ The demonstration suite contains two state machines:
   every store and journal point;
 - deterministic Git candidate publication, cut at every CAS window.
 
-These are framework proofs, not production-engine crash coverage. W2 binds the
-real engine to SimWorld. W3 adds all production transaction rows, every point
-occurrence required by those rows, child lifecycle permutations, and schedule
-volume.
+The toy scenarios remain framework proofs. W2 L5 additionally exercises the
+real commit-loop, real epoch journal, and real CAS installation for the
+**no-effect decision transaction currently reachable through the frozen
+facade**: hostile pre-prepare rejection, a resumable command-store interruption,
+mid-frame append failure, and post-fdatasync uncertainty. These rows certify the
+expressible journal/CAS mechanics only; they are not a full nonempty-command or
+command-observation crash matrix. Separate dispatcher tests use SimWorld to show
+deterministic replay after a sink interruption, and a canonical replay fixture
+checks nonempty-command root verification, action deduplication, and duplicate-
+ingest reconciliation. The asynchronous rows use `assertTraceEquivalent`
+directly because the original synchronous `CrashScenario` driver cannot await
+the real journal. W3 and the frozen-seam amendments still own full command-
+observation semantics, real-CAS nonempty replay, child lifecycle permutations,
+and schedule volume.

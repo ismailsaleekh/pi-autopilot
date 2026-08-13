@@ -256,17 +256,16 @@ test("every record after terminal is rejected and state-identical", () => {
   }
 });
 
-test("prepare validates shape and exhaustively rejects every unwired admission seam", () => {
+test("prepare validates shape and exhaustively dispatches every wired admission seam", () => {
   const runGenesis = genesis(4750);
   const state = initialState(runGenesis);
   for (const kind of stimulusCapsule.kinds) {
     const stimulus = stimulusCapsule.arbitrary.validForKind(kind, 4750 + kind.length);
-    const result = prepare(state, stimulus);
-    assert.equal(result.kind, "feedback");
-    assert.equal(result.code, "admission-not-implemented");
-    if (result.code === "admission-not-implemented") {
-      assert.equal(result.stimulusKind, kind);
-      assert.equal(result.diagnostic, `not yet implemented: ${kind}`);
+    const first = prepare(state, stimulus);
+    const second = prepare(state, stimulus);
+    assert.deepEqual(first, second);
+    if (first.kind === "feedback") {
+      assert.notEqual(first.code, "admission-not-implemented");
     }
   }
   const malformed = prepare(state, Object.freeze({ kind: "not-a-stimulus" }));

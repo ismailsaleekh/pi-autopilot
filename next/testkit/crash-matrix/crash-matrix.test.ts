@@ -1,3 +1,4 @@
+import "./runtime-production.test.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { SimWorld } from "../simulation/sim-world.js";
