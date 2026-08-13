@@ -1,0 +1,200 @@
+{
+  "format": 1,
+  "capsules": {
+    "ChildIntent": {
+      "digest": "sha256:e18efbe55c8935ec48b99e3f1edfd129d4889f1714dd024e5f314deebc0c6ba5",
+      "kinds": [
+        "fence-child-session",
+        "inspect-child-session",
+        "launch-child-session"
+      ]
+    },
+    "ChildObservation": {
+      "digest": "sha256:0d80c9f86269a4a499a5d503a87d71b44288355f1d1a13e15d7b69d3124cfd1b",
+      "kinds": [
+        "child-session-fenced",
+        "child-session-inspected",
+        "child-session-launched"
+      ]
+    },
+    "ClockIntent": {
+      "digest": "sha256:351beabb513d942e5d84dda36c4dea33c60e855015d607fdba403d33efd68199",
+      "kinds": [
+        "observe-clock"
+      ]
+    },
+    "ClockObservation": {
+      "digest": "sha256:7f34e1d6db545ed594b63be68f5608f0bb4e3e495578472de2d840bdab266d37",
+      "kinds": [
+        "clock-observed"
+      ]
+    },
+    "Command": {
+      "digest": "sha256:9e2a199d056ef3587305408faa921dc116b32bbf98d68c1db1fbb49b13aed4de",
+      "kinds": [
+        "build-integrated-candidate",
+        "execute-evidence",
+        "execute-validation-rule",
+        "inspect-child",
+        "launch-child",
+        "prepare-workspace",
+        "publish-compare-and-swap"
+      ]
+    },
+    "DomainFact": {
+      "digest": "sha256:c9726de96a02298a6b303cd1f3021ae9afb7288b5ed9e072fda6e6f7279b24a8",
+      "kinds": [
+        "candidate-accepted",
+        "coverage-linked",
+        "evidence-observed",
+        "finding-cleared",
+        "finding-raised",
+        "plan-root-accepted",
+        "plan-root-superseded",
+        "publication-intended",
+        "publication-observed",
+        "requirements-bound",
+        "submission-bound",
+        "work-declared"
+      ]
+    },
+    "EvidenceFact": {
+      "digest": "sha256:8167270a5281ee1b1fb7072e152aa2f1b79479bdc7387ac231045a5c3ddd1539",
+      "kinds": [
+        "evidence-fact"
+      ]
+    },
+    "Finding": {
+      "digest": "sha256:2f060e69b7a939930eb9227e574abcbe595fbe4dc376597796b42067f54380c5",
+      "kinds": [
+        "advisory",
+        "definition-of-done",
+        "integrity",
+        "planning-gap"
+      ]
+    },
+    "GitIntent": {
+      "digest": "sha256:50c6122b62a308e89223a4843973c4b034969c074b8aeb7e683c4bf1943698ac",
+      "kinds": [
+        "compare-roots",
+        "integrate-candidate",
+        "materialize-workspace",
+        "publish-if-expected-head",
+        "seal-workspace"
+      ]
+    },
+    "GitObservation": {
+      "digest": "sha256:b3f9f17792f4a56fcbfdf318b2880fad1bbece9fa6ac620dc7003f2a546d2763",
+      "kinds": [
+        "candidate-integrated",
+        "head-publication-observed",
+        "roots-compared",
+        "workspace-materialized",
+        "workspace-sealed"
+      ]
+    },
+    "IngestDecision": {
+      "digest": "sha256:6725d692a54ead1e6f093c8a8ac176923a2fee871637893d52c572f2fa985ca7",
+      "kinds": [
+        "accept",
+        "retry"
+      ]
+    },
+    "JournalRecord": {
+      "digest": "sha256:08dc91e117dad5a8db02d3220ddfc0b806af93cba6aaa5ee2696985c79a2f9e0",
+      "kinds": [
+        "command-settled",
+        "decision-committed",
+        "outcome-committed",
+        "run-genesis",
+        "run-resumed",
+        "run-suspended"
+      ]
+    },
+    "SecretsIntent": {
+      "digest": "sha256:ea71305447e6c6ee825c091635de8b280c57144351323a7c45c23fca69d3bcb6",
+      "kinds": [
+        "authorize-secret-use",
+        "revoke-secret-use"
+      ]
+    },
+    "SecretsObservation": {
+      "digest": "sha256:16febfdc551f32830178c3526c5d4c159e9591700e82867e3df948c425344155",
+      "kinds": [
+        "secret-use-authorized",
+        "secret-use-revoked"
+      ]
+    },
+    "Stimulus": {
+      "digest": "sha256:6c0a1621ad61ef9eeb452e8918dcf164c4dc4d304f2aeb3bad640fc18f048c1c",
+      "kinds": [
+        "boundary-request-received",
+        "command-observation-received",
+        "operator-resume-requested",
+        "operator-suspend-requested",
+        "run-replay-completed",
+        "submission-ready"
+      ]
+    },
+    "StoreIntent": {
+      "digest": "sha256:3d9993d0931a4bc981c9b86cb5ceeb4a151ef6b64ff999b09caf40c255115007",
+      "kinds": [
+        "install-sealed-object",
+        "list-artifact-page",
+        "observe-object-presence",
+        "read-artifact-range"
+      ]
+    },
+    "StoreObservation": {
+      "digest": "sha256:35991207c1532c0346860448d71833a6f9359c8a3bf4de4a060d3f1a13d806de",
+      "kinds": [
+        "artifact-page-listed",
+        "artifact-range-read",
+        "object-presence-observed",
+        "sealed-object-installed"
+      ]
+    },
+    "TerminalOutcome": {
+      "digest": "sha256:3d982429a733f77d5a4b7bf352859f41017715a84b2615fd476666c79f00cc15",
+      "kinds": [
+        "t1",
+        "t2"
+      ]
+    },
+    "ToolResult": {
+      "digest": "sha256:864bbd0a2747e45763c9bd54b6d75b283088a105e19663a42d488b69f00c6c00",
+      "kinds": [
+        "ok",
+        "retry"
+      ]
+    },
+    "WorkItem": {
+      "digest": "sha256:3b8b98d88c537abc30e9d044f8b71008f363e4011cc0b6a0917781d52ba24167",
+      "kinds": [
+        "correct-artifact",
+        "integrate-candidate",
+        "produce-artifact",
+        "review-artifact",
+        "verify-candidate"
+      ]
+    },
+    "WorkspaceIntent": {
+      "digest": "sha256:ac1356f3dcc5a0e943c1bde67fbf2e6d87e046ef69a40e4c02b454975e2ce1b0",
+      "kinds": [
+        "allocate-attempt-directory",
+        "apply-attempt-isolation",
+        "dispose-attempt-directory",
+        "inspect-attempt-directory"
+      ]
+    },
+    "WorkspaceObservation": {
+      "digest": "sha256:e3ae18f07daf4cb6ecbff522209ea288b6c957df7b2149d7b0e7201c4e112a5b",
+      "kinds": [
+        "attempt-directory-allocated",
+        "attempt-directory-disposed",
+        "attempt-directory-inspected",
+        "attempt-isolation-applied"
+      ]
+    }
+  }
+}

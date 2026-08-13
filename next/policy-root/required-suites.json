@@ -1,0 +1,20 @@
+{
+  "format": 1,
+  "suites": [
+    { "id": "D2.1-replay-determinism", "owner": "W1-authority", "registration": "pending" },
+    { "id": "D2.2-full-run-scenarios", "owner": "W2-authority", "registration": "pending" },
+    { "id": "D2.3-crash-matrix", "owner": "W3-testkit", "registration": "pending" },
+    { "id": "D2.4-third-outcome-hunt", "owner": "W3-testkit", "registration": "pending" },
+    { "id": "D2.5-idempotency", "owner": "W2-runtime", "registration": "pending" },
+    { "id": "D2.6-totality-fuzzing", "owner": "W3-testkit", "registration": "pending" },
+    { "id": "D2.7-yardstick-properties", "owner": "W2-authority", "registration": "pending" },
+    { "id": "D3.1-adapter-contract-parity", "owner": "W2-adapters", "registration": "pending" },
+    { "id": "D3.2-journal-durability", "owner": "W1-storage", "registration": "pending" },
+    { "id": "D3.3-real-git", "owner": "W2-git", "registration": "pending" },
+    { "id": "D3.4-process-reality", "owner": "W4-reality", "registration": "pending" },
+    { "id": "D3.5-sandbox", "owner": "W4-reality", "registration": "pending" },
+    { "id": "D3.6-scale", "owner": "W4-reality", "registration": "pending" },
+    { "id": "D3.7-real-pi", "owner": "W4-reality", "registration": "pending" },
+    { "id": "D3.8-w0-replay-corpus", "owner": "W3-testkit", "registration": "pending" }
+  ]
+}

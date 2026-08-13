@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "./dist-policy",
+    "tsBuildInfoFile": "./dist/policy.tsbuildinfo",
+    "lib": ["ES2022"],
+    "types": ["node"]
+  },
+  "include": [
+    "policy-root/*.ts",
+    "authority/**/*.ts",
+    "ports/**/*.ts"
+  ],
+  "exclude": ["policy-root/fixtures/**"]
+}

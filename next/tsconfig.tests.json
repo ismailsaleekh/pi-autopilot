@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "./dist-tests",
+    "tsBuildInfoFile": "./dist/tests.tsbuildinfo",
+    "lib": ["ES2022"],
+    "types": ["node"]
+  },
+  "include": [
+    "tests/**/*.ts",
+    "authority/**/*.ts",
+    "ports/**/*.ts"
+  ],
+  "exclude": ["policy-root/fixtures/**"]
+}

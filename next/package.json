@@ -1,0 +1,14 @@
+{
+  "name": "@earendil-works/pi-autopilot-next-foundations",
+  "private": true,
+  "version": "0.0.0-w0",
+  "type": "module",
+  "scripts": {
+    "w0:generate": "../node_modules/.bin/tsc -p tsconfig.policy.json --pretty false && node dist-policy/policy-root/generate-aggregates.js",
+    "w0:gate": "../node_modules/.bin/tsc -p tsconfig.policy.json --pretty false && node dist-policy/policy-root/w0-gate.js"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.2",
+    "typescript": "5.9.3"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "../dist/ports",
+    "tsBuildInfoFile": "../dist/ports.tsbuildinfo",
+    "lib": ["ES2022"],
+    "types": []
+  },
+  "references": [
+    { "path": "../authority" }
+  ],
+  "include": ["**/*.ts"]
+}
