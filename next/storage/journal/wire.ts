@@ -20,12 +20,11 @@
 import { createHash } from "node:crypto";
 import { Buffer } from "node:buffer";
 import {
-  decisionFactsMatchRoot,
   journalRecordCapsule,
+  recordSemanticRootsMatch,
 } from "../../authority/protocol/journal-record.capsule.js";
 import type { JournalRecord } from "../../authority/protocol/journal-record.capsule.js";
 import {
-  arrayOf,
   defineCapsule,
   literal,
   object,
@@ -47,14 +46,10 @@ export const JOURNAL_GENESIS_HASH = Buffer.from(
   "hex",
 );
 
-const takeoverCutSchema = object({
-  epoch: text("plain"),
-  observedByteLength: text("plain"),
-});
-
 const takeoverControlSchema = object({
-  cuts: arrayOf(takeoverCutSchema),
-  kind: literal("epoch-takeover-v1"),
+  kind: literal("epoch-continuation-v2"),
+  predecessorEpoch: text("plain"),
+  predecessorObservedByteLength: text("plain"),
 });
 
 const takeoverControlCapsule = defineCapsule(
@@ -64,10 +59,6 @@ const takeoverControlCapsule = defineCapsule(
 
 export type TakeoverControl = Infer<typeof takeoverControlSchema>;
 
-export interface ObservedCut {
-  readonly epoch: JournalEpoch;
-  readonly observedByteLength: bigint;
-}
 
 export type WirePayload =
   | { readonly kind: "control"; readonly control: TakeoverControl }
@@ -115,50 +106,39 @@ export function epochSegmentName(epoch: JournalEpoch): string {
 }
 
 function validateControl(control: TakeoverControl): string | null {
-  let previous = "";
-  for (const cut of control.cuts) {
-    if (parseU64(cut.epoch) === null) {
-      return "takeover cut epoch is not a zero-padded unsigned-u64 decimal";
-    }
-    if (parseU64(cut.observedByteLength) === null) {
-      return "takeover cut byte length is not a zero-padded unsigned-u64 decimal";
-    }
-    if (previous !== "" && cut.epoch <= previous) {
-      return "takeover cuts must be unique and strictly ordered by epoch";
-    }
-    previous = cut.epoch;
+  if (parseU64(control.predecessorEpoch) === null) {
+    return "continuation predecessor epoch is not canonical unsigned-u64 decimal";
+  }
+  if (parseU64(control.predecessorObservedByteLength) === null) {
+    return "continuation predecessor byte length is not canonical unsigned-u64 decimal";
   }
   return null;
 }
 
 export function encodeTakeoverControl(
-  cuts: readonly ObservedCut[],
+  predecessorEpoch: JournalEpoch,
+  predecessorObservedByteLength: bigint,
   path: string,
   epoch: JournalEpoch,
 ): ControlEncodeResult {
-  const wireCuts: Array<{ readonly epoch: string; readonly observedByteLength: string }> = [];
-  let previous = "";
-  for (const cut of cuts) {
-    const byteLength = formatU64(cut.observedByteLength);
-    if (parseU64(cut.epoch) === null || byteLength === null || (previous !== "" && cut.epoch <= previous)) {
-      return Object.freeze({
-        kind: "error",
-        error: journalError(
-          "corrupt-control",
-          "fatal",
-          "encode-takeover-control",
-          "takeover cuts must be sorted unsigned-u64 epochs and byte lengths",
-          path,
-          epoch,
-        ),
-      });
-    }
-    wireCuts.push(Object.freeze({ epoch: cut.epoch, observedByteLength: byteLength }));
-    previous = cut.epoch;
+  const byteLength = formatU64(predecessorObservedByteLength);
+  if (parseU64(predecessorEpoch) === null || byteLength === null || predecessorEpoch >= epoch) {
+    return Object.freeze({
+      kind: "error",
+      error: journalError(
+        "corrupt-control",
+        "fatal",
+        "encode-epoch-continuation",
+        "continuation must bind one canonical predecessor and observed byte length",
+        path,
+        epoch,
+      ),
+    });
   }
   const encoded = takeoverControlCapsule.encodeUnknown(Object.freeze({
-    cuts: Object.freeze(wireCuts),
-    kind: "epoch-takeover-v1",
+    kind: "epoch-continuation-v2",
+    predecessorEpoch,
+    predecessorObservedByteLength: byteLength,
   }));
   if (encoded.kind === "error") {
     return Object.freeze({
@@ -244,14 +224,19 @@ export function decodeWirePayload(
         ),
       });
     }
-    if (decoded.value.kind === "decision-committed" && !decisionFactsMatchRoot(decoded.value)) {
+    if (
+      (decoded.value.kind === "decision-committed"
+        || decoded.value.kind === "command-settled"
+        || decoded.value.kind === "outcome-committed")
+      && !recordSemanticRootsMatch(decoded.value)
+    ) {
       return Object.freeze({
         kind: "error",
         error: journalError(
-          "decision-fact-root-mismatch",
+          "semantic-root-mismatch",
           "fatal",
           "decode-record-frame",
-          "DecisionCommitted facts do not match factRoot",
+          "semantic record facts, commands, and artifact bindings do not match",
           path,
           epoch,
         ),

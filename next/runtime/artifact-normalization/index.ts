@@ -131,7 +131,7 @@ const normalizers = Object.freeze({
 const artifactPaths = Object.freeze({
   "child-observation": "runtime/observations/child.json",
   "clock-observation": "runtime/observations/clock.json",
-  "command-batch": "runtime/commands/batch.json",
+  "command-batch": "semantic/commands.canonical.json",
   "command-execution-feedback": "runtime/observations/command-feedback.json",
   "evidence-envelope": "runtime/evidence/envelope.json",
   "git-observation": "runtime/observations/git.json",

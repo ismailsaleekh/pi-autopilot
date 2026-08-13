@@ -18,9 +18,11 @@ import {
 } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { isPreparedCommit } from "../../authority/protocol/accepted-batch.js";
+import type { PreparedCommit } from "../../authority/protocol/accepted-batch.js";
 import {
-  decisionFactsMatchRoot,
   journalRecordCapsule,
+  recordSemanticRootsMatch,
 } from "../../authority/protocol/journal-record.capsule.js";
 import type { JournalRecord } from "../../authority/protocol/journal-record.capsule.js";
 import {
@@ -571,12 +573,17 @@ async function appendRecord(
     ));
   }
   try {
-    if (record.kind === "decision-committed" && !decisionFactsMatchRoot(record)) {
+    if (
+      (record.kind === "decision-committed"
+        || record.kind === "command-settled"
+        || record.kind === "outcome-committed")
+      && !recordSemanticRootsMatch(record)
+    ) {
       return appendRejection(journalError(
-        "decision-fact-root-mismatch",
+        "semantic-root-mismatch",
         "feedback",
         "append-committed-batch",
-        "DecisionCommitted facts must canonically hash to factRoot before append",
+        "semantic record facts, commands, and installed artifact bindings must match",
         state.path,
         state.epoch,
       ));
@@ -627,9 +634,41 @@ async function appendRecord(
  * production call edge when that lane lands. The function serializes every
  * operation for this opaque handle and acknowledges only after fdatasync.
  */
+/** Dedicated bootstrap edge; genesis cannot be represented as PreparedCommit. */
+export async function appendGenesisRecord(
+  handle: JournalWriterHandle,
+  genesis: Extract<JournalRecord, { readonly kind: "run-genesis" }>,
+): Promise<JournalAppendResult> {
+  const state = writerStates.get(handle);
+  if (state === undefined) {
+    return appendRejection(journalError(
+      "unknown-handle",
+      "feedback",
+      "append-genesis-record",
+      "writer capability was not minted by openJournal in this process",
+    ));
+  }
+  if (state.byteLength !== 0n || state.epoch !== "00000000000000000001") {
+    return appendRejection(journalError(
+      "invalid-argument",
+      "feedback",
+      "append-genesis-record",
+      "genesis may be appended only to an empty first epoch",
+      state.path,
+      state.epoch,
+    ));
+  }
+  const operation = state.queue.then(
+    () => appendRecord(state, genesis),
+    () => appendRecord(state, genesis),
+  );
+  state.queue = operation.then(() => undefined, () => undefined);
+  return operation;
+}
+
 export async function appendCommittedBatch(
   handle: JournalWriterHandle,
-  batch: JournalRecord,
+  batch: PreparedCommit,
 ): Promise<JournalAppendResult> {
   const state = writerStates.get(handle);
   if (state === undefined) {
@@ -640,9 +679,19 @@ export async function appendCommittedBatch(
       "writer capability was not minted by openJournal in this process",
     ));
   }
+  if (!isPreparedCommit(batch)) {
+    return appendRejection(journalError(
+      "invalid-argument",
+      "feedback",
+      "append-committed-batch",
+      "journal append accepts only authority-minted PreparedCommit capabilities",
+      state.path,
+      state.epoch,
+    ));
+  }
   const operation = state.queue.then(
-    () => appendRecord(state, batch),
-    () => appendRecord(state, batch),
+    () => appendRecord(state, batch.record),
+    () => appendRecord(state, batch.record),
   );
   state.queue = operation.then(
     () => undefined,
@@ -773,8 +822,27 @@ async function openJournalInternal(
       queue: Promise.resolve(),
     };
     if (priorEpochs.length > 0) {
+      const predecessor = priorEpochs[priorEpochs.length - 1];
+      const predecessorCut = predecessor === undefined
+        ? undefined
+        : scanned.plan.observedCuts.find((entry) => entry.epoch === predecessor.epoch);
+      if (predecessor === undefined || predecessorCut === undefined) {
+        await segmentFile.close();
+        return Object.freeze({
+          kind: "error",
+          error: journalError(
+            "corrupt-control",
+            "fatal",
+            "open-journal-writer",
+            "successor epoch could not bind its immediate predecessor cut",
+            segmentPath,
+            claimed.epoch,
+          ),
+        });
+      }
       const control = encodeTakeoverControl(
-        scanned.plan.observedCuts,
+        predecessor.epoch,
+        predecessorCut.observedByteLength,
         segmentPath,
         claimed.epoch,
       );

@@ -9,7 +9,7 @@ import type {
 } from "./journal-record.capsule.js";
 import type { DecodeError } from "./schema.js";
 
-const preparedCommitCapability: unique symbol = Symbol();
+export const preparedCommitCapability: unique symbol = Symbol();
 
 export type PreparedCommitKind =
   | "prepared-decision"
@@ -76,6 +76,10 @@ function expectedRecordKind(kind: PreparedCommitKind): JournalRecord["kind"] {
 }
 
 /** Sole opaque mint edge; architecture policy permits calls only from facade. */
+export function isPreparedCommit(value: PreparedCommit): boolean {
+  return value[preparedCommitCapability] === true;
+}
+
 export function mintPreparedCommit(fields: PreparedCommitFields): PreparedCommitMintResult {
   const encoded = journalRecordCapsule.encodeUnknown(fields.record);
   if (encoded.kind === "error") {

@@ -54,10 +54,12 @@ export const prepareWorkspaceSchema = object({
 
 export const applyWorkspaceIsolationSchema = object({
   ...commandEnvelope,
+  childEpoch: childEpochSchema,
   expectedPolicyDigest: digestSchema,
   expectedWorkspaceRoot: artifactRootSchema,
   isolationPolicy: artifactRefSchema,
   kind: literal("apply-workspace-isolation"),
+  leaseId: leaseIdSchema,
   workspaceCapability: workspaceCapabilitySchema,
   workspaceId: workspaceIdSchema,
 });

@@ -12,6 +12,7 @@ export type JournalErrorCode =
   | "corrupt-frame"
   | "corrupt-layout"
   | "decision-fact-root-mismatch"
+  | "semantic-root-mismatch"
   | "epoch-exhausted"
   | "invalid-argument"
   | "io-denied"

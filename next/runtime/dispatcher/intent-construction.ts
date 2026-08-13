@@ -1,353 +1,234 @@
-import {
-  actionIdSchema,
-  childEpochSchema,
-  digestSchema,
-  leaseIdSchema,
-} from "../../authority/protocol/identifiers.js";
 import type {
-  ActionId,
-  ArtifactRef,
-  ArtifactRoot,
-  ChildEpoch,
-  Digest,
-  LeaseId,
-  RevisionId,
-  RunId,
-} from "../../authority/protocol/identifiers.js";
-import type {
+  ApplyWorkspaceIsolation,
   BuildIntegratedCandidate,
+  Command,
+  ExecuteEvidence,
+  ExecuteValidationRule,
   InspectChild,
+  InstallArtifactCommand,
   LaunchChild,
+  MaterializeWorkspace,
+  ObserveClockCommand,
   PrepareWorkspace,
   PublishCompareAndSwap,
+  VerifyChildRoute,
 } from "../../authority/protocol/command.capsule.js";
-import {
-  canonicalDigestUnknown,
-  defineCapsule,
-} from "../../authority/protocol/schema.js";
-import type {
-  JsonValue,
-  SchemaCapsule,
-} from "../../authority/protocol/schema.js";
 import {
   childIntentCapsule,
 } from "../../ports/contracts/child.capsule.js";
 import type {
   ChildIntent,
+  ExecuteEvidenceCommand,
+  ExecuteValidationCommand,
   InspectChildSession,
   LaunchChildSession,
+  VerifyPiRoute,
 } from "../../ports/contracts/child.capsule.js";
-import {
-  gitIntentCapsule,
-} from "../../ports/contracts/git.capsule.js";
+import { clockIntentCapsule } from "../../ports/contracts/clock.capsule.js";
+import type { ClockIntent, ObserveClock } from "../../ports/contracts/clock.capsule.js";
+import { gitIntentCapsule } from "../../ports/contracts/git.capsule.js";
 import type {
   GitIntent,
   IntegrateCandidate,
+  MaterializeWorkspace as MaterializeWorkspaceIntent,
   PublishIfExpectedHead,
 } from "../../ports/contracts/git.capsule.js";
-import {
-  workspaceIntentCapsule,
-} from "../../ports/contracts/workspace.capsule.js";
+import { storeIntentCapsule } from "../../ports/contracts/store.capsule.js";
+import type { InstallSealedObject, StoreIntent } from "../../ports/contracts/store.capsule.js";
+import { workspaceIntentCapsule } from "../../ports/contracts/workspace.capsule.js";
 import type {
   AllocateAttemptDirectory,
   ApplyAttemptIsolation,
-  InspectAttemptDirectory,
   WorkspaceIntent,
 } from "../../ports/contracts/workspace.capsule.js";
-import type {
-  BoundaryFeedback,
-  BoundaryResult,
-  RuntimePortName,
-} from "../boundary-codecs/index.js";
+import type { BoundaryFeedback, BoundaryResult } from "../boundary-codecs/index.js";
 
-interface JsonObject {
-  readonly [field: string]: JsonValue;
+function feedback(path: string, diagnostic: string): BoundaryFeedback {
+  return Object.freeze({ kind: "feedback", code: "boundary-schema", path, diagnostic });
 }
 
-interface IntentSeed {
-  readonly runId: RunId;
-  readonly kind: string;
-  readonly inputs: JsonObject;
-  readonly preconditions: JsonObject;
+interface IntentCapsuleLike {
+  readonly encodeUnknown: (value: unknown) => { readonly kind: "ok"; readonly value: Uint8Array } | { readonly kind: "error"; readonly error: { readonly path: string; readonly diagnostic: string } };
+  readonly decodeCanonical: (value: Uint8Array) => { readonly kind: "ok"; readonly value: unknown } | { readonly kind: "error"; readonly error: { readonly path: string; readonly diagnostic: string } };
 }
 
-export interface GitDispatchBinding {
-  readonly repositoryBase: RevisionId;
-  readonly repositoryIdentity: ArtifactRoot;
+function normalize<Intent extends { readonly actionId: Command["actionId"]; readonly kind: string }>(
+  capsule: IntentCapsuleLike,
+  input: unknown,
+  expectedKind: Intent["kind"],
+): BoundaryResult<Intent> {
+  const encoded = capsule.encodeUnknown(input);
+  if (encoded.kind === "error") {
+    return feedback(encoded.error.path, encoded.error.diagnostic);
+  }
+  const decoded = capsule.decodeCanonical(encoded.value);
+  if (decoded.kind === "error") {
+    return feedback(decoded.error.path, decoded.error.diagnostic);
+  }
+  if (typeof decoded.value !== "object" || decoded.value === null || !("kind" in decoded.value) || decoded.value.kind !== expectedKind) {
+    return feedback("$.kind", "intent capsule decoded a different closed operation");
+  }
+  return Object.freeze({ kind: "ok", value: decoded.value as Intent, canonicalBytes: encoded.value });
 }
 
-const actionIdCapsule = defineCapsule("RuntimePortActionId", actionIdSchema);
-const leaseIdCapsule = defineCapsule("RuntimePortLeaseId", leaseIdSchema);
-const childEpochCapsule = defineCapsule("RuntimePortChildEpoch", childEpochSchema);
-const digestCapsule = defineCapsule("RuntimePortDigest", digestSchema);
-
-function buildFeedback(path: string, diagnostic: string): BoundaryFeedback {
+function envelope(command: Command, kind: string, inputs: object, preconditions: object) {
   return Object.freeze({
-    kind: "feedback",
-    code: "boundary-schema",
-    path,
-    diagnostic,
+    actionId: command.actionId,
+    inputs: Object.freeze(inputs),
+    kind,
+    preconditions: Object.freeze(preconditions),
+    runId: command.runId,
   });
 }
 
-function derivedActionId(port: RuntimePortName, seed: IntentSeed): ActionId | null {
-  const digest = canonicalDigestUnknown(Object.freeze({
-    domain: "pi-autopilot.action.v1",
-    inputs: seed.inputs,
-    kind: seed.kind,
-    port,
-    preconditions: seed.preconditions,
-    runId: seed.runId,
-  }));
-  const decoded = actionIdCapsule.decode(`action:sha256:${digest.slice(7)}`);
-  return decoded.kind === "ok" ? decoded.value : null;
-}
-
-function derivedLease(label: JsonValue): LeaseId | null {
-  const digest = canonicalDigestUnknown(Object.freeze({
-    domain: "pi-autopilot.dispatch-lease.v1",
-    label,
-  }));
-  const decoded = leaseIdCapsule.decode(`lease:sha256:${digest.slice(7)}`);
-  return decoded.kind === "ok" ? decoded.value : null;
-}
-
-function derivedEpoch(label: JsonValue): ChildEpoch | null {
-  const digest = canonicalDigestUnknown(Object.freeze({
-    domain: "pi-autopilot.child-epoch.v1",
-    label,
-  }));
-  const decoded = childEpochCapsule.decode(`epoch:sha256:${digest.slice(7)}`);
-  return decoded.kind === "ok" ? decoded.value : null;
-}
-
-function digestFromRoot(root: ArtifactRoot): Digest | null {
-  const decoded = digestCapsule.decode(String(root));
-  return decoded.kind === "ok" ? decoded.value : null;
-}
-
-function bindIntent<Name extends string, Value>(
-  port: RuntimePortName,
-  seed: IntentSeed,
-  capsule: SchemaCapsule<Name, Value>,
-): BoundaryResult<Value> {
-  const actionId = derivedActionId(port, seed);
-  if (actionId === null) {
-    return buildFeedback("$.actionId", "port action identity could not be derived");
-  }
-  const encoded = capsule.encodeUnknown(Object.freeze({
-    actionId,
-    inputs: seed.inputs,
-    kind: seed.kind,
-    preconditions: seed.preconditions,
-    runId: seed.runId,
-  }));
-  if (encoded.kind === "error") {
-    return buildFeedback(encoded.error.path, encoded.error.diagnostic);
-  }
-  const decoded = capsule.decodeCanonical(encoded.value);
-  return decoded.kind === "ok"
-    ? Object.freeze({ kind: "ok", value: decoded.value, canonicalBytes: encoded.value.slice() })
-    : buildFeedback(decoded.error.path, decoded.error.diagnostic);
-}
-
-function workspaceIntent(seed: IntentSeed): BoundaryResult<WorkspaceIntent> {
-  return bindIntent("workspace", seed, workspaceIntentCapsule);
-}
-
-function childIntent(seed: IntentSeed): BoundaryResult<ChildIntent> {
-  return bindIntent("child", seed, childIntentCapsule);
-}
-
-function gitIntent(seed: IntentSeed): BoundaryResult<GitIntent> {
-  return bindIntent("git", seed, gitIntentCapsule);
-}
-
-export function prepareWorkspaceIntent(
-  command: PrepareWorkspace,
-): BoundaryResult<AllocateAttemptDirectory> {
-  const leaseId = derivedLease(Object.freeze({ commandId: command.commandId, workspaceId: command.workspaceId }));
-  if (leaseId === null) {
-    return buildFeedback("$.preconditions.leaseId", "workspace lease identity could not be derived");
-  }
-  const decoded = workspaceIntent(Object.freeze({
-    runId: command.runId,
-    kind: "allocate-attempt-directory",
-    inputs: Object.freeze({
-      baseRoot: command.baseRoot,
-      workspaceId: command.workspaceId,
-    }),
-    preconditions: Object.freeze({
-      expectedAbsent: true,
-      leaseId,
-    }),
-  }));
-  if (decoded.kind !== "ok") {
-    return decoded;
-  }
-  return decoded.value.kind === "allocate-attempt-directory"
-    ? Object.freeze({ kind: "ok", value: decoded.value, canonicalBytes: decoded.canonicalBytes })
-    : buildFeedback("$.kind", "workspace constructor produced the wrong intent kind");
-}
-
-export function inspectWorkspaceIntent(
-  command: LaunchChild,
-): BoundaryResult<InspectAttemptDirectory> {
-  const leaseId = derivedLease(Object.freeze({ commandId: command.commandId, workspaceId: command.workspaceId }));
-  if (leaseId === null) {
-    return buildFeedback("$.preconditions.leaseId", "workspace inspection lease could not be derived");
-  }
-  const decoded = workspaceIntent(Object.freeze({
-    runId: command.runId,
-    kind: "inspect-attempt-directory",
-    inputs: Object.freeze({ workspaceId: command.workspaceId }),
-    preconditions: Object.freeze({ leaseId }),
-  }));
-  if (decoded.kind !== "ok") {
-    return decoded;
-  }
-  return decoded.value.kind === "inspect-attempt-directory"
-    ? Object.freeze({ kind: "ok", value: decoded.value, canonicalBytes: decoded.canonicalBytes })
-    : buildFeedback("$.kind", "workspace constructor produced the wrong inspection kind");
-}
-
-export function isolateWorkspaceIntent(
-  command: LaunchChild,
-  expectedWorkspaceRoot: ArtifactRoot,
-): BoundaryResult<ApplyAttemptIsolation> {
-  const expectedPolicyDigest = digestFromRoot(command.policyRoot);
-  if (expectedPolicyDigest === null) {
-    return buildFeedback("$.preconditions.expectedPolicyDigest", "policy root is not a canonical digest");
-  }
-  const decoded = workspaceIntent(Object.freeze({
-    runId: command.runId,
-    kind: "apply-attempt-isolation",
-    inputs: Object.freeze({
-      isolationPolicyRoot: command.policyRoot,
-      workspaceId: command.workspaceId,
-    }),
-    preconditions: Object.freeze({
-      expectedPolicyDigest,
-      expectedWorkspaceRoot,
-    }),
-  }));
-  if (decoded.kind !== "ok") {
-    return decoded;
-  }
-  return decoded.value.kind === "apply-attempt-isolation"
-    ? Object.freeze({ kind: "ok", value: decoded.value, canonicalBytes: decoded.canonicalBytes })
-    : buildFeedback("$.kind", "workspace constructor produced the wrong isolation kind");
-}
-
-export function launchChildIntent(
-  command: LaunchChild,
-  expectedWorkspaceRoot: ArtifactRoot,
-): BoundaryResult<LaunchChildSession> {
-  const childEpoch = derivedEpoch(Object.freeze({
-    attemptId: command.attemptId,
-    commandId: command.commandId,
+export function prepareWorkspaceIntent(command: PrepareWorkspace): BoundaryResult<AllocateAttemptDirectory> {
+  return normalize<AllocateAttemptDirectory>(workspaceIntentCapsule, envelope(command, "allocate-attempt-directory", {
+    workspaceCapability: command.workspaceCapability,
     workspaceId: command.workspaceId,
-  }));
-  const runtimeDigest = digestFromRoot(command.runtimeRoot);
-  if (childEpoch === null || runtimeDigest === null) {
-    return buildFeedback("$.preconditions", "child epoch or runtime digest could not be derived");
-  }
-  const decoded = childIntent(Object.freeze({
-    runId: command.runId,
-    kind: "launch-child-session",
-    inputs: Object.freeze({
-      attemptId: command.attemptId,
-      prompt: command.prompt,
-      roleId: command.roleId,
-      runtimeRoot: command.runtimeRoot,
-      workItemId: command.workItemId,
-      workspaceId: command.workspaceId,
-    }),
-    preconditions: Object.freeze({
-      childEpoch,
-      expectedWorkspaceRoot,
-      runtimeDigest,
-    }),
-  }));
-  if (decoded.kind !== "ok") {
-    return decoded;
-  }
-  return decoded.value.kind === "launch-child-session"
-    ? Object.freeze({ kind: "ok", value: decoded.value, canonicalBytes: decoded.canonicalBytes })
-    : buildFeedback("$.kind", "child constructor produced the wrong launch kind");
+  }, {
+    expectedAbsent: true,
+    leaseId: command.leaseId,
+  }), "allocate-attempt-directory");
 }
 
-export function inspectChildIntent(
-  command: InspectChild,
-): BoundaryResult<InspectChildSession> {
-  const decoded = childIntent(Object.freeze({
-    runId: command.runId,
-    kind: "inspect-child-session",
-    inputs: Object.freeze({ childId: command.childId }),
-    preconditions: Object.freeze({ childEpoch: command.childEpoch }),
-  }));
-  if (decoded.kind !== "ok") {
-    return decoded;
-  }
-  return decoded.value.kind === "inspect-child-session"
-    ? Object.freeze({ kind: "ok", value: decoded.value, canonicalBytes: decoded.canonicalBytes })
-    : buildFeedback("$.kind", "child constructor produced the wrong inspection kind");
+export function applyWorkspaceIsolationIntent(command: ApplyWorkspaceIsolation): BoundaryResult<ApplyAttemptIsolation> {
+  return normalize<ApplyAttemptIsolation>(workspaceIntentCapsule, envelope(command, "apply-attempt-isolation", {
+    isolationPolicy: command.isolationPolicy,
+    workspaceCapability: command.workspaceCapability,
+    workspaceId: command.workspaceId,
+  }, {
+    childEpoch: command.childEpoch,
+    expectedPolicyDigest: command.expectedPolicyDigest,
+    expectedWorkspaceRoot: command.expectedWorkspaceRoot,
+    leaseId: command.leaseId,
+  }), "apply-attempt-isolation");
 }
 
-export function integrateCandidateIntent(
-  command: BuildIntegratedCandidate,
-  binding: GitDispatchBinding,
-): BoundaryResult<IntegrateCandidate> {
-  const decoded = gitIntent(Object.freeze({
-    runId: command.runId,
-    kind: "integrate-candidate",
-    inputs: Object.freeze({
-      acceptedOutputs: command.acceptedOutputs,
-      baseRevision: binding.repositoryBase,
-      candidateId: command.candidateId,
-    }),
-    preconditions: Object.freeze({
-      expectedIntegrationRoot: command.baseRoot,
-      repositoryIdentity: binding.repositoryIdentity,
-    }),
-  }));
-  if (decoded.kind !== "ok") {
-    return decoded;
-  }
-  return decoded.value.kind === "integrate-candidate"
-    ? Object.freeze({ kind: "ok", value: decoded.value, canonicalBytes: decoded.canonicalBytes })
-    : buildFeedback("$.kind", "git constructor produced the wrong integration kind");
+export function materializeWorkspaceIntent(command: MaterializeWorkspace): BoundaryResult<MaterializeWorkspaceIntent> {
+  return normalize<MaterializeWorkspaceIntent>(gitIntentCapsule, envelope(command, "materialize-workspace", {
+    baseCommit: command.baseCommit,
+    baseTree: command.baseTree,
+    repository: command.repository,
+    workspaceCapability: command.workspaceCapability,
+    workspaceId: command.workspaceId,
+  }, {
+    expectedEmptyReservation: true,
+    reservationLease: command.reservationLease,
+  }), "materialize-workspace");
 }
 
-export function publishCandidateIntent(
-  command: PublishCompareAndSwap,
-  manifest: ArtifactRef,
-): BoundaryResult<PublishIfExpectedHead> {
-  const publicationLease = derivedLease(Object.freeze({
-    commandId: command.commandId,
+export function verifyChildRouteIntent(command: VerifyChildRoute): BoundaryResult<VerifyPiRoute> {
+  return normalize<VerifyPiRoute>(childIntentCapsule, envelope(command, "verify-pi-route", {
+    captureId: command.captureId,
+    route: command.route,
+  }, {
+    deadlineTick: command.deadlineTick,
+    oauthSubscriptionOnly: true,
+  }), "verify-pi-route");
+}
+
+export function launchChildIntent(command: LaunchChild): BoundaryResult<LaunchChildSession> {
+  return normalize<LaunchChildSession>(childIntentCapsule, envelope(command, "launch-child-session", {
+    attemptId: command.attemptId,
+    captureId: command.captureId,
+    memorySeed: command.memorySeed,
+    policyRoot: command.policyRoot,
+    roleId: command.roleId,
+    route: command.route,
+    runtimeRoot: command.runtimeRoot,
+    workItemId: command.workItemId,
+    workspaceCapability: command.workspaceCapability,
+    workspaceId: command.workspaceId,
+  }, {
+    childEpoch: command.childEpoch,
+    deadlineTick: command.deadlineTick,
+    expectedWorkspaceRoot: command.expectedWorkspaceRoot,
+    maxStderrBytes: command.maxStderrBytes,
+    maxStdoutBytes: command.maxStdoutBytes,
+    routeObservation: command.routeObservation,
+    routeObservationId: command.routeObservationId,
+  }), "launch-child-session");
+}
+
+export function inspectChildIntent(command: InspectChild): BoundaryResult<InspectChildSession> {
+  return normalize<InspectChildSession>(childIntentCapsule, envelope(command, "inspect-child-session", {
+    childId: command.childId,
+    processDescriptor: command.processDescriptor,
+  }, {
+    childEpoch: command.childEpoch,
+  }), "inspect-child-session");
+}
+
+export function evidenceIntent(command: ExecuteEvidence): BoundaryResult<ExecuteEvidenceCommand> {
+  return normalize<ExecuteEvidenceCommand>(childIntentCapsule, envelope(command, "execute-evidence-command", {
+    candidateTree: command.candidateTree,
+    commandSpec: command.commandSpec,
+    ruleId: command.ruleId,
+    workItemId: command.workItemId,
+    workspaceCapability: command.workspaceCapability,
+    workspaceId: command.workspaceId,
+  }, { deadlineTick: command.deadlineTick }), "execute-evidence-command");
+}
+
+export function validationIntent(command: ExecuteValidationRule): BoundaryResult<ExecuteValidationCommand> {
+  return normalize<ExecuteValidationCommand>(childIntentCapsule, envelope(command, "execute-validation-command", {
+    candidateTree: command.candidateTree,
+    ruleId: command.ruleId,
+    ruleInputs: command.inputs,
+    workItemId: command.workItemId,
+  }, { deadlineTick: command.deadlineTick }), "execute-validation-command");
+}
+
+export function integrateCandidateIntent(command: BuildIntegratedCandidate): BoundaryResult<IntegrateCandidate> {
+  return normalize<IntegrateCandidate>(gitIntentCapsule, envelope(command, "integrate-candidate", {
+    baseCommit: command.baseCommit,
+    baseTree: command.baseTree,
+    candidateCommit: command.candidateCommit,
+    candidateId: command.candidateId,
+    candidateTree: command.candidateTree,
+    repository: command.repository,
+    workspaceCapability: command.integrationWorkspace,
+  }, {
+    expectedIntegrationRoot: command.baseRoot,
+    oneCandidate: true,
+  }), "integrate-candidate");
+}
+
+export function publishCandidateIntent(command: PublishCompareAndSwap): BoundaryResult<PublishIfExpectedHead> {
+  return normalize<PublishIfExpectedHead>(gitIntentCapsule, envelope(command, "publish-if-expected-head", {
+    desiredHead: command.desiredHead,
+    expected: command.expected,
     publicationId: command.publicationId,
-  }));
-  if (publicationLease === null) {
-    return buildFeedback("$.preconditions.publicationLease", "publication lease could not be derived");
-  }
-  const decoded = gitIntent(Object.freeze({
-    runId: command.runId,
-    kind: "publish-if-expected-head",
-    inputs: Object.freeze({
-      desiredHead: command.desiredHead,
-      expectedHead: command.expectedHead,
-      publicationId: command.publicationId,
-    }),
-    preconditions: Object.freeze({
-      candidateTree: command.candidateTree,
-      publicationLease,
-      verifiedManifest: manifest,
-    }),
-  }));
-  if (decoded.kind !== "ok") {
-    return decoded;
-  }
-  return decoded.value.kind === "publish-if-expected-head"
-    ? Object.freeze({ kind: "ok", value: decoded.value, canonicalBytes: decoded.canonicalBytes })
-    : buildFeedback("$.kind", "git constructor produced the wrong publication kind");
+    publicationRef: command.publicationRef,
+    repository: command.repository,
+  }, {
+    candidateTree: command.candidateTree,
+    publicationLease: command.publicationLease,
+    verifiedAttestation: command.verifiedAttestation,
+  }), "publish-if-expected-head");
 }
+
+export function observeClockIntent(command: ObserveClockCommand): BoundaryResult<ObserveClock> {
+  return normalize<ObserveClock>(clockIntentCapsule, envelope(command, "observe-clock", {
+    clockId: command.clockId,
+  }, {
+    notBeforeTick: command.notBeforeTick,
+    sourceDigest: command.sourceDigest,
+  }), "observe-clock");
+}
+
+export function installArtifactIntent(command: InstallArtifactCommand): BoundaryResult<InstallSealedObject> {
+  return normalize<InstallSealedObject>(storeIntentCapsule, envelope(command, "install-sealed-object", {
+    artifact: command.artifact,
+  }, {
+    expectedDigest: command.artifact.digest,
+    objectFirst: true,
+  }), "install-sealed-object");
+}
+
+void (workspaceIntentCapsule satisfies typeof workspaceIntentCapsule);
+void (childIntentCapsule satisfies typeof childIntentCapsule);
+void (gitIntentCapsule satisfies typeof gitIntentCapsule);
+void (storeIntentCapsule satisfies typeof storeIntentCapsule);
+void (clockIntentCapsule satisfies typeof clockIntentCapsule);
+void (null as WorkspaceIntent | ChildIntent | GitIntent | StoreIntent | ClockIntent | null);

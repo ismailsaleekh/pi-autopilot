@@ -537,59 +537,30 @@ async function scanRawSegment(layout: EpochLayout): Promise<RawSegmentResult> {
   }
 }
 
-function controlCuts(
+function predecessorCut(
   control: TakeoverControl,
-  priorEpochs: readonly EpochLayout[],
+  predecessor: EpochLayout,
   successor: EpochLayout,
-): { readonly kind: "ok"; readonly cuts: readonly CutAssignment[] }
+): { readonly kind: "ok"; readonly cut: CutAssignment }
   | { readonly kind: "error"; readonly error: JournalError } {
-  if (control.cuts.length !== priorEpochs.length) {
+  const byteLength = parseU64(control.predecessorObservedByteLength);
+  if (control.predecessorEpoch !== predecessor.epoch || byteLength === null) {
     return Object.freeze({
       kind: "error",
       error: journalError(
         "corrupt-control",
         "fatal",
-        "validate-takeover-control",
-        "takeover control must record exactly one cut for every prior claimed epoch",
+        "validate-epoch-continuation",
+        "continuation must bind exactly the immediately preceding epoch",
         successor.segmentPath,
         successor.epoch,
       ),
     });
   }
-  const cuts: CutAssignment[] = [];
-  for (let index = 0; index < priorEpochs.length; index += 1) {
-    const prior = priorEpochs[index];
-    const cut = control.cuts[index];
-    if (prior === undefined || cut === undefined || cut.epoch !== prior.epoch) {
-      return Object.freeze({
-        kind: "error",
-        error: journalError(
-          "corrupt-control",
-          "fatal",
-          "validate-takeover-control",
-          "takeover control epochs must equal all prior claims in ascending order",
-          successor.segmentPath,
-          successor.epoch,
-        ),
-      });
-    }
-    const byteLength = parseU64(cut.observedByteLength);
-    if (byteLength === null) {
-      return Object.freeze({
-        kind: "error",
-        error: journalError(
-          "corrupt-control",
-          "fatal",
-          "validate-takeover-control",
-          "takeover cut contains an invalid unsigned-u64 byte length",
-          successor.segmentPath,
-          successor.epoch,
-        ),
-      });
-    }
-    cuts.push(Object.freeze({ byteLength, successor: successor.epoch }));
-  }
-  return Object.freeze({ kind: "ok", cuts: Object.freeze(cuts) });
+  return Object.freeze({
+    kind: "ok",
+    cut: Object.freeze({ byteLength, successor: successor.epoch }),
+  });
 }
 
 function rawFor(
@@ -757,20 +728,25 @@ export async function buildJournalScanPlan(
     if (takeover.kind === "error") {
       return takeover;
     }
-    const decodedCuts = controlCuts(takeover.control, epochs.slice(0, index), epoch);
-    if (decodedCuts.kind === "error") {
-      return decodedCuts;
+    const predecessor = epochs[index - 1];
+    if (predecessor === undefined) {
+      return Object.freeze({
+        kind: "error",
+        error: journalError(
+          "corrupt-control",
+          "fatal",
+          "plan-journal-replay",
+          "noninitial continuation has no predecessor epoch",
+          epoch.segmentPath,
+          epoch.epoch,
+        ),
+      });
     }
-    for (let priorIndex = 0; priorIndex < index; priorIndex += 1) {
-      const prior = epochs[priorIndex];
-      const cut = decodedCuts.cuts[priorIndex];
-      if (prior !== undefined && cut !== undefined) {
-        // Descending traversal means this overwrite always selects the earliest
-        // valid successor. A takeover frame beyond its own successor's cut is
-        // never visited and therefore can never re-fence an older segment.
-        assignments.set(prior.epoch, cut);
-      }
+    const decodedCut = predecessorCut(takeover.control, predecessor, epoch);
+    if (decodedCut.kind === "error") {
+      return decodedCut;
     }
+    assignments.set(predecessor.epoch, decodedCut.cut);
   }
 
   const segmentPlans: SegmentReplayPlan[] = [];
