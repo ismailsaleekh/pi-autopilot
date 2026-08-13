@@ -71,6 +71,13 @@ const TIMER_OR_SCHEDULER_NAMES = new Set([
   "schedule",
 ]);
 
+const AUTHORITY_CONSTRUCTION_NAMES = new Set([
+  "defineCapsule",
+  "canonicalEncodeUnknown",
+  "canonicalDigestUnknown",
+  "digestBytes",
+]);
+
 const DURABLE_WRITE_NAMES = new Set([
   "appendFile",
   "appendFileSync",
@@ -503,6 +510,19 @@ function checkAuthorityPurity(units: readonly SourceUnit[]): readonly Architectu
           && node.expression.name.text === "random"
         ) {
           output.push(finding("authority-purity", unit, node, "randomness is forbidden in authority"));
+        }
+        const call = callName(node);
+        if (
+          call !== null
+          && AUTHORITY_CONSTRUCTION_NAMES.has(call)
+          && !unit.path.startsWith("authority/protocol/")
+        ) {
+          output.push(finding(
+            "authority-purity",
+            unit,
+            node,
+            "protocol construction and canonical codecs are callable only inside authority/protocol",
+          ));
         }
         if (
           ts.isPropertyAccessExpression(node.expression)

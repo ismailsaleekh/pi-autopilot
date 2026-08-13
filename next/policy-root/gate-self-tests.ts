@@ -39,6 +39,7 @@ function oneFile(path: string, text: string): ReadonlyArray<{ readonly path: str
 test("authority purity accepts pure code and rejects ambient effects", () => {
   assert.equal(rulesFor(oneFile("authority/model/good.ts", "export const fold = (value: number): number => value + 1;\n")).has("authority-purity"), false);
   assert.equal(rulesFor(oneFile("authority/model/bad.ts", "export async function bad(): Promise<number> { return Date.now(); }\n")).has("authority-purity"), true);
+  assert.equal(rulesFor(oneFile("authority/model/bad-constructor.ts", "declare function defineCapsule(): unknown; export const bad = defineCapsule();\n")).has("authority-purity"), true);
 });
 
 test("one append edge accepts commit-loop and rejects a second caller", () => {
