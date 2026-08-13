@@ -122,14 +122,12 @@ test("port intent actionId is deterministic and enforced", () => {
   for (const capsule of portContractCapsules.filter((candidate) => candidate.name.endsWith("Intent"))) {
     const value = capsule.arbitrary.valid(41);
     const encodedValue = capsule.encodeUnknown(value);
-    assert.equal(encodedValue.kind, "ok");
     if (encodedValue.kind === "error") {
-      continue;
+      assert.fail(encodedValue.error.diagnostic);
     }
     const decoded = capsule.decodeCanonical(encodedValue.value);
-    assert.equal(decoded.kind, "ok");
     if (decoded.kind === "error") {
-      continue;
+      assert.fail(decoded.error.diagnostic);
     }
     assert.equal(typeof decoded.value, "object");
     if (typeof decoded.value !== "object" || decoded.value === null || Array.isArray(decoded.value)) {
