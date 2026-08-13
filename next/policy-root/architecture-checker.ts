@@ -212,10 +212,12 @@ export function collectActualUnits(nextRoot: string): {
       }
     }
   }
+  const testkitSourceFiles = collectFiles(join(absoluteRoot, "testkit"), new Set([".ts"]))
+    .filter((file) => !file.endsWith(".d.ts"));
   const projectFiles = new Set<string>();
   collectProjectConfigFiles(join(absoluteRoot, "tsconfig.json"), new Set(), projectFiles);
   const projectFindings: ArchitectureFinding[] = [];
-  for (const sourceFile of sourceFiles) {
+  for (const sourceFile of [...sourceFiles, ...testkitSourceFiles]) {
     if (!projectFiles.has(resolve(sourceFile))) {
       projectFindings.push(Object.freeze({
         rule: "project-graph",
@@ -254,6 +256,22 @@ export function collectActualUnits(nextRoot: string): {
         path: logicalSource,
         line: 1,
         detail: "production TypeScript file has no corresponding fresh emitted JavaScript",
+      }));
+    }
+  }
+  const emittedTestkitRoot = join(absoluteRoot, "dist-testkit", "testkit");
+  const emittedTestkitFiles = new Set(collectFiles(emittedTestkitRoot, new Set([".js"]))
+    .map((file) => slash(relative(emittedTestkitRoot, file))));
+  for (const sourceFile of testkitSourceFiles) {
+    const logicalSource = slash(relative(join(absoluteRoot, "testkit"), sourceFile));
+    const expectedEmission = logicalSource.replace(/\.ts$/, ".js");
+    if (!emittedTestkitFiles.has(expectedEmission)) {
+      projectFindings.push(Object.freeze({
+        rule: "project-graph",
+        origin: "config",
+        path: `testkit/${logicalSource}`,
+        line: 1,
+        detail: "testkit TypeScript file has no corresponding fresh emitted JavaScript",
       }));
     }
   }
@@ -312,6 +330,27 @@ function importsOf(unit: SourceUnit): readonly ImportEdge[] {
     }
   });
   return Object.freeze(output);
+}
+
+function importEdgeIsTypeOnly(edge: ImportEdge): boolean {
+  if (ts.isExportDeclaration(edge.node)) {
+    return edge.node.isTypeOnly;
+  }
+  if (!ts.isImportDeclaration(edge.node)) {
+    return false;
+  }
+  const clause = edge.node.importClause;
+  if (clause === undefined) {
+    return false;
+  }
+  if (clause.isTypeOnly) {
+    return true;
+  }
+  return clause.name === undefined
+    && clause.namedBindings !== undefined
+    && ts.isNamedImports(clause.namedBindings)
+    && clause.namedBindings.elements.length > 0
+    && clause.namedBindings.elements.every((element) => element.isTypeOnly);
 }
 
 function resolvedLogicalImport(unit: SourceUnit, specifier: string): string | null {
@@ -402,8 +441,10 @@ function checkOneAppendEdge(units: readonly SourceUnit[]): readonly Architecture
   const output: ArchitectureFinding[] = [];
   for (const origin of ["source", "emitted"] as const) {
     const originUnits = units.filter((unit) => unit.origin === origin);
-    const hasJournalImplementation = originUnits.some(
-      (unit) => unit.path.startsWith("storage/journal/") && !unit.path.endsWith("README.md"),
+    const hasCommitLoopImplementation = originUnits.some(
+      (unit) => unit.path.startsWith("runtime/commit-loop/")
+        && !unit.path.endsWith("_project.js")
+        && !unit.path.endsWith("_project.ts"),
     );
     const calls: Array<{ readonly unit: SourceUnit; readonly node: ts.CallExpression }> = [];
     const externalJournalImports: Array<{ readonly unit: SourceUnit; readonly edge: ImportEdge }> = [];
@@ -424,17 +465,37 @@ function checkOneAppendEdge(units: readonly SourceUnit[]): readonly Architecture
         }
       });
     }
-    if (hasJournalImplementation && origin === "source" && calls.length !== 1) {
-      const anchor = originUnits.find((unit) => unit.path.startsWith("storage/journal/"));
-      if (anchor !== undefined) {
+
+    const anchor = originUnits.find((unit) => unit.path.startsWith("runtime/commit-loop/"))
+      ?? originUnits.find((unit) => unit.path.startsWith("storage/journal/"));
+    if (!hasCommitLoopImplementation) {
+      if ((calls.length !== 0 || externalJournalImports.length !== 0) && anchor !== undefined) {
         output.push(finding(
           "one-append-edge",
           anchor,
           anchor.sourceFile,
-          `expected exactly one appendCommittedBatch call edge, found ${String(calls.length)}`,
+          "pre-commit-loop phase requires zero external journal append call/import edges",
+        ));
+      }
+    } else if (anchor !== undefined) {
+      if (calls.length !== 1) {
+        output.push(finding(
+          "one-append-edge",
+          anchor,
+          anchor.sourceFile,
+          `commit-loop phase requires exactly one appendCommittedBatch call edge, found ${String(calls.length)}`,
+        ));
+      }
+      if (externalJournalImports.length !== 1) {
+        output.push(finding(
+          "one-append-edge",
+          anchor,
+          anchor.sourceFile,
+          `commit-loop phase requires exactly one external journal import edge, found ${String(externalJournalImports.length)}`,
         ));
       }
     }
+
     for (const call of calls) {
       if (!call.unit.path.startsWith("runtime/commit-loop/")) {
         output.push(finding(
@@ -442,17 +503,6 @@ function checkOneAppendEdge(units: readonly SourceUnit[]): readonly Architecture
           call.unit,
           call.node,
           "journal append is callable only from runtime/commit-loop",
-        ));
-      }
-    }
-    if (hasJournalImplementation && externalJournalImports.length !== 1) {
-      const anchor = originUnits.find((unit) => unit.path.startsWith("storage/journal/"));
-      if (anchor !== undefined) {
-        output.push(finding(
-          "one-append-edge",
-          anchor,
-          anchor.sourceFile,
-          `expected exactly one emitted import edge to journal, found ${String(externalJournalImports.length)}`,
         ));
       }
     }
@@ -641,6 +691,21 @@ function checkConstructorCapabilities(units: readonly SourceUnit[]): readonly Ar
     "workItemId",
   ]);
   for (const unit of units) {
+    for (const edge of importsOf(unit)) {
+      const resolvedImport = resolvedLogicalImport(unit, edge.specifier);
+      if (
+        resolvedImport === "authority/protocol/accepted-batch"
+        && !unit.path.startsWith("authority/facade/")
+        && !importEdgeIsTypeOnly(edge)
+      ) {
+        output.push(finding(
+          "constructor-capabilities",
+          unit,
+          edge.node,
+          "AcceptedBatch mint capability may be value-imported only by authority/facade",
+        ));
+      }
+    }
     visit(unit.sourceFile, (node) => {
       if (!ts.isObjectLiteralExpression(node) || insideSchemaDescriptor(node)) {
         return;
@@ -667,7 +732,11 @@ function checkConstructorCapabilities(units: readonly SourceUnit[]): readonly Ar
           "EvidenceEnvelope values may be constructed only in runtime/dispatcher",
         ));
       }
-      if (typeText.includes("AcceptedBatch") && !unit.path.startsWith("authority/facade/")) {
+      if (
+        typeText.includes("AcceptedBatch")
+        && !unit.path.startsWith("authority/facade/")
+        && unit.path !== "authority/protocol/accepted-batch.ts"
+      ) {
         output.push(finding(
           "constructor-capabilities",
           unit,
@@ -709,7 +778,10 @@ function checkConstructorCapabilities(units: readonly SourceUnit[]): readonly Ar
           "EvidenceEnvelope constructor capability is owned by runtime/dispatcher",
         ));
       }
-      if (name === "makeAcceptedBatch" && !unit.path.startsWith("authority/facade/")) {
+      if (
+        (name === "makeAcceptedBatch" || name === "mintAcceptedBatch")
+        && !unit.path.startsWith("authority/facade/")
+      ) {
         output.push(finding(
           "constructor-capabilities",
           unit,
@@ -892,6 +964,11 @@ export function checkCompilerBaseline(nextRoot: string): readonly ArchitectureFi
   const configPaths = Object.freeze([
     "authority/tsconfig.json",
     "ports/tsconfig.json",
+    "storage/tsconfig.json",
+    "runtime/tsconfig.json",
+    "adapters/tsconfig.json",
+    "apps/tsconfig.json",
+    "testkit/tsconfig.json",
     "tsconfig.tests.json",
     "tsconfig.policy.json",
   ]);

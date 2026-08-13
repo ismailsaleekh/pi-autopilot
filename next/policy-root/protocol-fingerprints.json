@@ -101,7 +101,7 @@
       ]
     },
     "JournalRecord": {
-      "digest": "sha256:08dc91e117dad5a8db02d3220ddfc0b806af93cba6aaa5ee2696985c79a2f9e0",
+      "digest": "sha256:fc0158ceeb596c8726abf893277e94d9499c791c7f222ab549fee9342bd85a0f",
       "kinds": [
         "command-settled",
         "decision-committed",

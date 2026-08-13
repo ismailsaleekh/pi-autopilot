@@ -4,6 +4,10 @@ import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { generateAggregates } from "./generate-aggregates.js";
 import { runPolicy } from "./run-policy.js";
+import {
+  readSuiteManifest,
+  registeredSuiteCommands,
+} from "./suite-manifest-checker.js";
 
 const modulePolicyRoot = dirname(fileURLToPath(import.meta.url));
 const moduleParent = dirname(modulePolicyRoot);
@@ -35,8 +39,27 @@ function run(spec: CommandSpec): boolean {
   return true;
 }
 
+function runRegisteredSuite(id: string, command: string): boolean {
+  process.stdout.write(`\n[w0] registered suite ${id}\n[w0] command: ${command}\n`);
+  const child = spawnSync(command, {
+    cwd: nextRoot,
+    encoding: "utf8",
+    shell: true,
+    stdio: "inherit",
+  });
+  if (child.error !== undefined) {
+    process.stderr.write(`${child.error.message}\n`);
+    return false;
+  }
+  if (child.status !== 0) {
+    process.stderr.write(`[w0] registered suite ${id} failed with status ${String(child.status)}\n`);
+    return false;
+  }
+  return true;
+}
+
 let green = true;
-for (const outputDirectory of ["dist", "dist-policy", "dist-tests"]) {
+for (const outputDirectory of ["dist", "dist-policy", "dist-testkit", "dist-tests"]) {
   const absolute = join(nextRoot, outputDirectory);
   if (existsSync(absolute)) {
     rmSync(absolute, { recursive: true, force: true });
@@ -60,6 +83,12 @@ green = run(Object.freeze({
   name: "strict project typecheck and emit",
   command: tsc,
   arguments: Object.freeze(["-b", "--pretty", "false", "--force"]),
+})) && green;
+
+green = run(Object.freeze({
+  name: "link testkit project dependencies",
+  command: process.execPath,
+  arguments: Object.freeze(["dist-policy/policy-root/link-testkit-dependencies.js"]),
 })) && green;
 
 if (green) {
@@ -87,6 +116,16 @@ green = run(Object.freeze({
   command: process.execPath,
   arguments: Object.freeze(["--test", "dist-tests/tests/spine.test.js"]),
 })) && green;
+
+const suiteManifest = readSuiteManifest(join(nextRoot, "policy-root", "required-suites.json"));
+if (suiteManifest === null) {
+  process.stderr.write("[w0] required suite manifest is unreadable; no registered command may be skipped\n");
+  green = false;
+} else {
+  for (const suite of registeredSuiteCommands(suiteManifest)) {
+    green = runRegisteredSuite(suite.id, suite.command) && green;
+  }
+}
 
 if (!green) {
   process.stderr.write("\n[w0] GATE RED\n");

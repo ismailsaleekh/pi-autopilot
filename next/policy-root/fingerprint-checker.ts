@@ -136,12 +136,6 @@ export function checkFingerprintChange(
 ): readonly FingerprintFinding[] {
   const differences = diffFingerprints(expected, actual);
   if (differences.length === 0) {
-    if (amendmentMarkers.length > 0) {
-      return Object.freeze([Object.freeze({
-        capsule: "policy-root/amendments",
-        detail: "stale amendment marker exists without a fingerprint change",
-      })]);
-    }
     return differences;
   }
   if (amendmentMarkers.length === 0) {

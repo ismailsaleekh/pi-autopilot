@@ -4,6 +4,7 @@ export interface SuiteRegistration {
   readonly id: string;
   readonly owner: string;
   readonly registration: "pending" | "registered";
+  readonly command?: string;
 }
 
 export interface SuiteManifest {
@@ -14,6 +15,11 @@ export interface SuiteManifest {
 export interface SuiteManifestFinding {
   readonly suite: string;
   readonly detail: string;
+}
+
+export interface RegisteredSuiteCommand {
+  readonly id: string;
+  readonly command: string;
 }
 
 interface UnknownObject {
@@ -42,25 +48,49 @@ function isObject(value: unknown): value is UnknownObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function hasOnlyRegistrationKeys(value: UnknownObject): boolean {
+  const allowed = new Set(["command", "id", "owner", "registration"]);
+  return Object.keys(value).every((key) => allowed.has(key));
+}
+
 export function decodeSuiteManifest(value: unknown): SuiteManifest | null {
   if (!isObject(value) || value["format"] !== 1 || !Array.isArray(value["suites"])) {
+    return null;
+  }
+  if (Object.keys(value).some((key) => key !== "format" && key !== "suites")) {
     return null;
   }
   const suites: SuiteRegistration[] = [];
   for (const entry of value["suites"]) {
     if (
       !isObject(entry)
+      || !hasOnlyRegistrationKeys(entry)
       || typeof entry["id"] !== "string"
       || typeof entry["owner"] !== "string"
       || (entry["registration"] !== "pending" && entry["registration"] !== "registered")
     ) {
       return null;
     }
-    suites.push(Object.freeze({
-      id: entry["id"],
-      owner: entry["owner"],
-      registration: entry["registration"],
-    }));
+    if (entry["registration"] === "registered") {
+      if (typeof entry["command"] !== "string" || entry["command"].trim().length === 0) {
+        return null;
+      }
+      suites.push(Object.freeze({
+        id: entry["id"],
+        owner: entry["owner"],
+        registration: "registered",
+        command: entry["command"],
+      }));
+    } else {
+      if (entry["command"] !== undefined) {
+        return null;
+      }
+      suites.push(Object.freeze({
+        id: entry["id"],
+        owner: entry["owner"],
+        registration: "pending",
+      }));
+    }
   }
   return Object.freeze({ format: 1, suites: Object.freeze(suites) });
 }
@@ -76,6 +106,12 @@ export function checkSuiteManifest(
       output.push(Object.freeze({ suite: suite.id, detail: "duplicate suite registration" }));
     }
     byId.set(suite.id, suite);
+    if (suite.registration === "registered" && (suite.command === undefined || suite.command.trim().length === 0)) {
+      output.push(Object.freeze({ suite: suite.id, detail: "registered suite requires a non-empty command" }));
+    }
+    if (suite.registration === "pending" && suite.command !== undefined) {
+      output.push(Object.freeze({ suite: suite.id, detail: "pending suite forbids a command" }));
+    }
   }
   for (const requiredId of REQUIRED_SUITE_IDS) {
     const suite = byId.get(requiredId);
@@ -93,6 +129,16 @@ export function checkSuiteManifest(
     }
   }
   return Object.freeze(output);
+}
+
+export function registeredSuiteCommands(
+  manifest: SuiteManifest,
+): readonly RegisteredSuiteCommand[] {
+  return Object.freeze(manifest.suites
+    .filter((suite): suite is SuiteRegistration & { readonly command: string } => (
+      suite.registration === "registered" && suite.command !== undefined
+    ))
+    .map((suite) => Object.freeze({ id: suite.id, command: suite.command })));
 }
 
 export function readSuiteManifest(path: string): SuiteManifest | null {

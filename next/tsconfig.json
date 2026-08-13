@@ -3,6 +3,11 @@
   "references": [
     { "path": "./authority" },
     { "path": "./ports" },
+    { "path": "./storage" },
+    { "path": "./runtime" },
+    { "path": "./adapters" },
+    { "path": "./apps" },
+    { "path": "./testkit" },
     { "path": "./tsconfig.tests.json" },
     { "path": "./tsconfig.policy.json" }
   ]

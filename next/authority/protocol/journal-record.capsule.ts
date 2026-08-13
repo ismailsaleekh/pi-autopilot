@@ -1,3 +1,5 @@
+import { domainFactSchema } from "./domain-fact.capsule.js";
+import type { DomainFact } from "./domain-fact.capsule.js";
 import {
   actionIdSchema,
   artifactRefSchema,
@@ -9,13 +11,15 @@ import {
   runIdSchema,
 } from "./identifiers.js";
 import {
+  arrayOf,
+  canonicalDigestUnknown,
   defineCapsule,
   literal,
   natural,
   object,
   union,
 } from "./schema.js";
-import type { Infer } from "./schema.js";
+import type { Digest, Infer } from "./schema.js";
 import { terminalOutcomeSchema } from "./terminal-outcome.capsule.js";
 
 export const runGenesisSchema = object({
@@ -28,10 +32,14 @@ export const runGenesisSchema = object({
   taskSnapshot: artifactRootSchema,
 });
 
+// Binding law: facts are canonical and ordered. Runtime must require
+// canonicalDigestUnknown(facts) === factRoot before append and again before
+// replay. commandRoot remains a CAS reference and is not embedded here.
 export const decisionCommittedSchema = object({
   actionId: actionIdSchema,
   commandRoot: artifactRootSchema,
   factRoot: artifactRootSchema,
+  facts: arrayOf(domainFactSchema),
   kind: literal("decision-committed"),
   runId: runIdSchema,
   sequence: natural(),
@@ -90,6 +98,16 @@ export type OutcomeCommitted = Infer<typeof outcomeCommittedSchema>;
 export type RunSuspended = Infer<typeof runSuspendedSchema>;
 export type RunResumed = Infer<typeof runResumedSchema>;
 export type JournalRecord = Infer<typeof journalRecordSchema>;
+
+export function canonicalDecisionFactsDigest(facts: readonly DomainFact[]): Digest {
+  return canonicalDigestUnknown(facts);
+}
+
+export function decisionFactsMatchRoot(
+  decision: Pick<DecisionCommitted, "factRoot" | "facts">,
+): boolean {
+  return String(decision.factRoot) === String(canonicalDecisionFactsDigest(decision.facts));
+}
 
 export const journalRecordCapsule = defineCapsule("JournalRecord", journalRecordSchema);
 

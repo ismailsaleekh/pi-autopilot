@@ -3,6 +3,11 @@ import { join } from "node:path";
 import { canonicalDigestUnknown } from "../authority/protocol/schema.js";
 import type { Digest, JsonValue } from "../authority/protocol/schema.js";
 import { activeAmendmentMarkers } from "./fingerprint-checker.js";
+import {
+  TRUSTED_BOOTSTRAP_COMMIT,
+  readCommittedFile,
+  resolveGovernanceBaseline,
+} from "./governance-baseline.js";
 
 export interface ProtectionManifest {
   readonly format: 1;
@@ -16,6 +21,43 @@ export interface ProtectionFinding {
 
 export const AMENDMENT_ENVIRONMENT_FLAG = "PI_AUTOPILOT_ARCHITECTURE_AMENDMENT_APPROVED";
 
+export const REQUIRED_PROTECTED_PATHS = Object.freeze([
+  "adapters/tsconfig.json",
+  "apps/tsconfig.json",
+  "authority/protocol/accepted-batch.ts",
+  "authority/tsconfig.json",
+  "package.json",
+  "policy-root/SEAM-OWNERSHIP.md",
+  "policy-root/amendment-marker.ts",
+  "policy-root/amendments/README.md",
+  "policy-root/architecture-checker.ts",
+  "policy-root/bootstrap-baselines.ts",
+  "policy-root/fingerprint-checker.ts",
+  "policy-root/gate-self-tests.ts",
+  "policy-root/generate-aggregates.ts",
+  "policy-root/governance-baseline.ts",
+  "policy-root/hygiene-checker.ts",
+  "policy-root/link-testkit-dependencies.ts",
+  "policy-root/negative-compile.ts",
+  "policy-root/payload-checker.ts",
+  "policy-root/protection-checker.ts",
+  "policy-root/protocol-fingerprints.json",
+  "policy-root/purity-poison.test.ts",
+  "policy-root/required-suites.json",
+  "policy-root/run-policy.ts",
+  "policy-root/suite-manifest-checker.ts",
+  "policy-root/suppression-checker.ts",
+  "policy-root/w0-gate.ts",
+  "ports/tsconfig.json",
+  "runtime/tsconfig.json",
+  "storage/tsconfig.json",
+  "testkit/tsconfig.json",
+  "tsconfig.base.json",
+  "tsconfig.json",
+  "tsconfig.policy.json",
+  "tsconfig.tests.json",
+]);
+
 interface UnknownObject {
   readonly [key: string]: unknown;
 }
@@ -28,8 +70,20 @@ function isDigest(value: unknown): value is Digest {
   return typeof value === "string" && /^sha256:[0-9a-f]{64}$/.test(value);
 }
 
+function exactKeys(value: UnknownObject, expected: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const sortedExpected = expected.slice().sort();
+  return actual.length === sortedExpected.length
+    && actual.every((key, index) => key === sortedExpected[index]);
+}
+
 export function decodeProtectionManifest(value: unknown): ProtectionManifest | null {
-  if (!isObject(value) || value["format"] !== 1 || !isObject(value["files"])) {
+  if (
+    !isObject(value)
+    || !exactKeys(value, ["files", "format"])
+    || value["format"] !== 1
+    || !isObject(value["files"])
+  ) {
     return null;
   }
   const files: Record<string, Digest> = Object.create(null);
@@ -47,12 +101,54 @@ export function contentDigest(text: string): Digest {
   return canonicalDigestUnknown(text);
 }
 
+function selfComparableText(manifest: ProtectionManifest): string {
+  const files: Record<string, Digest> = Object.create(null);
+  for (const path of Object.keys(manifest.files).sort()) {
+    if (path === "policy-root/protected-files.json") {
+      continue;
+    }
+    const digest = manifest.files[path];
+    if (digest !== undefined) {
+      files[path] = digest;
+    }
+  }
+  return `${JSON.stringify({ format: manifest.format, files }, null, 2)}\n`;
+}
+
+export function checkProtectionManifestSelfDigest(
+  manifest: ProtectionManifest,
+): readonly ProtectionFinding[] {
+  const expected = manifest.files["policy-root/protected-files.json"];
+  if (expected === undefined) {
+    return Object.freeze([Object.freeze({
+      path: "policy-root/protected-files.json",
+      detail: "protection manifest must carry its own approved digest",
+    })]);
+  }
+  if (contentDigest(selfComparableText(manifest)) !== expected) {
+    return Object.freeze([Object.freeze({
+      path: "policy-root/protected-files.json",
+      detail: "protection manifest self-digest is invalid",
+    })]);
+  }
+  return Object.freeze([]);
+}
+
 export function checkProtectedFiles(
   nextRoot: string,
   manifest: ProtectionManifest,
   markers: readonly string[],
+  requiredPaths: readonly string[] = REQUIRED_PROTECTED_PATHS,
 ): readonly ProtectionFinding[] {
   const output: ProtectionFinding[] = [];
+  for (const path of requiredPaths) {
+    if (manifest.files[path] === undefined) {
+      output.push(Object.freeze({
+        path,
+        detail: "required protected path is absent from the git-pinned protection manifest",
+      }));
+    }
+  }
   for (const path of Object.keys(manifest.files).sort()) {
     if (path === "policy-root/protected-files.json") {
       continue;
@@ -68,75 +164,85 @@ export function checkProtectedFiles(
       output.push(Object.freeze({
         path,
         detail: markers.length === 0
-          ? "protected policy file changed without an architecture amendment marker"
-          : "protected policy file changed; amendment review must update the protection baseline",
+          ? "protected policy file differs from the git-pinned governance baseline"
+          : "protected policy file differs from the git-pinned governance baseline; a marker cannot self-approve it",
       }));
     }
-  }
-  if (output.length === 0 && markers.length > 0) {
-    output.push(Object.freeze({
-      path: "policy-root/amendments",
-      detail: "stale architecture amendment marker exists without a protected-file change",
-    }));
   }
   return Object.freeze(output);
 }
 
-export function readProtectionManifest(path: string): ProtectionManifest | null {
-  if (!existsSync(path)) {
-    return null;
-  }
+function parseManifestText(text: string): ProtectionManifest | null {
   let value: unknown;
   try {
-    value = JSON.parse(readFileSync(path, "utf8"));
+    value = JSON.parse(text);
   } catch {
     return null;
   }
   return decodeProtectionManifest(value);
 }
 
-export function checkRepositoryProtection(nextRoot: string): readonly ProtectionFinding[] {
-  const manifest = readProtectionManifest(join(nextRoot, "policy-root", "protected-files.json"));
+export function readProtectionManifest(path: string): ProtectionManifest | null {
+  if (!existsSync(path)) {
+    return null;
+  }
+  return parseManifestText(readFileSync(path, "utf8"));
+}
+
+export function checkRepositoryProtection(
+  nextRoot: string,
+  requiredPaths: readonly string[] = REQUIRED_PROTECTED_PATHS,
+  trustedBootstrapCommit: string = TRUSTED_BOOTSTRAP_COMMIT,
+): readonly ProtectionFinding[] {
+  const resolution = resolveGovernanceBaseline(nextRoot, trustedBootstrapCommit);
+  if (resolution.baseline === null) {
+    return Object.freeze(resolution.findings.map((detail) => Object.freeze({
+      path: "policy-root/protected-files.json",
+      detail,
+    })));
+  }
+  const committed = readCommittedFile(
+    nextRoot,
+    resolution.baseline.tag,
+    "policy-root/protected-files.json",
+  );
+  if (committed.text === null) {
+    return Object.freeze([Object.freeze({
+      path: "policy-root/protected-files.json",
+      detail: committed.finding ?? `cannot read git-pinned baseline ${resolution.baseline.tag}`,
+    })]);
+  }
+  const manifest = parseManifestText(committed.text);
   if (manifest === null) {
     return Object.freeze([Object.freeze({
       path: "policy-root/protected-files.json",
-      detail: "protection manifest is missing or malformed",
+      detail: `git-pinned protection manifest at ${resolution.baseline.tag} is malformed`,
     })]);
   }
-  const expectedSelfDigest = manifest.files["policy-root/protected-files.json"];
-  if (expectedSelfDigest === undefined) {
-    return Object.freeze([Object.freeze({
+  const selfFindings = checkProtectionManifestSelfDigest(manifest);
+  if (selfFindings.length > 0) {
+    return selfFindings;
+  }
+
+  const output = [...checkProtectedFiles(
+    nextRoot,
+    manifest,
+    activeAmendmentMarkers(nextRoot),
+    requiredPaths,
+  )];
+  const workingPath = join(nextRoot, "policy-root", "protected-files.json");
+  if (!existsSync(workingPath)) {
+    output.push(Object.freeze({
       path: "policy-root/protected-files.json",
-      detail: "protection manifest must carry its own approved digest",
-    })]);
-  }
-  const selfComparable: Record<string, unknown> = Object.create(null);
-  selfComparable["format"] = manifest.format;
-  const selfFiles: Record<string, Digest> = Object.create(null);
-  for (const path of Object.keys(manifest.files).sort()) {
-    if (path !== "policy-root/protected-files.json") {
-      const digest = manifest.files[path];
-      if (digest !== undefined) {
-        selfFiles[path] = digest;
-      }
-    }
-  }
-  selfComparable["files"] = selfFiles;
-  const actualSelfDigest = contentDigest(`${JSON.stringify(selfComparable, null, 2)}\n`);
-  if (actualSelfDigest !== expectedSelfDigest) {
-    return Object.freeze([Object.freeze({
+      detail: "working-tree protection manifest is missing",
+    }));
+  } else if (readFileSync(workingPath, "utf8") !== committed.text) {
+    output.push(Object.freeze({
       path: "policy-root/protected-files.json",
-      detail: "protection manifest self-digest is invalid",
-    })]);
+      detail: `working-tree manifest differs from git-pinned baseline ${resolution.baseline.tag} and cannot self-certify`,
+    }));
   }
-  const markers = activeAmendmentMarkers(nextRoot);
-  if (markers.length > 0 && process.env[AMENDMENT_ENVIRONMENT_FLAG] !== "1") {
-    return Object.freeze([Object.freeze({
-      path: "policy-root/amendments",
-      detail: `architecture marker requires protected CI approval via ${AMENDMENT_ENVIRONMENT_FLAG}`,
-    })]);
-  }
-  return checkProtectedFiles(nextRoot, manifest, markers);
+  return Object.freeze(output);
 }
 
 export function protectionManifestValue(files: Readonly<Record<string, Digest>>): JsonValue {

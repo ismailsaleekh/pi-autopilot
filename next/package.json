@@ -4,6 +4,7 @@
   "version": "0.0.0-w0",
   "type": "module",
   "scripts": {
+    "amendment:baseline": "../node_modules/.bin/tsc -p tsconfig.policy.json --pretty false && node dist-policy/policy-root/bootstrap-baselines.js --approved-amendment",
     "w0:generate": "../node_modules/.bin/tsc -p tsconfig.policy.json --pretty false && node dist-policy/policy-root/generate-aggregates.js",
     "w0:gate": "../node_modules/.bin/tsc -p tsconfig.policy.json --pretty false && node dist-policy/policy-root/w0-gate.js"
   },

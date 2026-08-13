@@ -1,0 +1,15 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "../dist/adapters",
+    "tsBuildInfoFile": "../dist/adapters.tsbuildinfo",
+    "lib": ["ES2022"],
+    "types": ["node"]
+  },
+  "references": [
+    { "path": "../ports" }
+  ],
+  "include": ["**/*.ts"],
+  "exclude": ["**/*.test.ts"]
+}

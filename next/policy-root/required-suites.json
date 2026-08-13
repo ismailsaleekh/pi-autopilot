@@ -1,12 +1,12 @@
 {
   "format": 1,
   "suites": [
-    { "id": "D2.1-replay-determinism", "owner": "W1-authority", "registration": "pending" },
+    { "id": "D2.1-replay-determinism", "owner": "W1-authority", "registration": "registered", "command": "node --test --test-reporter=spec dist-testkit/testkit/model-check/replay-determinism.test.js dist-testkit/testkit/model-check/accepted-batch-owner.test.js" },
     { "id": "D2.2-full-run-scenarios", "owner": "W2-authority", "registration": "pending" },
-    { "id": "D2.3-crash-matrix", "owner": "W3-testkit", "registration": "pending" },
+    { "id": "D2.3-crash-matrix", "owner": "W3-testkit", "registration": "registered", "command": "node --test --test-reporter=spec dist-testkit/testkit/crash-matrix/crash-matrix.test.js" },
     { "id": "D2.4-third-outcome-hunt", "owner": "W3-testkit", "registration": "pending" },
     { "id": "D2.5-idempotency", "owner": "W2-runtime", "registration": "pending" },
-    { "id": "D2.6-totality-fuzzing", "owner": "W3-testkit", "registration": "pending" },
+    { "id": "D2.6-totality-fuzzing", "owner": "W3-testkit", "registration": "registered", "command": "node --test --test-reporter=spec dist-testkit/testkit/simulation/simulation.test.js dist-testkit/testkit/crash-matrix/crash-matrix.test.js" },
     { "id": "D2.7-yardstick-properties", "owner": "W2-authority", "registration": "pending" },
     { "id": "D3.1-adapter-contract-parity", "owner": "W2-adapters", "registration": "pending" },
     { "id": "D3.2-journal-durability", "owner": "W1-storage", "registration": "pending" },

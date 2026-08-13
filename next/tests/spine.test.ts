@@ -5,6 +5,11 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { protocolCapsules } from "../authority/protocol/aggregate.generated.js";
 import {
+  canonicalDecisionFactsDigest,
+  decisionFactsMatchRoot,
+  journalRecordCapsule,
+} from "../authority/protocol/journal-record.capsule.js";
+import {
   bytesEqual,
   canonicalEncodeUnknown,
   digestBytes,
@@ -136,6 +141,30 @@ for (const capsule of allCapsules) {
     assert.equal(capsule.decodeCanonical(padded).kind, "error");
   });
 }
+
+test("DecisionCommitted canonical ordered facts bind to factRoot", () => {
+  const candidate = journalRecordCapsule.arbitrary.validForKind("decision-committed", 31415);
+  const decoded = journalRecordCapsule.decode(candidate);
+  assert.equal(decoded.kind, "ok");
+  if (decoded.kind === "ok" && decoded.value.kind === "decision-committed") {
+    const matching = journalRecordCapsule.decode({
+      ...decoded.value,
+      factRoot: canonicalDecisionFactsDigest(decoded.value.facts),
+    });
+    assert.equal(matching.kind, "ok");
+    if (matching.kind === "ok" && matching.value.kind === "decision-committed") {
+      assert.equal(decisionFactsMatchRoot(matching.value), true);
+      const mismatch = journalRecordCapsule.decode({
+        ...matching.value,
+        factRoot: `sha256:${"0".repeat(64)}`,
+      });
+      assert.equal(mismatch.kind, "ok");
+      if (mismatch.kind === "ok" && mismatch.value.kind === "decision-committed") {
+        assert.equal(decisionFactsMatchRoot(mismatch.value), false);
+      }
+    }
+  }
+});
 
 test("port intent actionId is deterministic and enforced", () => {
   for (const capsule of portContractCapsules.filter((candidate) => candidate.name.endsWith("Intent"))) {

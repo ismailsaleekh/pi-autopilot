@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import {
   mkdirSync,
   mkdtempSync,
@@ -10,6 +11,12 @@ import { test } from "node:test";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { basename, dirname } from "node:path";
+import {
+  amendmentApprovalGranted,
+  amendmentMarkerRelativePath,
+  parseArchitectureAmendmentMarkdown,
+  validateArchitectureAmendmentScope,
+} from "./amendment-marker.js";
 import {
   checkArchitectureUnits,
   checkCompilerBaseline,
@@ -23,14 +30,20 @@ import {
   currentFingerprintManifest,
   diffFingerprints,
 } from "./fingerprint-checker.js";
+import { resolveGovernanceBaseline } from "./governance-baseline.js";
 import { runNegativeCompileFixtures } from "./negative-compile.js";
 import { checkPayloadShapes } from "./payload-checker.js";
 import {
   checkProtectedFiles,
+  checkRepositoryProtection,
   contentDigest,
 } from "./protection-checker.js";
 import type { ProtectionManifest } from "./protection-checker.js";
-import { checkSuiteManifest, decodeSuiteManifest } from "./suite-manifest-checker.js";
+import {
+  checkSuiteManifest,
+  decodeSuiteManifest,
+  registeredSuiteCommands,
+} from "./suite-manifest-checker.js";
 import { scanSuppressionText } from "./suppression-checker.js";
 import { defineCapsule, literal, object, union } from "../authority/protocol/schema.js";
 
@@ -56,6 +69,24 @@ function temporaryDirectory(run: (directory: string) => void): void {
   }
 }
 
+function runFixtureGit(directory: string, arguments_: readonly string[]): void {
+  const child = spawnSync("git", ["-C", directory, ...arguments_], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  assert.equal(child.status, 0, typeof child.stderr === "string" ? child.stderr : "git fixture failed");
+}
+
+function protectionFixtureText(entries: readonly { readonly path: string; readonly text: string }[]): string {
+  const files: Record<string, string> = Object.create(null);
+  for (const entry of entries.slice().sort((left, right) => left.path.localeCompare(right.path))) {
+    files[entry.path] = contentDigest(entry.text);
+  }
+  const unsigned = `${JSON.stringify({ format: 1, files }, null, 2)}\n`;
+  files["policy-root/protected-files.json"] = contentDigest(unsigned);
+  return `${JSON.stringify({ format: 1, files }, null, 2)}\n`;
+}
+
 const strictCompilerOptions = Object.freeze({
   composite: true,
   exactOptionalPropertyTypes: true,
@@ -68,17 +99,31 @@ const strictCompilerOptions = Object.freeze({
   useUnknownInCatchVariables: true,
 });
 
-test("project graph accepts referenced fresh emission and rejects orphan source", () => {
+test("project graph covers referenced production and testkit real-adapters, and rejects orphan source", () => {
   temporaryDirectory((directory) => {
     mkdirSync(join(directory, "authority"), { recursive: true });
+    mkdirSync(join(directory, "testkit", "real-adapters"), { recursive: true });
     mkdirSync(join(directory, "dist", "authority"), { recursive: true });
-    writeFileSync(join(directory, "tsconfig.json"), JSON.stringify({ files: [], references: [{ path: "./authority" }] }));
+    mkdirSync(join(directory, "dist-testkit", "testkit", "real-adapters"), { recursive: true });
+    writeFileSync(join(directory, "tsconfig.json"), JSON.stringify({
+      files: [],
+      references: [{ path: "./authority" }, { path: "./testkit" }],
+    }));
     writeFileSync(join(directory, "authority", "tsconfig.json"), JSON.stringify({
       compilerOptions: strictCompilerOptions,
       include: ["**/*.ts"],
     }));
+    writeFileSync(join(directory, "testkit", "tsconfig.json"), JSON.stringify({
+      compilerOptions: strictCompilerOptions,
+      include: ["**/*.ts"],
+    }));
     writeFileSync(join(directory, "authority", "good.ts"), "export const good = 1;\n");
+    writeFileSync(join(directory, "testkit", "real-adapters", "covered.test.ts"), "export const covered = true;\n");
     writeFileSync(join(directory, "dist", "authority", "good.js"), "export const good = 1;\n");
+    writeFileSync(
+      join(directory, "dist-testkit", "testkit", "real-adapters", "covered.test.js"),
+      "export const covered = true;\n",
+    );
     assert.equal(collectActualUnits(directory).projectFindings.length, 0);
     mkdirSync(join(directory, "runtime"));
     writeFileSync(join(directory, "runtime", "orphan.ts"), "export const orphan = 1;\n");
@@ -86,13 +131,13 @@ test("project graph accepts referenced fresh emission and rejects orphan source"
   });
 });
 
-test("compiler baseline accepts strict projects and rejects DOM authority", () => {
+test("compiler baseline accepts every strict referenced layer and rejects DOM authority", () => {
   temporaryDirectory((directory) => {
-    mkdirSync(join(directory, "authority"), { recursive: true });
-    mkdirSync(join(directory, "ports"), { recursive: true });
     const config = JSON.stringify({ compilerOptions: strictCompilerOptions });
-    writeFileSync(join(directory, "authority", "tsconfig.json"), config);
-    writeFileSync(join(directory, "ports", "tsconfig.json"), config);
+    for (const project of ["authority", "ports", "storage", "runtime", "adapters", "apps", "testkit"]) {
+      mkdirSync(join(directory, project), { recursive: true });
+      writeFileSync(join(directory, project, "tsconfig.json"), config);
+    }
     writeFileSync(join(directory, "tsconfig.tests.json"), config);
     writeFileSync(join(directory, "tsconfig.policy.json"), config);
     assert.equal(checkCompilerBaseline(directory).length, 0);
@@ -109,18 +154,36 @@ test("authority purity accepts pure code and rejects ambient effects", () => {
   assert.equal(rulesFor(oneFile("authority/model/bad-constructor.ts", "declare function defineCapsule(): unknown; export const bad = defineCapsule();\n")).has("authority-purity"), true);
 });
 
-test("one append edge accepts commit-loop and rejects a second caller", () => {
-  const good = rulesFor(Object.freeze([
-    Object.freeze({ path: "storage/journal/append.ts", text: "export function appendCommittedBatch(): void {}\n" }),
-    Object.freeze({ path: "runtime/commit-loop/commit.ts", text: "import { appendCommittedBatch } from '../../storage/journal/append.js'; export function commit(): void { appendCommittedBatch(); }\n" }),
-  ]));
-  assert.equal(good.has("one-append-edge"), false);
-  const bad = rulesFor(Object.freeze([
-    Object.freeze({ path: "storage/journal/append.ts", text: "export function appendCommittedBatch(): void {}\n" }),
-    Object.freeze({ path: "runtime/commit-loop/commit.ts", text: "import { appendCommittedBatch } from '../../storage/journal/append.js'; export function commit(): void { appendCommittedBatch(); }\n" }),
-    Object.freeze({ path: "apps/worker/bad.ts", text: "import { appendCommittedBatch } from '../../storage/journal/append.js'; appendCommittedBatch();\n" }),
-  ]));
-  assert.equal(bad.has("one-append-edge"), true);
+test("two-phase one-append-edge law accepts pre-loop zero edge, rejects early edge, and enforces transition", () => {
+  const journal = Object.freeze({
+    path: "storage/journal/append.ts",
+    text: "export function appendCommittedBatch(): void {}\n",
+  });
+  const commitLoop = Object.freeze({
+    path: "runtime/commit-loop/commit.ts",
+    text: "import { appendCommittedBatch } from '../../storage/journal/append.js'; export function commit(): void { appendCommittedBatch(); }\n",
+  });
+  assert.equal(rulesFor(Object.freeze([journal])).has("one-append-edge"), false);
+  assert.equal(rulesFor(Object.freeze([
+    journal,
+    Object.freeze({
+      path: "apps/worker/early.ts",
+      text: "import { appendCommittedBatch } from '../../storage/journal/append.js'; appendCommittedBatch();\n",
+    }),
+  ])).has("one-append-edge"), true);
+  assert.equal(rulesFor(Object.freeze([journal, commitLoop])).has("one-append-edge"), false);
+  assert.equal(rulesFor(Object.freeze([
+    journal,
+    Object.freeze({ path: "runtime/commit-loop/empty.ts", text: "export const commitLoop = true;\n" }),
+  ])).has("one-append-edge"), true);
+  assert.equal(rulesFor(Object.freeze([
+    journal,
+    commitLoop,
+    Object.freeze({
+      path: "apps/worker/bad.ts",
+      text: "import { appendCommittedBatch } from '../../storage/journal/append.js'; appendCommittedBatch();\n",
+    }),
+  ])).has("one-append-edge"), true);
 });
 
 test("adapters are leaves", () => {
@@ -137,6 +200,21 @@ test("constructor capabilities accept owners and reject outsiders", () => {
   assert.equal(evidence.has("constructor-capabilities"), true);
   const batch = rulesFor(oneFile("runtime/commit-loop/bad.ts", "interface AcceptedBatch { readonly value: string } const batch: AcceptedBatch = { value: 'x' }; void batch;\n"));
   assert.equal(batch.has("constructor-capabilities"), true);
+  const typeConsumer = rulesFor(oneFile(
+    "runtime/commit-loop/good.ts",
+    "import type { AcceptedBatch } from '../../authority/protocol/accepted-batch.js'; export type Input = AcceptedBatch;\n",
+  ));
+  assert.equal(typeConsumer.has("constructor-capabilities"), false);
+  const aliasedMint = rulesFor(oneFile(
+    "apps/worker/bad-mint.ts",
+    "import { mintAcceptedBatch as bypass } from '../../authority/protocol/accepted-batch.js'; void bypass;\n",
+  ));
+  assert.equal(aliasedMint.has("constructor-capabilities"), true);
+  const facadeMint = rulesFor(oneFile(
+    "authority/facade/good.ts",
+    "import { mintAcceptedBatch } from '../protocol/accepted-batch.js'; void mintAcceptedBatch;\n",
+  ));
+  assert.equal(facadeMint.has("constructor-capabilities"), false);
 });
 
 test("extensions import SDK only", () => {
@@ -191,22 +269,41 @@ test("third terminal variant changes fingerprint and fails compilation", () => {
   assert.equal(terminal?.failedAsRequired, true);
 });
 
-test("required-suite manifest accepts complete skeleton and rejects missing/skipped registered suite", () => {
-  const complete = decodeSuiteManifest({
+test("suite command schema requires commands for registered, forbids them for pending, and exposes every registration", () => {
+  const ids = [
+    "D2.1-replay-determinism", "D2.2-full-run-scenarios", "D2.3-crash-matrix",
+    "D2.4-third-outcome-hunt", "D2.5-idempotency", "D2.6-totality-fuzzing",
+    "D2.7-yardstick-properties", "D3.1-adapter-contract-parity", "D3.2-journal-durability",
+    "D3.3-real-git", "D3.4-process-reality", "D3.5-sandbox", "D3.6-scale",
+    "D3.7-real-pi", "D3.8-w0-replay-corpus",
+  ];
+  const pending = decodeSuiteManifest({
     format: 1,
-    suites: [
-      "D2.1-replay-determinism", "D2.2-full-run-scenarios", "D2.3-crash-matrix",
-      "D2.4-third-outcome-hunt", "D2.5-idempotency", "D2.6-totality-fuzzing",
-      "D2.7-yardstick-properties", "D3.1-adapter-contract-parity", "D3.2-journal-durability",
-      "D3.3-real-git", "D3.4-process-reality", "D3.5-sandbox", "D3.6-scale",
-      "D3.7-real-pi", "D3.8-w0-replay-corpus",
-    ].map((id) => ({ id, owner: "lane", registration: "pending" })),
+    suites: ids.map((id) => ({ id, owner: "lane", registration: "pending" })),
   });
-  assert.notEqual(complete, null);
-  if (complete !== null) {
-    assert.equal(checkSuiteManifest(complete, false).length, 0);
-    assert.equal(checkSuiteManifest(complete, true).length > 0, true);
+  assert.notEqual(pending, null);
+  if (pending !== null) {
+    assert.equal(checkSuiteManifest(pending, false).length, 0);
+    assert.equal(checkSuiteManifest(pending, true).length > 0, true);
+    assert.deepEqual(registeredSuiteCommands(pending), []);
   }
+  const registered = decodeSuiteManifest({
+    format: 1,
+    suites: ids.map((id) => ({ id, owner: "lane", registration: "registered", command: `node ${id}.js` })),
+  });
+  assert.notEqual(registered, null);
+  if (registered !== null) {
+    assert.equal(checkSuiteManifest(registered, true).length, 0);
+    assert.deepEqual(registeredSuiteCommands(registered).map((suite) => suite.id), ids);
+  }
+  assert.equal(decodeSuiteManifest({
+    format: 1,
+    suites: [{ id: ids[0], owner: "lane", registration: "registered" }],
+  }), null);
+  assert.equal(decodeSuiteManifest({
+    format: 1,
+    suites: [{ id: ids[0], owner: "lane", registration: "pending", command: "node bad.js" }],
+  }), null);
   const incomplete = decodeSuiteManifest({ format: 1, suites: [] });
   assert.notEqual(incomplete, null);
   if (incomplete !== null) {
@@ -225,7 +322,120 @@ test("policy protection accepts baseline and rejects unmarked change", () => {
     format: 1,
     files: Object.freeze({ "policy-root/fixtures/protected-good.json": contentDigest(actualText) }),
   });
-  assert.equal(checkProtectedFiles(nextRoot, fixtureManifest, Object.freeze([])).length, 0);
+  assert.equal(checkProtectedFiles(
+    nextRoot,
+    fixtureManifest,
+    Object.freeze([]),
+    Object.freeze(["policy-root/fixtures/protected-good.json"]),
+  ).length, 0);
+});
+
+test("incident-w1-l3-self-certification.rejected", () => {
+  temporaryDirectory((directory) => {
+    const fixtureNext = join(directory, "next");
+    const fixturePolicy = join(fixtureNext, "policy-root");
+    mkdirSync(fixturePolicy, { recursive: true });
+    const checkerPath = "policy-root/protection-checker.ts";
+    const suitePath = "policy-root/required-suites.json";
+    const fingerprintPath = "policy-root/protocol-fingerprints.json";
+    const gatePath = "policy-root/w0-gate.ts";
+    const baselineChecker = "export const protectedGate = true;\n";
+    const baselineSuites = "{\"suites\":[]}\n";
+    const baselineFingerprints = "{\"format\":1}\n";
+    const baselineGate = "export const runDefaultGate = true;\n";
+    writeFileSync(join(fixtureNext, checkerPath), baselineChecker);
+    writeFileSync(join(fixtureNext, suitePath), baselineSuites);
+    writeFileSync(join(fixtureNext, fingerprintPath), baselineFingerprints);
+    writeFileSync(join(fixtureNext, gatePath), baselineGate);
+    writeFileSync(
+      join(fixturePolicy, "protected-files.json"),
+      protectionFixtureText(Object.freeze([
+        Object.freeze({ path: checkerPath, text: baselineChecker }),
+        Object.freeze({ path: fingerprintPath, text: baselineFingerprints }),
+        Object.freeze({ path: gatePath, text: baselineGate }),
+        Object.freeze({ path: suitePath, text: baselineSuites }),
+      ])),
+    );
+    runFixtureGit(directory, ["init", "--quiet"]);
+    runFixtureGit(directory, ["config", "user.name", "governance fixture"]);
+    runFixtureGit(directory, ["config", "user.email", "governance-fixture@example.invalid"]);
+    runFixtureGit(directory, ["add", "."]);
+    runFixtureGit(directory, ["commit", "--quiet", "-m", "trusted baseline"]);
+    runFixtureGit(directory, ["tag", "w0-trusted-baseline"]);
+    const fixtureCommit = spawnSync("git", ["-C", directory, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+
+    const required = Object.freeze([checkerPath, fingerprintPath, gatePath, suitePath]);
+    assert.deepEqual(checkRepositoryProtection(fixtureNext, required, fixtureCommit), []);
+
+    const tamperedChecker = "export const protectedGate = false;\n";
+    writeFileSync(join(fixtureNext, checkerPath), tamperedChecker);
+    writeFileSync(join(fixtureNext, suitePath), "{\"suites\":[{\"skipped\":true}]}\n");
+    writeFileSync(join(fixtureNext, fingerprintPath), "{\"format\":999}\n");
+    writeFileSync(join(fixtureNext, gatePath), "export const runDefaultGate = false;\n");
+    writeFileSync(
+      join(fixturePolicy, "protected-files.json"),
+      protectionFixtureText(Object.freeze([
+        Object.freeze({ path: checkerPath, text: tamperedChecker }),
+      ])),
+    );
+    const findings = checkRepositoryProtection(fixtureNext, required, fixtureCommit);
+    assert.equal(findings.some((finding) => finding.path === checkerPath), true);
+    assert.equal(findings.some((finding) => finding.path === fingerprintPath), true);
+    assert.equal(findings.some((finding) => finding.path === gatePath), true);
+    assert.equal(findings.some((finding) => finding.path === suitePath), true);
+    assert.equal(
+      findings.some((finding) => finding.detail.includes("cannot self-certify")),
+      true,
+    );
+  });
+});
+
+test("governance tags accept trusted bootstrap and reject a manually-created lightweight successor", () => {
+  temporaryDirectory((directory) => {
+    const fixtureNext = join(directory, "next");
+    mkdirSync(join(fixtureNext, "policy-root"), { recursive: true });
+    writeFileSync(join(fixtureNext, "policy-root", "protected-files.json"), "{}\n");
+    runFixtureGit(directory, ["init", "--quiet"]);
+    runFixtureGit(directory, ["config", "user.name", "governance fixture"]);
+    runFixtureGit(directory, ["config", "user.email", "governance-fixture@example.invalid"]);
+    runFixtureGit(directory, ["add", "."]);
+    runFixtureGit(directory, ["commit", "--quiet", "-m", "trusted baseline"]);
+    runFixtureGit(directory, ["tag", "w0-trusted-baseline"]);
+    const fixtureCommit = spawnSync("git", ["-C", directory, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+    assert.notEqual(resolveGovernanceBaseline(fixtureNext, fixtureCommit).baseline, null);
+    assert.equal(resolveGovernanceBaseline(fixtureNext, "0".repeat(40)).baseline, null);
+    runFixtureGit(directory, ["tag", "governance-baseline-001"]);
+    const rejected = resolveGovernanceBaseline(fixtureNext, fixtureCommit);
+    assert.equal(rejected.baseline, null);
+    assert.equal(rejected.findings.some((finding) => finding.includes("annotated tag")), true);
+  });
+});
+
+test("amendment protocol requires flag, approval environment, exact marker scope, and old/new fingerprints", () => {
+  assert.equal(amendmentApprovalGranted(["node", "tool"], "1"), false);
+  assert.equal(amendmentApprovalGranted(["node", "tool", "--approved-amendment"], undefined), false);
+  assert.equal(amendmentApprovalGranted(["node", "tool", "--approved-amendment"], "1"), true);
+
+  const markerPath = amendmentMarkerRelativePath("001");
+  const protectedFiles = Object.freeze([markerPath, "policy-root/protection-checker.ts"].sort());
+  const markerText = `# Architecture Amendment 001\n\n\`\`\`architecture-amendment\n${JSON.stringify({
+    format: 1,
+    id: "001",
+    operatorApproval: "operator-approved W1-R recovery prompt",
+    rationale: "Close mutable-manifest self-certification.",
+    protectedFiles,
+    fingerprintChanges: [],
+  })}\n\`\`\`\n`;
+  const marker = parseArchitectureAmendmentMarkdown(markerText, "001");
+  assert.notEqual(marker, null);
+  if (marker !== null) {
+    assert.deepEqual(validateArchitectureAmendmentScope(marker, protectedFiles, Object.freeze([])), []);
+    assert.equal(validateArchitectureAmendmentScope(
+      marker,
+      Object.freeze([...protectedFiles, "policy-root/w0-gate.ts"].sort()),
+      Object.freeze([]),
+    ).length > 0, true);
+  }
 });
 
 test("hygiene accepts finished files and rejects unfinished-work markers", () => {
@@ -246,7 +456,9 @@ test("payload shape gate accepts contracts and rejects open bags", () => {
 test("negative compilation fixtures all fire for their intended reason", () => {
   const results = runNegativeCompileFixtures(join(policyRoot, "fixtures"));
   const expectedCodes = new Map([
-    ["accepted-batch.compile-fail.ts", 2741],
+    ["accepted-batch-factory.compile-fail.ts", 2345],
+    ["accepted-batch.compile-fail.ts", 2739],
+    ["domain-fact-handler.compile-fail.ts", 1360],
     ["evidence-envelope.compile-fail.ts", 2741],
     ["exhaustiveness.compile-fail.ts", 1360],
     ["third-terminal.compile-fail.ts", 2322],
