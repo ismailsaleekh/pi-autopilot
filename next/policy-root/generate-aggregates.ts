@@ -98,7 +98,7 @@ export function generateAggregates(checkOnly: boolean): void {
 }
 
 const invokedFile = process.argv[1] === undefined ? "" : basename(process.argv[1]);
-if (invokedFile === "generate-aggregates.ts") {
+if (invokedFile === "generate-aggregates.ts" || invokedFile === "generate-aggregates.js") {
   const argument = process.argv[2];
   if (argument !== undefined && argument !== "--check") {
     process.stderr.write("generate-aggregates accepts only --check\n");

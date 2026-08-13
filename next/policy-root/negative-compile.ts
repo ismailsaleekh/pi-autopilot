@@ -60,7 +60,8 @@ export function runNegativeCompileFixtures(fixturesDirectory: string): readonly 
   return Object.freeze(files.map((name) => compileNegativeFixture(join(fixturesDirectory, name))));
 }
 
-if (basename(process.argv[1] ?? "") === "negative-compile.ts") {
+const invokedFile = basename(process.argv[1] ?? "");
+if (invokedFile === "negative-compile.ts" || invokedFile === "negative-compile.js") {
   const results = runNegativeCompileFixtures(join(policyRoot, "fixtures"));
   let failed = false;
   for (const result of results) {
