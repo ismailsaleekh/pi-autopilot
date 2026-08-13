@@ -1,85 +1,122 @@
+import { commandSchema } from "./command.capsule.js";
+import type { Command } from "./command.capsule.js";
 import { domainFactSchema } from "./domain-fact.capsule.js";
 import type { DomainFact } from "./domain-fact.capsule.js";
+import { expectedRefStateSchema } from "./git-values.js";
 import {
   actionIdSchema,
   artifactRefSchema,
   artifactRootSchema,
   commandIdSchema,
+  decimalNaturalSchema,
   digestSchema,
+  gitCommitIdSchema,
+  gitRefSchema,
+  gitTreeIdSchema,
   operatorRequestIdSchema,
-  revisionIdSchema,
+  repositoryCapabilitySchema,
   runIdSchema,
 } from "./identifiers.js";
+import { subscriptionRouteSchema } from "./route.capsule.js";
 import {
   arrayOf,
   canonicalDigestUnknown,
+  canonicalEncodeUnknown,
   defineCapsule,
   literal,
-  natural,
+  nullable,
   object,
   union,
 } from "./schema.js";
 import type { Digest, Infer } from "./schema.js";
+import { indexMutationSchema, resolvedIndexPageSchema } from "./state-index.capsule.js";
 import { terminalOutcomeSchema } from "./terminal-outcome.capsule.js";
+import type { TerminalOutcome } from "./terminal-outcome.capsule.js";
 
 export const runGenesisSchema = object({
+  expectedPublication: expectedRefStateSchema,
   kind: literal("run-genesis"),
   policyRoot: artifactRootSchema,
-  repositoryBase: revisionIdSchema,
+  publicationRef: gitRefSchema,
+  repository: repositoryCapabilitySchema,
+  repositoryBase: gitCommitIdSchema,
+  repositoryTree: gitTreeIdSchema,
+  route: subscriptionRouteSchema,
   runId: runIdSchema,
   runtimeRoot: artifactRootSchema,
-  sequence: natural(),
+  sequence: decimalNaturalSchema,
   taskSnapshot: artifactRootSchema,
 });
 
-// Binding law: facts are canonical and ordered. Runtime must require
-// canonicalDigestUnknown(facts) === factRoot before append and again before
-// replay. commandRoot remains a CAS reference and is not embedded here.
-export const decisionCommittedSchema = object({
+const semanticCommitFields = {
   actionId: actionIdSchema,
-  commandRoot: artifactRootSchema,
-  factRoot: artifactRootSchema,
+  factDigest: digestSchema,
   facts: arrayOf(domainFactSchema),
-  kind: literal("decision-committed"),
+  mutations: arrayOf(indexMutationSchema),
+  pages: arrayOf(resolvedIndexPageSchema),
+  priorStateDigest: digestSchema,
+  resultStateDigest: digestSchema,
   runId: runIdSchema,
-  sequence: natural(),
+  sequence: decimalNaturalSchema,
   stimulusDigest: digestSchema,
+};
+
+const commandCommitFields = {
+  commandArtifact: artifactRefSchema,
+  commandDigest: digestSchema,
+  commands: arrayOf(commandSchema),
+};
+
+export const decisionCommittedSchema = object({
+  ...semanticCommitFields,
+  ...commandCommitFields,
+  kind: literal("decision-committed"),
 });
 
 export const commandSettledSchema = object({
-  actionId: actionIdSchema,
+  ...semanticCommitFields,
+  ...commandCommitFields,
   commandId: commandIdSchema,
+  eligibilityStateDigest: nullable(digestSchema),
   kind: literal("command-settled"),
   observation: artifactRefSchema,
   observationDigest: digestSchema,
-  runId: runIdSchema,
-  sequence: natural(),
+  outcome: nullable(terminalOutcomeSchema),
 });
 
 export const outcomeCommittedSchema = object({
-  actionId: actionIdSchema,
+  ...semanticCommitFields,
+  eligibilityStateDigest: digestSchema,
   kind: literal("outcome-committed"),
   outcome: terminalOutcomeSchema,
-  runId: runIdSchema,
-  sequence: natural(),
 });
 
 export const runSuspendedSchema = object({
   actionId: actionIdSchema,
   kind: literal("run-suspended"),
+  mutations: arrayOf(indexMutationSchema),
   operatorRequestId: operatorRequestIdSchema,
+  pages: arrayOf(resolvedIndexPageSchema),
+  priorStateDigest: digestSchema,
   reason: artifactRefSchema,
+  resultStateDigest: digestSchema,
   runId: runIdSchema,
-  sequence: natural(),
+  sequence: decimalNaturalSchema,
+  stimulusDigest: digestSchema,
 });
 
 export const runResumedSchema = object({
   actionId: actionIdSchema,
   kind: literal("run-resumed"),
+  mutations: arrayOf(indexMutationSchema),
   operatorRequestId: operatorRequestIdSchema,
-  resumeFromSequence: natural(),
+  pages: arrayOf(resolvedIndexPageSchema),
+  priorStateDigest: digestSchema,
+  resultStateDigest: digestSchema,
+  resumeFromSequence: decimalNaturalSchema,
   runId: runIdSchema,
-  sequence: natural(),
+  sequence: decimalNaturalSchema,
+  stimulusDigest: digestSchema,
 });
 
 export const journalRecordSchema = union([
@@ -103,10 +140,38 @@ export function canonicalDecisionFactsDigest(facts: readonly DomainFact[]): Dige
   return canonicalDigestUnknown(facts);
 }
 
-export function decisionFactsMatchRoot(
-  decision: Pick<DecisionCommitted, "factRoot" | "facts">,
+export function canonicalCommandsDigest(commands: readonly Command[]): Digest {
+  return canonicalDigestUnknown(commands);
+}
+
+export function recordSemanticRootsMatch(
+  record: DecisionCommitted | CommandSettled | OutcomeCommitted,
 ): boolean {
-  return String(decision.factRoot) === String(canonicalDecisionFactsDigest(decision.facts));
+  if (record.factDigest !== canonicalDecisionFactsDigest(record.facts)) {
+    return false;
+  }
+  if (record.kind === "outcome-committed") {
+    return true;
+  }
+  const commandBytes = canonicalEncodeUnknown(record.commands);
+  return record.commandDigest === canonicalCommandsDigest(record.commands)
+    && record.commandArtifact.digest === record.commandDigest
+    && String(record.commandArtifact.blob) === String(record.commandDigest)
+    && record.commandArtifact.byteLength === String(commandBytes.byteLength)
+    && record.commandArtifact.range === null;
+}
+
+export function decisionFactsMatchRoot(
+  decision: Pick<DecisionCommitted, "factDigest" | "facts">,
+): boolean {
+  return decision.factDigest === canonicalDecisionFactsDigest(decision.facts);
+}
+
+export function recordOutcome(record: JournalRecord): TerminalOutcome | null {
+  if (record.kind === "outcome-committed") {
+    return record.outcome;
+  }
+  return record.kind === "command-settled" ? record.outcome : null;
 }
 
 export const journalRecordCapsule = defineCapsule("JournalRecord", journalRecordSchema);

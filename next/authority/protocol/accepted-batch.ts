@@ -1,145 +1,129 @@
-import { commandCapsule } from "./command.capsule.js";
-import type { Command } from "./command.capsule.js";
-import { domainFactCapsule } from "./domain-fact.capsule.js";
-import type { DomainFact } from "./domain-fact.capsule.js";
-import type { ArtifactRoot, Digest, RunId } from "./identifiers.js";
-import { canonicalDecisionFactsDigest } from "./journal-record.capsule.js";
+import { journalRecordCapsule, recordSemanticRootsMatch } from "./journal-record.capsule.js";
+import type {
+  CommandSettled,
+  DecisionCommitted,
+  JournalRecord,
+  OutcomeCommitted,
+  RunResumed,
+  RunSuspended,
+} from "./journal-record.capsule.js";
 import type { DecodeError } from "./schema.js";
-import { terminalOutcomeCapsule } from "./terminal-outcome.capsule.js";
-import type { TerminalOutcome } from "./terminal-outcome.capsule.js";
 
-const acceptedBatchCapability: unique symbol = Symbol();
+const preparedCommitCapability: unique symbol = Symbol();
 
-/** An authority decision whose semantic payload is canonically owned. */
-export interface AcceptedBatch {
-  readonly runId: RunId;
-  readonly facts: readonly DomainFact[];
-  readonly commands: readonly Command[];
-  readonly outcome: TerminalOutcome | null;
-  readonly factRoot: ArtifactRoot;
-  readonly commandRoot: ArtifactRoot;
-  readonly stateDigest: Digest;
-  readonly [acceptedBatchCapability]: true;
-}
+export type PreparedCommitKind =
+  | "prepared-decision"
+  | "prepared-command-settlement"
+  | "prepared-suspension"
+  | "prepared-resumption"
+  | "prepared-outcome";
 
-export interface AcceptedBatchFields {
-  readonly runId: RunId;
-  readonly facts: readonly DomainFact[];
-  readonly commands: readonly Command[];
-  readonly outcome: TerminalOutcome | null;
-  readonly factRoot: ArtifactRoot;
-  readonly commandRoot: ArtifactRoot;
-  readonly stateDigest: Digest;
-}
-
-export type AcceptedBatchMember = "fact" | "factRoot" | "command" | "outcome";
-
-export type AcceptedBatchMintResult =
-  | { readonly kind: "minted"; readonly batch: AcceptedBatch }
+export type PreparedCommit =
   | {
-      readonly kind: "invalid";
-      readonly member: AcceptedBatchMember;
-      readonly index: number | null;
-      readonly error: DecodeError;
+      readonly kind: "prepared-decision";
+      readonly record: DecisionCommitted;
+      readonly [preparedCommitCapability]: true;
+    }
+  | {
+      readonly kind: "prepared-command-settlement";
+      readonly record: CommandSettled;
+      readonly [preparedCommitCapability]: true;
+    }
+  | {
+      readonly kind: "prepared-suspension";
+      readonly record: RunSuspended;
+      readonly [preparedCommitCapability]: true;
+    }
+  | {
+      readonly kind: "prepared-resumption";
+      readonly record: RunResumed;
+      readonly [preparedCommitCapability]: true;
+    }
+  | {
+      readonly kind: "prepared-outcome";
+      readonly record: OutcomeCommitted;
+      readonly [preparedCommitCapability]: true;
     };
 
-function invalidMember(
-  member: AcceptedBatchMember,
-  index: number | null,
-  error: DecodeError,
-): AcceptedBatchMintResult {
-  return Object.freeze({ kind: "invalid", member, index, error });
-}
+export type PreparedCommitFields =
+  | { readonly kind: "prepared-decision"; readonly record: DecisionCommitted }
+  | { readonly kind: "prepared-command-settlement"; readonly record: CommandSettled }
+  | { readonly kind: "prepared-suspension"; readonly record: RunSuspended }
+  | { readonly kind: "prepared-resumption"; readonly record: RunResumed }
+  | { readonly kind: "prepared-outcome"; readonly record: OutcomeCommitted };
+
+export type PreparedCommitMintResult =
+  | { readonly kind: "minted"; readonly commit: PreparedCommit }
+  | { readonly kind: "invalid"; readonly error: DecodeError };
 
 function semanticMismatch(path: string, diagnostic: string): DecodeError {
   return Object.freeze({ code: "schema-mismatch", path, diagnostic });
 }
 
-/**
- * Sole mint edge. Protected architecture policy permits value import and use
- * only from authority/facade. Canonical round-trips remove caller aliases, and
- * the ordered fact batch must bind to factRoot before an AcceptedBatch exists.
- */
-export function mintAcceptedBatch(fields: AcceptedBatchFields): AcceptedBatchMintResult {
-  const facts: DomainFact[] = [];
-  for (let index = 0; index < fields.facts.length; index += 1) {
-    const encoded = domainFactCapsule.encodeUnknown(fields.facts[index]);
-    if (encoded.kind === "error") {
-      return invalidMember("fact", index, encoded.error);
-    }
-    const decoded = domainFactCapsule.decodeCanonical(encoded.value);
-    if (decoded.kind === "error") {
-      return invalidMember("fact", index, decoded.error);
-    }
-    if (decoded.value.runId !== fields.runId) {
-      return invalidMember(
-        "fact",
-        index,
-        semanticMismatch(`$.facts[${String(index)}].runId`, "fact runId must equal accepted batch runId"),
-      );
-    }
-    facts.push(decoded.value);
+function expectedRecordKind(kind: PreparedCommitKind): JournalRecord["kind"] {
+  switch (kind) {
+    case "prepared-decision":
+      return "decision-committed";
+    case "prepared-command-settlement":
+      return "command-settled";
+    case "prepared-suspension":
+      return "run-suspended";
+    case "prepared-resumption":
+      return "run-resumed";
+    case "prepared-outcome":
+      return "outcome-committed";
   }
-  if (String(canonicalDecisionFactsDigest(facts)) !== String(fields.factRoot)) {
-    return invalidMember(
-      "factRoot",
-      null,
-      semanticMismatch("$.factRoot", "canonical ordered facts do not hash to factRoot"),
-    );
-  }
+}
 
-  const commands: Command[] = [];
-  for (let index = 0; index < fields.commands.length; index += 1) {
-    const encoded = commandCapsule.encodeUnknown(fields.commands[index]);
-    if (encoded.kind === "error") {
-      return invalidMember("command", index, encoded.error);
-    }
-    const decoded = commandCapsule.decodeCanonical(encoded.value);
-    if (decoded.kind === "error") {
-      return invalidMember("command", index, decoded.error);
-    }
-    if (decoded.value.runId !== fields.runId) {
-      return invalidMember(
-        "command",
-        index,
-        semanticMismatch(`$.commands[${String(index)}].runId`, "command runId must equal accepted batch runId"),
-      );
-    }
-    commands.push(decoded.value);
+/** Sole opaque mint edge; architecture policy permits calls only from facade. */
+export function mintPreparedCommit(fields: PreparedCommitFields): PreparedCommitMintResult {
+  const encoded = journalRecordCapsule.encodeUnknown(fields.record);
+  if (encoded.kind === "error") {
+    return Object.freeze({ kind: "invalid", error: encoded.error });
   }
-
-  let outcome: TerminalOutcome | null = null;
-  if (fields.outcome !== null) {
-    const encoded = terminalOutcomeCapsule.encodeUnknown(fields.outcome);
-    if (encoded.kind === "error") {
-      return invalidMember("outcome", null, encoded.error);
-    }
-    const decoded = terminalOutcomeCapsule.decodeCanonical(encoded.value);
-    if (decoded.kind === "error") {
-      return invalidMember("outcome", null, decoded.error);
-    }
-    outcome = decoded.value;
+  const decoded = journalRecordCapsule.decodeCanonical(encoded.value);
+  if (decoded.kind === "error") {
+    return Object.freeze({ kind: "invalid", error: decoded.error });
   }
-
-  const batch: AcceptedBatch = {
-    runId: fields.runId,
-    facts: Object.freeze(facts),
-    commands: Object.freeze(commands),
-    outcome,
-    factRoot: fields.factRoot,
-    commandRoot: fields.commandRoot,
-    stateDigest: fields.stateDigest,
-    [acceptedBatchCapability]: true,
-  };
-  Object.defineProperty(batch, acceptedBatchCapability, Object.freeze({
+  if (decoded.value.kind !== expectedRecordKind(fields.kind)) {
+    return Object.freeze({
+      kind: "invalid",
+      error: semanticMismatch("$.record.kind", "prepared commit kind must select the exact journal record family"),
+    });
+  }
+  if (
+    (decoded.value.kind === "decision-committed"
+      || decoded.value.kind === "command-settled"
+      || decoded.value.kind === "outcome-committed")
+    && !recordSemanticRootsMatch(decoded.value)
+  ) {
+    return Object.freeze({
+      kind: "invalid",
+      error: semanticMismatch("$.record", "facts, commands, artifact reference, and canonical digests must match"),
+    });
+  }
+  let commit: PreparedCommit;
+  if (fields.kind === "prepared-decision" && decoded.value.kind === "decision-committed") {
+    commit = { kind: fields.kind, record: decoded.value, [preparedCommitCapability]: true };
+  } else if (fields.kind === "prepared-command-settlement" && decoded.value.kind === "command-settled") {
+    commit = { kind: fields.kind, record: decoded.value, [preparedCommitCapability]: true };
+  } else if (fields.kind === "prepared-suspension" && decoded.value.kind === "run-suspended") {
+    commit = { kind: fields.kind, record: decoded.value, [preparedCommitCapability]: true };
+  } else if (fields.kind === "prepared-resumption" && decoded.value.kind === "run-resumed") {
+    commit = { kind: fields.kind, record: decoded.value, [preparedCommitCapability]: true };
+  } else if (fields.kind === "prepared-outcome" && decoded.value.kind === "outcome-committed") {
+    commit = { kind: fields.kind, record: decoded.value, [preparedCommitCapability]: true };
+  } else {
+    return Object.freeze({
+      kind: "invalid",
+      error: semanticMismatch("$.record.kind", "prepared commit and decoded record kinds diverged"),
+    });
+  }
+  Object.defineProperty(commit, preparedCommitCapability, Object.freeze({
     value: true,
     enumerable: false,
     configurable: false,
     writable: false,
   }));
-  const accepted: AcceptedBatch = Object.freeze(batch);
-  return Object.freeze({
-    kind: "minted",
-    batch: accepted,
-  });
+  return Object.freeze({ kind: "minted", commit: Object.freeze(commit) });
 }

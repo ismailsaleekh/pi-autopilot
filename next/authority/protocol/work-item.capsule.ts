@@ -2,12 +2,21 @@ import {
   artifactPathSchema,
   artifactRefSchema,
   artifactRootSchema,
+  correctionAssignmentIdSchema,
+  decimalNaturalSchema,
   findingIdSchema,
+  gitCommitIdSchema,
+  gitRefSchema,
+  gitTreeIdSchema,
+  indexRootSchema,
   kindIdSchema,
   planRootIdSchema,
+  repositoryCapabilitySchema,
   roleIdSchema,
   runIdSchema,
   workItemIdSchema,
+  workspaceCapabilitySchema,
+  workspaceIdSchema,
 } from "./identifiers.js";
 import {
   defineCapsule,
@@ -17,61 +26,72 @@ import {
 } from "./schema.js";
 import type { Infer } from "./schema.js";
 
-export const produceArtifactWorkSchema = object({
-  artifactKindId: kindIdSchema,
+const commonWorkFields = {
+  dependencyCount: decimalNaturalSchema,
+  dependencyRoot: indexRootSchema,
   inputRoot: artifactRootSchema,
+  planRootId: planRootIdSchema,
+  prompt: artifactRefSchema,
+  roleId: roleIdSchema,
+  ruleInputs: artifactRefSchema,
+  runId: runIdSchema,
+  taskRoot: artifactRootSchema,
+  workItemId: workItemIdSchema,
+  workspaceCapability: workspaceCapabilitySchema,
+  workspaceId: workspaceIdSchema,
+};
+
+export const produceArtifactWorkSchema = object({
+  ...commonWorkFields,
+  artifactKindId: kindIdSchema,
   kind: literal("produce-artifact"),
   outputPath: artifactPathSchema,
-  planRootId: planRootIdSchema,
-  roleId: roleIdSchema,
-  runId: runIdSchema,
   sourceRoot: artifactRootSchema,
-  workItemId: workItemIdSchema,
 });
 
 export const reviewArtifactWorkSchema = object({
-  inputRoot: artifactRootSchema,
+  ...commonWorkFields,
   kind: literal("review-artifact"),
-  planRootId: planRootIdSchema,
   reviewPolicy: artifactRefSchema,
-  roleId: roleIdSchema,
-  runId: runIdSchema,
   subjectRoot: artifactRootSchema,
-  workItemId: workItemIdSchema,
 });
 
+export const correctionScopeSchema = union([
+  literal("local"),
+  literal("plan-wide"),
+  literal("cross-lane"),
+]);
+
 export const correctArtifactWorkSchema = object({
+  ...commonWorkFields,
+  assignmentId: correctionAssignmentIdSchema,
   findingId: findingIdSchema,
-  inputRoot: artifactRootSchema,
+  integratedInput: artifactRootSchema,
   kind: literal("correct-artifact"),
-  planRootId: planRootIdSchema,
+  originalOwnerWorkItemId: workItemIdSchema,
   priorOutputRoot: artifactRootSchema,
-  roleId: roleIdSchema,
-  runId: runIdSchema,
+  scope: correctionScopeSchema,
   subjectRoot: artifactRootSchema,
-  workItemId: workItemIdSchema,
 });
 
 export const integrateCandidateWorkSchema = object({
+  ...commonWorkFields,
   acceptedOutputs: artifactRefSchema,
+  baseCommit: gitCommitIdSchema,
   baseRoot: artifactRootSchema,
-  inputRoot: artifactRootSchema,
+  baseTree: gitTreeIdSchema,
   kind: literal("integrate-candidate"),
-  planRootId: planRootIdSchema,
-  roleId: roleIdSchema,
-  runId: runIdSchema,
-  workItemId: workItemIdSchema,
+  publicationRef: gitRefSchema,
+  repository: repositoryCapabilitySchema,
+  workspaceCapability: workspaceCapabilitySchema,
+  workspaceId: workspaceIdSchema,
 });
 
 export const verifyCandidateWorkSchema = object({
+  ...commonWorkFields,
   candidateRoot: artifactRootSchema,
-  inputRoot: artifactRootSchema,
   kind: literal("verify-candidate"),
-  planRootId: planRootIdSchema,
-  roleId: roleIdSchema,
-  runId: runIdSchema,
   validationPlan: artifactRefSchema,
-  workItemId: workItemIdSchema,
 });
 
 export const workItemSchema = union([
@@ -84,6 +104,7 @@ export const workItemSchema = union([
 
 export type ProduceArtifactWork = Infer<typeof produceArtifactWorkSchema>;
 export type ReviewArtifactWork = Infer<typeof reviewArtifactWorkSchema>;
+export type CorrectionScope = Infer<typeof correctionScopeSchema>;
 export type CorrectArtifactWork = Infer<typeof correctArtifactWorkSchema>;
 export type IntegrateCandidateWork = Infer<typeof integrateCandidateWorkSchema>;
 export type VerifyCandidateWork = Infer<typeof verifyCandidateWorkSchema>;

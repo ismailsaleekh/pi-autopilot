@@ -1,7 +1,11 @@
 import {
   artifactRefSchema,
   artifactRootSchema,
-  revisionIdSchema,
+  candidateIdSchema,
+  gitCommitIdSchema,
+  gitTreeIdSchema,
+  indexRootSchema,
+  publicationIdSchema,
   sourceAnchorSchema,
 } from "./identifiers.js";
 import {
@@ -14,11 +18,20 @@ import {
 import type { Infer } from "./schema.js";
 
 export const taskCompleteSchema = object({
+  advisoryDisclosures: artifactRefSchema,
+  c1ToC7Proof: artifactRefSchema,
+  candidateId: candidateIdSchema,
   coverageRoot: artifactRootSchema,
-  evidenceRoot: artifactRootSchema,
+  evidenceIndexRoot: indexRootSchema,
+  finalManifest: artifactRefSchema,
   finalTree: artifactRootSchema,
+  gitTree: gitTreeIdSchema,
+  gitTreeCasAttestation: artifactRefSchema,
   kind: literal("t1"),
-  publishedRevision: revisionIdSchema,
+  publicationId: publicationIdSchema,
+  publicationTreeAttestation: artifactRefSchema,
+  publishedRevision: gitCommitIdSchema,
+  reviewedDiff: artifactRefSchema,
 });
 
 export const planningStopSchema = object({
@@ -29,6 +42,7 @@ export const planningStopSchema = object({
     literal("contradiction"),
   ]),
   sourceAnchors: nonEmptyArrayOf(sourceAnchorSchema),
+  sourceEvidence: nonEmptyArrayOf(artifactRefSchema),
 });
 
 export const terminalOutcomeSchema = union([

@@ -20,7 +20,10 @@ export type TextFormat =
   | "digest"
   | "artifact-root"
   | "path"
-  | "source-anchor";
+  | "source-anchor"
+  | "decimal-natural"
+  | "git-oid"
+  | "git-ref";
 
 export interface TextSchema<BrandName extends string | null = string | null> {
   readonly tag: "text";
@@ -99,7 +102,7 @@ type NextInferenceDepth<Depth extends readonly unknown[]> = readonly [unknown, .
 export type Infer<
   ValueSchema,
   Depth extends readonly unknown[] = readonly [],
-> = Depth["length"] extends 16
+> = Depth["length"] extends 48
   ? unknown
   : ValueSchema extends TextSchema<infer BrandName>
     ? BrandName extends string
@@ -393,6 +396,28 @@ function textMatchesFormat(value: string, format: TextFormat): boolean {
       return isRelativePath(value);
     case "source-anchor":
       return value.startsWith("anchor:") && isIdentifier(value.slice(7));
+    case "decimal-natural":
+      if (value === "0") {
+        return true;
+      }
+      if (value.length === 0 || value.charCodeAt(0) < 49 || value.charCodeAt(0) > 57) {
+        return false;
+      }
+      for (let index = 1; index < value.length; index += 1) {
+        const code = value.charCodeAt(index);
+        if (code < 48 || code > 57) {
+          return false;
+        }
+      }
+      return true;
+    case "git-oid":
+      return isHexText(value, 40) || isHexText(value, 64);
+    case "git-ref":
+      return value.startsWith("refs/")
+        && isRelativePath(value)
+        && !value.includes("..")
+        && !value.endsWith(".")
+        && !value.endsWith("/");
   }
 }
 
@@ -1121,6 +1146,12 @@ function generatedText(valueSchema: TextSchema, seed: number): string {
       return `artifact/${safeBrandLabel(valueSchema.brand)}-${String(normalized)}`;
     case "source-anchor":
       return `anchor:${safeBrandLabel(valueSchema.brand)}:${String(normalized)}`;
+    case "decimal-natural":
+      return String(normalized);
+    case "git-oid":
+      return seedHex(normalized).slice(0, normalized % 2 === 0 ? 40 : 64);
+    case "git-ref":
+      return `refs/pi-autopilot/${safeBrandLabel(valueSchema.brand)}-${String(normalized)}`;
   }
 }
 

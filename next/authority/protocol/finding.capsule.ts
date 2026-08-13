@@ -1,6 +1,7 @@
 import {
   artifactRefSchema,
   artifactRootSchema,
+  atomIdSchema,
   findingIdSchema,
   planRootIdSchema,
   ruleIdSchema,
@@ -12,16 +13,18 @@ import {
   defineCapsule,
   literal,
   nonEmptyArrayOf,
+  nullable,
   object,
   union,
 } from "./schema.js";
 import type { Infer } from "./schema.js";
 
 export const planningGapFindingSchema = object({
+  atomIds: nonEmptyArrayOf(atomIdSchema),
   explanation: artifactRefSchema,
   findingId: findingIdSchema,
+  independentReview: artifactRefSchema,
   kind: literal("planning-gap"),
-  planAuthorWorkItemId: workItemIdSchema,
   planRootId: planRootIdSchema,
   reason: union([
     literal("substantial-path"),
@@ -29,28 +32,28 @@ export const planningGapFindingSchema = object({
   ]),
   runId: runIdSchema,
   sourceAnchors: nonEmptyArrayOf(sourceAnchorSchema),
+  sourceEvidence: nonEmptyArrayOf(artifactRefSchema),
 });
 
-export const integrityFindingSchema = object({
-  correctionOwner: workItemIdSchema,
+const blockingFindingFields = {
   evidence: nonEmptyArrayOf(artifactRefSchema),
   findingId: findingIdSchema,
-  kind: literal("integrity"),
+  observedByWorkItemId: workItemIdSchema,
   report: artifactRefSchema,
   ruleId: ruleIdSchema,
   runId: runIdSchema,
   subjectRoot: artifactRootSchema,
+  subjectWorkItemId: nullable(workItemIdSchema),
+};
+
+export const integrityFindingSchema = object({
+  ...blockingFindingFields,
+  kind: literal("integrity"),
 });
 
 export const definitionOfDoneFindingSchema = object({
-  correctionOwner: workItemIdSchema,
-  evidence: nonEmptyArrayOf(artifactRefSchema),
-  findingId: findingIdSchema,
+  ...blockingFindingFields,
   kind: literal("definition-of-done"),
-  report: artifactRefSchema,
-  ruleId: ruleIdSchema,
-  runId: runIdSchema,
-  subjectRoot: artifactRootSchema,
 });
 
 export const advisoryFindingSchema = object({
