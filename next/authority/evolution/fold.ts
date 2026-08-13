@@ -1,28 +1,69 @@
+import { eligibleOutcomeForState } from "../model/eligibility.js";
 import { initialState } from "../model/genesis.js";
-import type {
-  ActionCommitState,
-  CommandSettlementState,
-  RunState,
-} from "../model/run-state.js";
+import { stateDigest } from "../model/run-state.js";
+import type { RunIndexes, RunState } from "../model/run-state.js";
 import {
-  canonicalDecisionFactsDigest,
+  applyIndexMutation,
+  indexKey,
+  indexMutationDigest,
+  lookupIndex,
+  prepareIndexMutation,
+} from "../model/authenticated-index.js";
+import type { AuthenticatedIndexState } from "../model/authenticated-index.js";
+import type { Command } from "../protocol/command.capsule.js";
+import type { DomainFact } from "../protocol/domain-fact.capsule.js";
+import {
+  compareDecimalNatural,
+  incrementDecimalNatural,
+} from "../protocol/identifiers.js";
+import type {
+  ActionId,
+  ArtifactRef,
+  CommandId,
+  DecimalNatural,
+  Digest,
+} from "../protocol/identifiers.js";
+import {
+  recordOutcome,
+  recordSemanticRootsMatch,
 } from "../protocol/journal-record.capsule.js";
 import type {
+  CommandSettled,
   DecisionCommitted,
   JournalRecord,
+  OutcomeCommitted,
   RunGenesis,
 } from "../protocol/journal-record.capsule.js";
+import type {
+  IndexMutation,
+  IndexName,
+  IndexValue,
+  ResolvedIndexPage,
+} from "../protocol/state-index.capsule.js";
+import { terminalOutcomeCapsule } from "../protocol/terminal-outcome.capsule.js";
 import { foldDomainFact } from "./domain-fact-fold.js";
-import type { FoldError, FoldResult } from "./fold-result.js";
+import type { FoldResult } from "./fold-result.js";
 
 export type FoldInput = JournalRecord;
 
-function rejected(state: RunState, record: JournalRecord, error: FoldError): FoldResult {
+interface IndexTransitionResult {
+  readonly kind: "applied";
+  readonly state: RunState;
+  readonly mutation: IndexMutation;
+}
+
+interface IndexTransitionFailure {
+  readonly kind: "rejected";
+  readonly code: string;
+  readonly diagnostic: string;
+}
+
+function rejected(state: RunState, record: JournalRecord, code: string, diagnostic: string): FoldResult {
   return Object.freeze({
     kind: "rejected",
     state,
     recordKind: record.kind,
-    error: Object.freeze(error),
+    error: Object.freeze({ code, diagnostic }),
   });
 }
 
@@ -30,224 +71,340 @@ function applied(state: RunState): FoldResult {
   return Object.freeze({ kind: "applied", state });
 }
 
-function validateEnvelope(state: RunState, record: JournalRecord): FoldResult | null {
-  if (state.terminal !== null) {
-    return rejected(state, record, { code: "post-terminal" });
+function indexOf(indexes: RunIndexes, name: IndexName): AuthenticatedIndexState {
+  switch (name) {
+    case "actions": return indexes.actions;
+    case "atoms": return indexes.atoms;
+    case "candidates": return indexes.candidates;
+    case "commands": return indexes.commands;
+    case "dependencies": return indexes.dependencies;
+    case "dispositions": return indexes.dispositions;
+    case "evidence": return indexes.evidence;
+    case "findings": return indexes.findings;
+    case "plans": return indexes.plans;
+    case "publications": return indexes.publications;
+    case "submissions": return indexes.submissions;
+    case "work": return indexes.work;
   }
-  if (record.runId !== state.identity.runId) {
-    return rejected(state, record, {
-      code: "run-mismatch",
-      expectedRunId: state.identity.runId,
-      actualRunId: record.runId,
-    });
+}
+
+function replaceIndex(indexes: RunIndexes, name: IndexName, value: AuthenticatedIndexState): RunIndexes {
+  switch (name) {
+    case "actions": return Object.freeze({ ...indexes, actions: value });
+    case "atoms": return Object.freeze({ ...indexes, atoms: value });
+    case "candidates": return Object.freeze({ ...indexes, candidates: value });
+    case "commands": return Object.freeze({ ...indexes, commands: value });
+    case "dependencies": return Object.freeze({ ...indexes, dependencies: value });
+    case "dispositions": return Object.freeze({ ...indexes, dispositions: value });
+    case "evidence": return Object.freeze({ ...indexes, evidence: value });
+    case "findings": return Object.freeze({ ...indexes, findings: value });
+    case "plans": return Object.freeze({ ...indexes, plans: value });
+    case "publications": return Object.freeze({ ...indexes, publications: value });
+    case "submissions": return Object.freeze({ ...indexes, submissions: value });
+    case "work": return Object.freeze({ ...indexes, work: value });
   }
-  if (record.sequence === state.lastSequence) {
-    return rejected(state, record, {
-      code: "duplicate-sequence",
-      sequence: record.sequence,
-    });
-  }
-  if (record.sequence < state.lastSequence) {
-    return rejected(state, record, {
-      code: "stale-sequence",
-      lastSequence: state.lastSequence,
-      actualSequence: record.sequence,
-    });
-  }
-  const expectedSequence = state.lastSequence + 1;
-  if (record.sequence !== expectedSequence) {
-    return rejected(state, record, {
-      code: "sequence-gap",
-      expectedSequence,
-      actualSequence: record.sequence,
-    });
+}
+
+function transitionIndex(
+  state: RunState,
+  name: IndexName,
+  identity: string,
+  next: IndexValue,
+  pages: readonly ResolvedIndexPage[],
+  expectedPriorKind: IndexValue["kind"] | null,
+): IndexTransitionResult | IndexTransitionFailure {
+  const index = indexOf(state.indexes, name);
+  const key = indexKey(name, identity);
+  const found = lookupIndex(index, key, pages);
+  if (found.kind !== "proved") {
+    return Object.freeze({ kind: "rejected", code: "page-unproven", diagnostic: found.diagnostic });
   }
   if (
-    record.kind !== "run-genesis"
-    && record.kind !== "command-settled"
-    && state.actionCommits.some((entry) => entry.actionId === record.actionId)
+    (expectedPriorKind === null && found.value !== null)
+    || (expectedPriorKind !== null && (found.value === null || found.value.kind !== expectedPriorKind))
   ) {
-    return rejected(state, record, {
-      code: "duplicate-action",
-      actionId: record.actionId,
+    return Object.freeze({ kind: "rejected", code: "index-prior-mismatch", diagnostic: `${name}/${identity} has an unexpected prior value` });
+  }
+  const prepared = prepareIndexMutation(index, key, next, pages);
+  if (prepared.kind !== "prepared") {
+    return Object.freeze({ kind: "rejected", code: "page-unproven", diagnostic: prepared.diagnostic });
+  }
+  const changed = applyIndexMutation(index, prepared.mutation, found.value, next);
+  if (changed.kind !== "applied") {
+    return Object.freeze({ kind: "rejected", code: "index-proof-invalid", diagnostic: changed.diagnostic });
+  }
+  return Object.freeze({
+    kind: "applied",
+    state: Object.freeze({ ...state, indexes: replaceIndex(state.indexes, name, changed.state) }),
+    mutation: prepared.mutation,
+  });
+}
+
+function insertCommands(
+  state: RunState,
+  commands: readonly Command[],
+  pages: readonly ResolvedIndexPage[],
+): { readonly kind: "applied"; readonly state: RunState; readonly mutations: readonly IndexMutation[] }
+  | IndexTransitionFailure {
+  let current = state;
+  const mutations: IndexMutation[] = [];
+  for (const command of commands) {
+    const value: IndexValue = Object.freeze({
+      kind: "command",
+      command,
+      commandId: command.commandId,
+      observation: null,
+      status: "issued",
     });
+    const transitioned = transitionIndex(current, "commands", command.commandId, value, pages, null);
+    if (transitioned.kind !== "applied") {
+      return transitioned;
+    }
+    current = transitioned.state;
+    mutations.push(transitioned.mutation);
+  }
+  return Object.freeze({ kind: "applied", state: current, mutations: Object.freeze(mutations) });
+}
+
+function insertAction(
+  state: RunState,
+  actionId: Exclude<JournalRecord, RunGenesis>["actionId"],
+  recordKind: Exclude<JournalRecord, RunGenesis>["kind"],
+  sequence: Exclude<JournalRecord, RunGenesis>["sequence"],
+  pages: readonly ResolvedIndexPage[],
+): IndexTransitionResult | IndexTransitionFailure {
+  const value: IndexValue = Object.freeze({
+    actionId,
+    kind: "action",
+    recordKind,
+    sequence,
+  });
+  return transitionIndex(state, "actions", actionId, value, pages, null);
+}
+
+function mutationsEqual(left: readonly IndexMutation[], right: readonly IndexMutation[]): boolean {
+  return left.length === right.length
+    && left.every((entry, index) => {
+      const other = right[index];
+      return other !== undefined && indexMutationDigest(entry) === indexMutationDigest(other);
+    });
+}
+
+function sameOutcome(left: ReturnType<typeof recordOutcome>, right: ReturnType<typeof recordOutcome>): boolean {
+  if (left === null || right === null) {
+    return left === right;
+  }
+  return terminalOutcomeCapsule.digest(left) === terminalOutcomeCapsule.digest(right);
+}
+
+function validateEnvelope(state: RunState, record: JournalRecord): FoldResult | null {
+  if (state.terminal !== null) {
+    return rejected(state, record, "post-terminal", "no record is admissible after a committed terminal");
+  }
+  if (record.runId !== state.identity.runId) {
+    return rejected(state, record, "run-mismatch", "record belongs to another run");
+  }
+  const expected = incrementDecimalNatural(state.lastSequence);
+  const comparison = compareDecimalNatural(record.sequence, expected);
+  if (comparison < 0) {
+    return rejected(state, record, "stale-sequence", "record sequence is stale or duplicate");
+  }
+  if (comparison > 0) {
+    return rejected(state, record, "sequence-gap", "record sequence skips the exact successor");
+  }
+  if (record.kind !== "run-genesis" && record.priorStateDigest !== stateDigest(state)) {
+    return rejected(state, record, "prior-state-mismatch", "record was prepared against a different authoritative state");
   }
   return null;
 }
 
-function appendActionCommit(
+export interface SemanticTransitionDraft {
+  readonly kind: "decision-committed" | "command-settled" | "outcome-committed";
+  readonly actionId: ActionId;
+  readonly sequence: DecimalNatural;
+  readonly facts: readonly DomainFact[];
+  readonly commands: readonly Command[];
+  readonly pages: readonly ResolvedIndexPage[];
+  readonly settlement: null | {
+    readonly commandId: CommandId;
+    readonly observation: ArtifactRef;
+    readonly observationDigest: Digest;
+  };
+}
+
+export type SemanticTransitionResult =
+  | { readonly kind: "derived"; readonly state: RunState; readonly mutations: readonly IndexMutation[] }
+  | IndexTransitionFailure;
+
+export function deriveSemanticTransition(
   state: RunState,
-  action: ActionCommitState,
-): readonly ActionCommitState[] {
-  return Object.freeze(
-    [...state.actionCommits, action].sort((left, right) => {
-      if (left.actionId < right.actionId) {
-        return -1;
-      }
-      return left.actionId > right.actionId ? 1 : 0;
-    }),
-  );
-}
-
-function applyDecision(state: RunState, decision: DecisionCommitted): FoldResult {
-  const actualFactDigest = canonicalDecisionFactsDigest(decision.facts);
-  if (String(decision.factRoot) !== String(actualFactDigest)) {
-    return rejected(state, decision, {
-      code: "decision-fact-root-mismatch",
-      expectedFactRoot: decision.factRoot,
-      actualFactDigest,
-    });
-  }
-  let candidate = state;
-  for (const fact of decision.facts) {
-    const factResult = foldDomainFact(candidate, fact);
-    if (factResult.kind === "rejected") {
-      return rejected(state, decision, factResult.error);
+  draft: SemanticTransitionDraft,
+): SemanticTransitionResult {
+  let current = state;
+  const mutations: IndexMutation[] = [];
+  if (draft.kind === "command-settled") {
+    if (draft.settlement === null) {
+      return Object.freeze({ kind: "rejected", code: "settlement-missing", diagnostic: "command settlement requires its exact observation" });
     }
-    candidate = factResult.state;
+    const settlementRecord = Object.freeze({
+      actionId: draft.actionId,
+      commandId: draft.settlement.commandId,
+      kind: "command-settled" as const,
+      observation: draft.settlement.observation,
+      pages: draft.pages,
+      runId: state.identity.runId,
+    });
+    const index = current.indexes.commands;
+    const key = indexKey("commands", settlementRecord.commandId);
+    const found = lookupIndex(index, key, draft.pages);
+    if (found.kind !== "proved" || found.value === null || found.value.kind !== "command" || found.value.status !== "issued") {
+      return Object.freeze({ kind: "rejected", code: "command-not-issued", diagnostic: "settlement does not name a proved issued command" });
+    }
+    const next: IndexValue = Object.freeze({ ...found.value, observation: settlementRecord.observation, status: "settled" });
+    const prepared = prepareIndexMutation(index, key, next, draft.pages);
+    if (prepared.kind !== "prepared") {
+      return Object.freeze({ kind: "rejected", code: "page-unproven", diagnostic: prepared.diagnostic });
+    }
+    const changed = applyIndexMutation(index, prepared.mutation, found.value, next);
+    if (changed.kind !== "applied") {
+      return Object.freeze({ kind: "rejected", code: "index-proof-invalid", diagnostic: changed.diagnostic });
+    }
+    current = Object.freeze({ ...current, indexes: replaceIndex(current.indexes, "commands", changed.state) });
+    mutations.push(prepared.mutation);
+  } else if (draft.settlement !== null) {
+    return Object.freeze({ kind: "rejected", code: "unexpected-settlement", diagnostic: "only command-settled may carry a settlement" });
   }
-  const actionCommit: ActionCommitState = Object.freeze({
-    actionId: decision.actionId,
-    recordKind: decision.kind,
-    sequence: decision.sequence,
-  });
-  return applied(Object.freeze({
-    ...candidate,
-    lastSequence: decision.sequence,
-    actionCommits: appendActionCommit(candidate, actionCommit),
-    lastDecision: Object.freeze({
-      actionId: decision.actionId,
-      sequence: decision.sequence,
-      stimulusDigest: decision.stimulusDigest,
-      factRoot: decision.factRoot,
-      commandRoot: decision.commandRoot,
-    }),
-  }));
+  for (const fact of draft.facts) {
+    const transitioned = foldDomainFact(current, fact, draft.pages, null);
+    if (transitioned.kind !== "applied") {
+      return Object.freeze({ kind: "rejected", code: transitioned.code, diagnostic: transitioned.diagnostic });
+    }
+    current = transitioned.state;
+    mutations.push(...transitioned.mutations);
+  }
+  const commands = draft.kind === "outcome-committed" ? Object.freeze([]) : draft.commands;
+  const issued = insertCommands(current, commands, draft.pages);
+  if (issued.kind !== "applied") {
+    return issued;
+  }
+  current = issued.state;
+  mutations.push(...issued.mutations);
+  const action = insertAction(current, draft.actionId, draft.kind, draft.sequence, draft.pages);
+  if (action.kind !== "applied") {
+    return action;
+  }
+  current = action.state;
+  mutations.push(action.mutation);
+  return Object.freeze({ kind: "derived", state: current, mutations: Object.freeze(mutations) });
 }
 
-function applyCommandSettled(state: RunState, record: JournalRecord): FoldResult {
-  if (record.kind !== "command-settled") {
-    return rejected(state, record, { code: "unknown-journal-record-kind" });
+function applySemanticRecord(
+  state: RunState,
+  record: DecisionCommitted | CommandSettled | OutcomeCommitted,
+): FoldResult {
+  if (!recordSemanticRootsMatch(record)) {
+    return rejected(state, record, "semantic-root-mismatch", "facts, commands, and canonical artifact bindings do not match");
   }
-  if (state.commandSettlements.some((entry) => entry.commandId === record.commandId)) {
-    return rejected(state, record, {
-      code: "duplicate-command-settlement",
-      commandId: record.commandId,
-    });
-  }
-  const settlement: CommandSettlementState = Object.freeze({
-    commandId: record.commandId,
+  const derived = deriveSemanticTransition(state, Object.freeze({
+    kind: record.kind,
     actionId: record.actionId,
     sequence: record.sequence,
-    observation: record.observation,
-    observationDigest: record.observationDigest,
-  });
-  const commandSettlements = Object.freeze(
-    [...state.commandSettlements, settlement].sort((left, right) => {
-      if (left.commandId < right.commandId) {
-        return -1;
-      }
-      return left.commandId > right.commandId ? 1 : 0;
-    }),
-  );
-  return applied(Object.freeze({
-    ...state,
-    lastSequence: record.sequence,
-    commandSettlements,
+    facts: record.facts,
+    commands: record.kind === "outcome-committed" ? Object.freeze([]) : record.commands,
+    pages: record.pages,
+    settlement: record.kind === "command-settled"
+      ? Object.freeze({
+          commandId: record.commandId,
+          observation: record.observation,
+          observationDigest: record.observationDigest,
+        })
+      : null,
   }));
-}
-
-function rejectUnknownRecord(
-  state: RunState,
-  record: never,
-  fallback: JournalRecord,
-): FoldResult {
-  void record;
-  return rejected(state, fallback, { code: "unknown-journal-record-kind" });
-}
-
-export function fold(state: RunState, record: FoldInput): FoldResult {
-  const invalidEnvelope = validateEnvelope(state, record);
-  if (invalidEnvelope !== null) {
-    return invalidEnvelope;
+  if (derived.kind !== "derived") {
+    return rejected(state, record, derived.code, derived.diagnostic);
   }
-  switch (record.kind) {
-    case "run-genesis":
-      return rejected(state, record, { code: "unexpected-genesis" });
-    case "decision-committed":
-      return applyDecision(state, record);
-    case "command-settled":
-      return applyCommandSettled(state, record);
-    case "outcome-committed": {
-      if (record.outcome.kind === "t2" && state.phase !== "planning") {
-        return rejected(state, record, { code: "planning-outcome-after-planning" });
-      }
-      const actionCommit: ActionCommitState = Object.freeze({
-        actionId: record.actionId,
-        recordKind: record.kind,
-        sequence: record.sequence,
-      });
-      return applied(Object.freeze({
-        ...state,
-        lastSequence: record.sequence,
-        actionCommits: appendActionCommit(state, actionCommit),
-        terminal: Object.freeze({
-          actionId: record.actionId,
-          sequence: record.sequence,
-          outcome: record.outcome,
-        }),
-      }));
+  let current = derived.state;
+  if (!mutationsEqual(derived.mutations, record.mutations)) {
+    return rejected(state, record, "index-mutation-mismatch", "committed index mutations do not equal the exact prospective transition");
+  }
+  const outcome = recordOutcome(record);
+  if (outcome !== null) {
+    const eligibility = eligibleOutcomeForState(current, record.pages);
+    const eligibilityDigest = stateDigest(current);
+    const committedDigest = record.kind === "command-settled" ? record.eligibilityStateDigest : record.eligibilityStateDigest;
+    if (eligibility.kind !== "eligible" || !sameOutcome(eligibility.outcome, outcome) || committedDigest !== eligibilityDigest) {
+      return rejected(state, record, "outcome-ineligible", "replay recomputation rejects stale or forged outcome eligibility");
     }
-    case "run-suspended": {
-      if (state.suspension.kind === "suspended") {
-        return rejected(state, record, { code: "already-suspended" });
-      }
-      const actionCommit: ActionCommitState = Object.freeze({
-        actionId: record.actionId,
-        recordKind: record.kind,
-        sequence: record.sequence,
-      });
-      return applied(Object.freeze({
-        ...state,
-        lastSequence: record.sequence,
-        actionCommits: appendActionCommit(state, actionCommit),
+    current = Object.freeze({
+      ...current,
+      terminal: Object.freeze({ actionId: record.actionId, sequence: record.sequence, outcome }),
+    });
+  } else if (record.kind === "command-settled" && record.eligibilityStateDigest !== null) {
+    return rejected(state, record, "outcome-binding-without-outcome", "eligibility digest cannot appear without an atomic outcome");
+  }
+  current = Object.freeze({ ...current, lastSequence: record.sequence });
+  if (stateDigest(current) !== record.resultStateDigest) {
+    return rejected(state, record, "result-state-mismatch", "committed result state digest does not match replay");
+  }
+  return applied(current);
+}
+
+function applyLifecycle(state: RunState, record: Exclude<JournalRecord, RunGenesis | DecisionCommitted | CommandSettled | OutcomeCommitted>): FoldResult {
+  if (record.kind === "run-suspended" && state.suspension.kind !== "active") {
+    return rejected(state, record, "already-suspended", "run is already suspended");
+  }
+  if (record.kind === "run-resumed") {
+    if (state.suspension.kind !== "suspended") {
+      return rejected(state, record, "not-suspended", "active run cannot be resumed");
+    }
+    if (record.operatorRequestId !== state.suspension.operatorRequestId || record.resumeFromSequence !== state.suspension.sequence) {
+      return rejected(state, record, "resume-binding-mismatch", "resume must bind the exact suspension request and sequence");
+    }
+  }
+  const action = insertAction(state, record.actionId, record.kind, record.sequence, record.pages);
+  if (action.kind !== "applied") {
+    return rejected(state, record, action.code, action.diagnostic);
+  }
+  if (!mutationsEqual(Object.freeze([action.mutation]), record.mutations)) {
+    return rejected(state, record, "index-mutation-mismatch", "lifecycle action mutation is not exact");
+  }
+  let current = record.kind === "run-suspended"
+    ? Object.freeze({
+        ...action.state,
         suspension: Object.freeze({
-          kind: "suspended",
+          kind: "suspended" as const,
           actionId: record.actionId,
           operatorRequestId: record.operatorRequestId,
           reason: record.reason,
           sequence: record.sequence,
         }),
-      }));
-    }
-    case "run-resumed": {
-      if (state.suspension.kind !== "suspended") {
-        return rejected(state, record, { code: "not-suspended" });
-      }
-      if (record.operatorRequestId !== state.suspension.operatorRequestId) {
-        return rejected(state, record, { code: "resume-request-mismatch" });
-      }
-      if (record.resumeFromSequence !== state.suspension.sequence) {
-        return rejected(state, record, { code: "resume-sequence-mismatch" });
-      }
-      const actionCommit: ActionCommitState = Object.freeze({
-        actionId: record.actionId,
-        recordKind: record.kind,
-        sequence: record.sequence,
-      });
-      return applied(Object.freeze({
-        ...state,
-        lastSequence: record.sequence,
-        actionCommits: appendActionCommit(state, actionCommit),
-        suspension: Object.freeze({ kind: "active" }),
-      }));
-    }
-    default:
-      return rejectUnknownRecord(state, record, record);
+      })
+    : Object.freeze({ ...action.state, suspension: Object.freeze({ kind: "active" as const }) });
+  current = Object.freeze({ ...current, lastSequence: record.sequence });
+  if (stateDigest(current) !== record.resultStateDigest) {
+    return rejected(state, record, "result-state-mismatch", "lifecycle result digest does not match replay");
+  }
+  return applied(current);
+}
+
+export function fold(state: RunState, record: FoldInput): FoldResult {
+  const invalid = validateEnvelope(state, record);
+  if (invalid !== null) {
+    return invalid;
+  }
+  switch (record.kind) {
+    case "run-genesis":
+      return rejected(state, record, "unexpected-genesis", "genesis is accepted only by initial()");
+    case "decision-committed":
+    case "command-settled":
+    case "outcome-committed":
+      return applySemanticRecord(state, record);
+    case "run-suspended":
+    case "run-resumed":
+      return applyLifecycle(state, record);
   }
 }
 
-/** Apply one decoded finite chunk without retaining another copy. */
 export function foldMany(state: RunState, records: readonly FoldInput[]): FoldResult {
   let current = state;
   for (const record of records) {
@@ -260,7 +417,6 @@ export function foldMany(state: RunState, records: readonly FoldInput[]): FoldRe
   return applied(current);
 }
 
-/** Replay one decoded journal chunk from genesis in a single pass. */
 export function foldAll(genesis: RunGenesis, records: readonly FoldInput[]): FoldResult {
   return foldMany(initialState(genesis), records);
 }
