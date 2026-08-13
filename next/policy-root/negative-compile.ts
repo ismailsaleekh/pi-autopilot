@@ -7,6 +7,7 @@ export interface NegativeCompileResult {
   readonly path: string;
   readonly failedAsRequired: boolean;
   readonly diagnostics: readonly string[];
+  readonly diagnosticCodes: readonly number[];
 }
 
 const modulePolicyRoot = dirname(fileURLToPath(import.meta.url));
@@ -42,11 +43,13 @@ function diagnosticText(diagnostic: ts.Diagnostic): string {
 
 export function compileNegativeFixture(path: string): NegativeCompileResult {
   const program = ts.createProgram([path], compilerOptions());
-  const diagnostics = ts.getPreEmitDiagnostics(program).map(diagnosticText);
+  const rawDiagnostics = ts.getPreEmitDiagnostics(program);
+  const diagnostics = rawDiagnostics.map(diagnosticText);
   return Object.freeze({
     path,
     failedAsRequired: diagnostics.length > 0,
     diagnostics: Object.freeze(diagnostics),
+    diagnosticCodes: Object.freeze(rawDiagnostics.map((diagnostic) => diagnostic.code)),
   });
 }
 

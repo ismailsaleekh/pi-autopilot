@@ -52,6 +52,10 @@ const AMBIENT_AUTHORITY_NAMES = new Set([
   "document",
   "navigator",
   "fetch",
+  "eval",
+  "Function",
+  "globalThis",
+  "WebAssembly",
   "setTimeout",
   "setInterval",
   "setImmediate",
@@ -232,10 +236,25 @@ export function collectActualUnits(nextRoot: string): {
     ));
   const emittedRoot = join(absoluteRoot, "dist");
   const emittedFiles = collectFiles(emittedRoot, new Set([".js"]));
+  const emittedLogicalPaths = new Set<string>();
   for (const file of emittedFiles) {
     const logicalPath = slash(relative(emittedRoot, file));
     if (isProductionPath(logicalPath)) {
+      emittedLogicalPaths.add(logicalPath);
       units.push(parseUnit(logicalPath, readFileSync(file, "utf8"), "emitted"));
+    }
+  }
+  for (const sourceFile of sourceFiles) {
+    const logicalSource = slash(relative(absoluteRoot, sourceFile));
+    const expectedEmission = logicalSource.replace(/\.ts$/, ".js");
+    if (!emittedLogicalPaths.has(expectedEmission)) {
+      projectFindings.push(Object.freeze({
+        rule: "project-graph",
+        origin: "config",
+        path: logicalSource,
+        line: 1,
+        detail: "production TypeScript file has no corresponding fresh emitted JavaScript",
+      }));
     }
   }
   return Object.freeze({
@@ -405,7 +424,7 @@ function checkOneAppendEdge(units: readonly SourceUnit[]): readonly Architecture
         }
       });
     }
-    if (hasJournalImplementation && calls.length !== 1) {
+    if (hasJournalImplementation && origin === "source" && calls.length !== 1) {
       const anchor = originUnits.find((unit) => unit.path.startsWith("storage/journal/"));
       if (anchor !== undefined) {
         output.push(finding(
@@ -910,12 +929,65 @@ export function checkCompilerBaseline(nextRoot: string): readonly ArchitectureFi
   return Object.freeze(output);
 }
 
+export function checkLegacyReferenceText(
+  path: string,
+  text: string,
+): readonly ArchitectureFinding[] {
+  const output: ArchitectureFinding[] = [];
+  const lines = text.split(/\r?\n/);
+  const nextReference = /(?:packages\/pi-autopilot\/next|(?:^|["'`./])next\/)/;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    if (nextReference.test(line)) {
+      output.push(Object.freeze({
+        rule: "old-new-isolation",
+        origin: "source",
+        path,
+        line: index + 1,
+        detail: "old package code and manifest may not reference the clean-rebuild next tree",
+      }));
+    }
+  }
+  return Object.freeze(output);
+}
+
+function checkLegacyPackageIsolation(nextRoot: string): readonly ArchitectureFinding[] {
+  const packageRoot = dirname(resolve(nextRoot));
+  const output: ArchitectureFinding[] = [];
+  const manifest = join(packageRoot, "package.json");
+  if (existsSync(manifest)) {
+    output.push(...checkLegacyReferenceText("../package.json", readFileSync(manifest, "utf8")));
+  }
+  const legacyRoots = Object.freeze([
+    "src",
+    "host/src",
+    "child-runtime",
+    "extensions",
+    "bin",
+    "kernel/src",
+    "drivers/src",
+    "codegen/src",
+    "modelcheck/src",
+  ]);
+  const extensions = new Set([".ts", ".js", ".mjs", ".cjs", ".rs"]);
+  for (const legacyRoot of legacyRoots) {
+    for (const file of collectFiles(join(packageRoot, legacyRoot), extensions)) {
+      output.push(...checkLegacyReferenceText(
+        `../${slash(relative(packageRoot, file))}`,
+        readFileSync(file, "utf8"),
+      ));
+    }
+  }
+  return Object.freeze(output);
+}
+
 export function checkArchitecture(nextRoot: string): readonly ArchitectureFinding[] {
   const collected = collectActualUnits(nextRoot);
   return Object.freeze([
     ...collected.projectFindings,
     ...checkCompilerBaseline(nextRoot),
     ...checkArchitectureUnits(collected.units),
+    ...checkLegacyPackageIsolation(nextRoot),
   ]);
 }
 

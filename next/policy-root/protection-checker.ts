@@ -54,6 +54,9 @@ export function checkProtectedFiles(
 ): readonly ProtectionFinding[] {
   const output: ProtectionFinding[] = [];
   for (const path of Object.keys(manifest.files).sort()) {
+    if (path === "policy-root/protected-files.json") {
+      continue;
+    }
     const expected = manifest.files[path];
     const absolute = join(nextRoot, path);
     if (!existsSync(absolute)) {
@@ -98,6 +101,32 @@ export function checkRepositoryProtection(nextRoot: string): readonly Protection
     return Object.freeze([Object.freeze({
       path: "policy-root/protected-files.json",
       detail: "protection manifest is missing or malformed",
+    })]);
+  }
+  const expectedSelfDigest = manifest.files["policy-root/protected-files.json"];
+  if (expectedSelfDigest === undefined) {
+    return Object.freeze([Object.freeze({
+      path: "policy-root/protected-files.json",
+      detail: "protection manifest must carry its own approved digest",
+    })]);
+  }
+  const selfComparable: Record<string, unknown> = Object.create(null);
+  selfComparable["format"] = manifest.format;
+  const selfFiles: Record<string, Digest> = Object.create(null);
+  for (const path of Object.keys(manifest.files).sort()) {
+    if (path !== "policy-root/protected-files.json") {
+      const digest = manifest.files[path];
+      if (digest !== undefined) {
+        selfFiles[path] = digest;
+      }
+    }
+  }
+  selfComparable["files"] = selfFiles;
+  const actualSelfDigest = contentDigest(`${JSON.stringify(selfComparable, null, 2)}\n`);
+  if (actualSelfDigest !== expectedSelfDigest) {
+    return Object.freeze([Object.freeze({
+      path: "policy-root/protected-files.json",
+      detail: "protection manifest self-digest is invalid",
     })]);
   }
   const markers = activeAmendmentMarkers(nextRoot);

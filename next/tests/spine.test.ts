@@ -26,6 +26,7 @@ interface TestCapsule {
   readonly digestUnknown: (value: unknown) => DecodeResult<Digest>;
   readonly arbitrary: {
     readonly valid: (seed: number) => unknown;
+    readonly validForKind: (kind: string, seed: number) => unknown;
     readonly malformedValue: (seed: number) => unknown;
     readonly malformedBytes: (seed: number) => Uint8Array;
     readonly arbitraryBytes: (seed: number, length: number) => Uint8Array;
@@ -58,6 +59,24 @@ function digested(capsule: TestCapsule, value: unknown): Digest {
 
 for (const capsule of allCapsules) {
   test(`${capsule.name}: valid arbitrary decodes and canonical round-trip is identity`, () => {
+    for (const [kindIndex, kind] of capsule.kinds.entries()) {
+      const variant = capsule.arbitrary.validForKind(kind, kindIndex + 9000);
+      const variantEncoded = capsule.encodeUnknown(variant);
+      assert.equal(variantEncoded.kind, "ok");
+      if (variantEncoded.kind === "ok") {
+        const variantDecoded = capsule.decodeCanonical(variantEncoded.value);
+        assert.equal(variantDecoded.kind, "ok");
+        if (
+          variantDecoded.kind === "ok"
+          && typeof variantDecoded.value === "object"
+          && variantDecoded.value !== null
+          && !Array.isArray(variantDecoded.value)
+        ) {
+          assert.equal(Object.entries(variantDecoded.value)
+            .find(([field]) => field === "kind")?.[1], kind);
+        }
+      }
+    }
     for (let seed = 0; seed < 64; seed += 1) {
       const value = capsuleValue(capsule, seed);
       const encodedValue = capsule.encodeUnknown(value);
@@ -144,6 +163,19 @@ test("canonical encoder sorts keys recursively without JSON.stringify", () => {
   const right = canonicalEncodeUnknown({ a: { b: null, y: true }, z: 1 });
   assert.equal(bytesEqual(left, right), true);
   assert.equal(Buffer.from(left).toString("utf8"), "{\"a\":{\"b\":null,\"y\":true},\"z\":1}");
+});
+
+test("canonical encoder has stable negative-zero and malformed-key behavior", () => {
+  assert.equal(Buffer.from(canonicalEncodeUnknown(-0)).toString("utf8"), "0");
+  const malformedKey = String.fromCharCode(0xd800);
+  const replacementKey = String.fromCharCode(0xfffd);
+  assert.equal(
+    bytesEqual(
+      canonicalEncodeUnknown({ [malformedKey]: true }),
+      canonicalEncodeUnknown({ [replacementKey]: true }),
+    ),
+    true,
+  );
 });
 
 test("SHA-256 implementation matches standard vectors", () => {

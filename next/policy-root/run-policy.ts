@@ -12,6 +12,7 @@ import {
   readFingerprintManifest,
 } from "./fingerprint-checker.js";
 import { checkHygiene } from "./hygiene-checker.js";
+import { checkPayloadShapes } from "./payload-checker.js";
 import { checkRepositoryProtection } from "./protection-checker.js";
 import { checkSuiteManifest, readSuiteManifest } from "./suite-manifest-checker.js";
 import { checkSuppressions, formatSuppressionFinding } from "./suppression-checker.js";
@@ -23,6 +24,7 @@ export interface PolicySummary {
   readonly protectionFindings: number;
   readonly suiteFindings: number;
   readonly hygieneFindings: number;
+  readonly payloadFindings: number;
 }
 
 export function runPolicy(nextRoot: string): PolicySummary {
@@ -68,6 +70,11 @@ export function runPolicy(nextRoot: string): PolicySummary {
     process.stderr.write(`hygiene ${finding.path}:${String(finding.line)} ${finding.detail}\n`);
   }
 
+  const payloads = checkPayloadShapes(nextRoot);
+  for (const finding of payloads) {
+    process.stderr.write(`payload ${finding.path}:${String(finding.line)} ${finding.detail}\n`);
+  }
+
   const suiteManifest = readSuiteManifest(join(nextRoot, "policy-root", "required-suites.json"));
   const suites = suiteManifest === null
     ? Object.freeze([Object.freeze({
@@ -86,5 +93,6 @@ export function runPolicy(nextRoot: string): PolicySummary {
     protectionFindings: protections.length,
     suiteFindings: suites.length,
     hygieneFindings: hygiene.length,
+    payloadFindings: payloads.length,
   });
 }

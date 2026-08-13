@@ -414,8 +414,8 @@ function decodeJsonValue(input: unknown, path: string, depth: number): DecodeRes
     return success(input);
   }
   if (typeof input === "number") {
-    if (!Number.isFinite(input)) {
-      return failure("schema-mismatch", path, "number must be finite");
+    if (!Number.isFinite(input) || Object.is(input, -0)) {
+      return failure("schema-mismatch", path, "number must be finite and must not be negative zero");
     }
     return success(input);
   }
@@ -434,6 +434,9 @@ function decodeJsonValue(input: unknown, path: string, depth: number): DecodeRes
     const output: { [field: string]: JsonValue } = Object.create(null);
     const keys = Object.keys(input).sort();
     for (const key of keys) {
+      if (!isWellFormedUnicode(key)) {
+        return failure("schema-mismatch", joinPath(path, key), "object key must contain well-formed Unicode");
+      }
       const decoded = decodeJsonValue(input[key], joinPath(path, key), depth + 1);
       if (decoded.kind === "error") {
         return decoded;

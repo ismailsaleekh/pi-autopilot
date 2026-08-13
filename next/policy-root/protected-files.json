@@ -1,15 +1,29 @@
 {
   "format": 1,
   "files": {
-    "policy-root/architecture-checker.ts": "sha256:6253efd12f8b7ac6369b2ada50c7ba0651382a0540f531d50778738613ae8b58",
+    "authority/tsconfig.json": "sha256:529f1643e67b7435fb009f064273cf3cd297a2bcfba983ac743542e86d04165e",
+    "package.json": "sha256:3369f033c2bcc20e8b9c9973958742a1c30d2a1869bb53b078b7a79001419992",
+    "policy-root/architecture-checker.ts": "sha256:505104b2cf5af247d32f94e1551833e823c1ab9e42c209d65f5ecf6a3c4a7f6a",
+    "policy-root/bootstrap-baselines.ts": "sha256:4ee5a1890826a46812638755b01eda1568ffc394e73f5f3fc7656b6e15fc6ef1",
     "policy-root/fingerprint-checker.ts": "sha256:791a5452424876fdafc2da654402beba4bde9f190d9db812e4c4ffe439654649",
-    "policy-root/gate-self-tests.ts": "sha256:3eb25e5777e74d22b5ec1d81a574553e7eb3d4ecdbe25796dbad9d08a13a030f",
-    "policy-root/protocol-fingerprints.json": "sha256:f5878ad30a2f5ca4492603a43df81402505c96c6309a950cf458976fa2593737",
-    "policy-root/protection-checker.ts": "sha256:6afee21d88108135b27a54d93945b9217331588b4c74155c77cec1aa0ab637df",
+    "policy-root/gate-self-tests.ts": "sha256:617e47a6fce8d8e23934a603e8ae46cdd57de02ac509bdc15b5131cfb7c47649",
+    "policy-root/generate-aggregates.ts": "sha256:f3003587e0af0c0dea9338b135784c08988f16811277f72f71522a05ce585ecf",
+    "policy-root/hygiene-checker.ts": "sha256:58727c083a8a4ed6220b4c45f6a343751cb0fb39de3a30bae89c3b46ea3e5564",
+    "policy-root/negative-compile.ts": "sha256:23dbd5aa41f78f110687c54c4ef86bf660c2fd94a7112d949441fb0917fdd233",
+    "policy-root/payload-checker.ts": "sha256:a4d4d7ac648965d6954735c6aafbbb6177bf3fe86cc33d9aa82abf41987f132b",
+    "policy-root/protection-checker.ts": "sha256:a3d1199f973f17da865ee5c2e1a28ddb04f1163d6262d066c0d3be66126bb361",
+    "policy-root/protocol-fingerprints.json": "sha256:decbc240148fe050828e0098edecc8eb5de33d4ce361df00955b791a6bf35c85",
+    "policy-root/purity-poison.test.ts": "sha256:dde04126e9260cc3a6a01f387787857e2cbbbd6ae9b30d57e4fef5e559c84f7d",
     "policy-root/required-suites.json": "sha256:e8a1dc6a04f795476e684652d15186b75154f31604745729931a9696fdca81b9",
+    "policy-root/run-policy.ts": "sha256:e52a9930124925e8f345e31ab7076fed502394870d0944ff20cb86a1f89f1316",
     "policy-root/suite-manifest-checker.ts": "sha256:4096566d46e1dffb4e525848c7019daa9c2c2debf205355060f5718d6acfe1e9",
-    "policy-root/suppression-checker.ts": "sha256:ebf96f0dd9ec84bce432ec82442a2362b9de85013087802fb70f1d7af3187380",
+    "policy-root/suppression-checker.ts": "sha256:1e3e251fbdc5a3d9fb4691f234ed3547648a8f01f43280bce88999f05a265a5a",
+    "policy-root/w0-gate.ts": "sha256:e2b135122e864006d7f3b2b2e5c5d356fb425cb871c14e26547f94475c7f797a",
+    "ports/tsconfig.json": "sha256:83d0f36a2074c05543d85d051c785b145b269688ab90e1f57e42a5b3c5964282",
     "tsconfig.base.json": "sha256:08d53593d6501de666219d6944dccd33d05c8e749e334b5708743b9ed867dc18",
-    "authority/tsconfig.json": "sha256:529f1643e67b7435fb009f064273cf3cd297a2bcfba983ac743542e86d04165e"
+    "tsconfig.json": "sha256:82393293635ea32ef27b7488c32f4f4278f5d36ab469e406f3f1a4fb778f1cc7",
+    "tsconfig.policy.json": "sha256:ec997dd4d3339cadacc61334e21c8f60976dcc0c9f8749af1b629ff287c56724",
+    "tsconfig.tests.json": "sha256:3c40e3c87c430dbe3a792927fd2831a3875622ed9a1cd9042a9fd2563af6698f",
+    "policy-root/protected-files.json": "sha256:8787175483198422335378899b3daa5be58c0c0c93d53da62c60695178ec7b05"
   }
 }

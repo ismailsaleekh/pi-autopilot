@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { existsSync, rmSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { generateAggregates } from "./generate-aggregates.js";
@@ -35,6 +36,19 @@ function run(spec: CommandSpec): boolean {
 }
 
 let green = true;
+for (const outputDirectory of ["dist", "dist-policy", "dist-tests"]) {
+  const absolute = join(nextRoot, outputDirectory);
+  if (existsSync(absolute)) {
+    rmSync(absolute, { recursive: true, force: true });
+  }
+}
+process.stdout.write("[w0] clean output trees\n");
+green = run(Object.freeze({
+  name: "compile protected gate bootstrap",
+  command: tsc,
+  arguments: Object.freeze(["-p", "tsconfig.policy.json", "--pretty", "false"]),
+})) && green;
+
 process.stdout.write("[w0] generated aggregate freshness\n");
 generateAggregates(true);
 if (process.exitCode !== undefined && process.exitCode !== 0) {
@@ -55,6 +69,12 @@ if (green) {
   process.stdout.write(`[w0] policy findings: ${String(findingCount)}\n`);
   green = findingCount === 0 && green;
 }
+
+green = run(Object.freeze({
+  name: "poisoned-runtime authority purity test",
+  command: process.execPath,
+  arguments: Object.freeze(["--test", "dist-policy/policy-root/purity-poison.test.js"]),
+})) && green;
 
 green = run(Object.freeze({
   name: "gate self-tests",

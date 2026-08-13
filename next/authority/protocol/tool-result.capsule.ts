@@ -1,14 +1,12 @@
-import { diagnosticSchema } from "./identifiers.js";
+import { artifactRefSchema, diagnosticSchema } from "./identifiers.js";
 import {
   defineCapsule,
-  jsonValue,
   literal,
   object,
   union,
 } from "./schema.js";
 import type {
   Infer,
-  JsonValue,
   Schema,
   SchemaCapsule,
 } from "./schema.js";
@@ -26,7 +24,7 @@ export function toolResultSchemaFor<const ValueSchema extends Schema>(valueSchem
   ]);
 }
 
-const toolResultTemplateSchema = toolResultSchemaFor(jsonValue());
+const toolResultTemplateSchema = toolResultSchemaFor(artifactRefSchema);
 type ToolResultTemplate = Infer<typeof toolResultTemplateSchema>;
 
 type BindToolResult<Template, Value> = Template extends { readonly kind: "ok" }
@@ -46,9 +44,9 @@ export function makeToolResultCapsule(name: string, valueSchema: Schema) {
   return defineCapsule(name, toolResultSchemaFor(valueSchema));
 }
 
-export const toolResultCapsule = makeToolResultCapsule("ToolResult", jsonValue());
+export const toolResultCapsule = makeToolResultCapsule("ToolResult", artifactRefSchema);
 
 export const toolResultExhaustive = Object.freeze({
   ok: true,
   retry: true,
-}) satisfies Readonly<Record<ToolResult<JsonValue>["kind"], true>>;
+}) satisfies Readonly<Record<ToolResult<Infer<typeof artifactRefSchema>>["kind"], true>>;

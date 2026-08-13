@@ -1,10 +1,20 @@
 import assert from "node:assert/strict";
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { test } from "node:test";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { basename, dirname } from "node:path";
 import {
   checkArchitectureUnits,
+  checkCompilerBaseline,
+  checkLegacyReferenceText,
+  collectActualUnits,
   fixtureUnits,
 } from "./architecture-checker.js";
 import { checkHygiene } from "./hygiene-checker.js";
@@ -14,6 +24,7 @@ import {
   diffFingerprints,
 } from "./fingerprint-checker.js";
 import { runNegativeCompileFixtures } from "./negative-compile.js";
+import { checkPayloadShapes } from "./payload-checker.js";
 import {
   checkProtectedFiles,
   contentDigest,
@@ -35,6 +46,62 @@ function rulesFor(files: Readonly<{ readonly path: string; readonly text: string
 function oneFile(path: string, text: string): ReadonlyArray<{ readonly path: string; readonly text: string }> {
   return Object.freeze([Object.freeze({ path, text })]);
 }
+
+function temporaryDirectory(run: (directory: string) => void): void {
+  const directory = mkdtempSync(join(tmpdir(), "pi-autopilot-w0-"));
+  try {
+    run(directory);
+  } finally {
+    rmSync(directory, { force: true, recursive: true });
+  }
+}
+
+const strictCompilerOptions = Object.freeze({
+  composite: true,
+  exactOptionalPropertyTypes: true,
+  lib: ["ES2022"],
+  noFallthroughCasesInSwitch: true,
+  noImplicitReturns: true,
+  noUncheckedIndexedAccess: true,
+  strict: true,
+  types: [],
+  useUnknownInCatchVariables: true,
+});
+
+test("project graph accepts referenced fresh emission and rejects orphan source", () => {
+  temporaryDirectory((directory) => {
+    mkdirSync(join(directory, "authority"), { recursive: true });
+    mkdirSync(join(directory, "dist", "authority"), { recursive: true });
+    writeFileSync(join(directory, "tsconfig.json"), JSON.stringify({ files: [], references: [{ path: "./authority" }] }));
+    writeFileSync(join(directory, "authority", "tsconfig.json"), JSON.stringify({
+      compilerOptions: strictCompilerOptions,
+      include: ["**/*.ts"],
+    }));
+    writeFileSync(join(directory, "authority", "good.ts"), "export const good = 1;\n");
+    writeFileSync(join(directory, "dist", "authority", "good.js"), "export const good = 1;\n");
+    assert.equal(collectActualUnits(directory).projectFindings.length, 0);
+    mkdirSync(join(directory, "runtime"));
+    writeFileSync(join(directory, "runtime", "orphan.ts"), "export const orphan = 1;\n");
+    assert.equal(collectActualUnits(directory).projectFindings.length > 0, true);
+  });
+});
+
+test("compiler baseline accepts strict projects and rejects DOM authority", () => {
+  temporaryDirectory((directory) => {
+    mkdirSync(join(directory, "authority"), { recursive: true });
+    mkdirSync(join(directory, "ports"), { recursive: true });
+    const config = JSON.stringify({ compilerOptions: strictCompilerOptions });
+    writeFileSync(join(directory, "authority", "tsconfig.json"), config);
+    writeFileSync(join(directory, "ports", "tsconfig.json"), config);
+    writeFileSync(join(directory, "tsconfig.tests.json"), config);
+    writeFileSync(join(directory, "tsconfig.policy.json"), config);
+    assert.equal(checkCompilerBaseline(directory).length, 0);
+    writeFileSync(join(directory, "authority", "tsconfig.json"), JSON.stringify({
+      compilerOptions: { ...strictCompilerOptions, lib: ["ES2022", "DOM"] },
+    }));
+    assert.equal(checkCompilerBaseline(directory).length > 0, true);
+  });
+});
 
 test("authority purity accepts pure code and rejects ambient effects", () => {
   assert.equal(rulesFor(oneFile("authority/model/good.ts", "export const fold = (value: number): number => value + 1;\n")).has("authority-purity"), false);
@@ -90,12 +157,14 @@ test("boundary entry accepts unknown decoder and rejects direct parse", () => {
 test("old and new implementation trees are isolated", () => {
   assert.equal(rulesFor(oneFile("runtime/dispatcher/good.ts", "import type { Command } from '../../authority/protocol/command.capsule.js'; export type Value = Command;\n")).has("old-new-isolation"), false);
   assert.equal(rulesFor(oneFile("runtime/dispatcher/bad.ts", "import { old } from '../../../../src/old.js'; old();\n")).has("old-new-isolation"), true);
+  assert.equal(checkLegacyReferenceText("../package.json", "{ \"main\": \"dist/index.js\" }").length, 0);
+  assert.equal(checkLegacyReferenceText("../package.json", "{ \"main\": \"next/apps/worker.js\" }").length, 1);
 });
 
 test("suppression scanner accepts strict source and rejects every escape hatch", () => {
   assert.equal(scanSuppressionText("good.ts", "const value = { key: 1 } as const;\n").length, 0);
-  const bad = scanSuppressionText("bad.ts", "// @ts-ignore\nconst x: any = value as string;\nconst y = x!;\n");
-  assert.deepEqual(new Set(bad.map((finding) => finding.kind)), new Set(["ts-ignore", "any", "as-cast", "non-null"]));
+  const bad = scanSuppressionText("bad.ts", "// @ts-ignore\n// @ts-expect-error\nconst x: any = value as string;\nconst y = x!;\n");
+  assert.deepEqual(new Set(bad.map((finding) => finding.kind)), new Set(["ts-ignore", "ts-expect-error", "any", "as-cast", "non-null"]));
 });
 
 test("fingerprints accept exact baseline and reject changes without amendment", () => {
@@ -167,10 +236,25 @@ test("hygiene accepts finished files and rejects unfinished-work markers", () =>
   assert.equal(markerRule.test(`${unfinishedWord} repair later`), true);
 });
 
-test("negative compilation fixtures all fire", () => {
+test("payload shape gate accepts contracts and rejects open bags", () => {
+  assert.equal(checkPayloadShapes(nextRoot).length, 0);
+  const forbidden = /Record\s*<\s*string\s*,\s*unknown\s*>/;
+  assert.equal(forbidden.test("type Explicit = { readonly value: string }"), false);
+  assert.equal(forbidden.test("type Open = Record<string, unknown>"), true);
+});
+
+test("negative compilation fixtures all fire for their intended reason", () => {
   const results = runNegativeCompileFixtures(join(policyRoot, "fixtures"));
-  assert.equal(results.length >= 3, true);
+  const expectedCodes = new Map([
+    ["accepted-batch.compile-fail.ts", 2741],
+    ["evidence-envelope.compile-fail.ts", 2741],
+    ["exhaustiveness.compile-fail.ts", 1360],
+    ["third-terminal.compile-fail.ts", 2322],
+  ]);
+  assert.equal(results.length, expectedCodes.size);
   for (const result of results) {
     assert.equal(result.failedAsRequired, true, result.path);
+    const name = result.path.slice(result.path.lastIndexOf("/") + 1);
+    assert.deepEqual(result.diagnosticCodes, [expectedCodes.get(name)], result.path);
   }
 });

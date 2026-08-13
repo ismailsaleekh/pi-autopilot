@@ -5,6 +5,7 @@ import * as ts from "typescript";
 export type SuppressionKind =
   | "any"
   | "ts-ignore"
+  | "ts-expect-error"
   | "ts-nocheck"
   | "as-cast"
   | "type-assertion"
@@ -68,6 +69,14 @@ export function scanSuppressionText(path: string, text: string): readonly Suppre
         path,
         line: index + 1,
         detail: "@ts-ignore is forbidden",
+      }));
+    }
+    if (/^\s*\/\/[\/]?\s*@ts-expect-error\b|\/\*\s*@ts-expect-error\b/.test(line)) {
+      output.push(Object.freeze({
+        kind: "ts-expect-error",
+        path,
+        line: index + 1,
+        detail: "@ts-expect-error is forbidden",
       }));
     }
     if (/^\s*\/\/[\/]?\s*@ts-nocheck\b|\/\*\s*@ts-nocheck\b/.test(line)) {
