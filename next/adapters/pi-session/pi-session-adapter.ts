@@ -9,7 +9,7 @@ import {
   durableChildDescriptorVersion,
   encodeDurableChildDescriptor,
 } from "../../ports/contracts/child.capsule.js";
-import type { ChildIntent, ChildObservation, LaunchChildSession, VerifyPiRoute } from "../../ports/contracts/child.capsule.js";
+import type { ChildArtifactReference, ChildIntent, ChildObservation, LaunchChildSession, VerifyPiRoute } from "../../ports/contracts/child.capsule.js";
 import type {
   PiDurableChildDescriptor,
   PiProcessExecutor,
@@ -195,15 +195,23 @@ export class PiSessionAdapter<Handle> {
     const session = Object.freeze({ process, sessionFile: null, sessionId: id, sessionFiles: Object.freeze([]) });
     return execution(Object.freeze({ actionId: intent.actionId, kind: "child-session-launched", result: Object.freeze({ kind: "ok", value: Object.freeze({ childEpoch: intent.preconditions.childEpoch, childId: id, process, processDescriptor: descriptor, session, workspaceId: intent.inputs.workspaceId }) }), runId: intent.runId }), Object.freeze({ ...physical(intent.preconditions.childEpoch, id), process: started.observation, sessionDirectory: bound.sessionDirectory, sessionId: id }));
   }
-  private async loadDescriptor(intent: Extract<ChildIntent, { kind: "inspect-child-session" | "fence-child-session" }>): Promise<PiDurableChildDescriptor | null> {
+  private async descriptorFromReference(reference: ChildArtifactReference): Promise<PiDurableChildDescriptor | null> {
     const codec = durableChildDescriptorCodec();
     const codecVersion = durableChildDescriptorVersion();
     const path = durableChildDescriptorPath();
-    const reference = intent.inputs.processDescriptor;
     if (codec === null || codecVersion === null || path === null || reference.codec !== codec || reference.codecVersion !== codecVersion || reference.path !== path || String(reference.digest) !== String(reference.blob) || Number(reference.byteLength) > MAX_DESCRIPTOR_BYTES) return null;
     let loaded;
     try { loaded = await this.artifacts.read(reference, MAX_DESCRIPTOR_BYTES); } catch { loaded = Object.freeze({ kind: "error" as const }); }
-    const descriptor = loaded.kind === "read" ? decodeDurableChildDescriptor(loaded.bytes) : null;
+    return loaded.kind === "read" ? decodeDurableChildDescriptor(loaded.bytes) : null;
+  }
+  public async isActive(reference: ChildArtifactReference, childIdInput: string, childEpochInput: string, runIdInput: string): Promise<boolean> {
+    const descriptor = await this.descriptorFromReference(reference);
+    if (descriptor === null || descriptor.childId !== childIdInput || descriptor.childEpoch !== childEpochInput || descriptor.runId !== runIdInput) return false;
+    const observed = this.processes.observeDescriptor(descriptor.process);
+    return observed.kind === "running";
+  }
+  private async loadDescriptor(intent: Extract<ChildIntent, { kind: "inspect-child-session" | "fence-child-session" }>): Promise<PiDurableChildDescriptor | null> {
+    const descriptor = await this.descriptorFromReference(intent.inputs.processDescriptor);
     return descriptor !== null
       && descriptor.childId === intent.inputs.childId
       && descriptor.childEpoch === intent.preconditions.childEpoch

@@ -26,7 +26,12 @@ export type SecretLeaseUseResult =
   | { readonly diagnostic: SecretsDiagnostic; readonly kind: "rejected" };
 
 export interface SecretChildLookup {
-  readonly isActive: (childId: string, childEpoch: string) => boolean;
+  readonly isActive: (
+    childId: string,
+    childEpoch: string,
+    processDescriptor: Extract<SecretsIntent, { readonly kind: "authorize-secret-use" }>["preconditions"]["processDescriptor"],
+    runId: string,
+  ) => boolean | Promise<boolean>;
 }
 
 interface LeaseRecord {
@@ -34,7 +39,9 @@ interface LeaseRecord {
   readonly childId: string;
   readonly destination: Extract<SecretsIntent, { readonly kind: "authorize-secret-use" }>['inputs']['destination'];
   readonly leaseId: string;
+  readonly processDescriptor: Extract<SecretsIntent, { readonly kind: "authorize-secret-use" }>["preconditions"]["processDescriptor"];
   readonly purposeId: string;
+  readonly runId: string;
   readonly secretHandle: string;
   revoked: boolean;
 }
@@ -162,12 +169,12 @@ export class SecretsAdapter {
     return Object.freeze({ handle, kind: "registered" });
   }
 
-  public execute(input: unknown): SecretsExecution {
+  public async execute(input: unknown): Promise<SecretsExecution> {
     const decoded = safeIntent(input);
     if (decoded.kind === "error") {
       return Object.freeze({ diagnostic: decoded.diagnostic, kind: "rejected" });
     }
-    const candidate = this.#apply(decoded.value);
+    const candidate = await this.#apply(decoded.value);
     const observation = canonicalObservation(candidate);
     return observation === null
       ? Object.freeze({
@@ -193,7 +200,7 @@ export class SecretsAdapter {
     let active = false;
     if (lease !== undefined) {
       try {
-        active = this.#childLookup.isActive(lease.childId, lease.childEpoch);
+        active = await this.#childLookup.isActive(lease.childId, lease.childEpoch, lease.processDescriptor, lease.runId);
       } catch {
         active = false;
       }
@@ -215,12 +222,12 @@ export class SecretsAdapter {
     return Object.freeze({ kind: "used", leaseId: lease.leaseId, secretHandle: lease.secretHandle });
   }
 
-  #apply(intent: SecretsIntent): unknown {
+  async #apply(intent: SecretsIntent): Promise<unknown> {
     switch (intent.kind) {
       case "authorize-secret-use": {
         let active = false;
         try {
-          active = this.#childLookup.isActive(intent.inputs.childId, intent.preconditions.childEpoch);
+          active = await this.#childLookup.isActive(intent.inputs.childId, intent.preconditions.childEpoch, intent.preconditions.processDescriptor, intent.runId);
         } catch {
           active = false;
         }
@@ -243,8 +250,10 @@ export class SecretsAdapter {
             childId: intent.inputs.childId,
             destination: intent.inputs.destination,
             leaseId: id,
+            processDescriptor: intent.preconditions.processDescriptor,
             purposeId: intent.inputs.purposeId,
             revoked: false,
+            runId: intent.runId,
             secretHandle: intent.inputs.secretHandle,
           });
         }
@@ -268,7 +277,8 @@ export class SecretsAdapter {
         if (
           prior !== undefined
           && (prior.secretHandle !== intent.inputs.secretHandle
-            || prior.childEpoch !== intent.preconditions.childEpoch)
+            || prior.childEpoch !== intent.preconditions.childEpoch
+            || prior.processDescriptor.digest !== intent.preconditions.processDescriptor.digest)
         ) {
           return Object.freeze({
             actionId: intent.actionId,

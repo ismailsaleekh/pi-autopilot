@@ -1,5 +1,6 @@
 import {
   actionIdSchema,
+  artifactRefSchema,
   childEpochSchema,
   childIdSchema,
   digestSchema,
@@ -35,6 +36,7 @@ export const authorizeSecretUseSchema = object({
   preconditions: object({
     childEpoch: childEpochSchema,
     policyDigest: digestSchema,
+    processDescriptor: artifactRefSchema,
   }),
   runId: runIdSchema,
 });
@@ -46,7 +48,7 @@ export const revokeSecretUseSchema = object({
     secretHandle: secretHandleSchema,
   }),
   kind: literal("revoke-secret-use"),
-  preconditions: object({ childEpoch: childEpochSchema }),
+  preconditions: object({ childEpoch: childEpochSchema, processDescriptor: artifactRefSchema }),
   runId: runIdSchema,
 });
 
