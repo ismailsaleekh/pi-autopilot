@@ -1,5 +1,8 @@
 import type {
+  ArtifactPath,
+  ArtifactRef,
   ArtifactRoot,
+  KindId,
   Digest,
 } from "../../authority/protocol/identifiers.js";
 
@@ -136,4 +139,51 @@ export type WalkTreeResult =
 
 export type MaterializeTreeResult =
   | { readonly kind: "materialized"; readonly destination: string }
+  | { readonly kind: "error"; readonly error: CasError };
+
+export type CanonicalTreeSourceEntry =
+  | {
+      readonly kind: "file";
+      readonly path: string;
+      readonly mode: number;
+      readonly bytes: Uint8Array;
+    }
+  | {
+      readonly kind: "symlink";
+      readonly path: string;
+      readonly mode: number;
+      readonly target: string;
+    };
+
+export interface CanonicalArtifactInstallRequest {
+  readonly bytes: Uint8Array;
+  readonly codec: KindId;
+  readonly codecVersion: KindId;
+  readonly path: ArtifactPath;
+}
+
+export interface CanonicalArtifactInstaller {
+  readonly install: (request: CanonicalArtifactInstallRequest) => Promise<CanonicalArtifactInstallResult>;
+  readonly installTree: (entries: readonly CanonicalTreeSourceEntry[]) => Promise<CanonicalTreeInstallResult>;
+  readonly read: (reference: ArtifactRef, maxBytes: number) => Promise<CanonicalArtifactReadResult>;
+}
+
+export type CanonicalArtifactInstallResult =
+  | {
+      readonly kind: "installed";
+      readonly alreadyPresent: boolean;
+      readonly reference: ArtifactRef;
+    }
+  | { readonly kind: "error"; readonly error: CasError };
+
+export type CanonicalTreeInstallResult =
+  | {
+      readonly kind: "installed";
+      readonly alreadyPresent: boolean;
+      readonly root: ArtifactRoot;
+    }
+  | { readonly kind: "error"; readonly error: CasError };
+
+export type CanonicalArtifactReadResult =
+  | { readonly kind: "read"; readonly bytes: Uint8Array }
   | { readonly kind: "error"; readonly error: CasError };

@@ -25,10 +25,16 @@ import { constants } from "node:fs";
 import type { BigIntStats } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
+import {
+  artifactRefSchema,
+  casBlobIdSchema,
+} from "../../authority/protocol/identifiers.js";
 import type {
+  ArtifactRef,
   ArtifactRoot,
   Digest,
 } from "../../authority/protocol/identifiers.js";
+import { defineCapsule, digestBytes } from "../../authority/protocol/schema.js";
 import { casError, casIoError, casSystemCode } from "./errors.js";
 import {
   CAS_U64_MAX,
@@ -48,6 +54,12 @@ import {
 import type {
   BlobByteRange,
   BlobRef,
+  CanonicalArtifactInstallRequest,
+  CanonicalArtifactInstallResult,
+  CanonicalArtifactInstaller,
+  CanonicalArtifactReadResult,
+  CanonicalTreeInstallResult,
+  CanonicalTreeSourceEntry,
   CaptureTreeResult,
   CasByteStream,
   CasDurabilityEvent,
@@ -67,6 +79,12 @@ import type {
 export type {
   BlobByteRange,
   BlobRef,
+  CanonicalArtifactInstallRequest,
+  CanonicalArtifactInstallResult,
+  CanonicalArtifactInstaller,
+  CanonicalArtifactReadResult,
+  CanonicalTreeInstallResult,
+  CanonicalTreeSourceEntry,
   CaptureTreeResult,
   CasByteStream,
   CasDurabilityEvent,
@@ -92,6 +110,8 @@ export { CAS_U64_WIDTH, TREE_MANIFEST_MAGIC } from "./manifest.js";
 const IO_CHUNK_BYTES = 64 * 1024;
 const MAX_WALK_PAGE_SIZE = 1024;
 const MAX_TREE_ENTRY_PAYLOAD_BYTES = 1024 * 1024;
+const canonicalArtifactRefCapsule = defineCapsule("CasCanonicalArtifactRef", artifactRefSchema);
+const canonicalBlobIdCapsule = defineCapsule("CasCanonicalBlobId", casBlobIdSchema);
 
 interface StoreState {
   readonly root: string;
@@ -926,6 +946,63 @@ async function collectTree(state: StoreState, sourceDir: string): Promise<Collec
   }
 }
 
+async function* bytesChunks(bytes: Uint8Array): AsyncGenerator<Uint8Array> {
+  yield bytes.slice();
+}
+
+async function installCanonicalTreeEntries(
+  store: ContentAddressedStore,
+  entries: readonly CanonicalTreeSourceEntry[],
+): Promise<CanonicalTreeInstallResult> {
+  const lookup = lookupStore(store);
+  if (lookup.kind === "error") {
+    return lookup;
+  }
+  const manifestEntries: TreeEntry[] = [Object.freeze({ kind: "directory", mode: 0o700, path: "" })];
+  const directories = new Set<string>();
+  let alreadyPresent = true;
+  for (const entry of entries) {
+    if (!validManifestPath(entry.path, false) || !Number.isSafeInteger(entry.mode) || entry.mode < 0 || entry.mode > 0o7777) {
+      return Object.freeze({ kind: "error", error: casError("invalid-argument", "feedback", "install-canonical-tree", "canonical tree entry has an invalid path or mode") });
+    }
+    const parts = entry.path.split("/");
+    for (let index = 1; index < parts.length; index += 1) {
+      directories.add(parts.slice(0, index).join("/"));
+    }
+    if (entry.kind === "file") {
+      const installed = await installObject(lookup.state, "blob", bytesChunks(entry.bytes));
+      if (installed.kind === "error") {
+        return installed;
+      }
+      alreadyPresent = alreadyPresent && installed.alreadyPresent;
+      const ref = blobRef(installed.digest, installed.byteLength);
+      if (ref === null) {
+        return Object.freeze({ kind: "error", error: casError("invalid-argument", "feedback", "install-canonical-tree", "canonical file exceeds the CAS byte-length domain") });
+      }
+      manifestEntries.push(Object.freeze({ blob: ref, kind: "file", mode: entry.mode, path: entry.path }));
+    } else {
+      manifestEntries.push(Object.freeze({ kind: "symlink", mode: entry.mode, path: entry.path, target: entry.target }));
+    }
+  }
+  for (const path of directories) {
+    manifestEntries.push(Object.freeze({ kind: "directory", mode: 0o700, path }));
+  }
+  manifestEntries.sort((left, right) => compareManifestPaths(left.path, right.path));
+  for (let index = 1; index < manifestEntries.length; index += 1) {
+    if (manifestEntries[index - 1]?.path === manifestEntries[index]?.path) {
+      return Object.freeze({ kind: "error", error: casError("invalid-argument", "feedback", "install-canonical-tree", "canonical tree paths must be unique") });
+    }
+  }
+  const installed = await installObject(lookup.state, "tree", manifestChunks(manifestEntries));
+  if (installed.kind === "error") {
+    return installed;
+  }
+  const root = parseArtifactRoot(String(installed.digest));
+  return root === null
+    ? Object.freeze({ kind: "error", error: casError("manifest-corrupt", "fatal", "install-canonical-tree", "tree digest could not be decoded as an ArtifactRoot") })
+    : Object.freeze({ alreadyPresent: alreadyPresent && installed.alreadyPresent, kind: "installed", root });
+}
+
 async function* manifestChunks(entries: readonly TreeEntry[]): AsyncGenerator<Uint8Array> {
   yield TREE_MANIFEST_MAGIC;
   let previous: string | null = null;
@@ -1015,6 +1092,118 @@ export async function captureTree(
       ),
     });
   }
+}
+
+/** Installs exact caller-owned bytes as a deterministic CAS tree without a filesystem staging path. */
+export async function installCanonicalTree(
+  store: ContentAddressedStore,
+  entries: readonly CanonicalTreeSourceEntry[],
+): Promise<CanonicalTreeInstallResult> {
+  try {
+    if (!Array.isArray(entries)) {
+      return Object.freeze({ kind: "error", error: casError("invalid-argument", "feedback", "install-canonical-tree", "entries must be a bounded array") });
+    }
+    return await installCanonicalTreeEntries(store, entries);
+  } catch (error: unknown) {
+    return Object.freeze({ kind: "error", error: casIoError("install-canonical-tree", store.root, error) });
+  }
+}
+
+/** Canonical bytes become a real blob and containing tree before an ArtifactRef is returned. */
+export async function installCanonicalArtifact(
+  store: ContentAddressedStore,
+  request: CanonicalArtifactInstallRequest,
+): Promise<CanonicalArtifactInstallResult> {
+  try {
+    if (!(request.bytes instanceof Uint8Array)) {
+      return Object.freeze({ kind: "error", error: casError("invalid-argument", "feedback", "install-canonical-artifact", "artifact bytes must be Uint8Array") });
+    }
+    const bytes = request.bytes.slice();
+    const digest = digestBytes(bytes);
+    const blob = canonicalBlobIdCapsule.decode(String(digest));
+    if (blob.kind !== "ok") {
+      return Object.freeze({ kind: "error", error: casError("invalid-argument", "fatal", "install-canonical-artifact", "canonical digest is not a CAS blob identity") });
+    }
+    const installed = await installCanonicalTreeEntries(store, Object.freeze([
+      Object.freeze({ bytes, kind: "file", mode: 0o600, path: request.path }),
+    ]));
+    if (installed.kind === "error") {
+      return installed;
+    }
+    const decoded = canonicalArtifactRefCapsule.decode(Object.freeze({
+      blob: blob.value,
+      byteLength: String(bytes.byteLength),
+      codec: request.codec,
+      codecVersion: request.codecVersion,
+      digest,
+      path: request.path,
+      range: null,
+      root: installed.root,
+    }));
+    return decoded.kind === "ok"
+      ? Object.freeze({ alreadyPresent: installed.alreadyPresent, kind: "installed", reference: decoded.value })
+      : Object.freeze({ kind: "error", error: casError("manifest-corrupt", "fatal", "install-canonical-artifact", decoded.error.diagnostic) });
+  } catch (error: unknown) {
+    return Object.freeze({ kind: "error", error: casIoError("install-canonical-artifact", store.root, error) });
+  }
+}
+
+/** Reads and re-derives the deterministic containing tree, rejecting fabricated references. */
+export async function readCanonicalArtifact(
+  store: ContentAddressedStore,
+  reference: ArtifactRef,
+  maxBytes: number,
+): Promise<CanonicalArtifactReadResult> {
+  try {
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || reference.range !== null) {
+      return Object.freeze({ kind: "error", error: casError("invalid-argument", "feedback", "read-canonical-artifact", "full artifact read requires a nonnegative safe bound and null range") });
+    }
+    const length = Number(reference.byteLength);
+    const digest = parseDigest(String(reference.blob));
+    if (!Number.isSafeInteger(length) || length < 0 || length > maxBytes || digest === null || String(digest) !== String(reference.digest)) {
+      return Object.freeze({ kind: "error", error: casError("invalid-argument", "feedback", "read-canonical-artifact", "artifact identity or byte bound is invalid") });
+    }
+    const ready = await readBlob(store, Object.freeze({ byteLength: formatCasU64(BigInt(length)) ?? "", digest }), Object.freeze({ length, offset: 0 }));
+    if (ready.kind === "error") {
+      return ready;
+    }
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    for await (const chunk of ready.bytes) {
+      total += chunk.byteLength;
+      if (total > maxBytes) {
+        await ready.bytes.close();
+        return Object.freeze({ kind: "error", error: casError("invalid-argument", "feedback", "read-canonical-artifact", "artifact exceeded its declared read bound") });
+      }
+      chunks.push(chunk.slice());
+    }
+    const completion = await ready.bytes.completion;
+    if (completion.kind === "error") {
+      return completion;
+    }
+    const bytes = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)), total);
+    if (String(digestBytes(bytes)) !== String(reference.digest)) {
+      return Object.freeze({ kind: "error", error: casError("blob-corrupt", "fatal", "read-canonical-artifact", "artifact bytes differ from the declared digest") });
+    }
+    const installed = await installCanonicalArtifact(store, Object.freeze({ bytes, codec: reference.codec, codecVersion: reference.codecVersion, path: reference.path }));
+    if (installed.kind === "error") {
+      return installed;
+    }
+    const expected = canonicalArtifactRefCapsule.digest(reference);
+    return canonicalArtifactRefCapsule.digest(installed.reference) === expected
+      ? Object.freeze({ bytes: Uint8Array.from(bytes), kind: "read" })
+      : Object.freeze({ kind: "error", error: casError("manifest-corrupt", "fatal", "read-canonical-artifact", "artifact containing tree or metadata was fabricated") });
+  } catch (error: unknown) {
+    return Object.freeze({ kind: "error", error: casIoError("read-canonical-artifact", store.root, error) });
+  }
+}
+
+export function canonicalArtifactInstaller(store: ContentAddressedStore): CanonicalArtifactInstaller {
+  return Object.freeze({
+    install: (request: CanonicalArtifactInstallRequest) => installCanonicalArtifact(store, request),
+    installTree: (entries: readonly CanonicalTreeSourceEntry[]) => installCanonicalTree(store, entries),
+    read: (reference: ArtifactRef, maxBytes: number) => readCanonicalArtifact(store, reference, maxBytes),
+  });
 }
 
 function safeArtifactRoot(value: unknown): ArtifactRoot | null {
