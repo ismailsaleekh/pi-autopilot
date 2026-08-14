@@ -5,7 +5,7 @@ import { domainFactCapsule } from "../protocol/domain-fact.capsule.js";
 import type { DomainFact } from "../protocol/domain-fact.capsule.js";
 import { findingCapsule } from "../protocol/finding.capsule.js";
 import type { Finding } from "../protocol/finding.capsule.js";
-import { zeroDecimalNatural } from "../protocol/identifiers.js";
+import { incrementDecimalNatural, zeroDecimalNatural } from "../protocol/identifiers.js";
 import type { ArtifactRoot, WorkItemId } from "../protocol/identifiers.js";
 import type {
   BoundaryRequestReceived,
@@ -223,6 +223,7 @@ function correctionFact(
     scope,
     subjectRoot: finding.subjectRoot,
     taskRoot: state.identity.taskSnapshot,
+    topologicalRank: incrementDecimalNatural(owner.value.workItem.topologicalRank),
     workItemId: correctionWorkId,
     workspaceCapability: owner.value.workItem.workspaceCapability,
     workspaceId: owner.value.workItem.workspaceId,
