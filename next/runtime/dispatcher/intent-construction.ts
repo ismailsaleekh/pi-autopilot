@@ -165,8 +165,13 @@ export function inspectChildIntent(command: InspectChild): BoundaryResult<Inspec
 
 export function evidenceIntent(command: ExecuteEvidence): BoundaryResult<ExecuteEvidenceCommand> {
   return normalize(childIntentCapsule, envelope(command, "execute-evidence-command", {
+    attemptId: command.attemptId,
     candidateTree: command.candidateTree,
     commandSpec: command.commandSpec,
+    cwd: command.cwd,
+    environment: command.environment,
+    evidenceClass: command.evidenceClass,
+    kindId: command.kindId,
     ruleId: command.ruleId,
     workItemId: command.workItemId,
     workspaceCapability: command.workspaceCapability,

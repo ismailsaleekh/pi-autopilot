@@ -11,7 +11,7 @@ import type { RunState } from "../../authority/model/run-state.js";
 
 const scenarioActionCapsule = defineCapsule("TestScenarioActionId", actionIdSchema);
 
-function actionIdFor(runId: string, seed: number) {
+export function actionIdFor(runId: string, seed: number) {
   const digest = canonicalDigestUnknown(Object.freeze({ domain: "pi-autopilot.test-scenario", runId, seed }));
   const decoded = scenarioActionCapsule.decode(`action:sha256:${digest.slice(7)}`);
   if (decoded.kind !== "ok") throw new Error(decoded.error.diagnostic);

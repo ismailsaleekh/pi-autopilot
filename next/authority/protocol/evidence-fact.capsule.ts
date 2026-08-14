@@ -49,7 +49,7 @@ export const evidenceEnvelopeSchema = object({
 });
 
 type DerivedEvidenceEnvelope = Infer<typeof evidenceEnvelopeSchema>;
-declare const evidenceEnvelopeCapability: unique symbol;
+const evidenceEnvelopeCapability: unique symbol = Symbol("pi-autopilot.evidence-envelope-capability");
 
 export interface EvidenceEnvelope extends DerivedEvidenceEnvelope {
   readonly [evidenceEnvelopeCapability]: true;

@@ -1,3 +1,4 @@
+import { evidenceClassSchema } from "./evidence-fact.capsule.js";
 import { expectedRefStateSchema, gitTreeCasAttestationSchema } from "./git-values.js";
 import {
   actionIdSchema,
@@ -14,6 +15,7 @@ import {
   gitCommitIdSchema,
   gitRefSchema,
   gitTreeIdSchema,
+  kindIdSchema,
   leaseIdSchema,
   planRootIdSchema,
   publicationIdSchema,
@@ -25,6 +27,7 @@ import {
   workItemIdSchema,
   workspaceCapabilitySchema,
   workspaceIdSchema,
+  workspaceRelativePathSchema,
 } from "./identifiers.js";
 import { childMemorySeedSchema, subscriptionRouteSchema } from "./route.capsule.js";
 import {
@@ -118,10 +121,15 @@ export const inspectChildSchema = object({
 
 export const executeEvidenceSchema = object({
   ...commandEnvelope,
+  attemptId: attemptIdSchema,
   candidateTree: artifactRootSchema,
   commandSpec: artifactRefSchema,
+  cwd: workspaceRelativePathSchema,
   deadlineTick: decimalNaturalSchema,
+  environment: artifactRefSchema,
+  evidenceClass: evidenceClassSchema,
   kind: literal("execute-evidence"),
+  kindId: kindIdSchema,
   ruleId: ruleIdSchema,
   workItemId: workItemIdSchema,
   workspaceCapability: workspaceCapabilitySchema,

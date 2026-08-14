@@ -2,8 +2,12 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { inspect } from "node:util";
 import test from "node:test";
+import { commandActionId, commandCapsule, commandIdentity } from "../../authority/protocol/command.capsule.js";
+import { evidenceEnvelopeDigest } from "../../authority/protocol/evidence-fact.capsule.js";
 import type { ArtifactRef } from "../../authority/protocol/identifiers.js";
+import { journalRecordCapsule } from "../../authority/protocol/journal-record.capsule.js";
 import type { Stimulus } from "../../authority/protocol/stimulus.capsule.js";
 import { stimulusCapsule } from "../../authority/protocol/stimulus.capsule.js";
 import { canonicalArtifactInstaller, openCas } from "../../storage/cas/index.js";
@@ -16,6 +20,7 @@ import { canonicalRuntimeArtifactRecorder, dispatchCommittedCommands } from "../
 import type { DispatcherDependencies, RuntimeArtifactRecorder } from "../../runtime/dispatcher/index.js";
 import { sealSubmission } from "../../runtime/seal/index.js";
 import { nonemptyScenario } from "../scenario-harness/authority.js";
+import { PublicAuthorityScenario } from "../scenario-harness/full-run.js";
 import { SimLawDriver } from "../simulation/law-driver.js";
 
 function dispatcher(driver: SimLawDriver, artifacts: RuntimeArtifactRecorder): DispatcherDependencies {
@@ -124,6 +129,70 @@ test("public authority commands dispatch through closed port ingress with canoni
   }
 });
 
+test("dispatcher alone mints class-bound evidence from a committed command and physical receipt", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-autopilot-runtime-evidence-"));
+  try {
+    const openedCas = await openCas(join(root, "cas"));
+    assert.equal(openedCas.kind, "opened");
+    if (openedCas.kind !== "opened") return;
+    const scenario = new PublicAuthorityScenario(706);
+    const template = commandCapsule.arbitrary.validForKind("execute-evidence", 706);
+    assert.equal(template.kind, "execute-evidence");
+    if (template.kind !== "execute-evidence") return;
+    const candidateTree = scenario.install("dispatcher-evidence-tree", Object.freeze({ tree: true })).root;
+    const commandSpec = scenario.install("dispatcher-evidence-command", Object.freeze({ command: true })).reference;
+    const environment = scenario.install("dispatcher-evidence-environment", Object.freeze({ environment: true })).reference;
+    const intentInputs = Object.freeze({
+      attemptId: template.attemptId,
+      candidateTree,
+      commandSpec,
+      cwd: template.cwd,
+      environment,
+      evidenceClass: "final-verification",
+      kindId: template.kindId,
+      ruleId: template.ruleId,
+      workItemId: template.workItemId,
+      workspaceCapability: template.workspaceCapability,
+      workspaceId: template.workspaceId,
+    });
+    const intentPreconditions = Object.freeze({ deadlineTick: template.deadlineTick });
+    const actionId = commandActionId("child", scenario.genesis.runId, "execute-evidence-command", intentInputs, intentPreconditions);
+    const decoded = commandCapsule.decode(Object.freeze({
+      ...template,
+      actionId,
+      candidateTree,
+      commandId: commandIdentity("execute-evidence", actionId),
+      commandSpec,
+      environment,
+      evidenceClass: "final-verification",
+      runId: scenario.genesis.runId,
+    }));
+    assert.equal(decoded.kind, "ok");
+    if (decoded.kind !== "ok" || decoded.value.kind !== "execute-evidence") return;
+    const submitted: Stimulus[] = [];
+    const result = await dispatchCommittedCommands(
+      Object.freeze([decoded.value]),
+      dispatcher(new SimLawDriver(706), canonicalRuntimeArtifactRecorder(canonicalArtifactInstaller(openedCas.store))),
+      Object.freeze({ submit(stimulus: Stimulus) { submitted.push(stimulus); } }),
+    );
+    assert.equal(result.kind, "dispatched");
+    assert.equal(submitted.length, 1, inspect(result, { depth: 8 }));
+    const stimulus = submitted[0];
+    assert.equal(stimulus?.kind, "command-observation-received");
+    if (stimulus?.kind !== "command-observation-received" || stimulus.observationPayload.kind !== "evidence-observed-v2") return;
+    const evidence = stimulus.observationPayload.evidence;
+    assert.equal(evidence.envelope.class, "final-verification");
+    assert.equal(evidence.envelope.acceptedOutput, candidateTree);
+    assert.equal(evidence.envelope.tree, candidateTree);
+    assert.deepEqual(evidence.envelope.command, commandSpec);
+    assert.deepEqual(evidence.envelope.environment, environment);
+    assert.equal(evidence.envelope.workItemId, decoded.value.workItemId);
+    assert.equal(evidence.envelopeDigest, evidenceEnvelopeDigest(evidence.envelope));
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
 test("dispatcher rejects recorder references whose installed bytes cannot be read back exactly", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-autopilot-runtime-recorder-"));
   try {
@@ -162,9 +231,10 @@ test("commit loop installs command bytes before append, settles via public ingre
     const scenario = nonemptyScenario(801);
     const journalDir = join(root, "journal");
     const installer = canonicalArtifactInstaller(openedCas.store);
+    const lawDriver = new SimLawDriver(801);
     const dependencies: CommitLoopDependencies = Object.freeze({
       commands: canonicalCommandArtifactRepository(installer),
-      dispatcher: dispatcher(new SimLawDriver(801), canonicalRuntimeArtifactRecorder(installer)),
+      dispatcher: dispatcher(lawDriver, canonicalRuntimeArtifactRecorder(installer)),
       journalOptions: undefined,
     });
     const opened = await openCommitLoop(Object.freeze({ genesis: scenario.genesis, journalDir }), dependencies);
@@ -178,8 +248,15 @@ test("commit loop installs command bytes before append, settles via public ingre
       assert.ok(accepted.record.kind === "decision-committed" && accepted.record.commands.length > 0);
       assert.equal(accepted.dispatch.kind, "dispatched");
     }
+    const effectsAfterFirst = lawDriver.world.trace.snapshot().filter((entry) => entry.category === "contract" && entry.name === "observation").length;
     const duplicate = await opened.loop.ingest(scenario.stimulus);
     assert.equal(duplicate.kind, "already-committed");
+    if (accepted.kind === "accepted" && duplicate.kind === "already-committed") {
+      assert.equal(journalRecordCapsule.digest(duplicate.record), journalRecordCapsule.digest(accepted.record));
+      assert.equal(duplicate.dispatch.kind, "dispatched");
+      if (duplicate.dispatch.kind === "dispatched") assert.equal(duplicate.dispatch.reports.length, 0);
+    }
+    assert.equal(lawDriver.world.trace.snapshot().filter((entry) => entry.category === "contract" && entry.name === "observation").length, effectsAfterFirst);
     await opened.loop.close();
 
     const kinds = await journalKinds(journalDir);
@@ -193,6 +270,8 @@ test("commit loop installs command bytes before append, settles via public ingre
       assert.equal(restarted.reconciliation.kind, "dispatched");
       const replayDuplicate = await restarted.loop.ingest(scenario.stimulus);
       assert.equal(replayDuplicate.kind, "already-committed");
+      if (accepted.kind === "accepted" && replayDuplicate.kind === "already-committed") assert.equal(journalRecordCapsule.digest(replayDuplicate.record), journalRecordCapsule.digest(accepted.record));
+      assert.equal(lawDriver.world.trace.snapshot().filter((entry) => entry.category === "contract" && entry.name === "observation").length, effectsAfterFirst);
       await restarted.loop.close();
     }
   } finally {

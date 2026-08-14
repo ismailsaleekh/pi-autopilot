@@ -1,4 +1,5 @@
 import type { Command } from "../../authority/protocol/command.capsule.js";
+import { evidenceEnvelopeDigest } from "../../authority/protocol/evidence-fact.capsule.js";
 import type {
   ActionId,
   ArtifactRef,
@@ -43,6 +44,7 @@ import {
   validationIntent,
   verifyChildRouteIntent,
 } from "./intent-construction.js";
+import { makeEvidenceEnvelope } from "./evidence.js";
 import { defineCapsule, literal, object } from "../../authority/protocol/schema.js";
 import type { JsonValue } from "../../authority/protocol/schema.js";
 import { artifactPathSchema, artifactRefSchema, kindIdSchema, digestSchema } from "../../authority/protocol/identifiers.js";
@@ -308,7 +310,13 @@ function observationPayload(command: Command, observation: RuntimePortObservatio
       return Object.freeze({ kind: "clock-observed-v2", tick: observation.result.value.tick });
     case "sealed-object-installed":
       return Object.freeze({ artifact: observation.result.value.artifact, kind: "artifact-installed-v2" });
-    case "evidence-command-executed":
+    case "evidence-command-executed": {
+      if (command.kind !== "execute-evidence") return null;
+      const minted = makeEvidenceEnvelope(command, Object.freeze({ exit: observation.result.value.exit, output: observation.result.value.capture }));
+      return minted.kind === "minted"
+        ? Object.freeze({ kind: "evidence-observed-v2", evidence: Object.freeze({ kind: "evidence-fact", envelope: minted.transport, envelopeDigest: evidenceEnvelopeDigest(minted.transport) }) })
+        : null;
+    }
     case "validation-command-executed":
     case "attempt-isolation-applied":
     case "attempt-directory-disposed":

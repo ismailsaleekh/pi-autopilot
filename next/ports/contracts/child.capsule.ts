@@ -1,3 +1,4 @@
+import { evidenceClassSchema } from "../../authority/protocol/evidence-fact.capsule.js";
 import {
   actionIdSchema,
   artifactPathSchema,
@@ -19,6 +20,7 @@ import {
   workItemIdSchema,
   workspaceCapabilitySchema,
   workspaceIdSchema,
+  workspaceRelativePathSchema,
 } from "../../authority/protocol/identifiers.js";
 import {
   childMemorySeedSchema,
@@ -156,8 +158,13 @@ export const fenceChildSessionSchema = object({
 export const executeEvidenceCommandSchema = object({
   actionId: actionIdSchema,
   inputs: object({
+    attemptId: attemptIdSchema,
     candidateTree: artifactRootSchema,
     commandSpec: artifactRefSchema,
+    cwd: workspaceRelativePathSchema,
+    environment: artifactRefSchema,
+    evidenceClass: evidenceClassSchema,
+    kindId: kindIdSchema,
     ruleId: ruleIdSchema,
     workItemId: workItemIdSchema,
     workspaceCapability: workspaceCapabilitySchema,

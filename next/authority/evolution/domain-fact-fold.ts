@@ -426,7 +426,9 @@ function applySemanticFact(
           return rejected(state, "corrector-unavailable", "correction work must bind the current plan");
         }
         const expectedOwner = finding.kind === "integrity" || finding.kind === "definition-of-done"
-          ? finding.subjectWorkItemId ?? state.currentPlan.integrationOwnerWorkItemId
+          ? finding.subjectWorkItemId ?? (finding.subjectRoot === state.currentPlan.planRoot
+              ? state.currentPlan.planAuthorWorkItemId
+              : state.currentPlan.integrationOwnerWorkItemId)
           : state.currentPlan.planAuthorWorkItemId;
         if (fact.acceptance.correction.originalOwnerWorkItemId !== expectedOwner) {
           return rejected(state, "corrector-unavailable", "correction owner is not authority-derived from the current finding subject");
