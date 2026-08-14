@@ -32,7 +32,9 @@ export interface SecretChildLookup {
 interface LeaseRecord {
   readonly childEpoch: string;
   readonly childId: string;
+  readonly destination: Extract<SecretsIntent, { readonly kind: "authorize-secret-use" }>['inputs']['destination'];
   readonly leaseId: string;
+  readonly purposeId: string;
   readonly secretHandle: string;
   revoked: boolean;
 }
@@ -239,7 +241,9 @@ export class SecretsAdapter {
           this.#leases.set(id, {
             childEpoch: intent.preconditions.childEpoch,
             childId: intent.inputs.childId,
+            destination: intent.inputs.destination,
             leaseId: id,
+            purposeId: intent.inputs.purposeId,
             revoked: false,
             secretHandle: intent.inputs.secretHandle,
           });
@@ -250,8 +254,9 @@ export class SecretsAdapter {
           result: Object.freeze({
             kind: "ok",
             value: Object.freeze({
+              destination: intent.inputs.destination,
               leaseId: id,
-              policyDigest: intent.preconditions.policyDigest,
+              purposeId: intent.inputs.purposeId,
               secretHandle: intent.inputs.secretHandle,
             }),
           }),
