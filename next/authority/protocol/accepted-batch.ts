@@ -85,6 +85,26 @@ function expectedRecordKind(kind: PreparedCommitKind): JournalRecord["kind"] {
   }
 }
 
+export interface PreparedCommitTestHarness {
+  readonly prepareRecord: (record: JournalRecord) => PreparedCommitMintResult;
+}
+
+/** Test-only closure: validation uses the production mint but does not expose it as a general export. */
+export function preparedCommitTestHarness(): PreparedCommitTestHarness {
+  return Object.freeze({
+    prepareRecord(record: JournalRecord): PreparedCommitMintResult {
+      switch (record.kind) {
+        case "run-genesis": return mintPreparedCommit(Object.freeze({ kind: "prepared-genesis", record }));
+        case "decision-committed": return mintPreparedCommit(Object.freeze({ kind: "prepared-decision", record }));
+        case "command-settled": return mintPreparedCommit(Object.freeze({ kind: "prepared-command-settlement", record }));
+        case "run-suspended": return mintPreparedCommit(Object.freeze({ kind: "prepared-suspension", record }));
+        case "run-resumed": return mintPreparedCommit(Object.freeze({ kind: "prepared-resumption", record }));
+        case "outcome-committed": return mintPreparedCommit(Object.freeze({ kind: "prepared-outcome", record }));
+      }
+    },
+  });
+}
+
 /** Sole opaque mint edge; architecture policy permits calls only from facade. */
 export function isPreparedCommit(value: PreparedCommit): boolean {
   return value[preparedCommitCapability] === true;

@@ -10,6 +10,15 @@ import type {
   JournalDurabilityObserver,
 } from "../../../storage/journal/index.js";
 import { journalRecordCapsule } from "../../../authority/protocol/journal-record.capsule.js";
+import type { JournalRecord } from "../../../authority/protocol/journal-record.capsule.js";
+import { preparedCommitTestHarness } from "../../../authority/protocol/accepted-batch.js";
+
+const preparedCommits = preparedCommitTestHarness();
+function prepared(record: JournalRecord) {
+  const result = preparedCommits.prepareRecord(record);
+  if (result.kind !== "minted") throw new Error(result.error.diagnostic);
+  return result.commit;
+}
 
 function send(message: unknown): void {
   if (process.send !== undefined) {
@@ -75,7 +84,7 @@ async function killWindow(
   }
   if (appendAfterOpen) {
     const record = journalRecordCapsule.arbitrary.validForKind("run-genesis", seed);
-    const result = await appendCommittedBatch(opened.handle, record);
+    const result = await appendCommittedBatch(opened.handle, prepared(record));
     send(Object.freeze({ event: "result", kind: result.kind }));
   } else {
     send(Object.freeze({ event: "result", kind: "acquired" }));
@@ -96,7 +105,7 @@ async function contend(journalDir: string, seed: number): Promise<void> {
     return;
   }
   const record = journalRecordCapsule.arbitrary.validForKind("run-genesis", seed);
-  const appended = await appendCommittedBatch(opened.handle, record);
+  const appended = await appendCommittedBatch(opened.handle, prepared(record));
   await closeJournal(opened.handle);
   send(Object.freeze({
     event: "finished",
@@ -115,7 +124,7 @@ async function staleWriter(journalDir: string, seed: number): Promise<void> {
   send(Object.freeze({ event: "acquired", epoch: opened.handle.epoch }));
   await waitFor("append");
   const record = journalRecordCapsule.arbitrary.validForKind("run-genesis", seed);
-  const appended = await appendCommittedBatch(opened.handle, record);
+  const appended = await appendCommittedBatch(opened.handle, prepared(record));
   await closeJournal(opened.handle);
   send(Object.freeze({
     code: appended.kind === "rejected" ? appended.error.code : null,
