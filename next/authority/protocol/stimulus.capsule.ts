@@ -209,6 +209,9 @@ const commandObservationPayloadSchema = union([
     kind: literal("artifact-installed-v2"),
   }),
   object({
+    kind: literal("command-observed-v2"),
+  }),
+  object({
     diagnostic: diagnosticSchema,
     kind: literal("command-retry-v2"),
   }),

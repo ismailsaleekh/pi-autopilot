@@ -455,6 +455,7 @@ function observationFacts(state: RunState, stimulus: CommandObservationReceived)
     case "child-observed-v2":
     case "clock-observed-v2":
     case "artifact-installed-v2":
+    case "command-observed-v2":
     case "command-retry-v2":
       return proposed(EMPTY_FACTS);
   }

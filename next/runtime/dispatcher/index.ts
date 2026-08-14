@@ -45,7 +45,7 @@ import {
 } from "./intent-construction.js";
 import { defineCapsule, literal, object } from "../../authority/protocol/schema.js";
 import type { JsonValue } from "../../authority/protocol/schema.js";
-import { artifactRefSchema, diagnosticCode, digestSchema } from "../../authority/protocol/identifiers.js";
+import { artifactRefSchema, digestSchema } from "../../authority/protocol/identifiers.js";
 
 export type RuntimePortIntent = WorkspaceIntent | GitIntent | ChildIntent | StoreIntent | ClockIntent | SecretsIntent;
 
@@ -207,8 +207,6 @@ async function callPort(dependencies: DispatcherDependencies, bindingValue: Port
   return decoded.value;
 }
 
-const recordedObservationCode = diagnosticCode("runtime.observation-recorded");
-
 function observationPayload(command: Command, observation: RuntimePortObservation): CommandObservationPayload | null {
   if (observation.result.kind !== "ok") {
     return Object.freeze({ kind: "command-retry-v2", diagnostic: observation.result.diagnostic });
@@ -297,11 +295,7 @@ function observationPayload(command: Command, observation: RuntimePortObservatio
     case "object-presence-observed":
     case "secret-use-authorized":
     case "secret-use-revoked":
-      return recordedObservationCode === null ? null : Object.freeze({ kind: "command-retry-v2", diagnostic: Object.freeze({
-        code: recordedObservationCode,
-        message: "physical observation has no direct semantic consequence",
-        related: Object.freeze([]),
-      }) });
+      return Object.freeze({ kind: "command-observed-v2" });
   }
 }
 
