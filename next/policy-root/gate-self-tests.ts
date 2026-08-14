@@ -236,21 +236,21 @@ test("constructor capabilities accept owners and reject outsiders", () => {
   assert.equal(outsider.has("constructor-capabilities"), true);
   const evidence = rulesFor(oneFile("apps/worker/bad.ts", "import type { EvidenceEnvelope } from '../../authority/protocol/evidence-fact.capsule.js'; const value: EvidenceEnvelope = { actionId: 'x' }; void value;\n"));
   assert.equal(evidence.has("constructor-capabilities"), true);
-  const batch = rulesFor(oneFile("runtime/commit-loop/bad.ts", "interface AcceptedBatch { readonly value: string } const batch: AcceptedBatch = { value: 'x' }; void batch;\n"));
+  const batch = rulesFor(oneFile("runtime/commit-loop/bad.ts", "interface PreparedCommit { readonly value: string } const batch: PreparedCommit = { value: 'x' }; void batch;\n"));
   assert.equal(batch.has("constructor-capabilities"), true);
   const typeConsumer = rulesFor(oneFile(
     "runtime/commit-loop/good.ts",
-    "import type { AcceptedBatch } from '../../authority/protocol/accepted-batch.js'; export type Input = AcceptedBatch;\n",
+    "import type { PreparedCommit } from '../../authority/protocol/accepted-batch.js'; export type Input = PreparedCommit;\n",
   ));
   assert.equal(typeConsumer.has("constructor-capabilities"), false);
   const aliasedMint = rulesFor(oneFile(
     "apps/worker/bad-mint.ts",
-    "import { mintAcceptedBatch as bypass } from '../../authority/protocol/accepted-batch.js'; void bypass;\n",
+    "import { mintPreparedCommit as bypass } from '../../authority/protocol/accepted-batch.js'; void bypass;\n",
   ));
   assert.equal(aliasedMint.has("constructor-capabilities"), true);
   const facadeMint = rulesFor(oneFile(
     "authority/facade/good.ts",
-    "import { mintAcceptedBatch } from '../protocol/accepted-batch.js'; void mintAcceptedBatch;\n",
+    "import { mintPreparedCommit } from '../protocol/accepted-batch.js'; void mintPreparedCommit;\n",
   ));
   assert.equal(facadeMint.has("constructor-capabilities"), false);
 });

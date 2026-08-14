@@ -928,7 +928,7 @@ function checkConstructorCapabilities(units: readonly SourceUnit[]): readonly Ar
         ));
       }
       if (
-        typeText.includes("AcceptedBatch")
+        typeText.includes("PreparedCommit")
         && !unit.path.startsWith("authority/facade/")
         && unit.path !== "authority/protocol/accepted-batch.ts"
       ) {
@@ -936,7 +936,7 @@ function checkConstructorCapabilities(units: readonly SourceUnit[]): readonly Ar
           "constructor-capabilities",
           unit,
           node,
-          "AcceptedBatch values may be constructed only in authority/facade",
+          "PreparedCommit values may be constructed only in authority/facade",
         ));
       }
       if (
@@ -974,14 +974,14 @@ function checkConstructorCapabilities(units: readonly SourceUnit[]): readonly Ar
         ));
       }
       if (
-        (name === "makeAcceptedBatch" || name === "mintAcceptedBatch")
+        (name === "mintPreparedCommit" || name === "preparedCommitTestHarness")
         && !unit.path.startsWith("authority/facade/")
       ) {
         output.push(finding(
           "constructor-capabilities",
           unit,
           node,
-          "AcceptedBatch constructor capability is owned by authority/facade",
+          "PreparedCommit constructor capability is owned by authority/facade",
         ));
       }
     });
