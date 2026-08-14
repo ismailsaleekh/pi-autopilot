@@ -1109,7 +1109,7 @@ export async function installCanonicalTree(
   }
 }
 
-/** Canonical bytes become a real blob and containing tree before an ArtifactRef is returned. */
+/** Canonical bytes become a real immutable CAS blob before an ArtifactRef is returned. */
 export async function installCanonicalArtifact(
   store: ContentAddressedStore,
   request: CanonicalArtifactInstallRequest,
@@ -1124,11 +1124,13 @@ export async function installCanonicalArtifact(
     if (blob.kind !== "ok") {
       return Object.freeze({ kind: "error", error: casError("invalid-argument", "fatal", "install-canonical-artifact", "canonical digest is not a CAS blob identity") });
     }
-    const installed = await installCanonicalTreeEntries(store, Object.freeze([
-      Object.freeze({ bytes, kind: "file", mode: 0o600, path: request.path }),
-    ]));
-    if (installed.kind === "error") {
-      return installed;
+    const lookup = lookupStore(store);
+    if (lookup.kind === "error") return lookup;
+    const installed = await installObject(lookup.state, "blob", bytesChunks(bytes));
+    if (installed.kind === "error") return installed;
+    const root = parseArtifactRoot(String(installed.digest));
+    if (root === null || installed.digest !== digest) {
+      return Object.freeze({ kind: "error", error: casError("manifest-corrupt", "fatal", "install-canonical-artifact", "installed blob digest could not bind the artifact root") });
     }
     const decoded = canonicalArtifactRefCapsule.decode(Object.freeze({
       blob: blob.value,
@@ -1138,7 +1140,7 @@ export async function installCanonicalArtifact(
       digest,
       path: request.path,
       range: null,
-      root: installed.root,
+      root,
     }));
     return decoded.kind === "ok"
       ? Object.freeze({ alreadyPresent: installed.alreadyPresent, kind: "installed", reference: decoded.value })
@@ -1148,7 +1150,7 @@ export async function installCanonicalArtifact(
   }
 }
 
-/** Reads and re-derives the deterministic containing tree, rejecting fabricated references. */
+/** Reads and re-derives the immutable blob reference, rejecting fabricated metadata. */
 export async function readCanonicalArtifact(
   store: ContentAddressedStore,
   reference: ArtifactRef,
@@ -1192,7 +1194,7 @@ export async function readCanonicalArtifact(
     const expected = canonicalArtifactRefCapsule.digest(reference);
     return canonicalArtifactRefCapsule.digest(installed.reference) === expected
       ? Object.freeze({ bytes: Uint8Array.from(bytes), kind: "read" })
-      : Object.freeze({ kind: "error", error: casError("manifest-corrupt", "fatal", "read-canonical-artifact", "artifact containing tree or metadata was fabricated") });
+      : Object.freeze({ kind: "error", error: casError("manifest-corrupt", "fatal", "read-canonical-artifact", "artifact blob identity or metadata was fabricated") });
   } catch (error: unknown) {
     return Object.freeze({ kind: "error", error: casIoError("read-canonical-artifact", store.root, error) });
   }

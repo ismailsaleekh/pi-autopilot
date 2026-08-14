@@ -29,6 +29,7 @@ import {
   text,
 } from "../../authority/protocol/schema.js";
 import type { Stimulus } from "../../authority/protocol/stimulus.capsule.js";
+import type { CanonicalArtifactInstaller } from "../../storage/cas/index.js";
 import {
   appendCommittedBatch,
   closeJournal,
@@ -45,6 +46,7 @@ import {
 import type { NormalizedArtifact } from "../artifact-normalization/index.js";
 import {
   decodeBoundaryValue,
+  decodeCommandBatch,
   decodeStimulus,
 } from "../boundary-codecs/index.js";
 import type { BoundaryFeedback } from "../boundary-codecs/index.js";
@@ -71,6 +73,26 @@ export interface CommandArtifactRepository {
     expected: ArtifactRef,
   ) => CommandArtifactStoreResult | Promise<CommandArtifactStoreResult>;
   readonly load: (reference: ArtifactRef) => unknown | Promise<unknown>;
+}
+
+export function canonicalCommandArtifactRepository(installer: CanonicalArtifactInstaller): CommandArtifactRepository {
+  return Object.freeze({
+    async store(artifact: NormalizedArtifact, expected: ArtifactRef): Promise<CommandArtifactStoreResult> {
+      if (artifact.digest !== expected.digest || artifact.path !== expected.path || artifact.canonicalBytes.byteLength !== Number(expected.byteLength)) {
+        return Object.freeze({ kind: "feedback", disposition: "fatal", diagnostic: "command bytes do not bind authority ArtifactRef" });
+      }
+      const installed = await installer.install(Object.freeze({ bytes: artifact.canonicalBytes, codec: expected.codec, codecVersion: expected.codecVersion, path: expected.path }));
+      return installed.kind === "installed"
+        ? Object.freeze({ kind: "stored", reference: installed.reference })
+        : Object.freeze({ kind: "feedback", disposition: installed.error.disposition, diagnostic: installed.error.message });
+    },
+    async load(reference: ArtifactRef): Promise<unknown> {
+      const length = Number(reference.byteLength);
+      if (!Number.isSafeInteger(length) || length < 0) return null;
+      const read = await installer.read(reference, length);
+      return read.kind === "read" ? read.bytes : null;
+    },
+  });
 }
 
 export interface CommitLoopDependencies {
@@ -303,6 +325,8 @@ class CommitLoopEngine implements RuntimeCommitLoop {
 
   public async reconcile(): Promise<SuccessfulDispatch | CommitLoopFailure> {
     const pending = this.issued.filter((command) => !this.settlements.has(command.commandId));
+    const artifactFailure = await this.verifyPendingCommandArtifacts(pending);
+    if (artifactFailure !== null) return artifactFailure;
     const sink: CommandObservationSink = Object.freeze({ submit: (stimulus: Stimulus) => this.ingest(stimulus) });
     const dispatched = await dispatchCommittedCommands(pending, this.dependencies.dispatcher, sink);
     return dispatched.kind === "dispatched" ? dispatched : boundaryResult(dispatched);
@@ -327,6 +351,31 @@ class CommitLoopEngine implements RuntimeCommitLoop {
     }
     const appended = await this.appendPrepared(prepared);
     return appended.kind === "acknowledged" ? null : journalResult(appended.error);
+  }
+
+  private async verifyRecordCommandArtifact(record: Extract<JournalRecord, { readonly kind: "decision-committed" | "command-settled" }>): Promise<CommitLoopFailure | null> {
+    let loaded: unknown;
+    try { loaded = await this.dependencies.commands.load(record.commandArtifact); } catch {
+      return Object.freeze({ kind: "resume", diagnostic: "committed command artifact is temporarily unreadable" });
+    }
+    const decoded = decodeCommandBatch(loaded);
+    return decoded.kind === "ok"
+      && canonicalCommandsDigest(decoded.value) === record.commandDigest
+      && decoded.canonicalBytes.byteLength === Number(record.commandArtifact.byteLength)
+      && decoded.value.length === record.commands.length
+      && !decoded.value.some((command, index) => command.commandId !== record.commands[index]?.commandId)
+      ? null
+      : Object.freeze({ kind: "fatal", diagnostic: "committed command artifact failed exact CAS readback before dispatch" });
+  }
+
+  private async verifyPendingCommandArtifacts(pending: readonly Command[]): Promise<CommitLoopFailure | null> {
+    const pendingIds = new Set(pending.map((command) => command.commandId));
+    for (const record of this.actions.values()) {
+      if ((record.kind !== "decision-committed" && record.kind !== "command-settled") || !record.commands.some((command) => pendingIds.has(command.commandId))) continue;
+      const failure = await this.verifyRecordCommandArtifact(record);
+      if (failure !== null) return failure;
+    }
+    return null;
   }
 
   private async installCommandArtifact(commit: PreparedCommit): Promise<CommitLoopFailure | null> {
@@ -356,9 +405,10 @@ class CommitLoopEngine implements RuntimeCommitLoop {
         ? Object.freeze({ kind: "resume", diagnostic: stored.diagnostic })
         : Object.freeze({ kind: "feedback", source: "commands", diagnostic: stored.diagnostic });
     }
-    return commandArtifactMatches(stored.reference, artifact)
-      ? null
-      : Object.freeze({ kind: "fatal", diagnostic: "command store acknowledged a different ArtifactRef" });
+    if (!commandArtifactMatches(stored.reference, artifact)) return Object.freeze({ kind: "fatal", diagnostic: "command store acknowledged a different ArtifactRef" });
+    return commit.record.kind === "decision-committed" || commit.record.kind === "command-settled"
+      ? this.verifyRecordCommandArtifact(commit.record)
+      : null;
   }
 
   private async commitInput(input: unknown): Promise<TransactionResult> {
