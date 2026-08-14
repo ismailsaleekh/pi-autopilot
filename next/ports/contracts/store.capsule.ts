@@ -1,3 +1,4 @@
+import type { ArtifactPath, ArtifactRoot, KindId } from "../../authority/protocol/identifiers.js";
 import {
   actionIdSchema,
   artifactPathSchema,
@@ -10,14 +11,17 @@ import {
   runIdSchema,
 } from "../../authority/protocol/identifiers.js";
 import {
+  arrayOf,
   booleanValue,
   defineCapsule,
+  jsonValue,
   literal,
   nullable,
   object,
   union,
 } from "../../authority/protocol/schema.js";
-import type { Infer } from "../../authority/protocol/schema.js";
+import type { Infer, JsonValue } from "../../authority/protocol/schema.js";
+export type { ArtifactPath, ArtifactRef, ArtifactRoot, KindId } from "../../authority/protocol/identifiers.js";
 import { toolResultSchemaFor } from "../../authority/protocol/tool-result.capsule.js";
 import { defineIntentCapsule } from "./intent-capsule.js";
 
@@ -136,6 +140,29 @@ export type StoreObservation = Infer<typeof storeObservationSchema>;
 
 export const storeIntentCapsule = defineIntentCapsule("StoreIntent", "store", storeIntentSchema);
 export const storeObservationCapsule = defineCapsule("StoreObservation", storeObservationSchema);
+
+export type StorePageEntry = JsonValue;
+const storeCaptureCoordinatesCapsule = defineCapsule("StoreCaptureCoordinates", object({
+  codec: kindIdSchema,
+  codecVersion: kindIdSchema,
+  path: artifactPathSchema,
+}));
+const storePageCaptureCapsule = defineCapsule("StorePageCapture", object({
+  entries: arrayOf(jsonValue()),
+  root: artifactRootSchema,
+}));
+
+/** Own-contract coordinate decoding keeps the adapter leaf typed without authority imports. */
+export function decodeStoreCaptureCoordinates(path: string, codec: string, codecVersion: string): Readonly<{ readonly codec: KindId; readonly codecVersion: KindId; readonly path: ArtifactPath }> | null {
+  const decoded = storeCaptureCoordinatesCapsule.decode(Object.freeze({ codec, codecVersion, path }));
+  return decoded.kind === "ok" ? decoded.value : null;
+}
+
+/** Own-contract canonical page encoding keeps the adapter leaf free of authority imports. */
+export function encodeStorePageCapture(entries: readonly StorePageEntry[], root: ArtifactRoot): Uint8Array | null {
+  const encoded = storePageCaptureCapsule.encodeUnknown(Object.freeze({ entries: Object.freeze(entries.slice()), root }));
+  return encoded.kind === "ok" ? encoded.value : null;
+}
 
 export const storeIntentExhaustive = Object.freeze({
   "install-sealed-object": true,

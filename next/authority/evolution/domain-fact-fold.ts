@@ -1,10 +1,12 @@
 import { dispositionIsLegal } from "../protocol/atom.capsule.js";
 import type { DomainFact } from "../protocol/domain-fact.capsule.js";
 import {
+  artifactRefsEqual,
   compareDecimalNatural,
   decrementDecimalNatural,
   incrementDecimalNatural,
 } from "../protocol/identifiers.js";
+import { evidenceEnvelopeDigest } from "../protocol/evidence-fact.capsule.js";
 import { indexMutationDigest } from "../protocol/state-index.capsule.js";
 import type {
   IndexMutation,
@@ -230,6 +232,17 @@ function applySemanticFact(
       if (atomValue === null || atomValue.kind !== "atom" || !dispositionIsLegal(atomValue.atom, fact.disposition)) {
         return rejected(state, "illegal-disposition", "disposition is not legal for the authoritative atom kind");
       }
+      const plan = state.currentPlan;
+      if (plan === null || fact.disposition.meaning.planRootId !== plan.planRootId) {
+        return rejected(state, "noncurrent-plan-consequence", "atom disposition must bind the current accepted plan");
+      }
+      if (fact.disposition.meaning.kind === "implemented-by") {
+        for (const workItemId of fact.disposition.meaning.workItems) {
+          const work = lookupValue(state, pages, "work", workItemId);
+          if (work === "unproven") return rejected(state, "page-unproven", "disposition work membership page is missing");
+          if (work === null || work.kind !== "work" || work.workItem.planRootId !== plan.planRootId) return rejected(state, "illegal-disposition", "implemented-by disposition must name current-plan work");
+        }
+      }
       const value: IndexValue = Object.freeze({ kind: "disposition", disposition: fact.disposition });
       const transitioned = mutate(state, context, "dispositions", fact.disposition.atomId, (prior) => prior === null
         ? Object.freeze({ kind: "next", value })
@@ -415,6 +428,32 @@ function applySemanticFact(
       if (finding.runId !== state.identity.runId) {
         return rejected(state, "finding-run-mismatch", "finding belongs to another run");
       }
+      if (finding.kind === "planning-gap") {
+        if (state.phase !== "planning" || state.currentPlan !== null || state.requirements === null || !state.requirements.inventorySealed) {
+          return rejected(state, "planning-gap-invalid", "planning gap requires the sealed planning phase before plan acceptance");
+        }
+        if (!state.indexes.commands.hotComplete || state.indexes.commands.hot.some((entry) => entry.value.kind === "command" && entry.value.status === "issued")) {
+          return rejected(state, "planning-gap-invalid", "planning stop requires every issued preparation command to be durably settled");
+        }
+        if (finding.atomIds.length !== finding.sourceAnchors.length || finding.atomIds.length !== finding.sourceEvidence.length || new Set(finding.atomIds).size !== finding.atomIds.length) {
+          return rejected(state, "planning-gap-invalid", "planning gap atoms, anchors, and evidence must form one exact nonduplicated relation");
+        }
+        for (let index = 0; index < finding.atomIds.length; index += 1) {
+          const atomId = finding.atomIds[index];
+          const anchor = finding.sourceAnchors[index];
+          const sourceEvidence = finding.sourceEvidence[index];
+          if (atomId === undefined || anchor === undefined || sourceEvidence === undefined) return rejected(state, "planning-gap-invalid", "planning gap relation is incomplete");
+          const atom = lookupValue(state, pages, "atoms", atomId);
+          if (atom === "unproven") return rejected(state, "page-unproven", "planning-gap atom page is missing");
+          if (atom === null || atom.kind !== "atom" || atom.atom.sourceAnchor !== anchor || !artifactRefsEqual(atom.atom.sourceEvidence, sourceEvidence)) return rejected(state, "planning-gap-invalid", "planning-gap anchors and evidence must equal the sealed atom inventory");
+        }
+        if (finding.reason === "contradiction" && (finding.atomIds.length < 2 || new Set(finding.sourceAnchors).size < 2)) {
+          return rejected(state, "planning-gap-invalid", "contradiction requires at least two distinct sealed source anchors");
+        }
+        if (finding.sourceEvidence.some((reference) => artifactRefsEqual(reference, finding.independentReview))) {
+          return rejected(state, "planning-gap-invalid", "independent review must be distinct from cited source evidence");
+        }
+      }
       const isBlocking = blockingKind(finding.kind);
       if (isBlocking !== (fact.acceptance.kind === "blocking-with-correction")) {
         return rejected(state, "correction-atomicity", "blocking findings require one atomic correction assignment and work item");
@@ -508,6 +547,9 @@ function applySemanticFact(
     case "evidence-observed": {
       if (fact.evidence.envelope.runId !== state.identity.runId) {
         return rejected(state, "evidence-run-mismatch", "evidence belongs to another run");
+      }
+      if (fact.evidence.envelopeDigest !== evidenceEnvelopeDigest(fact.evidence.envelope)) {
+        return rejected(state, "evidence-digest-mismatch", "evidence envelope digest must bind the exact closed envelope");
       }
       const value: IndexValue = Object.freeze({ kind: "evidence", evidence: fact.evidence });
       const transitioned = mutate(state, context, "evidence", fact.evidence.envelope.evidenceId, (prior) => prior === null
@@ -647,6 +689,9 @@ function applySemanticFact(
         || fact.evidenceIndexRoot !== state.indexes.evidence.root
       ) {
         return rejected(state, "final-attestation-stale", "final attestations must bind current candidate, publication, and evidence index");
+      }
+      if (!state.indexes.commands.hotComplete || state.indexes.commands.hot.some((entry) => entry.value.kind === "command" && entry.value.status === "issued" && (entry.value.command.kind !== "publish-compare-and-swap" || entry.value.command.publicationId !== fact.publicationId))) {
+        return rejected(state, "final-attestation-stale", "final attestations require every non-publication command to be durably settled");
       }
       return Object.freeze({
         kind: "applied",

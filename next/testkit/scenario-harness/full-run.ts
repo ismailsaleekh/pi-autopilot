@@ -4,7 +4,6 @@ import type { RunState } from "../../authority/model/run-state.js";
 import { atomCapsule } from "../../authority/protocol/atom.capsule.js";
 import type { Atom, AtomDisposition } from "../../authority/protocol/atom.capsule.js";
 import type { PreparedCommit } from "../../authority/protocol/accepted-batch.js";
-import { commandActionId, commandCapsule, commandIdentity } from "../../authority/protocol/command.capsule.js";
 import type { Command, ExecuteEvidence, PublishCompareAndSwap } from "../../authority/protocol/command.capsule.js";
 import { evidenceEnvelopeDigest, evidenceFactCapsule } from "../../authority/protocol/evidence-fact.capsule.js";
 import type { EvidenceFact } from "../../authority/protocol/evidence-fact.capsule.js";
@@ -18,7 +17,7 @@ import { canonicalDigestUnknown, canonicalEncodeUnknown, defineCapsule } from ".
 import { stimulusCapsule } from "../../authority/protocol/stimulus.capsule.js";
 import type { BoundaryRequestReceived, CommandObservationPayload, CommandObservationReceived, OperatorResumeRequested, OperatorSuspendRequested, RequestPayload, Stimulus, SubmissionPayload, SubmissionReady } from "../../authority/protocol/stimulus.capsule.js";
 import { workItemCapsule } from "../../authority/protocol/work-item.capsule.js";
-import type { ProduceArtifactWork } from "../../authority/protocol/work-item.capsule.js";
+import type { ProduceArtifactWork, VerifyCandidateWork, WorkItem } from "../../authority/protocol/work-item.capsule.js";
 import { makeEvidenceEnvelope } from "../../runtime/dispatcher/evidence.js";
 import { ArtifactCatalog } from "../simulation/artifacts.js";
 import { actionIdFor, scenarioGenesis } from "./authority.js";
@@ -102,7 +101,7 @@ export class PublicAuthorityScenario {
     return decoded.value;
   }
 
-  public submission(work: ProduceArtifactWork, payload: SubmissionPayload, outputRoot: ArtifactRoot): SubmissionReady {
+  public submission(work: WorkItem, payload: SubmissionPayload, outputRoot: ArtifactRoot): SubmissionReady {
     const template = stimulusCapsule.arbitrary.validForKind("submission-ready", this.seed + this.actionSequence + 200);
     const decoded = stimulusCapsule.decode(Object.freeze({
       ...template,
@@ -191,6 +190,31 @@ export class PublicAuthorityScenario {
     if (decoded.kind !== "ok" || decoded.value.kind !== "produce-artifact") throw new Error("work item could not be decoded");
     return decoded.value;
   }
+
+  public verifyWork(planRootId: PlanRootId, candidateRoot: ArtifactRoot, label: string, rankText: string): VerifyCandidateWork {
+    const template = workItemCapsule.arbitrary.validForKind("verify-candidate", this.seed + this.actionSequence + this.artifactSequence + 700);
+    const rank = decimalNatural(rankText);
+    const prompt = this.install(`${label}-prompt`, Object.freeze({ label, kind: "prompt" })).reference;
+    const rules = this.install(`${label}-rules`, Object.freeze({ label, kind: "rules" })).reference;
+    const validationPlan = this.install(`${label}-validation-plan`, Object.freeze({ label, kind: "validation-plan" })).reference;
+    if (template.kind !== "verify-candidate" || rank === null) throw new Error("verification work template could not be created");
+    const decoded = workItemCapsule.decode(Object.freeze({
+      ...template,
+      candidateRoot,
+      dependencyCount: "0",
+      dependencyRoot: this.state.indexes.dependencies.root,
+      inputRoot: candidateRoot,
+      planRootId,
+      prompt,
+      ruleInputs: rules,
+      runId: this.genesis.runId,
+      taskRoot: this.genesis.taskSnapshot,
+      topologicalRank: rank,
+      validationPlan,
+    }));
+    if (decoded.kind !== "ok" || decoded.value.kind !== "verify-candidate") throw new Error("verification work item could not be decoded");
+    return decoded.value;
+  }
 }
 
 function planRootId(seed: number): PlanRootId {
@@ -199,13 +223,13 @@ function planRootId(seed: number): PlanRootId {
   return template.planRootId;
 }
 
-function workAtom(scenario: PublicAuthorityScenario, seed: number): Atom {
+function workAtom(scenario: PublicAuthorityScenario, seed: number, atomKind: Atom["kind"] = "WORK"): Atom {
   const template = atomCapsule.arbitrary.validForKind("atom", seed);
-  if (template.kind !== "atom") return workAtom(scenario, seed + 1);
+  if (template.kind !== "atom") return workAtom(scenario, seed + 1, atomKind);
   const evidence = scenario.install("atom-source", Object.freeze({ seed, kind: "atom-source" })).reference;
   const decoded = atomCapsule.decode(Object.freeze({
     kind: "atom",
-    value: Object.freeze({ ...template.value, kind: "WORK", runId: scenario.genesis.runId, sourceEvidence: evidence }),
+    value: Object.freeze({ ...template.value, kind: atomKind, runId: scenario.genesis.runId, sourceEvidence: evidence }),
   }));
   if (decoded.kind !== "ok" || decoded.value.kind !== "atom") throw new Error("work atom could not be decoded");
   return decoded.value.value;
@@ -227,41 +251,9 @@ function implementedDisposition(scenario: PublicAuthorityScenario, atom: Atom, p
   return decoded.value.value;
 }
 
-function finalEvidence(scenario: PublicAuthorityScenario, candidateTree: ArtifactRoot, work: ProduceArtifactWork, seed: number): EvidenceFact {
-  const template = commandCapsule.arbitrary.validForKind("execute-evidence", seed);
-  if (template.kind !== "execute-evidence") return finalEvidence(scenario, candidateTree, work, seed + 1);
-  const commandSpec = scenario.install("final-command", Object.freeze({ seed, kind: "final-command" })).reference;
-  const environment = scenario.install("final-environment", Object.freeze({ seed, kind: "final-environment" })).reference;
-  const intentInputs = Object.freeze({
-    attemptId: template.attemptId,
-    candidateTree,
-    commandSpec,
-    cwd: template.cwd,
-    environment,
-    evidenceClass: "final-verification",
-    kindId: template.kindId,
-    ruleId: template.ruleId,
-    workItemId: work.workItemId,
-    workspaceCapability: work.workspaceCapability,
-    workspaceId: work.workspaceId,
-  });
-  const actionId = commandActionId("child", scenario.genesis.runId, "execute-evidence-command", intentInputs, Object.freeze({ deadlineTick: template.deadlineTick }));
-  const decodedCommand = commandCapsule.decode(Object.freeze({
-    ...template,
-    actionId,
-    candidateTree,
-    commandId: commandIdentity("execute-evidence", actionId),
-    commandSpec,
-    environment,
-    evidenceClass: "final-verification",
-    runId: scenario.genesis.runId,
-    workItemId: work.workItemId,
-    workspaceCapability: work.workspaceCapability,
-    workspaceId: work.workspaceId,
-  }));
-  if (decodedCommand.kind !== "ok" || decodedCommand.value.kind !== "execute-evidence") throw new Error("final evidence command could not be decoded");
-  const output = scenario.install("final-evidence-output", Object.freeze({ seed, candidateTree })).reference;
-  const minted = makeEvidenceEnvelope(decodedCommand.value, Object.freeze({ exit: Object.freeze({ kind: "exited", code: "0" }), output }));
+function finalEvidence(scenario: PublicAuthorityScenario, command: ExecuteEvidence, seed: number): EvidenceFact {
+  const output = scenario.install("final-evidence-output", Object.freeze({ seed, candidateTree: command.candidateTree })).reference;
+  const minted = makeEvidenceEnvelope(command, Object.freeze({ exit: Object.freeze({ kind: "exited", code: "0" }), output }));
   if (minted.kind !== "minted") throw new Error(minted.diagnostic);
   const encoded = evidenceFactCapsule.encodeUnknown(Object.freeze({ kind: "evidence-fact", envelope: minted.transport, envelopeDigest: evidenceEnvelopeDigest(minted.transport) }));
   if (encoded.kind !== "ok") throw new Error(encoded.error.diagnostic);
@@ -270,22 +262,21 @@ function finalEvidence(scenario: PublicAuthorityScenario, candidateTree: Artifac
   return decoded.value;
 }
 
-function planningGap(scenario: PublicAuthorityScenario, atom: Atom, planId: PlanRootId, reason: PlanningGapFinding["reason"], seed: number): PlanningGapFinding {
+export function planningGap(scenario: PublicAuthorityScenario, atoms: readonly Atom[], planId: PlanRootId, reason: PlanningGapFinding["reason"], seed: number): PlanningGapFinding {
   const template = findingCapsule.arbitrary.validForKind("planning-gap", seed);
-  if (template.kind !== "planning-gap") return planningGap(scenario, atom, planId, reason, seed + 1);
+  if (template.kind !== "planning-gap") return planningGap(scenario, atoms, planId, reason, seed + 1);
   const explanation = scenario.install("planning-gap-explanation", Object.freeze({ seed, reason })).reference;
   const review = scenario.install("planning-gap-review", Object.freeze({ seed, kind: "independent-review" })).reference;
-  const source = scenario.install("planning-gap-source", Object.freeze({ seed, kind: "source" })).reference;
   const decoded = findingCapsule.decode(Object.freeze({
     ...template,
-    atomIds: Object.freeze([atom.atomId]),
+    atomIds: Object.freeze(atoms.map((atom) => atom.atomId)),
     explanation,
     independentReview: review,
     planRootId: planId,
     reason,
     runId: scenario.genesis.runId,
-    sourceAnchors: Object.freeze([atom.sourceAnchor]),
-    sourceEvidence: Object.freeze([source]),
+    sourceAnchors: Object.freeze(atoms.map((atom) => atom.sourceAnchor)),
+    sourceEvidence: Object.freeze(atoms.map((atom) => atom.sourceEvidence)),
   }));
   if (decoded.kind !== "ok" || decoded.value.kind !== "planning-gap") throw new Error("planning gap could not be decoded");
   return decoded.value;
@@ -329,8 +320,6 @@ export function buildPlannedScenario(seed: number): PlannedScenario {
   const laneA = scenario.produceWork(planId, "lane-a", "3");
   const laneB = scenario.produceWork(planId, "lane-b", "4");
   for (const workItem of [author, integrator, laneA, laneB]) scenario.commit(scenario.boundary(Object.freeze({ kind: "declare-work-v2", workItem })));
-  const disposition = implementedDisposition(scenario, atom, planId, laneA, seed + 30);
-  scenario.commit(scenario.submission(author, Object.freeze({ disposition, kind: "disposition-atom-v2" }), planRoot));
   scenario.commit(scenario.submission(author, Object.freeze({
     coverageRoot,
     integrationOwnerWorkItemId: integrator.workItemId,
@@ -339,36 +328,57 @@ export function buildPlannedScenario(seed: number): PlannedScenario {
     planRoot,
     reviewedPlan: scenario.install("reviewed-plan", Object.freeze({ seed, kind: "reviewed-plan" })).reference,
   }), planRoot));
+  const disposition = implementedDisposition(scenario, atom, planId, laneA, seed + 30);
+  scenario.commit(scenario.submission(author, Object.freeze({ disposition, kind: "disposition-atom-v2" }), planRoot));
   return Object.freeze({ scenario, planId, planRoot, coverageRoot, atom, author, integrator, laneA, laneB });
 }
 
-export function workOutputSubmission(planned: PlannedScenario, work: ProduceArtifactWork, label: string, outputRoot: ArtifactRoot): SubmissionReady {
+export function workOutputSubmission(planned: PlannedScenario, work: WorkItem, label: string, outputRoot: ArtifactRoot, accountedDiff: ArtifactRef | null = null): SubmissionReady {
   const scenario = planned.scenario;
   const digest = canonicalDigestUnknown(Object.freeze({ domain: "pi-autopilot.public-scenario-submission.v2", label, runId: scenario.genesis.runId, sequence: scenario.records.length }));
   const submissionId = scenarioSubmissionIdCapsule.decode(`submission:sha256:${digest.slice(7)}`);
   if (submissionId.kind !== "ok") throw new Error(submissionId.error.diagnostic);
   return scenario.submission(work, Object.freeze({
-    accountedDiff: scenario.install(`${label}-diff`, Object.freeze({ label, kind: "diff" })).reference,
+    accountedDiff: accountedDiff ?? scenario.install(`${label}-diff`, Object.freeze({ label, kind: "diff" })).reference,
     evidence: Object.freeze([scenario.install(`${label}-evidence`, Object.freeze({ label, kind: "evidence" })).reference]),
     kind: "accept-work-output-v2",
     submissionId: submissionId.value,
   }), outputRoot);
 }
 
-export function acceptWorkOutput(planned: PlannedScenario, work: ProduceArtifactWork, label: string, outputRoot: ArtifactRoot): PreparedCommit {
-  return planned.scenario.commit(workOutputSubmission(planned, work, label, outputRoot));
+export function acceptWorkOutput(planned: PlannedScenario, work: WorkItem, label: string, outputRoot: ArtifactRoot, accountedDiff: ArtifactRef | null = null): PreparedCommit {
+  return planned.scenario.commit(workOutputSubmission(planned, work, label, outputRoot, accountedDiff));
+}
+
+function settleWorkspaceCommands(scenario: PublicAuthorityScenario): void {
+  const issuedIds = new Set(scenario.state.indexes.commands.hot
+    .filter((entry) => entry.value.kind === "command" && entry.value.status === "issued")
+    .map((entry) => entry.value.kind === "command" ? entry.value.commandId : ""));
+  const commands = scenario.records.flatMap((record) => record.kind === "decision-committed" || record.kind === "command-settled" ? record.commands : Object.freeze([]));
+  for (const command of commands) {
+    if (command.kind !== "prepare-workspace" || !issuedIds.has(command.commandId)) continue;
+    scenario.commit(scenario.observation(command, Object.freeze({
+      kind: "workspace-reserved-v2",
+      leaseId: command.leaseId,
+      workspaceCapability: command.workspaceCapability,
+      workspaceId: command.workspaceId,
+    })));
+  }
 }
 
 export interface T1ScenarioResult extends PlannedScenario {
   readonly candidateTree: ArtifactRoot;
+  readonly evidenceCommand: ExecuteEvidence;
   readonly finalEvidence: EvidenceFact;
   readonly terminalCommit: PreparedCommit;
   readonly publicationCommand: PublishCompareAndSwap;
+  readonly verifier: VerifyCandidateWork;
 }
 
 export function buildT1Scenario(seed: number): T1ScenarioResult {
   const planned = buildPlannedScenario(seed);
   const scenario = planned.scenario;
+  settleWorkspaceCommands(scenario);
   const laneARoot = scenario.install("lane-a-output", Object.freeze({ seed, lane: "a" })).root;
   const laneBRoot = scenario.install("lane-b-output", Object.freeze({ seed, lane: "b" })).root;
   const authorRoot = scenario.install("author-output", Object.freeze({ seed, lane: "author" })).root;
@@ -396,6 +406,13 @@ export function buildT1Scenario(seed: number): T1ScenarioResult {
   }), candidateTree));
   const candidate = scenario.state.currentCandidate;
   if (candidate === null) throw new Error("candidate was not accepted");
+  const verifier = scenario.verifyWork(planned.planId, candidateTree, "final-verifier", "5");
+  const verifierCommit = scenario.commit(scenario.boundary(Object.freeze({ kind: "declare-work-v2", workItem: verifier })));
+  const evidenceCommand = verifierCommit.record.kind === "decision-committed"
+    ? verifierCommit.record.commands.find((command): command is ExecuteEvidence => command.kind === "execute-evidence")
+    : undefined;
+  if (evidenceCommand === undefined) throw new Error("final evidence command was not issued");
+  settleWorkspaceCommands(scenario);
 
   let publicationPayload: Extract<RequestPayload, { readonly kind: "intend-publication-v2" }> | null = null;
   for (let offset = 0; publicationPayload === null && offset < 100; offset += 1) {
@@ -417,8 +434,8 @@ export function buildT1Scenario(seed: number): T1ScenarioResult {
     : undefined;
   if (publicationCommand === undefined) throw new Error("publication command was not issued");
 
-  const evidence = finalEvidence(scenario, candidateTree, planned.integrator, seed + 1200);
-  scenario.commit(scenario.submission(planned.integrator, Object.freeze({ evidence, kind: "accept-evidence-v2" }), candidateTree));
+  const evidence = finalEvidence(scenario, evidenceCommand, seed + 1200);
+  scenario.commit(scenario.observation(evidenceCommand, Object.freeze({ evidence, kind: "evidence-observed-v2" })));
   const publication = scenario.state.currentPublication;
   if (publication === null) throw new Error("publication intent was not retained");
   scenario.commit(scenario.submission(planned.integrator, Object.freeze({
@@ -426,50 +443,62 @@ export function buildT1Scenario(seed: number): T1ScenarioResult {
     c1ToC7Proof: scenario.install("c1-c7-proof", Object.freeze({ seed, kind: "yardstick-proof" })).reference,
     candidateId: candidate.candidateId,
     evidenceIndexRoot: scenario.state.indexes.evidence.root,
-    finalManifest: scenario.install("final-manifest", Object.freeze({ seed, candidateTree })).reference,
+    finalManifest: manifest,
     finalVerificationEvidence: evidence.envelope.evidenceId,
     kind: "record-final-attestations-v2",
     publicationId: publication.publicationId,
   }), candidateTree));
-  acceptWorkOutput(planned, planned.integrator, "integrator", candidateTree);
+  acceptWorkOutput(planned, verifier, "verifier", candidateTree);
+  acceptWorkOutput(planned, planned.integrator, "integrator", candidateTree, reviewedDiff);
 
   const terminalCommit = scenario.commit(scenario.observation(publicationCommand, Object.freeze({
     gitTree: candidate.gitTree,
     kind: "publication-observed-v2",
     observedHead: publication.desiredHead,
     publicationId: publication.publicationId,
-    publicationTreeAttestation: Object.freeze({
-      artifactRoot: candidateTree,
-      attestation: scenario.install("publication-tree-attestation", Object.freeze({ seed, candidateTree })).reference,
-      gitTree: candidate.gitTree,
-    }),
+    publicationTreeAttestation: publicationCommand.verifiedAttestation,
     status: "desired-head",
     tree: candidateTree,
   })));
   if (scenario.state.terminal?.outcome.kind !== "t1") throw new Error("full scenario did not reach T1");
-  return Object.freeze({ ...planned, candidateTree, finalEvidence: evidence, terminalCommit, publicationCommand });
+  return Object.freeze({ ...planned, candidateTree, evidenceCommand, finalEvidence: evidence, terminalCommit, publicationCommand, verifier });
 }
 
 export interface T2ScenarioResult {
   readonly scenario: PublicAuthorityScenario;
   readonly atom: Atom;
   readonly finding: PlanningGapFinding;
+  readonly preterminalState: RunState;
+  readonly reviewer: ProduceArtifactWork;
+  readonly stimulus: SubmissionReady;
   readonly terminalCommit: PreparedCommit;
 }
 
 export function buildT2Scenario(seed: number, reason: PlanningGapFinding["reason"]): T2ScenarioResult {
   const scenario = new PublicAuthorityScenario(seed);
   const planId = planRootId(seed + 10);
-  const atom = workAtom(scenario, seed + 20);
+  const firstAtom = workAtom(scenario, seed + 20, reason === "contradiction" ? "DECISION" : "WORK");
+  let atoms: readonly Atom[] = Object.freeze([firstAtom]);
+  if (reason === "contradiction") {
+    let second = workAtom(scenario, seed + 21, "DECISION");
+    let offset = 22;
+    while (second.atomId === firstAtom.atomId || second.sourceAnchor === firstAtom.sourceAnchor) {
+      second = workAtom(scenario, seed + offset, "DECISION");
+      offset += 1;
+    }
+    atoms = Object.freeze([firstAtom, second]);
+  }
+  const atomCount = decimalNatural(String(atoms.length));
+  if (atomCount === null) throw new Error("T2 atom count could not be represented");
   scenario.commit(scenario.boundary(Object.freeze({
     atomIndexRoot: scenario.state.indexes.atoms.root,
-    declaredAtomCount: oneDecimalNatural(),
+    declaredAtomCount: atomCount,
     kind: "bind-requirements-v2",
     requirementsRoot: scenario.install("t2-requirements", Object.freeze({ seed, kind: "requirements" })).root,
     sourceRoot: scenario.install("t2-source", Object.freeze({ seed, kind: "source" })).root,
     taskRoot: scenario.genesis.taskSnapshot,
   })));
-  scenario.commit(scenario.boundary(Object.freeze({ atom, kind: "declare-atom-v2" })));
+  for (const atom of atoms) scenario.commit(scenario.boundary(Object.freeze({ atom, kind: "declare-atom-v2" })));
   scenario.commit(scenario.boundary(Object.freeze({
     atomCount: scenario.state.indexes.atoms.count,
     atomIndexRoot: scenario.state.indexes.atoms.root,
@@ -478,10 +507,13 @@ export function buildT2Scenario(seed: number, reason: PlanningGapFinding["reason
   })));
   const reviewer = scenario.produceWork(planId, "planning-reviewer", "1");
   scenario.commit(scenario.boundary(Object.freeze({ kind: "declare-work-v2", workItem: reviewer })));
-  const finding = planningGap(scenario, atom, planId, reason, seed + 30);
-  const terminalCommit = scenario.commit(scenario.submission(reviewer, Object.freeze({ finding, kind: "accept-finding-v2" }), scenario.genesis.taskSnapshot));
+  settleWorkspaceCommands(scenario);
+  const finding = planningGap(scenario, atoms, planId, reason, seed + 30);
+  const preterminalState = scenario.state;
+  const stimulus = scenario.submission(reviewer, Object.freeze({ finding, kind: "accept-finding-v2" }), scenario.genesis.taskSnapshot);
+  const terminalCommit = scenario.commit(stimulus);
   if (scenario.state.terminal?.outcome.kind !== "t2") throw new Error("planning scenario did not reach T2");
-  return Object.freeze({ scenario, atom, finding, terminalCommit });
+  return Object.freeze({ scenario, atom: firstAtom, finding, preterminalState, reviewer, stimulus, terminalCommit });
 }
 
 export function blockingFinding(planned: PlannedScenario, kind: "integrity" | "definition-of-done", scope: "local" | "plan-wide" | "cross-lane", seed: number): Finding {

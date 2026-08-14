@@ -130,7 +130,8 @@ test("generated T2 outcomes cover exactly both ruled conditions and preserve exa
     assert.equal(terminal.outcome.reason, reason);
     assert.deepEqual(terminal.outcome.sourceAnchors, result.finding.sourceAnchors);
     assert.deepEqual(terminal.outcome.sourceEvidence, result.finding.sourceEvidence);
-    assert.deepEqual(result.finding.atomIds, Object.freeze([result.atom.atomId]));
+    assert.equal(result.finding.atomIds.includes(result.atom.atomId), true);
+    assert.equal(reason === "contradiction" ? result.finding.atomIds.length >= 2 : result.finding.atomIds.length >= 1, true);
     assert.equal(result.scenario.artifacts.read(terminal.outcome.explanation).kind, "ok");
     assert.equal(terminal.outcome.sourceEvidence.every((reference) => result.scenario.artifacts.read(reference).kind === "ok"), true);
   }

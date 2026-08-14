@@ -300,8 +300,16 @@ class CommitLoopEngine implements RuntimeCommitLoop {
     return project(this.state);
   }
 
-  public async ingest(input: unknown): Promise<CommitLoopResult> {
-    const operation = this.queue.then(() => this.commitInput(input), () => this.commitInput(input));
+  public ingest(input: unknown): Promise<CommitLoopResult> {
+    return this.ingestWithSource(input, false);
+  }
+
+  private ingestFromDispatcher(stimulus: Stimulus): Promise<CommitLoopResult> {
+    return this.ingestWithSource(stimulus, true);
+  }
+
+  private async ingestWithSource(input: unknown, dispatcherOwned: boolean): Promise<CommitLoopResult> {
+    const operation = this.queue.then(() => this.commitInput(input, dispatcherOwned), () => this.commitInput(input, dispatcherOwned));
     this.queue = operation.then(() => undefined, () => undefined);
     let transaction: TransactionResult;
     try {
@@ -318,7 +326,7 @@ class CommitLoopEngine implements RuntimeCommitLoop {
     if (transaction.kind !== "pending-accepted") {
       return transaction;
     }
-    const sink: CommandObservationSink = Object.freeze({ submit: (stimulus: Stimulus) => this.ingest(stimulus) });
+    const sink: CommandObservationSink = Object.freeze({ submit: (stimulus: Stimulus) => this.ingestFromDispatcher(stimulus) });
     const dispatched = await dispatchCommittedCommands(transaction.commands, this.dependencies.dispatcher, sink);
     return Object.freeze({ kind: "accepted", record: transaction.record, dispatch: dispatched });
   }
@@ -327,7 +335,7 @@ class CommitLoopEngine implements RuntimeCommitLoop {
     const pending = this.issued.filter((command) => !this.settlements.has(command.commandId));
     const artifactFailure = await this.verifyPendingCommandArtifacts(pending);
     if (artifactFailure !== null) return artifactFailure;
-    const sink: CommandObservationSink = Object.freeze({ submit: (stimulus: Stimulus) => this.ingest(stimulus) });
+    const sink: CommandObservationSink = Object.freeze({ submit: (stimulus: Stimulus) => this.ingestFromDispatcher(stimulus) });
     const dispatched = await dispatchCommittedCommands(pending, this.dependencies.dispatcher, sink);
     return dispatched.kind === "dispatched" ? dispatched : boundaryResult(dispatched);
   }
@@ -411,10 +419,13 @@ class CommitLoopEngine implements RuntimeCommitLoop {
       : null;
   }
 
-  private async commitInput(input: unknown): Promise<TransactionResult> {
+  private async commitInput(input: unknown, dispatcherOwned: boolean): Promise<TransactionResult> {
     const decoded = decodeStimulus(input);
     if (decoded.kind !== "ok") {
       return boundaryResult(decoded);
+    }
+    if (decoded.value.kind === "command-observation-received" && !dispatcherOwned) {
+      return Object.freeze({ kind: "feedback", source: "boundary", diagnostic: "command observations require the private dispatcher sink capability" });
     }
     const prior = this.actions.get(decoded.value.actionId);
     if (prior !== undefined) {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { replay } from "../../authority/facade/index.js";
+import { prepare, replay } from "../../authority/facade/index.js";
 import { stateDigest } from "../../authority/model/run-state.js";
 import { journalRecordCapsule } from "../../authority/protocol/journal-record.capsule.js";
 import { decimalNatural } from "../../authority/protocol/identifiers.js";
@@ -11,6 +11,7 @@ import {
   buildPlannedScenario,
   buildT1Scenario,
   buildT2Scenario,
+  planningGap,
   submitBlockingFinding,
   workOutputSubmission,
 } from "../scenario-harness/full-run.js";
@@ -141,10 +142,77 @@ test("concurrent lane preparations require serial re-prepare before one integrat
   const completed = buildT1Scenario(15_500);
   const candidateIndex = completed.scenario.records.findIndex((record) => record.kind !== "run-genesis" && "facts" in record && record.facts.some((fact) => fact.kind === "candidate-accepted"));
   const laneIndexes = completed.scenario.records.map((record, index) => record.kind !== "run-genesis" && "facts" in record && record.facts.some((fact) => fact.kind === "work-output-accepted") ? index : -1).filter((index) => index >= 0);
-  assert.equal(laneIndexes.length, 4);
+  assert.equal(laneIndexes.length, 5);
   assert.ok(candidateIndex > (laneIndexes[2] ?? Number.MAX_SAFE_INTEGER));
   assert.ok(candidateIndex < (laneIndexes[3] ?? -1));
   assert.equal(completed.scenario.state.indexes.candidates.count, "1");
+});
+
+test("cross-wired command observations cannot settle or inject consequences", () => {
+  const planned = buildPlannedScenario(15_800);
+  const commands = planned.scenario.records.flatMap((record) => record.kind === "decision-committed" ? record.commands : Object.freeze([]));
+  const first = commands.find((command) => command.kind === "prepare-workspace" && command.workItemId === planned.author.workItemId);
+  const second = commands.find((command) => command.kind === "prepare-workspace" && command.workItemId === planned.integrator.workItemId);
+  assert.notEqual(first, undefined);
+  assert.notEqual(second, undefined);
+  if (first === undefined || second === undefined || first.kind !== "prepare-workspace") return;
+  const valid = planned.scenario.observation(first, Object.freeze({ kind: "workspace-reserved-v2", leaseId: first.leaseId, workspaceCapability: first.workspaceCapability, workspaceId: first.workspaceId }));
+  const crossWired = stimulusCapsule.decode(Object.freeze({ ...valid, commandId: second.commandId }));
+  assert.equal(crossWired.kind, "ok");
+  if (crossWired.kind !== "ok") return;
+  const before = stateDigest(planned.scenario.state);
+  const rejected = planned.scenario.inspect(crossWired.value);
+  assert.equal(rejected.kind, "feedback");
+  if (rejected.kind === "feedback") assert.equal(rejected.code, "command-not-issued");
+  assert.equal(stateDigest(planned.scenario.state), before);
+});
+
+test("execution-phase planning gaps are rejected instead of permanently poisoning C7", () => {
+  const planned = buildPlannedScenario(15_900);
+  const finding = planningGap(planned.scenario, Object.freeze([planned.atom]), planned.planId, "substantial-path", 15_901);
+  const stimulus = planned.scenario.submission(planned.integrator, Object.freeze({ finding, kind: "accept-finding-v2" }), planned.planRoot);
+  const before = stateDigest(planned.scenario.state);
+  const rejected = planned.scenario.inspect(stimulus);
+  assert.equal(rejected.kind, "feedback");
+  if (rejected.kind === "feedback") assert.equal(rejected.code, "finding-invalid");
+  assert.equal(stateDigest(planned.scenario.state), before);
+  assert.equal(planned.scenario.state.planningGap, null);
+});
+
+test("T2 anchors are authenticated against sealed atoms and contradiction needs two anchors", () => {
+  const substantial = buildT2Scenario(15_950, "substantial-path");
+  const foreignEvidence = substantial.scenario.install("foreign-t2-source", Object.freeze({ foreign: true })).reference;
+  const tamperedSubstantial = stimulusCapsule.decode(Object.freeze({
+    ...substantial.stimulus,
+    actionId: substantial.scenario.action(),
+    submissionPayload: Object.freeze({ kind: "accept-finding-v2", finding: Object.freeze({ ...substantial.finding, sourceEvidence: Object.freeze([foreignEvidence]) }) }),
+  }));
+  assert.equal(tamperedSubstantial.kind, "ok");
+  if (tamperedSubstantial.kind === "ok") {
+    const rejected = prepare(substantial.preterminalState, tamperedSubstantial.value);
+    assert.equal(rejected.kind, "feedback");
+    if (rejected.kind === "feedback") assert.equal(rejected.code, "invalid-domain-transition");
+  }
+
+  const contradiction = buildT2Scenario(15_975, "contradiction");
+  const oneAtom = contradiction.finding.atomIds[0];
+  const oneAnchor = contradiction.finding.sourceAnchors[0];
+  const oneEvidence = contradiction.finding.sourceEvidence[0];
+  assert.notEqual(oneAtom, undefined);
+  assert.notEqual(oneAnchor, undefined);
+  assert.notEqual(oneEvidence, undefined);
+  if (oneAtom === undefined || oneAnchor === undefined || oneEvidence === undefined) return;
+  const tamperedContradiction = stimulusCapsule.decode(Object.freeze({
+    ...contradiction.stimulus,
+    actionId: contradiction.scenario.action(),
+    submissionPayload: Object.freeze({ kind: "accept-finding-v2", finding: Object.freeze({ ...contradiction.finding, atomIds: Object.freeze([oneAtom]), sourceAnchors: Object.freeze([oneAnchor]), sourceEvidence: Object.freeze([oneEvidence]) }) }),
+  }));
+  assert.equal(tamperedContradiction.kind, "ok");
+  if (tamperedContradiction.kind === "ok") {
+    const rejected = prepare(contradiction.preterminalState, tamperedContradiction.value);
+    assert.equal(rejected.kind, "feedback");
+    if (rejected.kind === "feedback") assert.equal(rejected.code, "invalid-domain-transition");
+  }
 });
 
 test("stale immutable input roots are inert and do not mutate authority", () => {

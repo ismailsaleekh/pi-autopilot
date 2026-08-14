@@ -10,6 +10,7 @@ import type { ArtifactRef } from "../../authority/protocol/identifiers.js";
 import { journalRecordCapsule } from "../../authority/protocol/journal-record.capsule.js";
 import type { Stimulus } from "../../authority/protocol/stimulus.capsule.js";
 import { stimulusCapsule } from "../../authority/protocol/stimulus.capsule.js";
+import { workspaceIntentCapsule } from "../../ports/contracts/workspace.capsule.js";
 import { canonicalArtifactInstaller, openCas } from "../../storage/cas/index.js";
 import { replayJournal } from "../../storage/journal/index.js";
 import { normalizeArtifact } from "../../runtime/artifact-normalization/index.js";
@@ -274,6 +275,88 @@ test("commit loop installs command bytes before append, settles via public ingre
       assert.equal(lawDriver.world.trace.snapshot().filter((entry) => entry.category === "contract" && entry.name === "observation").length, effectsAfterFirst);
       await restarted.loop.close();
     }
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
+test("port retry leaves its command issued until reconciliation succeeds exactly once", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-autopilot-runtime-retry-"));
+  try {
+    const openedCas = await openCas(join(root, "cas"));
+    assert.equal(openedCas.kind, "opened");
+    if (openedCas.kind !== "opened") return;
+    const scenario = nonemptyScenario(811);
+    assert.equal(scenario.commit.record.kind, "decision-committed");
+    if (scenario.commit.record.kind !== "decision-committed") return;
+    const command = scenario.commit.record.commands[0];
+    assert.notEqual(command, undefined);
+    if (command === undefined) return;
+    const driver = new SimLawDriver(811);
+    let calls = 0;
+    const ports = Object.freeze({
+      dispatch(port: Parameters<SimLawDriver["dispatch"]>[0], intent: Parameters<SimLawDriver["dispatch"]>[1]) {
+        const workspaceIntent = port === "workspace" ? workspaceIntentCapsule.decode(intent) : null;
+        if (workspaceIntent?.kind === "ok" && workspaceIntent.value.kind === "allocate-attempt-directory" && calls === 0) {
+          calls += 1;
+          return Object.freeze({ kind: "observation", observation: Object.freeze({
+            actionId: workspaceIntent.value.actionId,
+            kind: "attempt-directory-allocated",
+            result: Object.freeze({ kind: "retry", diagnostic: Object.freeze({ code: "workspace.transient", message: "transient reservation failure", related: Object.freeze([]) }) }),
+            runId: workspaceIntent.value.runId,
+          }) });
+        }
+        calls += 1;
+        return driver.dispatch(port, intent);
+      },
+    });
+    const installer = canonicalArtifactInstaller(openedCas.store);
+    const dependencies: CommitLoopDependencies = Object.freeze({
+      commands: canonicalCommandArtifactRepository(installer),
+      dispatcher: Object.freeze({ ports, artifacts: canonicalRuntimeArtifactRecorder(installer) }),
+      journalOptions: undefined,
+    });
+    const journalDir = join(root, "journal");
+    const opened = await openCommitLoop(Object.freeze({ genesis: scenario.genesis, journalDir }), dependencies);
+    assert.equal(opened.kind, "opened");
+    if (opened.kind !== "opened") return;
+    const accepted = await opened.loop.ingest(scenario.stimulus);
+    assert.equal(accepted.kind, "accepted");
+    if (accepted.kind === "accepted") {
+      assert.equal(accepted.dispatch.kind, "dispatched");
+      if (accepted.dispatch.kind === "dispatched") assert.equal(accepted.dispatch.reports[0]?.kind, "feedback");
+    }
+    assert.equal(calls, 1);
+    assert.equal((await journalKinds(journalDir)).includes("command-settled"), false);
+    const reconciled = await opened.loop.reconcile();
+    assert.equal(reconciled.kind, "dispatched");
+    assert.equal(calls, 2);
+    assert.equal((await journalKinds(journalDir)).filter((kind) => kind === "command-settled").length, 1);
+    const repeated = await opened.loop.reconcile();
+    assert.equal(repeated.kind, "dispatched");
+    assert.equal(calls, 2);
+
+    const forgedTemplate = stimulusCapsule.arbitrary.validForKind("command-observation-received", 812);
+    assert.equal(forgedTemplate.kind, "command-observation-received");
+    if (forgedTemplate.kind === "command-observation-received") {
+      const forged = stimulusCapsule.decode(Object.freeze({
+        ...forgedTemplate,
+        actionId: command.actionId,
+        commandId: command.commandId,
+        observation: scenario.commit.record.commandArtifact,
+        observationDigest: scenario.commit.record.commandArtifact.digest,
+        observationPayload: Object.freeze({ kind: "command-observed-v2" }),
+        pages: Object.freeze([]),
+        runId: scenario.genesis.runId,
+      }));
+      assert.equal(forged.kind, "ok");
+      if (forged.kind === "ok") {
+        const rejected = await opened.loop.ingest(forged.value);
+        assert.equal(rejected.kind, "feedback");
+        if (rejected.kind === "feedback") assert.match(rejected.diagnostic, /private dispatcher sink/);
+      }
+    }
+    await opened.loop.close();
   } finally {
     await rm(root, { force: true, recursive: true });
   }

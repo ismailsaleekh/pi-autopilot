@@ -10,6 +10,7 @@ import type { Command } from "../protocol/command.capsule.js";
 import type { DomainFact } from "../protocol/domain-fact.capsule.js";
 import type { Stimulus } from "../protocol/stimulus.capsule.js";
 import type { IndexValue } from "../protocol/state-index.capsule.js";
+import { zeroDecimalNatural } from "../protocol/identifiers.js";
 import { semanticFeedback } from "../facade/feedback.js";
 import type { Feedback } from "../facade/feedback.js";
 import type { ReactionResult, ReactionSeam } from "../facade/seams.js";
@@ -72,6 +73,34 @@ function reserveCommand(work: Extract<IndexValue, { readonly kind: "work" }>): C
     workItemId: item.workItemId,
     workspaceCapability: item.workspaceCapability,
     workspaceId: item.workspaceId,
+  }));
+}
+
+function evidenceCommand(work: Extract<IndexValue, { readonly kind: "work" }>, state: RunState): Command | null {
+  const item = work.workItem;
+  if (item.kind !== "verify-candidate" || state.currentCandidate?.tree !== item.candidateRoot) return null;
+  const inputs = Object.freeze({
+    attemptId: `attempt:${item.workItemId}`,
+    candidateTree: item.candidateRoot,
+    commandSpec: item.validationPlan,
+    cwd: "evidence",
+    environment: item.ruleInputs,
+    evidenceClass: "final-verification",
+    kindId: "evidence:final-verification",
+    ruleId: "rule:final-verification",
+    workItemId: item.workItemId,
+    workspaceCapability: item.workspaceCapability,
+    workspaceId: item.workspaceId,
+  });
+  const preconditions = Object.freeze({ deadlineTick: zeroDecimalNatural() });
+  const actionId = commandActionId("child", item.runId, "execute-evidence-command", inputs, preconditions);
+  return decodeCommand(Object.freeze({
+    ...inputs,
+    actionId,
+    commandId: commandIdentity("execute-evidence", actionId),
+    deadlineTick: preconditions.deadlineTick,
+    kind: "execute-evidence",
+    runId: item.runId,
   }));
 }
 
@@ -142,6 +171,12 @@ export function deriveReaction(
     }
     if (!known && !commands.some((existing) => existing.commandId === command.commandId)) {
       commands.push(command);
+    }
+    const evidence = evidenceCommand(entry.value, prospective);
+    if (evidence !== null) {
+      const evidenceKnown = commandKnown(prospective, evidence, stimulus);
+      if (typeof evidenceKnown !== "boolean") return evidenceKnown;
+      if (!evidenceKnown && !commands.some((existing) => existing.commandId === evidence.commandId)) commands.push(evidence);
     }
   }
   const publish = publicationCommand(prospective);

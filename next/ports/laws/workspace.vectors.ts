@@ -7,7 +7,7 @@ export const workspaceLawVector: ContractVector = Object.freeze({
   id: "workspace.empty-reservation-lease-epoch.v2",
   port: "workspace",
   behaviors: Object.freeze([
-    "allocation creates an empty private reservation and duplicate allocation retries",
+    "allocation creates an empty private reservation and exact duplicate allocation returns the original success",
     "lease, capability, root, and child epoch are checked on every transition",
     "isolation success carries an enforcement attestation",
     "disposal requires a fenced epoch and inspection proves absence",
@@ -31,9 +31,10 @@ export const workspaceLawVector: ContractVector = Object.freeze({
     if (field(allocated.value, "empty") !== true) {
       findings.push("allocate-empty: reservation was not proved empty");
     }
-    const duplicate = await lawCall(driver, "workspace", "allocate-duplicate", allocate, "attempt-directory-allocated", "retry");
+    const duplicate = await lawCall(driver, "workspace", "allocate-idempotent", allocate, "attempt-directory-allocated", "ok");
     trace.push(duplicate.trace);
     collectFinding(findings, duplicate.finding);
+    if (field(duplicate.value, "leaseId") !== field(allocated.value, "leaseId") || field(duplicate.value, "workspaceCapability") !== field(allocated.value, "workspaceCapability")) findings.push("allocate-idempotent: original reservation binding changed");
 
     const inspectTemplate = workspaceIntentCapsule.arbitrary.validForKind("inspect-attempt-directory", 12);
     if (inspectTemplate.kind === "inspect-attempt-directory") {

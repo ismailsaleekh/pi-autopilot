@@ -18,7 +18,7 @@ export function eligibleOutcomeForState(
   state: RunState,
   pages: readonly ResolvedIndexPage[],
 ): Eligibility {
-  if (state.phase === "planning" && state.planningGap !== null) {
+  if (state.phase === "planning" && state.planningGap !== null && state.indexes.commands.hotComplete && state.indexes.commands.hot.every((entry) => entry.value.kind !== "command" || entry.value.status === "settled")) {
     const gap = state.planningGap;
     return Object.freeze({
       kind: "eligible",

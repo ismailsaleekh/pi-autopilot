@@ -278,8 +278,8 @@ export function deriveSemanticTransition(
     const index = current.indexes.commands;
     const key = indexKey("commands", settlementRecord.commandId);
     const found = lookupIndex(index, key, draft.pages);
-    if (found.kind !== "proved" || found.value === null || found.value.kind !== "command" || found.value.status !== "issued") {
-      return Object.freeze({ kind: "rejected", code: "command-not-issued", diagnostic: "settlement does not name a proved issued command" });
+    if (found.kind !== "proved" || found.value === null || found.value.kind !== "command" || found.value.status !== "issued" || found.value.command.actionId !== draft.actionId || found.value.command.commandId !== draft.settlement.commandId) {
+      return Object.freeze({ kind: "rejected", code: "command-not-issued", diagnostic: "settlement does not bind the exact proved issued command action" });
     }
     const next: IndexValue = Object.freeze({ ...found.value, observation: settlementRecord.observation, status: "settled" });
     const prepared = prepareIndexMutation(index, key, next, draft.pages);

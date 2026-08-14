@@ -23,8 +23,8 @@ import {
   workspaceIntentCapsule,
   workspaceObservationCapsule,
 } from "../../ports/contracts/workspace.capsule.js";
-import type { ArtifactRef } from "../../authority/protocol/identifiers.js";
 import type {
+  ArtifactRef,
   WorkspaceIntent,
   WorkspaceObservation,
 } from "../../ports/contracts/workspace.capsule.js";
@@ -430,12 +430,28 @@ export class WorkspaceAdapter {
       }));
     } catch (error: unknown) {
       const code = systemCode(error);
+      if (code === "EEXIST") {
+        try {
+          const status = await lstat(path);
+          if (status.isDirectory() && !status.isSymbolicLink() && (await readdir(path)).length === 0) {
+            return this.observation(intent, "attempt-directory-allocated", Object.freeze({
+              kind: "ok",
+              value: Object.freeze({ empty: true, leaseId: intent.preconditions.leaseId, workspaceCapability: intent.inputs.workspaceCapability, workspaceId: intent.inputs.workspaceId }),
+            }));
+          }
+        } catch {
+          return this.observation(intent, "attempt-directory-allocated", Object.freeze({
+            kind: "retry",
+            diagnostic: contractDiagnostic("workspace.inspect-existing-failed", "existing workspace reservation could not be re-observed safely"),
+          }));
+        }
+      }
       return this.observation(intent, "attempt-directory-allocated", Object.freeze({
         kind: "retry",
         diagnostic: contractDiagnostic(
           code === "EEXIST" ? "workspace.already-exists" : "workspace.allocate-failed",
           code === "EEXIST"
-            ? "workspace directory is already allocated"
+            ? "workspace path exists but is not the empty private reservation"
             : "workspace directory could not be allocated",
         ),
       }));

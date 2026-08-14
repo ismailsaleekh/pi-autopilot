@@ -1,6 +1,9 @@
-import { compareDecimalNatural, zeroDecimalNatural } from "../protocol/identifiers.js";
+import { coverageComplete } from "../coverage/index.js";
+import { commandIdentity } from "../protocol/command.capsule.js";
+import { evidenceEnvelopeDigest } from "../protocol/evidence-fact.capsule.js";
+import { artifactRefsEqual, compareDecimalNatural, zeroDecimalNatural } from "../protocol/identifiers.js";
 import type { ResolvedIndexPage } from "../protocol/state-index.capsule.js";
-import { indexKey, lookupIndex } from "./authenticated-index.js";
+import { indexKey, indexValues, lookupIndex } from "./authenticated-index.js";
 import type { RunState } from "./run-state.js";
 
 export interface T1Checks {
@@ -33,12 +36,29 @@ function finalEvidenceGreen(state: RunState, pages: readonly ResolvedIndexPage[]
   if (found.kind !== "proved" || found.value === null || found.value.kind !== "evidence") {
     return false;
   }
-  const envelope = found.value.evidence.envelope;
-  return envelope.evidenceId === evidenceId
+  const evidence = found.value.evidence;
+  const envelope = evidence.envelope;
+  const commandId = commandIdentity("execute-evidence", envelope.actionId);
+  const commandValue = lookupIndex(state.indexes.commands, indexKey("commands", commandId), pages);
+  if (commandValue.kind !== "proved" || commandValue.value === null || commandValue.value.kind !== "command" || commandValue.value.status !== "settled" || commandValue.value.command.kind !== "execute-evidence") return false;
+  const command = commandValue.value.command;
+  return evidence.envelopeDigest === evidenceEnvelopeDigest(envelope)
+    && envelope.evidenceId === evidenceId
+    && envelope.actionId === command.actionId
+    && envelope.attemptId === command.attemptId
     && envelope.class === "final-verification"
+    && envelope.class === command.evidenceClass
     && envelope.runId === state.identity.runId
     && envelope.tree === state.currentCandidate.tree
+    && envelope.tree === command.candidateTree
     && envelope.acceptedOutput === state.currentCandidate.tree
+    && artifactRefsEqual(envelope.command, command.commandSpec)
+    && envelope.cwd === command.cwd
+    && artifactRefsEqual(envelope.environment, command.environment)
+    && envelope.kindId === command.kindId
+    && envelope.obligationId === `evidence-obligation:${command.commandId}`
+    && envelope.ruleId === command.ruleId
+    && envelope.workItemId === command.workItemId
     && envelope.exit.kind === "exited"
     && envelope.exit.code === "0";
 }
@@ -56,20 +76,31 @@ export function t1Checks(state: RunState, pages: readonly ResolvedIndexPage[]): 
   const c2 = c1
     && !zero(state.counters.declaredAtoms)
     && equal(state.counters.declaredAtoms, state.counters.dispositionedAtoms)
-    && requirements?.declaredAtomCount === state.counters.declaredAtoms;
+    && requirements?.declaredAtomCount === state.counters.declaredAtoms
+    && coverageComplete(state);
   const c3 = finalEvidenceGreen(state, pages);
+  const workValues = indexValues(state.indexes.work, "work");
+  const integrationOwner = plan === null ? null : lookupIndex(state.indexes.work, indexKey("work", plan.integrationOwnerWorkItemId), pages);
+  const integrationOutput = integrationOwner?.kind === "proved" && integrationOwner.value?.kind === "work"
+    ? integrationOwner.value.acceptedOutput
+    : null;
   const c4 = candidate !== null
-    && candidate.reviewedDiff.digest.length > 0
-    && candidate.manifest.digest.length > 0
+    && attestations !== null
+    && artifactRefsEqual(attestations.finalManifest, candidate.manifest)
     && candidate.gitTreeCasAttestation.gitTree === candidate.gitTree
-    && candidate.gitTreeCasAttestation.artifactRoot === candidate.tree;
+    && candidate.gitTreeCasAttestation.artifactRoot === candidate.tree
+    && integrationOutput !== null
+    && integrationOutput.outputRoot === candidate.tree
+    && artifactRefsEqual(integrationOutput.accountedDiff, candidate.reviewedDiff);
   const c5 = state.phase === "execution"
     && plan !== null
     && candidate !== null
     && candidate.planRootId === plan.planRootId
     && publication?.candidateId === candidate.candidateId;
   const c6 = !zero(state.counters.declaredWork)
-    && equal(state.counters.declaredWork, state.counters.acceptedWork);
+    && equal(state.counters.declaredWork, state.counters.acceptedWork)
+    && workValues !== null
+    && workValues.every((value) => value.kind !== "work" || value.acceptedOutput !== null);
   const c7 = state.planningGap === null;
   const noBlocking = zero(state.counters.openBlockingFindings);
   const published = candidate !== null

@@ -13,6 +13,7 @@ import { traceJson } from "./trace.js";
 
 interface NamedTree { readonly root: string }
 interface NamedWorkspace {
+  readonly allocationActionId: string | null;
   readonly workspaceId: string;
   readonly workspaceCapability: string;
   readonly root: string;
@@ -105,6 +106,7 @@ export class SimLawDriver implements LawDriver {
       const template = workspaceIntentCapsule.arbitrary.validForKind("allocate-attempt-directory", 200 + this.fixtureSequence);
       if (tree === undefined || template.kind !== "allocate-attempt-directory") return Object.freeze({ kind: "invalid", diagnostic: "workspace fixture requires an installed tree" });
       const record: NamedWorkspace = Object.freeze({
+        allocationActionId: null,
         workspaceId: template.inputs.workspaceId,
         workspaceCapability: template.inputs.workspaceCapability,
         root: tree.root,
@@ -226,8 +228,13 @@ export class SimLawDriver implements LawDriver {
     const intent = decoded.value;
     if (intent.kind === "allocate-attempt-directory") {
       const prior = this.workspaces.get(intent.inputs.workspaceId);
-      if (prior !== undefined) return this.emit(Object.freeze({ actionId: intent.actionId, kind: "attempt-directory-allocated", result: retryResult("workspace.already-exists", "workspace reservation already exists"), runId: intent.runId }));
-      const record: NamedWorkspace = Object.freeze({ workspaceId: intent.inputs.workspaceId, workspaceCapability: intent.inputs.workspaceCapability, root: "", leaseId: intent.preconditions.leaseId, state: "empty-reserved" });
+      if (prior !== undefined) {
+        const exact = prior.allocationActionId === intent.actionId && prior.workspaceCapability === intent.inputs.workspaceCapability && prior.leaseId === intent.preconditions.leaseId && prior.state === "empty-reserved";
+        return exact
+          ? this.emit(Object.freeze({ actionId: intent.actionId, kind: "attempt-directory-allocated", result: Object.freeze({ kind: "ok", value: Object.freeze({ empty: true, leaseId: prior.leaseId, workspaceCapability: prior.workspaceCapability, workspaceId: prior.workspaceId }) }), runId: intent.runId }))
+          : this.emit(Object.freeze({ actionId: intent.actionId, kind: "attempt-directory-allocated", result: retryResult("workspace.already-exists", "workspace reservation already exists"), runId: intent.runId }));
+      }
+      const record: NamedWorkspace = Object.freeze({ allocationActionId: intent.actionId, workspaceId: intent.inputs.workspaceId, workspaceCapability: intent.inputs.workspaceCapability, root: "", leaseId: intent.preconditions.leaseId, state: "empty-reserved" });
       this.workspaces.set(record.workspaceId, record);
       return this.emit(Object.freeze({ actionId: intent.actionId, kind: "attempt-directory-allocated", result: Object.freeze({ kind: "ok", value: Object.freeze({ empty: true, leaseId: record.leaseId, workspaceCapability: record.workspaceCapability, workspaceId: record.workspaceId }) }), runId: intent.runId }));
     }

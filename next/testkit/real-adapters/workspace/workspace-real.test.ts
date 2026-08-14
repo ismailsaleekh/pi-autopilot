@@ -42,18 +42,22 @@ function intent(kind: "allocate-attempt-directory" | "inspect-attempt-directory"
   }));
 }
 
-test("workspace allocation is exclusive and concurrent IDs remain private", async () => {
+test("workspace allocation is idempotent and concurrent IDs remain private", async () => {
   const value = await fixture();
   try {
     const ids = Array.from({ length: 16 }, (_, index) => `attempt-${String(index)}`);
-    const observations = await Promise.all(ids.map((workspaceId, index) => value.adapter.execute(intent("allocate-attempt-directory", 100 + index, workspaceId))));
+    const intents = ids.map((workspaceId, index) => intent("allocate-attempt-directory", 100 + index, workspaceId));
+    const observations = await Promise.all(intents.map((allocation) => value.adapter.execute(allocation)));
     for (const observation of observations) {
       assert.equal(observation.kind, "observation");
       if (observation.kind === "observation") assert.equal(observation.observation.result.kind, "ok");
     }
-    const duplicate = await value.adapter.execute(intent("allocate-attempt-directory", 999, ids[0] ?? "attempt-0"));
+    const firstIntent = intents[0];
+    assert.notEqual(firstIntent, null);
+    if (firstIntent === null) return;
+    const duplicate = await value.adapter.execute(firstIntent);
     assert.equal(duplicate.kind, "observation");
-    if (duplicate.kind === "observation") assert.equal(duplicate.observation.result.kind, "retry");
+    if (duplicate.kind === "observation") assert.equal(duplicate.observation.result.kind, "ok");
   } finally {
     await rm(value.root, { recursive: true, force: true });
   }

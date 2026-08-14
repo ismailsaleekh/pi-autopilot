@@ -1,4 +1,5 @@
 import {
+  artifactRefsEqual,
   artifactRefSchema,
   captureIdSchema,
   childEpochSchema,
@@ -110,6 +111,21 @@ export type ChildMemorySeed = Infer<typeof childMemorySeedSchema>;
 export type ProcessObservation = Infer<typeof processObservationSchema>;
 export type RouteVerification = Infer<typeof routeVerificationSchema>;
 export type SessionObservation = Infer<typeof sessionObservationSchema>;
+
+export function subscriptionRoutesEqual(left: SubscriptionRoute, right: SubscriptionRoute): boolean {
+  const attestationsEqual = left.toolBundleAttestation === null
+    ? right.toolBundleAttestation === null
+    : right.toolBundleAttestation !== null && artifactRefsEqual(left.toolBundleAttestation, right.toolBundleAttestation);
+  return left.catalogDigest === right.catalogDigest
+    && left.channel === right.channel
+    && left.model === right.model
+    && left.piVersion === right.piVersion
+    && left.policyDigest === right.policyDigest
+    && left.provider === right.provider
+    && left.routeCapability === right.routeCapability
+    && left.thinking === right.thinking
+    && attestationsEqual;
+}
 
 export const routeContractSchema = union([
   object({ kind: literal("route"), value: subscriptionRouteSchema }),

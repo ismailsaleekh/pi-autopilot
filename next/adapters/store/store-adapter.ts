@@ -1,16 +1,12 @@
-import { artifactPathSchema, kindIdSchema } from "../../authority/protocol/identifiers.js";
-import type { ArtifactPath, ArtifactRef, ArtifactRoot, KindId } from "../../authority/protocol/identifiers.js";
-import { canonicalEncodeUnknown, defineCapsule } from "../../authority/protocol/schema.js";
-import type { JsonValue } from "../../authority/protocol/schema.js";
-import { storeIntentCapsule, storeObservationCapsule } from "../../ports/contracts/store.capsule.js";
-import type { StoreIntent, StoreObservation } from "../../ports/contracts/store.capsule.js";
+import { decodeStoreCaptureCoordinates, encodeStorePageCapture, storeIntentCapsule, storeObservationCapsule } from "../../ports/contracts/store.capsule.js";
+import type { ArtifactPath, ArtifactRef, ArtifactRoot, KindId, StoreIntent, StoreObservation, StorePageEntry } from "../../ports/contracts/store.capsule.js";
 export interface StoreAdapterDiagnostic { readonly code: string; readonly message: string }
 export type StoreAdapterExecution =
   | { readonly kind: "observation"; readonly observation: StoreObservation }
   | { readonly diagnostic: StoreAdapterDiagnostic; readonly kind: "rejected" };
 export interface StoreAdapterBackend {
   readonly install: (request: Readonly<{ readonly bytes: Uint8Array; readonly codec: KindId; readonly codecVersion: KindId; readonly path: ArtifactPath }>) => Promise<Readonly<{ readonly kind: "installed"; readonly reference: ArtifactRef }> | Readonly<{ readonly kind: "error"; readonly code: string; readonly message: string }>>;
-  readonly list: (root: ArtifactRoot, cursor: string | null, pageSize: number) => Promise<Readonly<{ readonly kind: "page"; readonly entries: readonly JsonValue[]; readonly nextCursor: string | null }> | Readonly<{ readonly kind: "error"; readonly code: string; readonly message: string }>>;
+  readonly list: (root: ArtifactRoot, cursor: string | null, pageSize: number) => Promise<Readonly<{ readonly kind: "page"; readonly entries: readonly StorePageEntry[]; readonly nextCursor: string | null }> | Readonly<{ readonly kind: "error"; readonly code: string; readonly message: string }>>;
   readonly read: (reference: ArtifactRef, maxBytes: number) => Promise<Readonly<{ readonly kind: "read"; readonly bytes: Uint8Array }> | Readonly<{ readonly kind: "error"; readonly code: string; readonly message: string }>>;
 }
 export interface StoreAdapterOptions {
@@ -22,8 +18,6 @@ export type StoreAdapterCreateResult =
   | { readonly adapter: StoreAdapter; readonly kind: "created" }
   | { readonly diagnostic: StoreAdapterDiagnostic; readonly kind: "rejected" };
 
-const pathCapsule = defineCapsule("StoreAdapterArtifactPath", artifactPathSchema);
-const kindCapsule = defineCapsule("StoreAdapterKind", kindIdSchema);
 function diagnostic(code: string, message: string): StoreAdapterDiagnostic { return Object.freeze({ code, message }); }
 function contractDiagnostic(code: string, message: string) { return Object.freeze({ code, message, related: Object.freeze([]) }); }
 function safeIntent(input: unknown): StoreIntent | null {
@@ -78,7 +72,8 @@ export class StoreAdapter {
     if (!Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > this.options.maxPageSize) return this.retry(intent, "artifact-page-listed", "store.page-bound", "page size exceeds the configured bound");
     const page = await this.options.backend.list(intent.inputs.root, intent.inputs.cursor, pageSize);
     if (page.kind !== "page") return this.retry(intent, "artifact-page-listed", page.code, page.message);
-    const entries = await this.installCapture(`store/page-${intent.actionId.slice(14)}.json`, canonicalEncodeUnknown(Object.freeze({ entries: page.entries, root: intent.inputs.root })), intent.inputs.codec, intent.inputs.codecVersion);
+    const encodedPage = encodeStorePageCapture(page.entries, intent.inputs.root);
+    const entries = encodedPage === null ? null : await this.installCapture(`store/page-${intent.actionId.slice(14)}.json`, encodedPage, intent.inputs.codec, intent.inputs.codecVersion);
     return entries === null
       ? this.retry(intent, "artifact-page-listed", "store.page-capture", "page proof could not be installed")
       : this.observation(intent, "artifact-page-listed", Object.freeze({ kind: "ok", value: Object.freeze({ entries, nextCursor: page.nextCursor, pageSize: intent.inputs.pageSize, previousPageProof: intent.inputs.previousPageProof, root: intent.inputs.root }) }));
@@ -96,12 +91,10 @@ export class StoreAdapter {
     return read.kind === "read" && read.bytes.byteLength === length ? read.bytes : null;
   }
 
-  private async installCapture(pathText: string, bytes: Uint8Array, codecText: string, versionText: string = "version:2"): Promise<ArtifactRef | null> {
-    const path = pathCapsule.decode(pathText);
-    const codec = kindCapsule.decode(codecText);
-    const version = kindCapsule.decode(versionText);
-    if (path.kind !== "ok" || codec.kind !== "ok" || version.kind !== "ok") return null;
-    const installed = await this.options.backend.install(Object.freeze({ bytes, codec: codec.value, codecVersion: version.value, path: path.value }));
+  private async installCapture(path: string, bytes: Uint8Array, codec: string, codecVersion: string = "version:2"): Promise<ArtifactRef | null> {
+    const coordinates = decodeStoreCaptureCoordinates(path, codec, codecVersion);
+    if (coordinates === null) return null;
+    const installed = await this.options.backend.install(Object.freeze({ bytes, ...coordinates }));
     return installed.kind === "installed" ? installed.reference : null;
   }
 

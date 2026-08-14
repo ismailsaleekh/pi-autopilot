@@ -1,3 +1,4 @@
+export type { ArtifactRef } from "../../authority/protocol/identifiers.js";
 import {
   actionIdSchema,
   artifactRefSchema,

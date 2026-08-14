@@ -1,14 +1,19 @@
 import { stateDigest } from "../model/run-state.js";
+import { commandIdentity } from "../protocol/command.capsule.js";
+import type { Command } from "../protocol/command.capsule.js";
+import { evidenceEnvelopeDigest } from "../protocol/evidence-fact.capsule.js";
 import type { RunState } from "../model/run-state.js";
 import { indexKey, lookupIndex } from "../model/authenticated-index.js";
 import { domainFactCapsule } from "../protocol/domain-fact.capsule.js";
+import { subscriptionRoutesEqual } from "../protocol/route.capsule.js";
 import type { DomainFact } from "../protocol/domain-fact.capsule.js";
 import { findingCapsule } from "../protocol/finding.capsule.js";
 import type { Finding } from "../protocol/finding.capsule.js";
-import { incrementDecimalNatural, zeroDecimalNatural } from "../protocol/identifiers.js";
+import { artifactRefsEqual, incrementDecimalNatural, zeroDecimalNatural } from "../protocol/identifiers.js";
 import type { ArtifactRoot, WorkItemId } from "../protocol/identifiers.js";
 import type {
   BoundaryRequestReceived,
+  CommandObservationPayload,
   CommandObservationReceived,
   OperatorResumeRequested,
   OperatorSuspendRequested,
@@ -171,6 +176,9 @@ function correctionFact(
   stimulus: SubmissionReady | CommandObservationReceived,
   finding: Finding,
 ): DomainFact | Feedback {
+  if (finding.kind === "planning-gap" && state.phase !== "planning") {
+    return semanticFeedback("finding-invalid", "$.finding.kind", "planning gaps are terminal planning-phase rulings and cannot poison execution");
+  }
   if (finding.kind === "planning-gap" || finding.kind === "advisory") {
     return fact(Object.freeze({
       kind: "finding-accepted",
@@ -302,7 +310,7 @@ function submissionFacts(state: RunState, stimulus: SubmissionReady): AdmissionR
       }));
       break;
     case "accept-evidence-v2":
-      candidate = fact(Object.freeze({ kind: "evidence-observed", runId: stimulus.runId, evidence: payload.evidence }));
+      candidate = semanticFeedback("evidence-invalid", "$.submissionPayload", "semantic evidence must arrive through settlement of its issued dispatcher command");
       break;
     case "accept-candidate-v2":
       if (
@@ -344,6 +352,98 @@ function submissionFacts(state: RunState, stimulus: SubmissionReady): AdmissionR
 export function admitSubmissionReady(state: RunState, stimulus: SubmissionReady): AdmissionResult {
   const universal = universalRejection(state, stimulus);
   return universal ?? submissionFacts(state, stimulus);
+}
+
+function issuedObservationCommand(state: RunState, stimulus: CommandObservationReceived): Command | Feedback {
+  const found = lookupIndex(state.indexes.commands, indexKey("commands", stimulus.commandId), stimulus.pages);
+  if (found.kind !== "proved") return semanticFeedback("page-unproven", "$.pages", found.diagnostic);
+  if (found.value === null || found.value.kind !== "command" || found.value.status !== "issued") return semanticFeedback("command-not-issued", "$.commandId", "observation must name one proved issued command");
+  const command = found.value.command;
+  if (command.actionId !== stimulus.actionId || command.commandId !== stimulus.commandId || command.commandId !== commandIdentity(command.kind, command.actionId)) {
+    return semanticFeedback("command-not-issued", "$.actionId", "observation action and command identities must equal the issued command");
+  }
+  return command;
+}
+
+function evidencePayloadMatches(command: Extract<Command, { readonly kind: "execute-evidence" }>, payload: Extract<CommandObservationPayload, { readonly kind: "evidence-observed-v2" }>): boolean {
+  const evidence = payload.evidence;
+  const envelope = evidence.envelope;
+  return evidence.envelopeDigest === evidenceEnvelopeDigest(envelope)
+    && envelope.actionId === command.actionId
+    && envelope.attemptId === command.attemptId
+    && envelope.acceptedOutput === command.candidateTree
+    && envelope.class === command.evidenceClass
+    && artifactRefsEqual(envelope.command, command.commandSpec)
+    && envelope.cwd === command.cwd
+    && artifactRefsEqual(envelope.environment, command.environment)
+    && envelope.kindId === command.kindId
+    && envelope.obligationId === `evidence-obligation:${command.commandId}`
+    && envelope.ruleId === command.ruleId
+    && envelope.runId === command.runId
+    && envelope.tree === command.candidateTree
+    && envelope.workItemId === command.workItemId;
+}
+
+function commandPayloadMatches(command: Command, payload: CommandObservationPayload): boolean {
+  if (payload.kind === "command-retry-v2") return false;
+  switch (command.kind) {
+    case "prepare-workspace":
+      return payload.kind === "workspace-reserved-v2"
+        && payload.leaseId === command.leaseId
+        && payload.workspaceCapability === command.workspaceCapability
+        && payload.workspaceId === command.workspaceId;
+    case "apply-workspace-isolation":
+      return payload.kind === "command-observed-v2";
+    case "materialize-workspace":
+      return payload.kind === "workspace-materialized-v2"
+        && payload.gitTree === command.baseTree
+        && payload.workspaceCapability === command.workspaceCapability
+        && payload.workspaceId === command.workspaceId;
+    case "verify-child-route":
+      return payload.kind === "route-verified-v2"
+        && subscriptionRoutesEqual(payload.route.route, command.route);
+    case "launch-child":
+      return payload.kind === "child-observed-v2"
+        && payload.childEpoch === command.childEpoch
+        && payload.session["process"].captureId === command.captureId
+        && payload.session["process"].workspaceId === command.workspaceId;
+    case "inspect-child":
+      return payload.kind === "child-observed-v2"
+        && payload.childEpoch === command.childEpoch
+        && payload.childId === command.childId;
+    case "execute-evidence":
+      return payload.kind === "evidence-observed-v2" && evidencePayloadMatches(command, payload);
+    case "execute-validation-rule":
+      if (payload.kind === "command-observed-v2") return true;
+      if (payload.kind !== "validation-finding-v2" || payload.finding.kind === "planning-gap") return false;
+      return payload.finding.runId === command.runId
+        && payload.finding.subjectRoot === command.candidateTree
+        && (payload.finding.kind === "advisory"
+          ? payload.finding.raisedByWorkItemId === command.workItemId
+          : payload.finding.observedByWorkItemId === command.workItemId);
+    case "build-integrated-candidate":
+      return payload.kind === "candidate-integrated-v2"
+        ? payload.candidateId === command.candidateId
+          && payload.planRootId === command.planRootId
+          && payload.gitRevision === command.candidateCommit
+          && payload.gitTree === command.candidateTree
+        : payload.kind === "integration-conflict-v2"
+          && payload.integrationOwnerWorkItemId === command.workItemId
+          && payload.planRootId === command.planRootId
+          && payload.subjectRoot === command.candidateRoot;
+    case "publish-compare-and-swap":
+      return payload.kind === "publication-observed-v2"
+        && payload.publicationId === command.publicationId
+        && payload.gitTree === command.candidateTree
+        && payload.tree === command.verifiedAttestation.artifactRoot
+        && payload.publicationTreeAttestation.gitTree === command.verifiedAttestation.gitTree
+        && payload.publicationTreeAttestation.artifactRoot === command.verifiedAttestation.artifactRoot
+        && artifactRefsEqual(payload.publicationTreeAttestation.attestation, command.verifiedAttestation.attestation);
+    case "observe-clock":
+      return payload.kind === "clock-observed-v2";
+    case "install-artifact":
+      return payload.kind === "artifact-installed-v2" && artifactRefsEqual(payload.artifact, command.artifact);
+  }
 }
 
 function observationFacts(state: RunState, stimulus: CommandObservationReceived): AdmissionResult {
@@ -468,7 +568,12 @@ function observationFacts(state: RunState, stimulus: CommandObservationReceived)
 
 export function admitCommandObservation(state: RunState, stimulus: CommandObservationReceived): AdmissionResult {
   const universal = universalRejection(state, stimulus);
-  return universal ?? observationFacts(state, stimulus);
+  if (universal !== null) return universal;
+  const command = issuedObservationCommand(state, stimulus);
+  if ("kind" in command && command.kind === "feedback") return command;
+  return commandPayloadMatches(command, stimulus.observationPayload)
+    ? observationFacts(state, stimulus)
+    : semanticFeedback("invalid-stimulus", "$.observationPayload", "observation payload does not match the exact issued command");
 }
 
 export function admitRunReplayCompleted(state: RunState, stimulus: RunReplayCompleted): AdmissionResult {

@@ -345,6 +345,9 @@ async function recordObservation(
   dependencies: DispatcherDependencies,
   sink: CommandObservationSink,
 ): Promise<CommandDispatchReport> {
+  if (observation.result.kind === "retry") {
+    return Object.freeze({ kind: "feedback", commandId: command.commandId, feedback: feedback("$.observation.result", `port requested retry: ${observation.result.diagnostic.code}`) });
+  }
   const payload = observationPayload(command, observation);
   if (payload === null) {
     return Object.freeze({ kind: "feedback", commandId: command.commandId, feedback: feedback("$.observation", "observation requires an explicit authority consequence codec") });
