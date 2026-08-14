@@ -154,6 +154,44 @@ test("authority purity accepts pure code and rejects ambient effects", () => {
   assert.equal(rulesFor(oneFile("authority/model/bad-constructor.ts", "declare function defineCapsule(): unknown; export const bad = defineCapsule();\n")).has("authority-purity"), true);
 });
 
+test("symbol-resolved append edge catches aliases, namespaces, CommonJS, and hidden second calls", () => {
+  const journal = Object.freeze({ path: "storage/journal/append.ts", text: "export function appendCommittedBatch(): void {}\n" });
+  const cases = Object.freeze([
+    "import { appendCommittedBatch as commit } from '../../storage/journal/append.js'; commit(); commit();\n",
+    "import * as journal from '../../storage/journal/append.js'; journal.appendCommittedBatch(); journal.appendCommittedBatch();\n",
+    "const { appendCommittedBatch: commit } = require('../../storage/journal/append.js'); commit(); commit();\n",
+    "import { appendCommittedBatch } from '../../storage/journal/append.js'; const again = appendCommittedBatch; appendCommittedBatch(); again();\n",
+  ]);
+  for (const text of cases) {
+    const findings = checkArchitectureUnits(fixtureUnits(Object.freeze([journal, Object.freeze({ path: "runtime/commit-loop/commit.ts", text })])));
+    assert.equal(findings.some((finding) => finding.rule === "one-append-edge" && finding.detail.includes("found 2")), true, text);
+  }
+});
+
+test("symbol-resolved adapter timer and durable-write checks reject aliases without generic-name false positives", () => {
+  const timer = rulesFor(oneFile("adapters/child/bad.ts", "import { setTimeout as pause } from 'node:timers'; pause(() => {}, 1);\n"));
+  assert.equal(timer.has("adapters-are-leaves"), true);
+  const dynamicTimer = rulesFor(oneFile("adapters/child/dynamic.ts", "export async function bad(): Promise<void> { await (await import('node:timers/promises')).setTimeout(1); }\n"));
+  assert.equal(dynamicTimer.has("adapters-are-leaves"), true);
+  const write = rulesFor(oneFile("apps/worker/bad.ts", "import * as io from 'node:fs/promises'; io.writeFile('x', 'y');\n"));
+  assert.equal(write.has("durable-write-boundary"), true);
+  const emittedWrite = rulesFor(oneFile("apps/worker/cjs.ts", "const io = require('node:fs'); (0, io.writeFileSync)('x', 'y');\n"));
+  assert.equal(emittedWrite.has("durable-write-boundary"), true);
+  const local = rulesFor(oneFile("apps/worker/good.ts", "const domain = { write(): void {}, open(): void {} }; domain.write(); domain.open();\n"));
+  assert.equal(local.has("durable-write-boundary"), false);
+  const shadow = rulesFor(oneFile("adapters/child/shadow.ts", "function setTimeout(): void {} setTimeout();\n"));
+  assert.equal(shadow.has("adapters-are-leaves"), false);
+});
+
+test("symbol resolver follows renamed re-export barrels to the journal capability", () => {
+  const findings = checkArchitectureUnits(fixtureUnits(Object.freeze([
+    Object.freeze({ path: "storage/journal/append.ts", text: "export function appendCommittedBatch(): void {}\n" }),
+    Object.freeze({ path: "runtime/barrel/index.ts", text: "export { appendCommittedBatch as durableAppend } from '../../storage/journal/append.js';\n" }),
+    Object.freeze({ path: "runtime/commit-loop/commit.ts", text: "import { durableAppend as commit } from '../../runtime/barrel/index.js'; commit(); commit();\n" }),
+  ])));
+  assert.equal(findings.some((finding) => finding.rule === "one-append-edge" && finding.detail.includes("found 2")), true);
+});
+
 test("two-phase one-append-edge law accepts pre-loop zero edge, rejects early edge, and enforces transition", () => {
   const journal = Object.freeze({
     path: "storage/journal/append.ts",
@@ -457,8 +495,8 @@ test("negative compilation fixtures all fire for their intended reason", () => {
   const results = runNegativeCompileFixtures(join(policyRoot, "fixtures"));
   const expectedCodes = new Map([
     ["accepted-batch-factory.compile-fail.ts", 2345],
-    ["accepted-batch.compile-fail.ts", 2739],
-    ["domain-fact-handler.compile-fail.ts", 1360],
+    ["accepted-batch.compile-fail.ts", 2322],
+    ["domain-fact-handler.compile-fail.ts", 2353],
     ["evidence-envelope.compile-fail.ts", 2741],
     ["exhaustiveness.compile-fail.ts", 1360],
     ["third-terminal.compile-fail.ts", 2322],

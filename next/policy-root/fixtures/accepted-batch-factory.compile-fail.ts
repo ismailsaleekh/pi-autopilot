@@ -1,3 +1,3 @@
-import { mintAcceptedBatch } from "../../authority/protocol/accepted-batch.js";
+import { preparedCommitTestHarness } from "../../authority/protocol/accepted-batch.js";
 
-mintAcceptedBatch({});
+preparedCommitTestHarness().prepareRecord({});

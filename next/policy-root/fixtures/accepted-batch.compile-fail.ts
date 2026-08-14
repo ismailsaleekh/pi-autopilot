@@ -1,16 +1,10 @@
-import type { AcceptedBatch } from "../../authority/protocol/accepted-batch.js";
-import { ingestDecisionCapsule } from "../../authority/protocol/ingest-decision.capsule.js";
+import type { PreparedCommit } from "../../authority/protocol/accepted-batch.js";
+import { journalRecordCapsule } from "../../authority/protocol/journal-record.capsule.js";
 
-const accepted = ingestDecisionCapsule.arbitrary.validForKind("accept", 401);
-if (accepted.kind !== "accept") {
-  throw new Error("fixture generator did not return accept");
-}
-
-const forbiddenBatch: AcceptedBatch = {
-  runId: accepted.runId,
-  factRoot: accepted.factRoot,
-  commandRoot: accepted.commandRoot,
-  stateDigest: accepted.stateDigest,
+const record = journalRecordCapsule.arbitrary.validForKind("run-genesis", 401);
+const forbiddenCommit: PreparedCommit = {
+  kind: "prepared-genesis",
+  record,
 };
 
-void forbiddenBatch;
+void forbiddenCommit;

@@ -26,11 +26,27 @@ export interface SourceUnit {
   readonly path: string;
   readonly text: string;
   readonly sourceFile: ts.SourceFile;
+  readonly resolvedImports: ReadonlyMap<string, string>;
 }
 
 interface ImportEdge {
   readonly specifier: string;
   readonly node: ts.Node;
+  readonly typeOnly: boolean;
+}
+
+interface ImportedBinding {
+  readonly local: string;
+  readonly imported: string;
+  readonly specifier: string;
+  readonly typeOnly: boolean;
+  readonly node: ts.Node;
+}
+
+interface ResolvedCall {
+  readonly exportName: string;
+  readonly specifier: string | null;
+  readonly unresolvedSensitive: boolean;
 }
 
 const PRODUCTION_ROOTS = Object.freeze([
@@ -160,6 +176,7 @@ function parseUnit(
   logicalPath: string,
   text: string,
   origin: "source" | "emitted",
+  resolvedImports: ReadonlyMap<string, string> = new Map(),
 ): SourceUnit {
   const language = origin === "source" ? ts.ScriptKind.TS : ts.ScriptKind.JS;
   return Object.freeze({
@@ -167,6 +184,7 @@ function parseUnit(
     path: logicalPath,
     text,
     sourceFile: ts.createSourceFile(logicalPath, text, ts.ScriptTarget.ES2022, true, language),
+    resolvedImports,
   });
 }
 
@@ -229,13 +247,36 @@ export function collectActualUnits(nextRoot: string): {
     }
   }
 
+  const baseConfigPath = join(absoluteRoot, "tsconfig.base.json");
+  const baseConfig = ts.readConfigFile(baseConfigPath, ts.sys.readFile);
+  const baseOptions = baseConfig.error === undefined
+    ? ts.parseJsonConfigFileContent(baseConfig.config, ts.sys, absoluteRoot, undefined, baseConfigPath).options
+    : Object.freeze({ moduleResolution: ts.ModuleResolutionKind.NodeNext });
+  const resolutionCache = ts.createModuleResolutionCache(absoluteRoot, (value) => value, baseOptions);
+  const sourceLogicalByAbsolute = new Map(sourceFiles.map((file) => [resolve(file), slash(relative(absoluteRoot, file)).replace(/\.ts$/, "")]));
+  const resolveSourceImports = (file: string, text: string): ReadonlyMap<string, string> => {
+    const parsed = parseUnit(slash(relative(absoluteRoot, file)), text, "source");
+    const resolved = new Map<string, string>();
+    for (const edge of importsOf(parsed)) {
+      const result = ts.resolveModuleName(edge.specifier, file, baseOptions, ts.sys, resolutionCache).resolvedModule;
+      if (result === undefined) continue;
+      const exact = sourceLogicalByAbsolute.get(resolve(result.resolvedFileName));
+      const logical = exact ?? slash(relative(absoluteRoot, result.resolvedFileName)).replace(/\.(?:d\.)?ts$/, "");
+      if (!logical.startsWith("../")) resolved.set(edge.specifier, logical);
+    }
+    return resolved;
+  };
   const units: SourceUnit[] = sourceFiles
     .sort(compareText)
-    .map((file) => parseUnit(
-      slash(relative(absoluteRoot, file)),
-      readFileSync(file, "utf8"),
-      "source",
-    ));
+    .map((file) => {
+      const text = readFileSync(file, "utf8");
+      return parseUnit(
+        slash(relative(absoluteRoot, file)),
+        text,
+        "source",
+        resolveSourceImports(file, text),
+      );
+    });
   const emittedRoot = join(absoluteRoot, "dist");
   const emittedFiles = collectFiles(emittedRoot, new Set([".js"]));
   const emittedLogicalPaths = new Set<string>();
@@ -315,27 +356,52 @@ function visit(node: ts.Node, callback: (node: ts.Node) => void): void {
   node.forEachChild((child) => visit(child, callback));
 }
 
+function literalModuleSpecifier(node: ts.Expression | undefined): string | null {
+  if (node === undefined) return null;
+  return ts.isStringLiteralLike(node) || ts.isNoSubstitutionTemplateLiteral(node) ? node.text : null;
+}
+
+function requireSpecifier(node: ts.CallExpression): string | null {
+  if (
+    ts.isIdentifier(node.expression)
+    && node.expression.text === "require"
+  ) return literalModuleSpecifier(node.arguments[0]);
+  if (
+    ts.isPropertyAccessExpression(node.expression)
+    && ts.isIdentifier(node.expression.expression)
+    && node.expression.expression.text === "module"
+    && node.expression.name.text === "require"
+  ) return literalModuleSpecifier(node.arguments[0]);
+  return null;
+}
+
 function importsOf(unit: SourceUnit): readonly ImportEdge[] {
   const output: ImportEdge[] = [];
   visit(unit.sourceFile, (node) => {
     if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier !== undefined) {
-      if (ts.isStringLiteral(node.moduleSpecifier)) {
-        output.push(Object.freeze({ specifier: node.moduleSpecifier.text, node }));
+      if (ts.isStringLiteralLike(node.moduleSpecifier)) {
+        output.push(Object.freeze({ specifier: node.moduleSpecifier.text, node, typeOnly: importEdgeIsTypeOnly(Object.freeze({ specifier: node.moduleSpecifier.text, node, typeOnly: false })) }));
       }
+    } else if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)) {
+      const specifier = literalModuleSpecifier(node.moduleReference.expression);
+      if (specifier !== null) output.push(Object.freeze({ specifier, node, typeOnly: node.isTypeOnly }));
     } else if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
-      const argument = node.arguments[0];
-      if (argument !== undefined && ts.isStringLiteral(argument)) {
-        output.push(Object.freeze({ specifier: argument.text, node }));
-      }
+      const specifier = literalModuleSpecifier(node.arguments[0]);
+      output.push(Object.freeze({ specifier: specifier ?? "<dynamic-unresolved>", node, typeOnly: false }));
+    } else if (ts.isCallExpression(node)) {
+      const specifier = requireSpecifier(node);
+      if (specifier !== null) output.push(Object.freeze({ specifier, node, typeOnly: false }));
     }
   });
   return Object.freeze(output);
 }
 
 function importEdgeIsTypeOnly(edge: ImportEdge): boolean {
+  if (edge.typeOnly) return true;
   if (ts.isExportDeclaration(edge.node)) {
     return edge.node.isTypeOnly;
   }
+  if (ts.isImportEqualsDeclaration(edge.node)) return edge.node.isTypeOnly;
   if (!ts.isImportDeclaration(edge.node)) {
     return false;
   }
@@ -353,7 +419,36 @@ function importEdgeIsTypeOnly(edge: ImportEdge): boolean {
     && clause.namedBindings.elements.every((element) => element.isTypeOnly);
 }
 
+function importedBindings(unit: SourceUnit): readonly ImportedBinding[] {
+  const output: ImportedBinding[] = [];
+  for (const statement of unit.sourceFile.statements) {
+    if (ts.isImportDeclaration(statement) && ts.isStringLiteralLike(statement.moduleSpecifier)) {
+      const clause = statement.importClause;
+      if (clause?.name !== undefined) output.push(Object.freeze({ local: clause.name.text, imported: "default", specifier: statement.moduleSpecifier.text, typeOnly: clause.isTypeOnly, node: statement }));
+      if (clause?.namedBindings !== undefined && ts.isNamespaceImport(clause.namedBindings)) {
+        output.push(Object.freeze({ local: clause.namedBindings.name.text, imported: "*", specifier: statement.moduleSpecifier.text, typeOnly: clause.isTypeOnly, node: statement }));
+      } else if (clause?.namedBindings !== undefined) {
+        for (const element of clause.namedBindings.elements) output.push(Object.freeze({ local: element.name.text, imported: element.propertyName?.text ?? element.name.text, specifier: statement.moduleSpecifier.text, typeOnly: clause.isTypeOnly || element.isTypeOnly, node: element }));
+      }
+    } else if (ts.isImportEqualsDeclaration(statement) && ts.isExternalModuleReference(statement.moduleReference)) {
+      const specifier = literalModuleSpecifier(statement.moduleReference.expression);
+      if (specifier !== null) output.push(Object.freeze({ local: statement.name.text, imported: "*", specifier, typeOnly: statement.isTypeOnly, node: statement }));
+    } else if (ts.isVariableStatement(statement)) {
+      for (const declaration of statement.declarationList.declarations) {
+        if (declaration.initializer === undefined || !ts.isCallExpression(declaration.initializer)) continue;
+        const specifier = requireSpecifier(declaration.initializer);
+        if (specifier === null) continue;
+        if (ts.isIdentifier(declaration.name)) output.push(Object.freeze({ local: declaration.name.text, imported: "*", specifier, typeOnly: false, node: declaration }));
+        if (ts.isObjectBindingPattern(declaration.name)) for (const element of declaration.name.elements) if (ts.isIdentifier(element.name)) output.push(Object.freeze({ local: element.name.text, imported: element.propertyName !== undefined && ts.isIdentifier(element.propertyName) ? element.propertyName.text : element.name.text, specifier, typeOnly: false, node: element }));
+      }
+    }
+  }
+  return Object.freeze(output);
+}
+
 function resolvedLogicalImport(unit: SourceUnit, specifier: string): string | null {
+  const configured = unit.resolvedImports.get(specifier);
+  if (configured !== undefined) return configured;
   if (!specifier.startsWith(".")) {
     return null;
   }
@@ -374,6 +469,95 @@ function callName(node: ts.CallExpression): string | null {
     return node.expression.name.text;
   }
   return null;
+}
+
+function unwrappedCallExpression(expression: ts.Expression): ts.Expression {
+  let current = expression;
+  while (ts.isParenthesizedExpression(current) || ts.isAsExpression(current) || ts.isSatisfiesExpression(current) || ts.isNonNullExpression(current) || ts.isAwaitExpression(current)) current = current.expression;
+  if (ts.isCommaListExpression(current)) current = current.elements[current.elements.length - 1] ?? current;
+  if (ts.isBinaryExpression(current) && current.operatorToken.kind === ts.SyntaxKind.CommaToken) current = current.right;
+  return current;
+}
+
+function moduleUnit(units: readonly SourceUnit[], origin: SourceUnit["origin"], logical: string): SourceUnit | null {
+  const candidates = [logical, `${logical}.ts`, `${logical}.js`, `${logical}/index.ts`, `${logical}/index.js`];
+  return units.find((unit) => unit.origin === origin && candidates.includes(unit.path)) ?? null;
+}
+
+function terminalTarget(
+  units: readonly SourceUnit[],
+  importer: SourceUnit,
+  target: ResolvedCall,
+  seen: ReadonlySet<string> = new Set(),
+): ResolvedCall {
+  if (target.specifier === null || target.specifier.startsWith("node:") || !target.specifier.startsWith(".")) return target;
+  const logical = resolvedLogicalImport(importer, target.specifier);
+  if (logical === null) return Object.freeze({ ...target, unresolvedSensitive: true });
+  const identity = `${importer.origin}:${logical}:${target.exportName}`;
+  if (seen.has(identity)) return Object.freeze({ ...target, unresolvedSensitive: true });
+  const unit = moduleUnit(units, importer.origin, logical);
+  if (unit === null) return Object.freeze({ ...target, specifier: `@logical/${logical}` });
+  const nextSeen = new Set([...seen, identity]);
+  for (const statement of unit.sourceFile.statements) {
+    if (!ts.isExportDeclaration(statement)) continue;
+    const specifier = statement.moduleSpecifier !== undefined && ts.isStringLiteralLike(statement.moduleSpecifier) ? statement.moduleSpecifier.text : null;
+    if (statement.exportClause !== undefined && ts.isNamedExports(statement.exportClause)) {
+      for (const element of statement.exportClause.elements) {
+        if (element.name.text !== target.exportName) continue;
+        const original = element.propertyName?.text ?? element.name.text;
+        if (specifier !== null) return terminalTarget(units, unit, Object.freeze({ exportName: original, specifier, unresolvedSensitive: false }), nextSeen);
+        const binding = importedBindings(unit).find((entry) => entry.local === original && !entry.typeOnly);
+        if (binding !== undefined) return terminalTarget(units, unit, Object.freeze({ exportName: binding.imported, specifier: binding.specifier, unresolvedSensitive: false }), nextSeen);
+      }
+    } else if (statement.exportClause === undefined && specifier !== null) {
+      const resolved = terminalTarget(units, unit, Object.freeze({ ...target, specifier }), nextSeen);
+      if (!resolved.unresolvedSensitive) return resolved;
+    }
+  }
+  return Object.freeze({ ...target, specifier: `@logical/${logical}` });
+}
+
+function resolvedCall(units: readonly SourceUnit[], unit: SourceUnit, node: ts.CallExpression): ResolvedCall {
+  const bindings = importedBindings(unit);
+  const aliases = new Map<string, ts.Expression>();
+  visit(unit.sourceFile, (candidate) => {
+    if (ts.isVariableDeclaration(candidate) && ts.isIdentifier(candidate.name) && candidate.initializer !== undefined) aliases.set(candidate.name.text, candidate.initializer);
+    if (ts.isBinaryExpression(candidate) && candidate.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isIdentifier(candidate.left)) aliases.set(candidate.left.text, candidate.right);
+  });
+  const resolveExpression = (input: ts.Expression, seen: ReadonlySet<string>): ResolvedCall => {
+    const expression = unwrappedCallExpression(input);
+    if (ts.isCallExpression(expression)) {
+      if (expression.expression.kind === ts.SyntaxKind.ImportKeyword) {
+        const specifier = literalModuleSpecifier(expression.arguments[0]);
+        return Object.freeze({ exportName: "*", specifier, unresolvedSensitive: specifier === null });
+      }
+      const required = requireSpecifier(expression);
+      if (required !== null) return Object.freeze({ exportName: "*", specifier: required, unresolvedSensitive: false });
+      if (ts.isIdentifier(expression.expression) && new Set(["__importStar", "__importDefault"]).has(expression.expression.text) && expression.arguments[0] !== undefined) return resolveExpression(expression.arguments[0], seen);
+      if (ts.isPropertyAccessExpression(expression.expression) && expression.expression.expression.getText() === "Reflect" && expression.expression.name.text === "apply" && expression.arguments[0] !== undefined) return resolveExpression(expression.arguments[0], seen);
+    }
+    if (ts.isIdentifier(expression)) {
+      const binding = bindings.find((entry) => entry.local === expression.text && !entry.typeOnly);
+      if (binding !== undefined) return Object.freeze({ exportName: binding.imported, specifier: binding.specifier, unresolvedSensitive: false });
+      const alias = aliases.get(expression.text);
+      if (alias !== undefined && !seen.has(expression.text)) return resolveExpression(alias, new Set([...seen, expression.text]));
+      const shadowed = unit.sourceFile.statements.some((statement) =>
+        (ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement)) && statement.name?.text === expression.text
+      );
+      return Object.freeze({ exportName: expression.text, specifier: shadowed ? "@local" : null, unresolvedSensitive: false });
+    }
+    if (ts.isPropertyAccessExpression(expression) || ts.isElementAccessExpression(expression)) {
+      const receiver = expression.expression;
+      const property = ts.isPropertyAccessExpression(expression) ? expression.name.text : literalModuleSpecifier(expression.argumentExpression);
+      if (property === "call" || property === "apply" || property === "bind") return resolveExpression(receiver, seen);
+      if (ts.isIdentifier(receiver) && receiver.text === "globalThis") return Object.freeze({ exportName: property ?? "*", specifier: "node:timers", unresolvedSensitive: property === null });
+      const receiverTarget = resolveExpression(receiver, seen);
+      if (receiverTarget.exportName === "*" && receiverTarget.specifier !== "@local") return Object.freeze({ exportName: property ?? "*", specifier: receiverTarget.specifier, unresolvedSensitive: receiverTarget.unresolvedSensitive || property === null });
+      return Object.freeze({ exportName: property ?? "*", specifier: "@local", unresolvedSensitive: false });
+    }
+    return Object.freeze({ exportName: callName(node) ?? "", specifier: "@local", unresolvedSensitive: false });
+  };
+  return terminalTarget(units, unit, resolveExpression(node.expression, new Set()));
 }
 
 function propertyName(node: ts.ObjectLiteralElementLike): string | null {
@@ -460,7 +644,12 @@ function checkOneAppendEdge(units: readonly SourceUnit[]): readonly Architecture
         }
       }
       visit(unit.sourceFile, (node) => {
-        if (ts.isCallExpression(node) && callName(node) === "appendCommittedBatch") {
+        if (!ts.isCallExpression(node)) return;
+        const resolved = resolvedCall(originUnits, unit, node);
+        const logical = resolved.specifier?.startsWith("@logical/") === true
+          ? resolved.specifier.slice("@logical/".length)
+          : resolved.specifier === null ? null : resolvedLogicalImport(unit, resolved.specifier);
+        if (resolved.exportName === "appendCommittedBatch" && (logical === null || logical.startsWith("storage/journal/"))) {
           calls.push({ unit, node });
         }
       });
@@ -611,9 +800,8 @@ function checkAuthorityPurity(units: readonly SourceUnit[]): readonly Architectu
       }
       if (ts.isIdentifier(node) && AMBIENT_AUTHORITY_NAMES.has(node.text)) {
         if (
-          ts.isPropertyAccessExpression(node.parent)
-          && node.parent.name === node
-          && !ts.isCallExpression(node.parent.parent)
+          (ts.isPropertyAccessExpression(node.parent) && node.parent.name === node && !ts.isCallExpression(node.parent.parent))
+          || ((ts.isPropertyAssignment(node.parent) || ts.isPropertySignature(node.parent) || ts.isMethodDeclaration(node.parent)) && node.parent.name === node)
         ) {
           return;
         }
@@ -647,6 +835,8 @@ function checkAdaptersAreLeaves(units: readonly SourceUnit[]): readonly Architec
     for (const edge of importsOf(unit)) {
       const resolvedImport = resolvedLogicalImport(unit, edge.specifier);
       if (resolvedImport === null) {
+        const platform = edge.specifier.startsWith("node:") || new Set(["fs", "fs/promises", "path", "os", "crypto", "child_process", "events", "stream", "url", "util", "timers", "timers/promises"]).has(edge.specifier);
+        if (!platform) output.push(finding("adapters-are-leaves", unit, edge.node, "unresolved non-platform import is forbidden in an adapter leaf"));
         continue;
       }
       const ownAdapter = resolvedImport.startsWith(`adapters/${adapter}/`);
@@ -662,8 +852,9 @@ function checkAdaptersAreLeaves(units: readonly SourceUnit[]): readonly Architec
     }
     visit(unit.sourceFile, (node) => {
       if (ts.isCallExpression(node)) {
-        const name = callName(node);
-        if (name !== null && TIMER_OR_SCHEDULER_NAMES.has(name)) {
+        const target = resolvedCall(units, unit, node);
+        const timerModule = target.specifier === "node:timers" || target.specifier === "timers" || target.specifier === "node:timers/promises" || target.specifier === "timers/promises";
+        if (target.unresolvedSensitive || (timerModule && TIMER_OR_SCHEDULER_NAMES.has(target.exportName)) || (target.specifier === null && TIMER_OR_SCHEDULER_NAMES.has(target.exportName))) {
           output.push(finding(
             "adapters-are-leaves",
             unit,
@@ -694,18 +885,19 @@ function checkConstructorCapabilities(units: readonly SourceUnit[]): readonly Ar
     "workItemId",
   ]);
   for (const unit of units) {
-    for (const edge of importsOf(unit)) {
-      const resolvedImport = resolvedLogicalImport(unit, edge.specifier);
+    for (const binding of importedBindings(unit)) {
+      const resolvedImport = resolvedLogicalImport(unit, binding.specifier);
       if (
         resolvedImport === "authority/protocol/accepted-batch"
         && !unit.path.startsWith("authority/facade/")
-        && !importEdgeIsTypeOnly(edge)
+        && !binding.typeOnly
+        && (binding.imported === "mintPreparedCommit" || binding.imported === "preparedCommitCapability" || binding.imported === "*")
       ) {
         output.push(finding(
           "constructor-capabilities",
           unit,
-          edge.node,
-          "AcceptedBatch mint capability may be value-imported only by authority/facade",
+          binding.node,
+          "PreparedCommit mint capability may be value-imported only by authority/facade",
         ));
       }
     }
@@ -773,7 +965,7 @@ function checkConstructorCapabilities(units: readonly SourceUnit[]): readonly Ar
           "TerminalOutcome constructor capability is owned by authority/outcome",
         ));
       }
-      if (name === "makeEvidenceEnvelope" && !unit.path.startsWith("runtime/dispatcher/")) {
+      if ((name === "makeEvidenceEnvelope" || name === "brandEvidenceEnvelope") && !unit.path.startsWith("runtime/dispatcher/")) {
         output.push(finding(
           "constructor-capabilities",
           unit,
@@ -832,13 +1024,14 @@ function checkDurableWriteBoundary(units: readonly SourceUnit[]): readonly Archi
       if (!ts.isCallExpression(node)) {
         return;
       }
-      const name = callName(node);
-      if (name !== null && DURABLE_WRITE_NAMES.has(name)) {
+      const target = resolvedCall(units, unit, node);
+      const fsModule = target.specifier === "node:fs" || target.specifier === "fs" || target.specifier === "node:fs/promises" || target.specifier === "fs/promises";
+      if ((fsModule && DURABLE_WRITE_NAMES.has(target.exportName)) || target.unresolvedSensitive) {
         output.push(finding(
           "durable-write-boundary",
           unit,
           node,
-          `durable-write API '${name}' is restricted to storage and adapters/workspace`,
+          `durable-write API '${target.exportName}' is restricted to storage and adapters/workspace`,
         ));
       }
     });
