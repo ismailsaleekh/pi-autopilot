@@ -226,7 +226,7 @@ export class SimLawDriver implements LawDriver {
     const intent = decoded.value;
     if (intent.kind === "allocate-attempt-directory") {
       const prior = this.workspaces.get(intent.inputs.workspaceId);
-      if (prior !== undefined) return this.emit(Object.freeze({ actionId: intent.actionId, kind: "attempt-directory-allocated", result: retryResult("workspace-exists", "workspace reservation already exists"), runId: intent.runId }));
+      if (prior !== undefined) return this.emit(Object.freeze({ actionId: intent.actionId, kind: "attempt-directory-allocated", result: retryResult("workspace.already-exists", "workspace reservation already exists"), runId: intent.runId }));
       const record: NamedWorkspace = Object.freeze({ workspaceId: intent.inputs.workspaceId, workspaceCapability: intent.inputs.workspaceCapability, root: "", leaseId: intent.preconditions.leaseId, state: "empty-reserved" });
       this.workspaces.set(record.workspaceId, record);
       return this.emit(Object.freeze({ actionId: intent.actionId, kind: "attempt-directory-allocated", result: Object.freeze({ kind: "ok", value: Object.freeze({ empty: true, leaseId: record.leaseId, workspaceCapability: record.workspaceCapability, workspaceId: record.workspaceId }) }), runId: intent.runId }));

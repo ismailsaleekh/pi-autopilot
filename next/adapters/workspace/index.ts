@@ -8,5 +8,8 @@ export type {
   WorkspaceAdapterExecution,
   WorkspaceAdapterOptions,
   WorkspaceEntry,
+  WorkspaceIsolationEnforcer,
+  WorkspaceIsolationEnforcementRequest,
+  WorkspaceIsolationEnforcementResult,
   WorkspaceReadResult,
 } from "./workspace-adapter.js";

@@ -71,14 +71,14 @@ export const workspaceLawVector: ContractVector = Object.freeze({
     if (materialized.kind === "workspace" && isolationTemplate.kind === "apply-attempt-isolation") {
       const isolation = bindLawIntent("workspace", Object.freeze({
         inputs: Object.freeze({
-          isolationPolicy: isolationTemplate.inputs.isolationPolicy,
+          isolationPolicy: isolationTree.firstFile,
           workspaceCapability: materialized.workspaceCapability,
           workspaceId: materialized.workspaceId,
         }),
         kind: "apply-attempt-isolation",
         preconditions: Object.freeze({
           childEpoch: isolationTemplate.preconditions.childEpoch,
-          expectedPolicyDigest: isolationTemplate.preconditions.expectedPolicyDigest,
+          expectedPolicyDigest: field(isolationTree.firstFile, "digest"),
           expectedWorkspaceRoot: materialized.root,
           leaseId: materialized.leaseId,
         }),

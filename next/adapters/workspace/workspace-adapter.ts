@@ -23,6 +23,7 @@ import {
   workspaceIntentCapsule,
   workspaceObservationCapsule,
 } from "../../ports/contracts/workspace.capsule.js";
+import type { ArtifactRef } from "../../authority/protocol/identifiers.js";
 import type {
   WorkspaceIntent,
   WorkspaceObservation,
@@ -37,9 +38,25 @@ export type WorkspaceAdapterExecution =
   | { readonly kind: "observation"; readonly observation: WorkspaceObservation }
   | { readonly kind: "rejected"; readonly diagnostic: WorkspaceAdapterDiagnostic };
 
+export interface WorkspaceIsolationEnforcementRequest {
+  readonly childEpoch: string;
+  readonly isolationPolicy: ArtifactRef;
+  readonly workspaceCapability: string;
+  readonly workspaceId: string;
+  readonly workspacePath: string;
+  readonly workspaceRoot: string;
+}
+export type WorkspaceIsolationEnforcementResult =
+  | { readonly attestation: ArtifactRef; readonly kind: "enforced" }
+  | { readonly diagnostic: WorkspaceAdapterDiagnostic; readonly kind: "retry" };
+export interface WorkspaceIsolationEnforcer {
+  readonly enforce: (request: WorkspaceIsolationEnforcementRequest) => Promise<WorkspaceIsolationEnforcementResult>;
+}
 export interface WorkspaceAdapterOptions {
   /** Real directory owned by one run; every workspace path is derived below it. */
   readonly workspaceRoot: string;
+  /** Optional OS/sandbox owner; absence is reported, never silently simulated. */
+  readonly isolationEnforcer?: WorkspaceIsolationEnforcer;
 }
 
 export type WorkspaceAdapterCreateResult =
@@ -271,14 +288,16 @@ async function collectEntries(
  * Filesystem leaf for run-owned attempt directories.
  *
  * Allocation reserves only a fresh real directory. Git materialization owns clone
- * bytes. Isolation records no policy state here: W3 must enforce mounts, process
- * credentials, network rules, and child epochs at the OS/supervisor boundary.
+ * bytes. Isolation is delegated to an injected OS/sandbox owner and succeeds only
+ * with its installed attestation; this adapter retains no workflow policy state.
  */
 export class WorkspaceAdapter {
   readonly workspaceRoot: string;
+  private readonly isolationEnforcer: WorkspaceIsolationEnforcer | null;
 
-  private constructor(workspaceRoot: string) {
+  private constructor(workspaceRoot: string, isolationEnforcer: WorkspaceIsolationEnforcer | null) {
     this.workspaceRoot = workspaceRoot;
+    this.isolationEnforcer = isolationEnforcer;
   }
 
   public static async create(options: WorkspaceAdapterOptions): Promise<WorkspaceAdapterCreateResult> {
@@ -311,9 +330,13 @@ export class WorkspaceAdapter {
         });
       }
       const workspaceRoot = await realpath(requestedRoot);
+      const enforcer = options.isolationEnforcer;
+      if (enforcer !== undefined && (typeof enforcer !== "object" || enforcer === null || typeof enforcer.enforce !== "function")) {
+        return Object.freeze({ kind: "rejected", diagnostic: diagnostic("workspace.invalid-enforcer", "isolation enforcer must expose an enforce capability") });
+      }
       return Object.freeze({
         kind: "created",
-        adapter: new WorkspaceAdapter(workspaceRoot),
+        adapter: new WorkspaceAdapter(workspaceRoot, enforcer ?? null),
       });
     } catch {
       return Object.freeze({
@@ -433,7 +456,8 @@ export class WorkspaceAdapter {
       }
     }
     if (
-      !present
+      path === null
+      || !present
       || intent.inputs.isolationPolicy.digest !== intent.preconditions.expectedPolicyDigest
       || intent.inputs.isolationPolicy.root !== intent.preconditions.expectedWorkspaceRoot
     ) {
@@ -445,13 +469,31 @@ export class WorkspaceAdapter {
         ),
       }));
     }
-    return this.observation(intent, "attempt-isolation-applied", Object.freeze({
-      kind: "retry",
-      diagnostic: contractDiagnostic(
-        "workspace.isolation-enforcement-unavailable",
-        "filesystem adapter cannot claim OS isolation without an injected enforcement attestation",
-      ),
-    }));
+    if (this.isolationEnforcer === null) {
+      return this.observation(intent, "attempt-isolation-applied", Object.freeze({
+        kind: "retry",
+        diagnostic: contractDiagnostic(
+          "workspace.isolation-enforcement-unavailable",
+          "filesystem adapter cannot claim OS isolation without an injected enforcement attestation",
+        ),
+      }));
+    }
+    let enforced: WorkspaceIsolationEnforcementResult;
+    try {
+      enforced = await this.isolationEnforcer.enforce(Object.freeze({
+        childEpoch: intent.preconditions.childEpoch,
+        isolationPolicy: intent.inputs.isolationPolicy,
+        workspaceCapability: intent.inputs.workspaceCapability,
+        workspaceId: intent.inputs.workspaceId,
+        workspacePath: path,
+        workspaceRoot: intent.preconditions.expectedWorkspaceRoot,
+      }));
+    } catch {
+      enforced = Object.freeze({ kind: "retry", diagnostic: diagnostic("workspace.isolation-enforcer-failed", "isolation enforcer was unavailable") });
+    }
+    return enforced.kind === "enforced"
+      ? this.observation(intent, "attempt-isolation-applied", Object.freeze({ kind: "ok", value: Object.freeze({ attestation: enforced.attestation, policyDigest: intent.preconditions.expectedPolicyDigest, workspaceRoot: intent.preconditions.expectedWorkspaceRoot, workspaceId: intent.inputs.workspaceId }) }))
+      : this.observation(intent, "attempt-isolation-applied", Object.freeze({ kind: "retry", diagnostic: contractDiagnostic(enforced.diagnostic.code, enforced.diagnostic.message) }));
   }
 
   public async inspect(
