@@ -54,6 +54,8 @@ export interface RuntimePortExecutor {
 
 export interface RuntimeArtifactRecorder {
   readonly record: (artifact: NormalizedArtifact, expectedDigest: Digest) => unknown | Promise<unknown>;
+  /** Reads exact installed bytes so runtime can reject a fabricated recorder reference. */
+  readonly read: (reference: ArtifactRef, maxBytes: number) => unknown | Promise<unknown>;
 }
 
 export interface DispatcherDependencies {
@@ -239,10 +241,16 @@ function observationPayload(command: Command, observation: RuntimePortObservatio
     }
     case "candidate-integrated": {
       const value = observation.result.value;
+      if (command.kind !== "build-integrated-candidate") return null;
       return value.kind === "conflict"
-        ? null
-        : command.kind === "build-integrated-candidate"
-          ? Object.freeze({
+        ? Object.freeze({
+            conflict: value.conflict.artifact,
+            integrationOwnerWorkItemId: command.workItemId,
+            kind: "integration-conflict-v2",
+            planRootId: command.planRootId,
+            subjectRoot: command.baseRoot,
+          })
+        : Object.freeze({
               candidateId: value.candidateId,
               gitRevision: value.commit,
               gitTree: value.tree,
@@ -252,8 +260,7 @@ function observationPayload(command: Command, observation: RuntimePortObservatio
               planRootId: command.planRootId,
               reviewedDiff: value.diff.artifact,
               tree: value.treeAttestation.artifactRoot,
-            })
-          : null;
+            });
     }
     case "head-publication-observed": {
       const value = observation.result.value;
@@ -321,9 +328,26 @@ async function recordObservation(
     return Object.freeze({ kind: "feedback", commandId: command.commandId, feedback: feedback("$.observation", "artifact recorder interrupted") });
   }
   const receipt = decodeBoundaryValue(rawReceipt, receiptCapsule);
-  if (receipt.kind !== "ok" || receipt.value.digest !== normalized.artifact.digest) {
-    return Object.freeze({ kind: "feedback", commandId: command.commandId, feedback: receipt.kind === "ok" ? feedback("$.digest", "recorder digest mismatch") : receipt });
+  if (
+    receipt.kind !== "ok"
+    || receipt.value.digest !== normalized.artifact.digest
+    || receipt.value.reference.digest !== normalized.artifact.digest
+    || String(receipt.value.reference.blob) !== String(normalized.artifact.digest)
+    || receipt.value.reference.byteLength !== String(normalized.artifact.canonicalBytes.byteLength)
+    || receipt.value.reference.path !== normalized.artifact.path
+  ) {
+    return Object.freeze({ kind: "feedback", commandId: command.commandId, feedback: receipt.kind === "ok" ? feedback("$.reference", "recorder reference does not bind exact canonical observation bytes") : receipt });
   }
+  let installedBytes: unknown;
+  try { installedBytes = await dependencies.artifacts.read(receipt.value.reference, normalized.artifact.canonicalBytes.byteLength); } catch {
+    return Object.freeze({ kind: "feedback", commandId: command.commandId, feedback: feedback("$.reference", "installed observation could not be read back") });
+  }
+  if (!(installedBytes instanceof Uint8Array) || installedBytes.byteLength !== normalized.artifact.canonicalBytes.byteLength) {
+    return Object.freeze({ kind: "feedback", commandId: command.commandId, feedback: feedback("$.reference", "installed observation readback has the wrong bounded byte shape") });
+  }
+  let differs = 0;
+  for (let index = 0; index < installedBytes.byteLength; index += 1) differs |= (installedBytes[index] ?? 0) ^ (normalized.artifact.canonicalBytes[index] ?? 0);
+  if (differs !== 0) return Object.freeze({ kind: "feedback", commandId: command.commandId, feedback: feedback("$.reference", "installed observation bytes differ from canonical observation") });
   const stimulus = decodeStimulus(Object.freeze({
     actionId: command.actionId,
     commandId: command.commandId,
