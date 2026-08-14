@@ -54,10 +54,18 @@ export const workspaceLawVector: ContractVector = Object.freeze({
       }
     }
 
+    const isolationTree = await driver.fixture(Object.freeze({
+      kind: "tree",
+      name: "workspace-law-tree",
+      files: Object.freeze([Object.freeze({ path: "law/workspace.bin", bytes: Uint8Array.from([1, 3, 5]) })]),
+    }));
+    if (isolationTree.kind !== "tree") {
+      return lawTrace(this.id, trace, [...findings, "workspace isolation tree failed"]);
+    }
     const materialized = await driver.fixture(Object.freeze({
       kind: "workspace",
       name: "workspace-isolation-target",
-      treeName: "workspace-law-tree",
+      treeName: isolationTree.name,
     }));
     const isolationTemplate = workspaceIntentCapsule.arbitrary.validForKind("apply-attempt-isolation", 13);
     if (materialized.kind === "workspace" && isolationTemplate.kind === "apply-attempt-isolation") {

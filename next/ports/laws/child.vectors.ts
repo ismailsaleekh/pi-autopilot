@@ -17,10 +17,19 @@ export const childLawVector: ContractVector = Object.freeze({
     const trace: LawTraceEntry[] = [];
     const launchTemplate = childIntentCapsule.arbitrary.validForKind("launch-child-session", 51);
     const routeTemplate = childIntentCapsule.arbitrary.validForKind("verify-pi-route", 50);
-    const workspace = await driver.fixture(Object.freeze({ kind: "workspace", name: "child-v2-workspace", treeName: "child-v2-base" }));
+    const tree = await driver.fixture(Object.freeze({
+      kind: "tree",
+      name: "child-v2-base",
+      files: Object.freeze([Object.freeze({ path: "law/child.bin", bytes: Uint8Array.from([2, 4, 6]) })]),
+    }));
+    if (tree.kind !== "tree") {
+      return lawTrace(this.id, trace, ["child tree fixture failed"]);
+    }
+    const workspace = await driver.fixture(Object.freeze({ kind: "workspace", name: "child-v2-workspace", treeName: tree.name }));
     if (workspace.kind !== "workspace" || launchTemplate.kind !== "launch-child-session" || routeTemplate.kind !== "verify-pi-route") {
       return lawTrace(this.id, trace, ["child fixtures failed"]);
     }
+    const verifiedRoute = Object.freeze({ ...routeTemplate.inputs.route, toolBundleAttestation: null });
     await driver.fixture(Object.freeze({
       kind: "child-script",
       name: "child-v2-script",
@@ -32,7 +41,7 @@ export const childLawVector: ContractVector = Object.freeze({
       terminalTick: "3",
     }));
     const verify = bindLawIntent("child", Object.freeze({
-      inputs: routeTemplate.inputs,
+      inputs: Object.freeze({ captureId: routeTemplate.inputs.captureId, route: verifiedRoute }),
       kind: "verify-pi-route",
       preconditions: routeTemplate.preconditions,
       runId: launchTemplate.runId,
@@ -47,6 +56,7 @@ export const childLawVector: ContractVector = Object.freeze({
     const launch = bindLawIntent("child", Object.freeze({
       inputs: Object.freeze({
         ...launchTemplate.inputs,
+        route: verifiedRoute,
         workspaceCapability: workspace.workspaceCapability,
         workspaceId: workspace.workspaceId,
       }),

@@ -103,8 +103,9 @@ export const gitLawVector: ContractVector = Object.freeze({
     if (integrationKind === "integrated") {
       const commit = field(integrated.value, "commit");
       const gitTree = field(integrated.value, "tree");
+      const treeAttestation = field(integrated.value, "treeAttestation");
       const publishTemplate = gitIntentCapsule.arbitrary.validForKind("publish-if-expected-head", 44);
-      if (typeof commit === "string" && typeof gitTree === "string" && publishTemplate.kind === "publish-if-expected-head") {
+      if (typeof commit === "string" && typeof gitTree === "string" && treeAttestation !== null && treeAttestation !== undefined && publishTemplate.kind === "publish-if-expected-head") {
         const publish = bindLawIntent("git", Object.freeze({
           inputs: Object.freeze({
             desiredHead: commit,
@@ -117,7 +118,7 @@ export const gitLawVector: ContractVector = Object.freeze({
           preconditions: Object.freeze({
             candidateTree: gitTree,
             publicationLease: publishTemplate.preconditions.publicationLease,
-            verifiedAttestation: publishTemplate.preconditions.verifiedAttestation,
+            verifiedAttestation: treeAttestation,
           }),
           runId: repository.runId,
         }));

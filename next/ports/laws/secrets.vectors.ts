@@ -49,7 +49,10 @@ export const secretsLawVector: ContractVector = Object.freeze({
       const revoke = bindLawIntent("secrets", Object.freeze({
         inputs: Object.freeze({ leaseId, secretHandle: secret.handle }),
         kind: "revoke-secret-use",
-        preconditions: Object.freeze({ childEpoch: template.preconditions.childEpoch }),
+        preconditions: Object.freeze({
+          childEpoch: template.preconditions.childEpoch,
+          processDescriptor: template.preconditions.processDescriptor,
+        }),
         runId: template.runId,
       }));
       const revoked = await lawCall(driver, "secrets", "revoke", revoke, "secret-use-revoked", "ok");

@@ -7,13 +7,16 @@ import {
   workItemIdSchema,
 } from "../../authority/protocol/identifiers.js";
 import {
+  arrayOf,
   defineCapsule,
   literal,
   object,
   text,
 } from "../../authority/protocol/schema.js";
 import type { Infer } from "../../authority/protocol/schema.js";
+import { submissionPayloadSchema } from "../../authority/protocol/stimulus.capsule.js";
 import type { SubmissionReady } from "../../authority/protocol/stimulus.capsule.js";
+import { resolvedIndexPageSchema } from "../../authority/protocol/state-index.capsule.js";
 import {
   captureTree,
 } from "../../storage/cas/index.js";
@@ -30,11 +33,13 @@ import type { BoundaryFeedback } from "../boundary-codecs/index.js";
 export const sealRequestSchema = object({
   actionId: actionIdSchema,
   attemptId: attemptIdSchema,
+  pages: arrayOf(resolvedIndexPageSchema),
   inputRoot: artifactRootSchema,
   kind: literal("seal-submission"),
   planRootId: planRootIdSchema,
   runId: runIdSchema,
   sourceDirectory: text("non-empty"),
+  submissionPayload: submissionPayloadSchema,
   workItemId: workItemIdSchema,
 });
 
@@ -88,8 +93,10 @@ export async function sealSubmission(
       inputRoot: request.value.inputRoot,
       kind: "submission-ready",
       outputRoot: captured.root,
+      pages: request.value.pages,
       planRootId: request.value.planRootId,
       runId: request.value.runId,
+      submissionPayload: request.value.submissionPayload,
       workItemId: request.value.workItemId,
     });
     const decoded = decodeStimulus(candidate);

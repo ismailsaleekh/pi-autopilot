@@ -155,7 +155,8 @@ export function childIdFor(label: JsonValue): ChildId {
 
 export function childEpochFor(label: JsonValue): ChildEpoch {
   const digest = canonicalDigestUnknown(label).slice(7);
-  return decodedOrGenerated(childEpochCapsule, `epoch:${digest}`, 4);
+  const decimal = BigInt(`0x${digest}`).toString(10);
+  return decodedOrGenerated(childEpochCapsule, decimal, 4);
 }
 
 export function leaseIdFor(label: JsonValue): LeaseId {

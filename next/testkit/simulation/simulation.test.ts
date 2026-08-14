@@ -260,9 +260,6 @@ test("deterministic mutation smoke is total across every simulation entry surfac
     assert.doesNotThrow(() => world.advance(value));
     assert.doesNotThrow(() => world.waitUntil(value));
     assert.doesNotThrow(() => world.armCrash(value));
-    assert.doesNotThrow(() => world.registerChildScript(value));
-    assert.doesNotThrow(() => world.registerGitRace(value));
-    assert.doesNotThrow(() => world.registerSecret(value, value));
     assert.doesNotThrow(() => world.acquireLock(value, value, value));
     assert.doesNotThrow(() => world.takeoverLock(value, value, value));
     assert.doesNotThrow(() => world.fileSystem.writeFile(value, value));

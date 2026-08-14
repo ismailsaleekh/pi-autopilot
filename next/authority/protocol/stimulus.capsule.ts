@@ -85,7 +85,7 @@ const requestPayloadSchema = union([
   }),
 ]);
 
-const submissionPayloadSchema = union([
+export const submissionPayloadSchema = union([
   object({
     coverageRoot: artifactRootSchema,
     integrationOwnerWorkItemId: workItemIdSchema,
