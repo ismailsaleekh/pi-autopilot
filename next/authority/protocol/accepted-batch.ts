@@ -10,7 +10,7 @@ import type {
 } from "./journal-record.capsule.js";
 import type { DecodeError } from "./schema.js";
 
-export const preparedCommitCapability: unique symbol = Symbol();
+const preparedCommitCapability: unique symbol = Symbol();
 
 export type PreparedCommitKind =
   | "prepared-genesis"
@@ -106,8 +106,8 @@ export function preparedCommitTestHarness(): PreparedCommitTestHarness {
 }
 
 /** Sole opaque mint edge; architecture policy permits calls only from facade. */
-export function isPreparedCommit(value: PreparedCommit): boolean {
-  return value[preparedCommitCapability] === true;
+export function isPreparedCommit(value: unknown): value is PreparedCommit {
+  return typeof value === "object" && value !== null && preparedCommitCapability in value && value[preparedCommitCapability] === true;
 }
 
 export function mintPreparedCommit(fields: PreparedCommitFields): PreparedCommitMintResult {
