@@ -1,12 +1,22 @@
 import { initial, prepare, replay } from "../../authority/facade/index.js";
 import type { PreparedCommit } from "../../authority/protocol/accepted-batch.js";
-import { decimalNatural } from "../../authority/protocol/identifiers.js";
+import { actionIdSchema, decimalNatural } from "../../authority/protocol/identifiers.js";
 import type { RunGenesis } from "../../authority/protocol/journal-record.capsule.js";
+import { canonicalDigestUnknown, defineCapsule } from "../../authority/protocol/schema.js";
 import { journalRecordCapsule } from "../../authority/protocol/journal-record.capsule.js";
 import { stimulusCapsule } from "../../authority/protocol/stimulus.capsule.js";
 import type { BoundaryRequestReceived, Stimulus } from "../../authority/protocol/stimulus.capsule.js";
 import { workItemCapsule } from "../../authority/protocol/work-item.capsule.js";
 import type { RunState } from "../../authority/model/run-state.js";
+
+const scenarioActionCapsule = defineCapsule("TestScenarioActionId", actionIdSchema);
+
+function actionIdFor(runId: string, seed: number) {
+  const digest = canonicalDigestUnknown(Object.freeze({ domain: "pi-autopilot.test-scenario", runId, seed }));
+  const decoded = scenarioActionCapsule.decode(`action:sha256:${digest.slice(7)}`);
+  if (decoded.kind !== "ok") throw new Error(decoded.error.diagnostic);
+  return decoded.value;
+}
 
 export function scenarioGenesis(seed: number): RunGenesis {
   const value = journalRecordCapsule.arbitrary.validForKind("run-genesis", seed);
@@ -35,7 +45,7 @@ export function declaredWorkStimulus(state: RunState, seed: number): BoundaryReq
   });
   const decoded = decodeScenarioStimulus(Object.freeze({
     ...stimulus,
-    actionId: stimulus.actionId,
+    actionId: actionIdFor(state.identity.runId, seed),
     pages: Object.freeze([]),
     requestDigest: stimulus.request.digest,
     requestPayload: Object.freeze({ kind: "declare-work-v2", workItem }),

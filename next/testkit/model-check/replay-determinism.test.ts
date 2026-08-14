@@ -56,7 +56,7 @@ test("exact successor, stale sequence, gaps, and run mismatch fail closed", () =
 
 test("record order is state-bound and projection does not affect replay", () => {
   const first = nonemptyScenario(1300);
-  const secondStimulus = declaredWorkStimulus(first.state, 1310);
+  const secondStimulus = declaredWorkStimulus(first.state, 1377);
   const secondCommit = prepareScenarioCommit(first.state, secondStimulus);
   const forward = replay(initial(first.genesis), Object.freeze([first.commit.record, secondCommit.record]));
   const reverse = replay(initial(first.genesis), Object.freeze([secondCommit.record, first.commit.record]));

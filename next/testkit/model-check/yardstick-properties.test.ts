@@ -79,7 +79,7 @@ test("command identity is deterministic and a committed command is not reissued"
   if (first.commit.record.kind !== "decision-committed") return;
   const commandIds = first.commit.record.commands.map((command) => command.commandId);
   assert.equal(new Set(commandIds).size, commandIds.length);
-  const next = declaredWorkStimulus(first.state, 5510);
+  const next = declaredWorkStimulus(first.state, 5577);
   const committed = prepareScenarioCommit(first.state, next);
   assert.equal(committed.record.kind, "decision-committed");
   if (committed.record.kind === "decision-committed") {
