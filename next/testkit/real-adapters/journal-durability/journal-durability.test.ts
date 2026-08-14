@@ -34,6 +34,8 @@ import {
   encodeFrame,
 } from "../../../storage/journal/wire.js";
 import {
+  canonicalCommandArtifact,
+  canonicalCommandsDigest,
   canonicalDecisionFactsDigest,
   decisionFactsMatchRoot,
   journalRecordCapsule,
@@ -144,13 +146,26 @@ function recordForSeed(seed: number, kind?: JournalRecord["kind"]): JournalRecor
   const record = kind === undefined
     ? journalRecordCapsule.arbitrary.valid(seed)
     : journalRecordCapsule.arbitrary.validForKind(kind, seed);
-  if (record.kind !== "decision-committed") {
+  if (record.kind !== "decision-committed" && record.kind !== "command-settled" && record.kind !== "outcome-committed") {
     return record;
   }
-  const encoded = journalRecordCapsule.encodeUnknown(Object.freeze({
-    ...record,
-    factRoot: canonicalDecisionFactsDigest(record.facts),
-  }));
+  const encoded = journalRecordCapsule.encodeUnknown(record.kind === "outcome-committed"
+    ? Object.freeze({ ...record, factDigest: canonicalDecisionFactsDigest(record.facts) })
+    : record.kind === "command-settled"
+      ? Object.freeze({
+          ...record,
+          commandArtifact: canonicalCommandArtifact(record.commands),
+          commandDigest: canonicalCommandsDigest(record.commands),
+          factDigest: canonicalDecisionFactsDigest(record.facts),
+          observation: Object.freeze({ ...record.observation, blob: record.observation.digest }),
+          observationDigest: record.observation.digest,
+        })
+      : Object.freeze({
+          ...record,
+          commandArtifact: canonicalCommandArtifact(record.commands),
+          commandDigest: canonicalCommandsDigest(record.commands),
+          factDigest: canonicalDecisionFactsDigest(record.facts),
+        }));
   if (encoded.kind === "error") {
     throw new Error(encoded.error.diagnostic);
   }
