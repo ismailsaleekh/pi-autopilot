@@ -304,6 +304,12 @@ function submissionFacts(state: RunState, stimulus: SubmissionReady): AdmissionR
       candidate = fact(Object.freeze({ kind: "evidence-observed", runId: stimulus.runId, evidence: payload.evidence }));
       break;
     case "accept-candidate-v2":
+      if (
+        payload.gitTreeCasAttestation.gitTree !== payload.gitTree
+        || payload.gitTreeCasAttestation.artifactRoot !== payload.tree
+      ) {
+        return semanticFeedback("invalid-domain-transition", "$.submissionPayload.gitTreeCasAttestation", "candidate Git/CAS attestation must bind the exact separate Git tree and CAS root");
+      }
       candidate = fact(Object.freeze({
         kind: "candidate-accepted",
         runId: stimulus.runId,
@@ -359,6 +365,12 @@ function observationFacts(state: RunState, stimulus: CommandObservationReceived)
       candidate = correctionFact(state, stimulus, payload.finding);
       break;
     case "candidate-integrated-v2":
+      if (
+        payload.gitTreeCasAttestation.gitTree !== payload.gitTree
+        || payload.gitTreeCasAttestation.artifactRoot !== payload.tree
+      ) {
+        return semanticFeedback("invalid-domain-transition", "$.observationPayload.gitTreeCasAttestation", "integrated candidate attestation must bind the exact Git tree and CAS root");
+      }
       candidate = fact(Object.freeze({
         kind: "candidate-accepted",
         runId: stimulus.runId,
@@ -388,6 +400,12 @@ function observationFacts(state: RunState, stimulus: CommandObservationReceived)
       break;
     }
     case "publication-observed-v2": {
+      if (
+        payload.publicationTreeAttestation.gitTree !== payload.gitTree
+        || payload.publicationTreeAttestation.artifactRoot !== payload.tree
+      ) {
+        return semanticFeedback("invalid-domain-transition", "$.observationPayload.publicationTreeAttestation", "publication attestation must bind the exact published Git tree and CAS root");
+      }
       const publication = fact(Object.freeze({
         kind: "publication-observed",
         runId: stimulus.runId,

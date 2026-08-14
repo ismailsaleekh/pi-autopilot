@@ -18,7 +18,7 @@ import type {
   RunId,
   WorkItemId,
 } from "../protocol/identifiers.js";
-import type { ExpectedRefState } from "../protocol/git-values.js";
+import type { ExpectedRefState, GitTreeCasAttestation } from "../protocol/git-values.js";
 import type { SubscriptionRoute } from "../protocol/route.capsule.js";
 import { canonicalDigestUnknown as digestCanonicalState } from "../protocol/schema.js";
 import type { AuthenticatedIndexState } from "./authenticated-index.js";
@@ -65,7 +65,7 @@ export interface CurrentCandidateState {
   readonly gitTree: GitTreeId;
   readonly manifest: ArtifactRef;
   readonly reviewedDiff: ArtifactRef;
-  readonly gitTreeCasAttestation: ArtifactRef;
+  readonly gitTreeCasAttestation: GitTreeCasAttestation;
 }
 
 export interface CurrentPublicationState {
@@ -79,7 +79,7 @@ export interface CurrentPublicationState {
   readonly observedHead: GitCommitId | null;
   readonly tree: ArtifactRoot | null;
   readonly gitTree: GitTreeId | null;
-  readonly publicationTreeAttestation: ArtifactRef | null;
+  readonly publicationTreeAttestation: GitTreeCasAttestation | null;
 }
 
 export interface FinalAttestationState {

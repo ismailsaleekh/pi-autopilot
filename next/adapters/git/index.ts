@@ -7,6 +7,7 @@ export type {
   GitAdapterDiagnostic,
   GitAdapterExecution,
   GitAdapterOptions,
+  GitArtifactInstaller,
   GitRepositoryLocator,
   GitWorkspaceLocator,
 } from "./git-adapter.js";

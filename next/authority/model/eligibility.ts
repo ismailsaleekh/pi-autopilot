@@ -65,7 +65,9 @@ export function t1Checks(state: RunState, pages: readonly ResolvedIndexPage[]): 
   const c3 = finalEvidenceGreen(state, pages);
   const c4 = candidate !== null
     && candidate.reviewedDiff.digest.length > 0
-    && candidate.manifest.digest.length > 0;
+    && candidate.manifest.digest.length > 0
+    && candidate.gitTreeCasAttestation.gitTree === candidate.gitTree
+    && candidate.gitTreeCasAttestation.artifactRoot === candidate.tree;
   const c5 = state.phase === "execution"
     && plan !== null
     && candidate !== null
@@ -81,7 +83,9 @@ export function t1Checks(state: RunState, pages: readonly ResolvedIndexPage[]): 
     && publication.observedHead === publication.desiredHead
     && publication.tree === candidate.tree
     && publication.gitTree === candidate.gitTree
-    && publication.publicationTreeAttestation !== null;
+    && publication.publicationTreeAttestation !== null
+    && publication.publicationTreeAttestation.gitTree === candidate.gitTree
+    && publication.publicationTreeAttestation.artifactRoot === candidate.tree;
   const finalBound = attestations !== null
     && candidate !== null
     && publication !== null
@@ -147,9 +151,9 @@ export function eligibleOutcomeForState(
       finalManifest: state.finalAttestations.finalManifest,
       finalTree: state.currentCandidate.tree,
       gitTree: state.currentCandidate.gitTree,
-      gitTreeCasAttestation: state.currentCandidate.gitTreeCasAttestation,
+      gitTreeCasAttestation: state.currentCandidate.gitTreeCasAttestation.attestation,
       publicationId: state.currentPublication.publicationId,
-      publicationTreeAttestation: state.currentPublication.publicationTreeAttestation,
+      publicationTreeAttestation: state.currentPublication.publicationTreeAttestation.attestation,
       publishedRevision: state.currentPublication.observedHead,
       reviewedDiff: state.currentCandidate.reviewedDiff,
     }),

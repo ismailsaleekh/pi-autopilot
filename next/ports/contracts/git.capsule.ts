@@ -1,7 +1,6 @@
-import { expectedRefStateSchema, gitCaptureSchema } from "../../authority/protocol/git-values.js";
+import { expectedRefStateSchema, gitCaptureSchema, gitTreeCasAttestationSchema } from "../../authority/protocol/git-values.js";
 import {
   actionIdSchema,
-  artifactRefSchema,
   artifactRootSchema,
   candidateIdSchema,
   childEpochSchema,
@@ -112,7 +111,7 @@ export const publishIfExpectedHeadSchema = object({
   preconditions: object({
     candidateTree: gitTreeIdSchema,
     publicationLease: leaseIdSchema,
-    verifiedAttestation: artifactRefSchema,
+    verifiedAttestation: gitTreeCasAttestationSchema,
   }),
   runId: runIdSchema,
 });
@@ -158,6 +157,7 @@ const integrationResultSchema = union([
     kind: literal("integrated"),
     manifest: gitCaptureSchema,
     tree: gitTreeIdSchema,
+    treeAttestation: gitTreeCasAttestationSchema,
   }),
   object({
     candidateId: candidateIdSchema,

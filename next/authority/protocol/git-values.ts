@@ -1,12 +1,9 @@
 import {
   artifactRefSchema,
   artifactRootSchema,
-  decimalNaturalSchema,
-  digestSchema,
   gitCommitIdSchema,
   gitObjectIdSchema,
   gitTreeIdSchema,
-  kindIdSchema,
 } from "./identifiers.js";
 import {
   arrayOf,
@@ -24,10 +21,7 @@ export const expectedRefStateSchema = union([
 ]);
 
 export const gitCaptureSchema = object({
-  byteLength: decimalNaturalSchema,
-  codec: kindIdSchema,
-  codecVersion: kindIdSchema,
-  digest: digestSchema,
+  artifact: artifactRefSchema,
   objectIds: arrayOf(gitObjectIdSchema),
 });
 

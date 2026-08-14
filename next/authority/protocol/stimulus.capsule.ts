@@ -1,7 +1,7 @@
 import { atomDispositionSchema, atomSchema } from "./atom.capsule.js";
 import { evidenceFactSchema } from "./evidence-fact.capsule.js";
 import { findingSchema } from "./finding.capsule.js";
-import { expectedRefStateSchema } from "./git-values.js";
+import { expectedRefStateSchema, gitTreeCasAttestationSchema } from "./git-values.js";
 import {
   actionIdSchema,
   artifactRefSchema,
@@ -123,7 +123,7 @@ const submissionPayloadSchema = union([
     candidateId: candidateIdSchema,
     gitRevision: gitCommitIdSchema,
     gitTree: gitTreeIdSchema,
-    gitTreeCasAttestation: artifactRefSchema,
+    gitTreeCasAttestation: gitTreeCasAttestationSchema,
     kind: literal("accept-candidate-v2"),
     manifest: artifactRefSchema,
     reviewedDiff: artifactRefSchema,
@@ -177,7 +177,7 @@ const commandObservationPayloadSchema = union([
     candidateId: candidateIdSchema,
     gitRevision: gitCommitIdSchema,
     gitTree: gitTreeIdSchema,
-    gitTreeCasAttestation: artifactRefSchema,
+    gitTreeCasAttestation: gitTreeCasAttestationSchema,
     kind: literal("candidate-integrated-v2"),
     manifest: artifactRefSchema,
     planRootId: planRootIdSchema,
@@ -196,7 +196,7 @@ const commandObservationPayloadSchema = union([
     kind: literal("publication-observed-v2"),
     observedHead: nullable(gitCommitIdSchema),
     publicationId: publicationIdSchema,
-    publicationTreeAttestation: artifactRefSchema,
+    publicationTreeAttestation: gitTreeCasAttestationSchema,
     status: union([literal("desired-head"), literal("head-moved")]),
     tree: artifactRootSchema,
   }),

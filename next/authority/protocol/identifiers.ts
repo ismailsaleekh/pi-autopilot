@@ -54,6 +54,11 @@ export const operatorRequestIdSchema = brandedText("OperatorRequestId", "identif
 export const leaseIdSchema = brandedText("LeaseId", "identifier");
 export const pageCursorSchema = brandedText("PageCursor", "identifier");
 export const diagnosticCodeSchema = brandedText("DiagnosticCode", "identifier");
+
+export function diagnosticCode(value: string): DiagnosticCode | null {
+  const decoded = defineCapsule("DiagnosticCodeValue", diagnosticCodeSchema).decode(value);
+  return decoded.kind === "ok" ? decoded.value : null;
+}
 export const workspaceRelativePathSchema = brandedText("WorkspaceRelativePath", "path");
 export const routeObservationIdSchema = brandedText("RouteObservationId", "identifier");
 export const routeCapabilitySchema = brandedText("RouteCapability", "identifier");

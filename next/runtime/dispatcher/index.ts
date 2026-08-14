@@ -44,7 +44,7 @@ import {
   verifyChildRouteIntent,
 } from "./intent-construction.js";
 import { defineCapsule, literal, object } from "../../authority/protocol/schema.js";
-import { artifactRefSchema, digestSchema } from "../../authority/protocol/identifiers.js";
+import { artifactRefSchema, diagnosticCode, digestSchema } from "../../authority/protocol/identifiers.js";
 
 export type RuntimePortIntent = WorkspaceIntent | GitIntent | ChildIntent | StoreIntent | ClockIntent | SecretsIntent;
 
@@ -202,6 +202,8 @@ async function callPort(dependencies: DispatcherDependencies, bindingValue: Port
   return decoded.value;
 }
 
+const recordedObservationCode = diagnosticCode("runtime.observation-recorded");
+
 function observationPayload(command: Command, observation: RuntimePortObservation): CommandObservationPayload | null {
   if (observation.result.kind !== "ok") {
     return Object.freeze({ kind: "command-retry-v2", diagnostic: observation.result.diagnostic });
@@ -244,12 +246,12 @@ function observationPayload(command: Command, observation: RuntimePortObservatio
               candidateId: value.candidateId,
               gitRevision: value.commit,
               gitTree: value.tree,
-              gitTreeCasAttestation: command.baseRoot as never,
+              gitTreeCasAttestation: value.treeAttestation,
               kind: "candidate-integrated-v2",
-              manifest: value.manifest as never,
+              manifest: value.manifest.artifact,
               planRootId: command.planRootId,
-              reviewedDiff: value.diff as never,
-              tree: command.baseRoot,
+              reviewedDiff: value.diff.artifact,
+              tree: value.treeAttestation.artifactRoot,
             })
           : null;
     }
@@ -263,7 +265,7 @@ function observationPayload(command: Command, observation: RuntimePortObservatio
             publicationId: value.publicationId,
             publicationTreeAttestation: command.verifiedAttestation,
             status: value.status,
-            tree: command.verifiedAttestation.root,
+            tree: command.verifiedAttestation.artifactRoot,
           })
         : null;
     }
@@ -285,8 +287,8 @@ function observationPayload(command: Command, observation: RuntimePortObservatio
     case "object-presence-observed":
     case "secret-use-authorized":
     case "secret-use-revoked":
-      return Object.freeze({ kind: "command-retry-v2", diagnostic: Object.freeze({
-        code: "runtime.observation-recorded" as never,
+      return recordedObservationCode === null ? null : Object.freeze({ kind: "command-retry-v2", diagnostic: Object.freeze({
+        code: recordedObservationCode,
         message: "physical observation has no direct semantic consequence",
         related: Object.freeze([]),
       }) });

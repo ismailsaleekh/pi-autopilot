@@ -1,4 +1,4 @@
-import { expectedRefStateSchema } from "./git-values.js";
+import { expectedRefStateSchema, gitTreeCasAttestationSchema } from "./git-values.js";
 import {
   actionIdSchema,
   artifactRefSchema,
@@ -164,7 +164,7 @@ export const publishCompareAndSwapSchema = object({
   publicationLease: leaseIdSchema,
   publicationRef: gitRefSchema,
   repository: repositoryCapabilitySchema,
-  verifiedAttestation: artifactRefSchema,
+  verifiedAttestation: gitTreeCasAttestationSchema,
 });
 
 export const observeClockCommandSchema = object({

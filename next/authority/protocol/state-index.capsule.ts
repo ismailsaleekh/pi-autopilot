@@ -1,6 +1,6 @@
 import { atomDispositionSchema, atomSchema } from "./atom.capsule.js";
 import { commandSchema } from "./command.capsule.js";
-import { expectedRefStateSchema } from "./git-values.js";
+import { expectedRefStateSchema, gitTreeCasAttestationSchema } from "./git-values.js";
 import { evidenceFactSchema } from "./evidence-fact.capsule.js";
 import { findingSchema } from "./finding.capsule.js";
 import {
@@ -92,7 +92,7 @@ const candidateIndexValueSchema = object({
   candidateId: candidateIdSchema,
   gitRevision: gitCommitIdSchema,
   gitTree: gitTreeIdSchema,
-  gitTreeCasAttestation: artifactRefSchema,
+  gitTreeCasAttestation: gitTreeCasAttestationSchema,
   kind: literal("candidate"),
   manifest: artifactRefSchema,
   planRootId: planRootIdSchema,
@@ -108,7 +108,7 @@ const publicationIndexValueSchema = object({
   kind: literal("publication"),
   observedHead: nullable(gitCommitIdSchema),
   publicationId: publicationIdSchema,
-  publicationTreeAttestation: nullable(artifactRefSchema),
+  publicationTreeAttestation: nullable(gitTreeCasAttestationSchema),
   runId: runIdSchema,
   status: union([literal("intended"), literal("desired-head"), literal("head-moved")]),
 });

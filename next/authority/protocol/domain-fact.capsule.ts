@@ -1,7 +1,7 @@
 import { atomDispositionSchema, atomSchema } from "./atom.capsule.js";
 import { evidenceFactSchema } from "./evidence-fact.capsule.js";
 import { findingSchema } from "./finding.capsule.js";
-import { expectedRefStateSchema } from "./git-values.js";
+import { expectedRefStateSchema, gitTreeCasAttestationSchema } from "./git-values.js";
 import {
   artifactRefSchema,
   artifactRootSchema,
@@ -163,7 +163,7 @@ export const candidateAcceptedSchema = object({
   candidateId: candidateIdSchema,
   gitRevision: gitCommitIdSchema,
   gitTree: gitTreeIdSchema,
-  gitTreeCasAttestation: artifactRefSchema,
+  gitTreeCasAttestation: gitTreeCasAttestationSchema,
   kind: literal("candidate-accepted"),
   manifest: artifactRefSchema,
   planRootId: planRootIdSchema,
@@ -188,7 +188,7 @@ export const publicationObservedSchema = object({
   kind: literal("publication-observed"),
   observedHead: nullable(gitCommitIdSchema),
   publicationId: publicationIdSchema,
-  publicationTreeAttestation: artifactRefSchema,
+  publicationTreeAttestation: gitTreeCasAttestationSchema,
   runId: runIdSchema,
   status: union([literal("desired-head"), literal("head-moved")]),
   tree: artifactRootSchema,
