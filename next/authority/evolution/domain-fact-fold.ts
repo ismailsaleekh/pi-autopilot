@@ -1,6 +1,7 @@
 import { dispositionIsLegal } from "../protocol/atom.capsule.js";
 import type { DomainFact } from "../protocol/domain-fact.capsule.js";
 import {
+  compareDecimalNatural,
   decrementDecimalNatural,
   incrementDecimalNatural,
 } from "../protocol/identifiers.js";
@@ -268,6 +269,9 @@ function applySemanticFact(
         || dependency.workItem.planRootId !== fact.planRootId
       ) {
         return rejected(state, "dependency-endpoint-invalid", "dependency endpoints must be current-plan work");
+      }
+      if (compareDecimalNatural(dependency.workItem.topologicalRank, dependent.workItem.topologicalRank) >= 0) {
+        return rejected(state, "dependency-cycle", "dependency rank must be strictly lower than dependent rank, proving transitive acyclicity");
       }
       const reverse = lookupValue(state, pages, "dependencies", `${fact.dependent}\u0000${fact.dependency}`);
       if (reverse === "unproven") {

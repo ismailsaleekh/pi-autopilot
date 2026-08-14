@@ -36,6 +36,7 @@ const commonWorkFields = {
   ruleInputs: artifactRefSchema,
   runId: runIdSchema,
   taskRoot: artifactRootSchema,
+  topologicalRank: decimalNaturalSchema,
   workItemId: workItemIdSchema,
   workspaceCapability: workspaceCapabilitySchema,
   workspaceId: workspaceIdSchema,
