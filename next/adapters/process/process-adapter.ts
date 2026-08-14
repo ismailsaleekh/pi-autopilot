@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
-import { createReadStream } from "node:fs";
+import { createReadStream, readFileSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { BoundedCapture } from "./bounded-capture.js";
@@ -10,8 +10,13 @@ import type {
   PhysicalDiagnostic,
   ProcessCaptureAcquireResult,
   ProcessCaptureSink,
+  ProcessColdObservation,
+  ProcessColdTerminationResult,
+  ProcessDescriptor,
+  ProcessDescriptorResult,
   ProcessGraceWaiter,
   ProcessGroupObservation,
+  ProcessIdentityInspector,
   ProcessObservation,
   ProcessObserveResult,
   ProcessOutputObservation,
@@ -223,9 +228,8 @@ async function awaitSpawn(child: ChildProcessWithoutNullStreams): Promise<"spawn
 
 interface ProcessHandleState {
   readonly child: ChildProcessWithoutNullStreams;
-  readonly environmentKeys: readonly string[];
+  readonly descriptor: ProcessDescriptor;
   groupKnownAbsent: boolean;
-  readonly pid: number;
   readonly stderrCapture: BoundedCapture;
   readonly stdoutCapture: BoundedCapture;
 }
@@ -248,16 +252,15 @@ export class ProcessHandle {
 
 function createProcessHandle(
   child: ChildProcessWithoutNullStreams,
-  environmentKeys: readonly string[],
+  descriptor: ProcessDescriptor,
   stdoutCapture: BoundedCapture,
   stderrCapture: BoundedCapture,
 ): ProcessHandle {
   const handle = new ProcessHandle();
   PROCESS_HANDLE_STATES.set(handle, {
     child,
-    environmentKeys: Object.freeze([...environmentKeys]),
+    descriptor,
     groupKnownAbsent: false,
-    pid: child.pid ?? -1,
     stderrCapture,
     stdoutCapture,
   });
@@ -268,12 +271,55 @@ function processHandleState(input: unknown): ProcessHandleState | null {
   return input instanceof ProcessHandle ? PROCESS_HANDLE_STATES.get(input) ?? null : null;
 }
 
+function decodeDescriptor(input: unknown): ProcessDescriptor | PhysicalDiagnostic {
+  try {
+    if (typeof input !== "object" || input === null || Array.isArray(input)) return diagnostic("process.invalid-descriptor", "process descriptor must be an object");
+    const captureId = ownString(input, "captureId");
+    const groupId = ownNatural(input, "groupId");
+    const pid = ownNatural(input, "pid");
+    const processBirthMarker = ownString(input, "processBirthMarker");
+    const stderrPath = ownString(input, "stderrPath");
+    const stdoutPath = ownString(input, "stdoutPath");
+    const keys = Reflect.get(input, "environmentKeys");
+    if (captureId === null || groupId === null || groupId < 1 || pid === null || pid < 1 || processBirthMarker === null || processBirthMarker.length === 0 || stderrPath === null || stdoutPath === null || !isAbsolute(stderrPath) || !isAbsolute(stdoutPath) || !Array.isArray(keys) || keys.length > MAX_ENVIRONMENT_ENTRIES || !keys.every((key) => typeof key === "string" && ENVIRONMENT_KEY.test(key))) {
+      return diagnostic("process.invalid-descriptor", "process descriptor contains an invalid physical identity");
+    }
+    return Object.freeze({ captureId, environmentKeys: Object.freeze([...keys].sort()), groupId, pid, processBirthMarker, stderrPath, stdoutPath });
+  } catch {
+    return diagnostic("process.uninspectable-descriptor", "process descriptor could not be inspected safely");
+  }
+}
+
+function procBirthMarker(pid: number): string | null {
+  if (process.platform !== "linux" || !Number.isSafeInteger(pid) || pid < 1) return null;
+  try {
+    const statLine = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const close = statLine.lastIndexOf(") ");
+    if (close < 0) return null;
+    const fields = statLine.slice(close + 2).split(" ");
+    const startTime = fields[19];
+    return startTime !== undefined && /^[0-9]+$/.test(startTime) ? `linux-proc-start:${startTime}` : null;
+  } catch {
+    return null;
+  }
+}
+
+function coldGroupAlive(descriptor: ProcessDescriptor): "alive" | "absent" | "unobservable" {
+  try {
+    process.kill(process.platform === "win32" ? descriptor.pid : -descriptor.groupId, 0);
+    return "alive";
+  } catch (error: unknown) {
+    const code = systemCode(error);
+    return code === "ESRCH" ? "absent" : code === "EPERM" ? "alive" : "unobservable";
+  }
+}
+
 function groupObservation(state: ProcessHandleState): ProcessGroupObservation {
   if (state.groupKnownAbsent) {
-    return Object.freeze({ kind: "absent", processGroupId: state.pid });
+    return Object.freeze({ kind: "absent", processGroupId: state.descriptor.pid });
   }
-  if (state.pid < 1) {
-    return Object.freeze({ code: "invalid-pid", kind: "unobservable", processGroupId: state.pid });
+  if (state.descriptor.pid < 1) {
+    return Object.freeze({ code: "invalid-pid", kind: "unobservable", processGroupId: state.descriptor.pid });
   }
   if (process.platform === "win32") {
     const alive = state.child.exitCode === null && state.child.signalCode === null;
@@ -283,22 +329,22 @@ function groupObservation(state: ProcessHandleState): ProcessGroupObservation {
     return Object.freeze({
       code: "win32-root-only",
       kind: alive ? "unobservable" : "absent",
-      processGroupId: state.pid,
+      processGroupId: state.descriptor.pid,
     });
   }
   try {
-    process.kill(-state.pid, 0);
-    return Object.freeze({ kind: "alive", processGroupId: state.pid });
+    process.kill(-state.descriptor.groupId, 0);
+    return Object.freeze({ kind: "alive", processGroupId: state.descriptor.groupId });
   } catch (error: unknown) {
     const code = systemCode(error);
     if (code === "ESRCH") {
       state.groupKnownAbsent = true;
-      return Object.freeze({ kind: "absent", processGroupId: state.pid });
+      return Object.freeze({ kind: "absent", processGroupId: state.descriptor.groupId });
     }
     if (code === "EPERM") {
-      return Object.freeze({ kind: "alive", processGroupId: state.pid });
+      return Object.freeze({ kind: "alive", processGroupId: state.descriptor.groupId });
     }
-    return Object.freeze({ code, kind: "unobservable", processGroupId: state.pid });
+    return Object.freeze({ code, kind: "unobservable", processGroupId: state.descriptor.groupId });
   }
 }
 
@@ -309,7 +355,7 @@ function lifecycleObservation(state: ProcessHandleState): ProcessObservation["li
   if (state.child.exitCode !== null) {
     return Object.freeze({ code: state.child.exitCode, kind: "exited" });
   }
-  if (state.pid < 1) {
+  if (state.descriptor.pid < 1) {
     return Object.freeze({ kind: "unavailable" });
   }
   return Object.freeze({ kind: "running" });
@@ -317,9 +363,9 @@ function lifecycleObservation(state: ProcessHandleState): ProcessObservation["li
 
 function observation(state: ProcessHandleState): ProcessObservation {
   return Object.freeze({
-    environmentKeys: state.environmentKeys,
+    environmentKeys: state.descriptor.environmentKeys,
     lifecycle: lifecycleObservation(state),
-    pid: state.pid,
+    pid: state.descriptor.pid,
     platform: process.platform,
     processGroup: groupObservation(state),
     stderr: state.stderrCapture.observation(),
@@ -355,7 +401,7 @@ function sendSignal(
       state: "already-absent",
     });
   }
-  if (handleState.pid < 1) {
+  if (handleState.descriptor.pid < 1) {
     return Object.freeze({
       after: before,
       before,
@@ -366,7 +412,7 @@ function sendSignal(
   try {
     const delivered = process.platform === "win32"
       ? handleState.child.kill(requestedSignal)
-      : (process.kill(-handleState.pid, requestedSignal), true);
+      : (process.kill(-handleState.descriptor.groupId, requestedSignal), true);
     return Object.freeze({
       after: observation(handleState),
       before,
@@ -468,10 +514,16 @@ async function readBoundedFile(
 export class ProcessAdapter {
   private readonly captureSink: ProcessCaptureSink;
   private readonly graceWaiter: ProcessGraceWaiter;
+  private readonly identityInspector: ProcessIdentityInspector;
 
-  public constructor(captureSink: ProcessCaptureSink, graceWaiter: ProcessGraceWaiter) {
+  public constructor(
+    captureSink: ProcessCaptureSink,
+    graceWaiter: ProcessGraceWaiter,
+    identityInspector: ProcessIdentityInspector = Object.freeze({ birthMarker: procBirthMarker }),
+  ) {
     this.captureSink = captureSink;
     this.graceWaiter = graceWaiter;
+    this.identityInspector = identityInspector;
   }
 
   public async start(input: unknown): Promise<ProcessStartResult<ProcessHandle>> {
@@ -548,9 +600,31 @@ export class ProcessAdapter {
     });
     stdoutCapture.attach(child.stdout);
     stderrCapture.attach(child.stderr);
+    const pid = child.pid ?? -1;
+    let processBirthMarker: string | null = null;
+    try { processBirthMarker = this.identityInspector.birthMarker(pid); } catch { processBirthMarker = null; }
+    if (processBirthMarker === null) {
+      try { process.kill(process.platform === "win32" ? pid : -pid, "SIGKILL"); } catch { /* Failed launch remains rejected and cannot be recovered. */ }
+      stdoutCapture.closeWithoutInput();
+      stderrCapture.closeWithoutInput();
+      await Promise.all([stdoutCapture.settled(), stderrCapture.settled()]);
+      return Object.freeze({
+        diagnostic: diagnostic("process.identity-unavailable", "process launch lacked a durable PID-reuse birth marker"),
+        kind: "rejected",
+      });
+    }
+    const descriptor: ProcessDescriptor = Object.freeze({
+      captureId: decoded.value.captureId,
+      environmentKeys: decoded.environmentKeys,
+      groupId: pid,
+      pid,
+      processBirthMarker,
+      stderrPath,
+      stdoutPath,
+    });
     const handle = createProcessHandle(
       child,
-      decoded.environmentKeys,
+      descriptor,
       stdoutCapture,
       stderrCapture,
     );
@@ -562,6 +636,56 @@ export class ProcessAdapter {
       });
     }
     return Object.freeze({ handle, kind: "started", observation: observation(state) });
+  }
+
+  public describe(input: unknown): ProcessDescriptorResult {
+    const state = processHandleState(input);
+    return state === null
+      ? Object.freeze({ diagnostic: diagnostic("process.unknown-handle", "process description requires a handle created by this adapter surface"), kind: "rejected" })
+      : Object.freeze({ descriptor: state.descriptor, kind: "described" });
+  }
+
+  public observeDescriptor(input: unknown): ProcessColdObservation {
+    const descriptor = decodeDescriptor(input);
+    if ("code" in descriptor) return Object.freeze({ diagnostic: descriptor, kind: "rejected" });
+    let marker: string | null = null;
+    try { marker = this.identityInspector.birthMarker(descriptor.pid); } catch { marker = null; }
+    const alive = coldGroupAlive(descriptor);
+    if (alive === "absent") return Object.freeze({ groupId: descriptor.groupId, kind: "absent", pid: descriptor.pid });
+    if (marker === null || marker !== descriptor.processBirthMarker || alive === "unobservable") {
+      return Object.freeze({ diagnostic: diagnostic("process.identity-mismatch", "process descriptor cannot prove the live PID/group birth identity"), kind: "rejected" });
+    }
+    return Object.freeze({ groupId: descriptor.groupId, kind: "running", pid: descriptor.pid });
+  }
+
+  public async terminateDescriptor(input: unknown, optionsInput: unknown): Promise<ProcessColdTerminationResult> {
+    const descriptor = decodeDescriptor(input);
+    if ("code" in descriptor) return Object.freeze({ diagnostic: descriptor, kind: "rejected" });
+    let graceMilliseconds: number | null = null;
+    try { graceMilliseconds = typeof optionsInput === "object" && optionsInput !== null ? ownNatural(optionsInput, "graceMilliseconds") : null; } catch { graceMilliseconds = null; }
+    if (graceMilliseconds === null || graceMilliseconds > 60_000) return Object.freeze({ diagnostic: diagnostic("process.invalid-grace", "process termination grace must be an integer from 0 through 60000 milliseconds"), kind: "rejected" });
+    const observed = this.observeDescriptor(descriptor);
+    if (observed.kind === "rejected") return observed;
+    if (observed.kind === "absent") return Object.freeze({ escalated: false, groupId: descriptor.groupId, kind: "terminated", pid: descriptor.pid, state: "already-absent" });
+    try { process.kill(process.platform === "win32" ? descriptor.pid : -descriptor.groupId, "SIGTERM"); } catch (error: unknown) {
+      if (systemCode(error) === "ESRCH") return Object.freeze({ escalated: false, groupId: descriptor.groupId, kind: "terminated", pid: descriptor.pid, state: "already-absent" });
+      return Object.freeze({ diagnostic: diagnostic("process.signal-failed", "descriptor-bound process group could not be terminated"), kind: "rejected" });
+    }
+    if (graceMilliseconds > 0) {
+      try { await this.graceWaiter.waitForGrace(graceMilliseconds); } catch { return Object.freeze({ diagnostic: diagnostic("process.grace-wait-unavailable", "process termination grace wait was unavailable"), kind: "rejected" }); }
+    }
+    const afterGrace = this.observeDescriptor(descriptor);
+    if (afterGrace.kind === "absent") return Object.freeze({ escalated: false, groupId: descriptor.groupId, kind: "terminated", pid: descriptor.pid, state: "fenced" });
+    if (afterGrace.kind === "rejected") return afterGrace;
+    try { process.kill(process.platform === "win32" ? descriptor.pid : -descriptor.groupId, "SIGKILL"); } catch (error: unknown) {
+      if (systemCode(error) !== "ESRCH") return Object.freeze({ diagnostic: diagnostic("process.kill-failed", "descriptor-bound process group could not be fenced"), kind: "rejected" });
+    }
+    const final = this.observeDescriptor(descriptor);
+    return final.kind === "running"
+      ? Object.freeze({ diagnostic: diagnostic("process.fence-unconfirmed", "descriptor-bound process group remained observable after fencing"), kind: "rejected" })
+      : final.kind === "rejected"
+        ? final
+        : Object.freeze({ escalated: true, groupId: descriptor.groupId, kind: "terminated", pid: descriptor.pid, state: "fenced" });
   }
 
   public observe(input: unknown): ProcessObserveResult {

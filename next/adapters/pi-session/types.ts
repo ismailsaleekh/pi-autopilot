@@ -1,6 +1,6 @@
 import type { ArtifactRef } from "../../authority/protocol/identifiers.js";
 import type { SubscriptionRoute } from "../../authority/protocol/route.capsule.js";
-import type { ChildObservation, ChildIntent, LaunchChildSession } from "../../ports/contracts/child.capsule.js";
+import type { ChildObservation, ChildIntent, LaunchChildSession, VerifyPiRoute } from "../../ports/contracts/child.capsule.js";
 
 export type PiThinkingLevel = SubscriptionRoute["thinking"];
 export type PiSubscriptionRoute = SubscriptionRoute;
@@ -16,10 +16,41 @@ export interface PiSessionLaunchBinding {
   readonly workspacePath: string;
 }
 export interface PiSessionBindingResolver {
-  readonly resolveLaunch: (intent: LaunchChildSession) => Promise<unknown>;
-  readonly persistProcessDescriptor: (descriptor: unknown) => Promise<ArtifactRef>;
+  readonly resolveLaunch: (intent: LaunchChildSession | VerifyPiRoute) => Promise<unknown>;
+  readonly persistProcessDescriptor: (descriptor: PiDurableChildDescriptor) => Promise<ArtifactRef>;
   readonly loadProcessDescriptor: (reference: ArtifactRef) => Promise<unknown>;
 }
+
+export interface PiDurableProcessDescriptor {
+  readonly captureId: string;
+  readonly environmentKeys: readonly string[];
+  readonly groupId: number;
+  readonly pid: number;
+  readonly processBirthMarker: string;
+  readonly stderrPath: string;
+  readonly stdoutPath: string;
+}
+
+export interface PiDurableChildDescriptor {
+  readonly childEpoch: string;
+  readonly childId: string;
+  readonly process: PiDurableProcessDescriptor;
+  readonly runId: string;
+  readonly sessionDirectory: string;
+  readonly sessionId: string;
+  readonly workspaceId: string;
+}
+
+export type PiProcessDescriptorResult =
+  | { readonly descriptor: PiDurableProcessDescriptor; readonly kind: "described" }
+  | { readonly diagnostic: Readonly<{ readonly code: string; readonly message: string }>; readonly kind: "rejected" };
+export type PiColdProcessObservation =
+  | { readonly groupId: number; readonly kind: "absent"; readonly pid: number }
+  | { readonly groupId: number; readonly kind: "running"; readonly pid: number }
+  | { readonly diagnostic: Readonly<{ readonly code: string; readonly message: string }>; readonly kind: "rejected" };
+export type PiColdProcessTerminationResult =
+  | { readonly escalated: boolean; readonly groupId: number; readonly kind: "terminated"; readonly pid: number; readonly state: "fenced" | "already-absent" }
+  | { readonly diagnostic: Readonly<{ readonly code: string; readonly message: string }>; readonly kind: "rejected" };
 export interface PiSessionChildReference {
   readonly childEpoch: string;
   readonly childId: string;
@@ -58,9 +89,12 @@ export type PiProcessTerminationResult =
   | { readonly diagnostic: Readonly<{ readonly code: string; readonly message: string }>; readonly kind: "rejected" };
 export interface PiProcessExecutor<Handle> {
   readonly collectOutput: (handle: Handle, request: unknown) => Promise<PiProcessOutputReadResult>;
+  readonly describe: (handle: Handle) => PiProcessDescriptorResult;
   readonly observe: (handle: Handle) => PiProcessObserveResult;
+  readonly observeDescriptor: (descriptor: PiDurableProcessDescriptor) => PiColdProcessObservation;
   readonly start: (request: unknown) => Promise<PiProcessStartResult<Handle>>;
   readonly terminate: (handle: Handle, options: Readonly<{ readonly graceMilliseconds: number }>) => Promise<PiProcessTerminationResult>;
+  readonly terminateDescriptor: (descriptor: PiDurableProcessDescriptor, options: Readonly<{ readonly graceMilliseconds: number }>) => Promise<PiColdProcessTerminationResult>;
   readonly waitForExit: (handle: Handle) => Promise<PiProcessObserveResult>;
 }
 

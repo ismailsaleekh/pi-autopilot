@@ -47,6 +47,31 @@ export interface ProcessStartRequest {
   readonly maxStdoutBytes: number;
 }
 
+/** Durable, restart-safe physical identity. The birth marker fences PID reuse. */
+export interface ProcessDescriptor {
+  readonly captureId: string;
+  readonly environmentKeys: readonly string[];
+  readonly groupId: number;
+  readonly pid: number;
+  readonly processBirthMarker: string;
+  readonly stderrPath: string;
+  readonly stdoutPath: string;
+}
+
+export interface ProcessDescriptorRequest {
+  readonly captureId: string;
+  readonly environmentKeys: readonly string[];
+  readonly groupId: number;
+  readonly pid: number;
+  readonly stderrPath: string;
+  readonly stdoutPath: string;
+}
+
+/** Host identity probe; implemented outside process mechanics for deterministic tests. */
+export interface ProcessIdentityInspector {
+  readonly birthMarker: (pid: number) => string | null;
+}
+
 export interface CaptureObservation {
   readonly capturedBytes: string;
   readonly faultCode: string | null;
@@ -86,6 +111,19 @@ export type ProcessStartResult<Handle> =
 
 export type ProcessObserveResult =
   | { readonly kind: "observed"; readonly observation: ProcessObservation }
+  | { readonly diagnostic: PhysicalDiagnostic; readonly kind: "rejected" };
+
+export type ProcessDescriptorResult =
+  | { readonly descriptor: ProcessDescriptor; readonly kind: "described" }
+  | { readonly diagnostic: PhysicalDiagnostic; readonly kind: "rejected" };
+
+export type ProcessColdObservation =
+  | { readonly groupId: number; readonly kind: "absent"; readonly pid: number }
+  | { readonly groupId: number; readonly kind: "running"; readonly pid: number }
+  | { readonly diagnostic: PhysicalDiagnostic; readonly kind: "rejected" };
+
+export type ProcessColdTerminationResult =
+  | { readonly escalated: boolean; readonly groupId: number; readonly kind: "terminated"; readonly pid: number; readonly state: "fenced" | "already-absent" }
   | { readonly diagnostic: PhysicalDiagnostic; readonly kind: "rejected" };
 
 export interface SignalDeliveryObservation {
