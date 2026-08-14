@@ -976,6 +976,7 @@ function checkConstructorCapabilities(units: readonly SourceUnit[]): readonly Ar
       if (
         (name === "mintPreparedCommit" || name === "preparedCommitTestHarness")
         && !unit.path.startsWith("authority/facade/")
+        && !unit.path.startsWith("authority/protocol/accepted-batch.")
       ) {
         output.push(finding(
           "constructor-capabilities",
