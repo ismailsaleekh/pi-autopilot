@@ -16,7 +16,11 @@ or model catalog, so every non-empty `extensionPaths` binding fails closed. JSON
 stdout is bounded physical output
 and is deliberately never parsed for "finished" meaning. Pi exits when its own
 single-shot run settles; the adapter reports only process lifecycle plus files
-found on disk.
+found on disk. Launch atomically installs a bounded canonical process descriptor
+in CAS and reads the exact bytes back before acknowledging. Inspect and fence
+load that descriptor after a worker restart, verify the persisted child/run/epoch
+and kernel birth marker, and fail closed on PID reuse or an unobservable process.
+The in-process handle is never recovery authority.
 
 Before launch, a managed `pi auth check --provider … --model … --json
 --no-refresh` process must return the exact OAuth-ready record for an exact
