@@ -145,6 +145,7 @@ export const buildIntegratedCandidateSchema = object({
   baseTree: gitTreeIdSchema,
   candidateCommit: gitCommitIdSchema,
   candidateId: candidateIdSchema,
+  candidateRoot: artifactRootSchema,
   candidateTree: gitTreeIdSchema,
   integrationWorkspace: workspaceCapabilitySchema,
   kind: literal("build-integrated-candidate"),

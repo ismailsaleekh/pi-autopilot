@@ -248,7 +248,7 @@ function observationPayload(command: Command, observation: RuntimePortObservatio
             integrationOwnerWorkItemId: command.workItemId,
             kind: "integration-conflict-v2",
             planRootId: command.planRootId,
-            subjectRoot: command.baseRoot,
+            subjectRoot: command.candidateRoot,
           })
         : Object.freeze({
               candidateId: value.candidateId,
