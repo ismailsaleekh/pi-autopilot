@@ -31,6 +31,7 @@ import type { JournalRecord } from "../../../authority/protocol/journal-record.c
 import { preparedCommitTestHarness } from "../../../authority/protocol/accepted-batch.js";
 import {
   JOURNAL_GENESIS_HASH,
+  decodeWirePayload,
   encodeFrame,
 } from "../../../storage/journal/wire.js";
 import {
@@ -142,10 +143,8 @@ async function temporaryDirectory(prefix: string): Promise<string> {
   return mkdtemp(join(tmpdir(), prefix));
 }
 
-function recordForSeed(seed: number, kind?: JournalRecord["kind"]): JournalRecord {
-  const record = kind === undefined
-    ? journalRecordCapsule.arbitrary.valid(seed)
-    : journalRecordCapsule.arbitrary.validForKind(kind, seed);
+function recordForSeed(seed: number, kind: JournalRecord["kind"] = "decision-committed"): JournalRecord {
+  const record = journalRecordCapsule.arbitrary.validForKind(kind, seed);
   if (record.kind !== "decision-committed" && record.kind !== "command-settled" && record.kind !== "outcome-committed") {
     return record;
   }
@@ -222,6 +221,13 @@ function canonicalBytes(record: JournalRecord): Buffer {
   return Buffer.from(journalRecordCapsule.encode(record));
 }
 
+function controlFrame(bytes: Buffer, path: string, epoch: JournalWriterHandle["epoch"]): unknown {
+  const payloadLength = bytes.readUInt32BE(0);
+  const decoded = decodeWirePayload(0, bytes.subarray(41, 41 + payloadLength), path, epoch);
+  assert.equal(decoded.kind, "ok");
+  return decoded.kind === "ok" && decoded.value.kind === "control" ? decoded.value.control : null;
+}
+
 async function replayDigestInChild(
   journalDir: string,
   environment: NodeJS.ProcessEnv,
@@ -246,7 +252,7 @@ test("wire v1 CRC32C vector and append/replay property preserve canonical record
     const expected: JournalRecord[] = [];
     const appends: Array<Promise<unknown>> = [];
     for (let seed = 0; seed < 48; seed += 1) {
-      const record = recordForSeed(seed);
+      const record = recordForSeed(seed, seed === 0 ? "run-genesis" : "decision-committed");
       expected.push(record);
       appends.push(appendCommittedBatch(handle, prepared(record)));
     }
@@ -297,13 +303,10 @@ test("DecisionCommitted facts/factRoot mismatch is rejected before append and on
       throw new Error("arbitrary did not produce DecisionCommitted");
     }
     assert.equal(decisionFactsMatchRoot(mismatch), false);
+    const mint = preparedCommits.prepareRecord(mismatch);
+    assert.equal(mint.kind, "invalid");
+    if (mint.kind === "invalid") assert.match(mint.error.diagnostic, /facts, commands, artifact reference, and canonical digests must match/);
     const handle = await acquired(journalDir);
-    const rejected = await appendCommittedBatch(handle, prepared(mismatch));
-    assert.equal(rejected.kind, "rejected");
-    if (rejected.kind === "rejected") {
-      assert.equal(rejected.error.code, "decision-fact-root-mismatch");
-      assert.equal(rejected.error.disposition, "feedback");
-    }
     await closeJournal(handle);
     assert.equal((await replayRecords(journalDir)).length, 0);
 
@@ -317,7 +320,7 @@ test("DecisionCommitted facts/factRoot mismatch is rejected before append and on
     const completion = await replayed.completion;
     assert.equal(completion.kind, "error");
     if (completion.kind === "error") {
-      assert.equal(completion.error.code, "decision-fact-root-mismatch");
+      assert.equal(completion.error.code, "semantic-root-mismatch");
     }
   } finally {
     await rm(journalDir, { force: true, recursive: true });
@@ -327,14 +330,13 @@ test("DecisionCommitted facts/factRoot mismatch is rejected before append and on
 test("oversize JournalRecord receives CAS-directed typed feedback", async () => {
   const journalDir = await temporaryDirectory("autopilot-journal-oversize-");
   try {
-    const template = recordForSeed(2, "run-genesis");
-    assert.equal(template.kind, "run-genesis");
-    if (template.kind !== "run-genesis") {
-      throw new Error("arbitrary did not produce RunGenesis");
-    }
+    const genesis = recordForSeed(2, "run-genesis");
+    const template = recordForSeed(3, "run-suspended");
+    assert.equal(template.kind, "run-suspended");
+    if (template.kind !== "run-suspended") throw new Error("arbitrary did not produce RunSuspended");
     const encoded = journalRecordCapsule.encodeUnknown(Object.freeze({
       ...template,
-      repositoryBase: `revision-${"x".repeat(1024 * 1024)}`,
+      reason: Object.freeze({ ...template.reason, path: `oversize/${"x".repeat(1024 * 1024)}` }),
     }));
     if (encoded.kind === "error") {
       throw new Error(encoded.error.diagnostic);
@@ -346,6 +348,7 @@ test("oversize JournalRecord receives CAS-directed typed feedback", async () => 
     }
     assert.equal(decoded.kind, "ok");
     const handle = await acquired(journalDir);
+    assert.equal((await appendCommittedBatch(handle, prepared(genesis))).kind, "acknowledged");
     const outcome = await appendCommittedBatch(handle, prepared(decoded.value));
     assert.equal(outcome.kind, "rejected");
     if (outcome.kind === "rejected") {
@@ -416,7 +419,7 @@ test("real SIGKILL append windows are prefix-safe and post-fdatasync record surv
       const journalDir = await temporaryDirectory(`autopilot-journal-append-kill-${point}-`);
       try {
         const seed = await seedJournal(journalDir, 200);
-        const childRecord = recordForSeed(201, "run-genesis");
+        const childRecord = recordForSeed(201, "decision-committed");
         await killAtPoint(journalDir, point, "record", true, 201);
         const recovery = await acquired(journalDir);
         await closeJournal(recovery);
@@ -496,13 +499,8 @@ test("fencing crown jewel: stopped A late-appends only dead fork bytes beyond B 
     const aBytes = await readFile(segmentPath(journalDir, 1));
     const bBytes = await readFile(segmentPath(journalDir, 2));
     assert.ok(aBytes.byteLength > 0);
-    const controlLength = bBytes.readUInt32BE(0);
-    const control = JSON.parse(
-      bBytes.subarray(41, 41 + controlLength).toString("utf8"),
-    );
-    const cuts = field(control, "cuts");
-    assert.ok(Array.isArray(cuts));
-    assert.equal(field(Array.isArray(cuts) ? cuts[0] : null, "observedByteLength"), "00000000000000000000");
+    const control = controlFrame(bBytes, segmentPath(journalDir, 2), successor.epoch);
+    assert.equal(field(control, "predecessorObservedByteLength"), "00000000000000000000");
     const aPayloadLength = aBytes.readUInt32BE(0);
     const aPayload = aBytes.subarray(41, 41 + aPayloadLength);
     const aStoredHash = aBytes.subarray(8, 40);
@@ -525,16 +523,16 @@ test("nonzero successor cut preserves A's accepted prefix and rejects A's late f
     const firstAccepted = recordForSeed(450, "run-genesis");
     assert.equal((await appendCommittedBatch(first, prepared(firstAccepted))).kind, "acknowledged");
     const successor = await acquired(journalDir);
-    const successorAccepted = recordForSeed(451, "run-genesis");
+    const successorAccepted = recordForSeed(451, "decision-committed");
     assert.equal((await appendCommittedBatch(successor, prepared(successorAccepted))).kind, "acknowledged");
-    const staleLate = recordForSeed(452, "run-genesis");
+    const staleLate = recordForSeed(452, "decision-committed");
     const staleResult = await appendCommittedBatch(first, prepared(staleLate));
     assert.equal(staleResult.kind, "rejected");
     if (staleResult.kind === "rejected") {
       assert.equal(staleResult.error.code, "superseded");
     }
     const third = await acquired(journalDir);
-    const thirdAccepted = recordForSeed(453, "run-genesis");
+    const thirdAccepted = recordForSeed(453, "decision-committed");
     assert.equal((await appendCommittedBatch(third, prepared(thirdAccepted))).kind, "acknowledged");
     await closeJournal(first);
     await closeJournal(successor);
@@ -546,25 +544,14 @@ test("nonzero successor cut preserves A's accepted prefix and rejects A's late f
       journalRecordCapsule.digest(thirdAccepted),
     ]);
     const successorBytes = await readFile(segmentPath(journalDir, 2));
-    const controlLength = successorBytes.readUInt32BE(0);
-    const control = JSON.parse(
-      successorBytes.subarray(41, 41 + controlLength).toString("utf8"),
-    );
-    const cuts = field(control, "cuts");
-    const cutText = field(Array.isArray(cuts) ? cuts[0] : null, "observedByteLength");
+    const control = controlFrame(successorBytes, segmentPath(journalDir, 2), successor.epoch);
+    const cutText = field(control, "predecessorObservedByteLength");
     assert.equal(typeof cutText, "string");
     const earliestCut = BigInt(typeof cutText === "string" ? cutText : "0");
     assert.equal(earliestCut > 0n, true);
     const thirdBytes = await readFile(segmentPath(journalDir, 3));
-    const thirdControlLength = thirdBytes.readUInt32BE(0);
-    const thirdControl = JSON.parse(
-      thirdBytes.subarray(41, 41 + thirdControlLength).toString("utf8"),
-    );
-    const laterCuts = field(thirdControl, "cuts");
-    const laterCutText = field(
-      Array.isArray(laterCuts) ? laterCuts[0] : null,
-      "observedByteLength",
-    );
+    const thirdControl = controlFrame(thirdBytes, segmentPath(journalDir, 3), third.epoch);
+    const laterCutText = field(thirdControl, "predecessorObservedByteLength");
     assert.equal(typeof laterCutText, "string");
     assert.equal(
       BigInt(typeof laterCutText === "string" ? laterCutText : "0") > earliestCut,
@@ -579,7 +566,7 @@ test("torn tail is ignored, recovery truncation is crash-idempotent", async () =
   const journalDir = await temporaryDirectory("autopilot-journal-torn-");
   try {
     const handle = await acquired(journalDir);
-    const records = [recordForSeed(500), recordForSeed(501)];
+    const records = [recordForSeed(500, "run-genesis"), recordForSeed(501, "decision-committed")];
     for (const record of records) {
       assert.equal((await appendCommittedBatch(handle, prepared(record))).kind, "acknowledged");
     }
@@ -608,7 +595,8 @@ test("interior corruption and nonzero cut to missing segment fail loudly", async
     try {
       const handle = await acquired(journalDir);
       for (let seed = 600; seed < 603; seed += 1) {
-        assert.equal((await appendCommittedBatch(handle, prepared(recordForSeed(seed)))).kind, "acknowledged");
+        const record = recordForSeed(seed, seed === 600 ? "run-genesis" : "decision-committed");
+        assert.equal((await appendCommittedBatch(handle, prepared(record))).kind, "acknowledged");
       }
       await closeJournal(handle);
       const path = segmentPath(journalDir, 1);
@@ -670,7 +658,7 @@ test("injected ENOSPC is loud, resumable, and leaves the valid prefix uncorrupte
     if (opened.kind !== "acquired") {
       throw new Error("writer did not open");
     }
-    const failed = await appendCommittedBatch(opened.handle, prepared(recordForSeed(700)));
+    const failed = await appendCommittedBatch(opened.handle, prepared(recordForSeed(700, "run-genesis")));
     assert.equal(failed.kind, "rejected");
     if (failed.kind === "rejected") {
       assert.equal(failed.error.code, "io-full");
@@ -692,7 +680,8 @@ test("replay is byte-deterministic across processes, locales, and timezones", as
   try {
     const handle = await acquired(journalDir);
     for (let seed = 800; seed < 816; seed += 1) {
-      assert.equal((await appendCommittedBatch(handle, prepared(recordForSeed(seed)))).kind, "acknowledged");
+      const record = recordForSeed(seed, seed === 800 ? "run-genesis" : "decision-committed");
+      assert.equal((await appendCommittedBatch(handle, prepared(record))).kind, "acknowledged");
     }
     await closeJournal(handle);
     const utc = await replayDigestInChild(journalDir, {

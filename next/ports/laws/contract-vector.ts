@@ -48,7 +48,10 @@ export type LawFixture =
   | { readonly kind: "tree"; readonly name: string; readonly files: readonly { readonly path: string; readonly bytes: Uint8Array }[] }
   | { readonly kind: "workspace"; readonly name: string; readonly treeName: string }
   | { readonly kind: "repository"; readonly name: string; readonly runId: string; readonly treeName: string }
+  | { readonly kind: "repository-history"; readonly name: string; readonly runId: string; readonly baseTreeName: string; readonly candidateTreeName: string }
   | { readonly kind: "root-list"; readonly name: string; readonly treeNames: readonly string[] }
+  | { readonly kind: "active-child"; readonly name: string }
+  | { readonly kind: "clock"; readonly name: string }
   | {
       readonly kind: "child-script";
       readonly name: string;
@@ -65,7 +68,10 @@ export type LawFixtureResult =
   | { readonly kind: "tree"; readonly name: string; readonly root: string; readonly manifest: JsonValue; readonly firstFile: JsonValue }
   | { readonly kind: "workspace"; readonly name: string; readonly workspaceId: string; readonly workspaceCapability: string; readonly root: string; readonly leaseId: string }
   | { readonly kind: "repository"; readonly name: string; readonly runId: string; readonly repository: string; readonly head: string; readonly tree: string; readonly publicationRef: string }
+  | { readonly kind: "repository-history"; readonly name: string; readonly runId: string; readonly repository: string; readonly baseCommit: string; readonly baseTree: string; readonly candidateCommit: string; readonly candidateTree: string; readonly publicationRef: string }
   | { readonly kind: "root-list"; readonly name: string; readonly reference: JsonValue }
+  | { readonly kind: "active-child"; readonly name: string; readonly childId: string; readonly childEpoch: string; readonly runId: string; readonly processDescriptor: JsonValue }
+  | { readonly kind: "clock"; readonly name: string; readonly sourceDigest: string }
   | { readonly kind: "child-script"; readonly name: string }
   | { readonly kind: "secret"; readonly name: string; readonly handle: string }
   | { readonly kind: "invalid"; readonly diagnostic: string };

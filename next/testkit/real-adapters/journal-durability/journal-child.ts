@@ -9,7 +9,12 @@ import type {
   JournalDurabilityEvent,
   JournalDurabilityObserver,
 } from "../../../storage/journal/index.js";
-import { journalRecordCapsule } from "../../../authority/protocol/journal-record.capsule.js";
+import {
+  canonicalCommandArtifact,
+  canonicalCommandsDigest,
+  canonicalDecisionFactsDigest,
+  journalRecordCapsule,
+} from "../../../authority/protocol/journal-record.capsule.js";
 import type { JournalRecord } from "../../../authority/protocol/journal-record.capsule.js";
 import { preparedCommitTestHarness } from "../../../authority/protocol/accepted-batch.js";
 
@@ -18,6 +23,21 @@ function prepared(record: JournalRecord) {
   const result = preparedCommits.prepareRecord(record);
   if (result.kind !== "minted") throw new Error(result.error.diagnostic);
   return result.commit;
+}
+
+function recordForSeed(seed: number, kind: "run-genesis" | "decision-committed"): JournalRecord {
+  const record = journalRecordCapsule.arbitrary.validForKind(kind, seed);
+  if (record.kind !== "decision-committed") return record;
+  const encoded = journalRecordCapsule.encodeUnknown(Object.freeze({
+    ...record,
+    commandArtifact: canonicalCommandArtifact(record.commands),
+    commandDigest: canonicalCommandsDigest(record.commands),
+    factDigest: canonicalDecisionFactsDigest(record.facts),
+  }));
+  if (encoded.kind === "error") throw new Error(encoded.error.diagnostic);
+  const decoded = journalRecordCapsule.decodeCanonical(encoded.value);
+  if (decoded.kind === "error") throw new Error(decoded.error.diagnostic);
+  return decoded.value;
 }
 
 function send(message: unknown): void {
@@ -83,7 +103,7 @@ async function killWindow(
     return;
   }
   if (appendAfterOpen) {
-    const record = journalRecordCapsule.arbitrary.validForKind("run-genesis", seed);
+    const record = recordForSeed(seed, "decision-committed");
     const result = await appendCommittedBatch(opened.handle, prepared(record));
     send(Object.freeze({ event: "result", kind: result.kind }));
   } else {
@@ -104,7 +124,7 @@ async function contend(journalDir: string, seed: number): Promise<void> {
     send(Object.freeze({ event: "finished", kind: opened.kind }));
     return;
   }
-  const record = journalRecordCapsule.arbitrary.validForKind("run-genesis", seed);
+  const record = recordForSeed(seed, "run-genesis");
   const appended = await appendCommittedBatch(opened.handle, prepared(record));
   await closeJournal(opened.handle);
   send(Object.freeze({
@@ -123,7 +143,7 @@ async function staleWriter(journalDir: string, seed: number): Promise<void> {
   }
   send(Object.freeze({ event: "acquired", epoch: opened.handle.epoch }));
   await waitFor("append");
-  const record = journalRecordCapsule.arbitrary.validForKind("run-genesis", seed);
+  const record = recordForSeed(seed, "run-genesis");
   const appended = await appendCommittedBatch(opened.handle, prepared(record));
   await closeJournal(opened.handle);
   send(Object.freeze({

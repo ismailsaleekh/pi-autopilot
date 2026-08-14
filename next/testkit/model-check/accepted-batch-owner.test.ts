@@ -3,6 +3,7 @@ import test from "node:test";
 import { prepareGenesis } from "../../authority/facade/index.js";
 import { isPreparedCommit } from "../../authority/protocol/accepted-batch.js";
 import { recordSemanticRootsMatch } from "../../authority/protocol/journal-record.capsule.js";
+import { canonicalEncodeUnknown, defineCapsule, jsonValue } from "../../authority/protocol/schema.js";
 import { nonemptyScenario, scenarioGenesis } from "../scenario-harness/authority.js";
 
 test("facade genesis and semantic preparation mint opaque PreparedCommit capabilities", () => {
@@ -15,11 +16,12 @@ test("facade genesis and semantic preparation mint opaque PreparedCommit capabil
   if (semantic.record.kind === "decision-committed") assert.equal(recordSemanticRootsMatch(semantic.record), true);
 });
 
-test("spread, JSON round-trip, and lookalike objects cannot forge PreparedCommit", () => {
+test("spread, canonical wire round-trip, and lookalike objects cannot forge PreparedCommit", () => {
   const commit = nonemptyScenario(402).commit;
   const spread = Object.freeze({ ...commit });
-  const encoded = JSON.stringify(commit);
-  const parsed: unknown = JSON.parse(encoded);
+  const decoded = defineCapsule("PreparedCommitPublicWire", jsonValue()).decodeCanonical(canonicalEncodeUnknown(commit));
+  assert.equal(decoded.kind, "ok");
+  const parsed: unknown = decoded.kind === "ok" ? decoded.value : null;
   const lookalike = Object.freeze({ kind: commit.kind, record: commit.record });
   assert.equal(isPreparedCommit(spread), false);
   assert.equal(isPreparedCommit(parsed), false);

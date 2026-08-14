@@ -1,3 +1,5 @@
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
@@ -9,6 +11,7 @@ import type {
   ProcessCaptureAcquireResult,
   ProcessCaptureSink,
   ProcessGraceWaiter,
+  ProcessIdentityInspector,
 } from "../../../adapters/process/index.js";
 
 function diagnostic(code: string, message: string): PhysicalDiagnostic {
@@ -100,6 +103,23 @@ async function acquireFileCaptures(
 
 export const nodeFileCaptureSink: ProcessCaptureSink = Object.freeze({
   acquire: acquireFileCaptures,
+});
+
+export const nodeProcessIdentityInspector: ProcessIdentityInspector = Object.freeze({
+  birthMarker(pid: number): string | null {
+    if (!Number.isSafeInteger(pid) || pid < 1 || process.platform === "win32") return null;
+    try {
+      const observed = execFileSync("/bin/ps", ["-o", "lstart=", "-o", "command=", "-p", String(pid)], {
+        encoding: "utf8",
+        maxBuffer: 1024 * 1024,
+        timeout: 5_000,
+      });
+      if (observed.trim().length === 0) return null;
+      return `ps-birth:sha256:${createHash("sha256").update(observed).digest("hex")}`;
+    } catch {
+      return null;
+    }
+  },
 });
 
 export const nodeProcessGraceWaiter: ProcessGraceWaiter = Object.freeze({

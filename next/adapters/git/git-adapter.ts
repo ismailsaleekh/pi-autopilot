@@ -178,7 +178,8 @@ export class GitAdapter {
       const type = header[1];
       const oid = header[2];
       if (modeText === undefined || type === undefined || oid === undefined || path.length === 0 || path.includes("\u0000")) return null;
-      const mode = Number.parseInt(modeText, 8);
+      const rawMode = Number.parseInt(modeText, 8);
+      const mode = modeText === "120000" ? 0o777 : rawMode & 0o7777;
       const object = await runGit(["cat-file", type === "commit" ? "commit" : "blob", oid], { cwd: binding.path, maxOutputBytes: this.options.maxOutputBytes });
       if (object.kind !== "exited" || object.code !== 0 || object.stdoutTruncated) return null;
       if (modeText === "120000") {
@@ -278,6 +279,8 @@ export class GitAdapter {
     const commit = headOut.kind === "exited" ? revision(headOut.stdout, repository.format) : null;
     const tree = treeOut.kind === "exited" ? revision(treeOut.stdout, repository.format) : null;
     if (commit === null || tree === null) return this.retry(intent, "candidate-integrated", "git.integration-result", "integrated identity unavailable");
+    const imported = await runGit(["fetch", "--no-tags", "--no-write-fetch-head", "--force", "--", directory, commit], { cwd: repository.path, maxOutputBytes: this.options.maxOutputBytes });
+    if (imported.kind !== "exited" || imported.code !== 0 || await this.commit(repository, commit) !== commit) return this.retry(intent, "candidate-integrated", "git.integration-import", "integrated commit could not be installed in the publication repository");
     const manifest = await capture(this.options.artifacts, encodeGitCanonicalValue({ base, candidate, commit, tree }), "codec:git-integration-manifest", "version:2", "git/integration-manifest.canonical.json", [base, candidate, commit, tree], this.options.maxOutputBytes);
     const diffResult = await runGit(["diff-tree", "--no-commit-id", "--root", "--raw", "-z", "-r", "-M", "--no-ext-diff", base, commit], { cwd: directory, maxOutputBytes: this.options.maxOutputBytes });
     const diff = diffResult.kind === "exited" && diffResult.code === 0 && !diffResult.stdoutTruncated

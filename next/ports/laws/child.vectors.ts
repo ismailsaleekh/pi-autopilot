@@ -56,7 +56,10 @@ export const childLawVector: ContractVector = Object.freeze({
     const launch = bindLawIntent("child", Object.freeze({
       inputs: Object.freeze({
         ...launchTemplate.inputs,
+        memorySeed: Object.freeze({ initialPrompt: tree.manifest, kind: "initial" }),
+        policyRoot: tree.root,
         route: verifiedRoute,
+        runtimeRoot: tree.root,
         workspaceCapability: workspace.workspaceCapability,
         workspaceId: workspace.workspaceId,
       }),
@@ -64,6 +67,7 @@ export const childLawVector: ContractVector = Object.freeze({
       preconditions: Object.freeze({
         ...launchTemplate.preconditions,
         expectedWorkspaceRoot: workspace.root,
+        routeObservation: tree.firstFile,
         routeObservationId: verification,
       }),
       runId: launchTemplate.runId,
@@ -96,7 +100,7 @@ export const childLawVector: ContractVector = Object.freeze({
         kind: "fence-child-session",
         preconditions: Object.freeze({
           childEpoch: launchTemplate.preconditions.childEpoch,
-          replacementEpoch: fenceTemplate.preconditions.replacementEpoch,
+          replacementEpoch: String(BigInt(launchTemplate.preconditions.childEpoch) + 1n),
         }),
         runId: launchTemplate.runId,
       }));

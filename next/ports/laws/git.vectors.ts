@@ -20,28 +20,34 @@ export const gitLawVector: ContractVector = Object.freeze({
       name: "git-v2-base",
       files: Object.freeze([Object.freeze({ path: "law/repository.bin", bytes: Uint8Array.from([7, 0, 9]) })]),
     }));
+    const candidateTree = await driver.fixture(Object.freeze({
+      kind: "tree",
+      name: "git-v2-candidate",
+      files: Object.freeze([Object.freeze({ path: "law/repository.bin", bytes: Uint8Array.from([7, 1, 9]) })]),
+    }));
     const template = gitIntentCapsule.arbitrary.validForKind("materialize-workspace", 41);
-    if (tree.kind !== "tree" || template.kind !== "materialize-workspace") {
+    if (tree.kind !== "tree" || candidateTree.kind !== "tree" || template.kind !== "materialize-workspace") {
       return lawTrace(this.id, trace, ["git fixture failed"]);
     }
     const repository = await driver.fixture(Object.freeze({
-      kind: "repository",
+      kind: "repository-history",
       name: "git-v2-repository",
       runId: template.runId,
-      treeName: tree.name,
+      baseTreeName: tree.name,
+      candidateTreeName: candidateTree.name,
     }));
     const workspace = await driver.fixture(Object.freeze({
       kind: "workspace",
       name: "git-v2-workspace",
       treeName: tree.name,
     }));
-    if (repository.kind !== "repository" || workspace.kind !== "workspace") {
+    if (repository.kind !== "repository-history" || workspace.kind !== "workspace") {
       return lawTrace(this.id, trace, ["repository or workspace fixture failed"]);
     }
     const materialize = bindLawIntent("git", Object.freeze({
       inputs: Object.freeze({
-        baseCommit: repository.head,
-        baseTree: repository.tree,
+        baseCommit: repository.baseCommit,
+        baseTree: repository.baseTree,
         repository: repository.repository,
         workspaceCapability: workspace.workspaceCapability,
         workspaceId: workspace.workspaceId,
@@ -58,9 +64,9 @@ export const gitLawVector: ContractVector = Object.freeze({
     if (compareTemplate.kind === "compare-roots") {
       const compare = bindLawIntent("git", Object.freeze({
         inputs: Object.freeze({
-          leftTree: repository.tree,
+          leftTree: repository.baseTree,
           repository: repository.repository,
-          rightTree: repository.tree,
+          rightTree: repository.baseTree,
         }),
         kind: "compare-roots",
         preconditions: Object.freeze({ boundedCapture: true }),
@@ -80,16 +86,16 @@ export const gitLawVector: ContractVector = Object.freeze({
     }
     const integrate = bindLawIntent("git", Object.freeze({
       inputs: Object.freeze({
-        baseCommit: repository.head,
-        baseTree: repository.tree,
-        candidateCommit: integrateTemplate.inputs.candidateCommit,
+        baseCommit: repository.baseCommit,
+        baseTree: repository.baseTree,
+        candidateCommit: repository.candidateCommit,
         candidateId: integrateTemplate.inputs.candidateId,
-        candidateTree: integrateTemplate.inputs.candidateTree,
+        candidateTree: repository.candidateTree,
         repository: repository.repository,
         workspaceCapability: workspace.workspaceCapability,
       }),
       kind: "integrate-candidate",
-      preconditions: Object.freeze({ expectedIntegrationRoot: tree.root, oneCandidate: true }),
+      preconditions: Object.freeze({ expectedIntegrationRoot: candidateTree.root, oneCandidate: true }),
       runId: repository.runId,
     }));
     const integrated = await lawCall(driver, "git", "integrate-one", integrate, "candidate-integrated", "ok");
@@ -104,12 +110,15 @@ export const gitLawVector: ContractVector = Object.freeze({
       const commit = field(integrated.value, "commit");
       const gitTree = field(integrated.value, "tree");
       const treeAttestation = field(integrated.value, "treeAttestation");
+      if (field(treeAttestation, "artifactRoot") !== candidateTree.root || field(treeAttestation, "gitTree") !== gitTree) {
+        findings.push("integrate-one: Git tree/CAS root attestation differed from the candidate fixture");
+      }
       const publishTemplate = gitIntentCapsule.arbitrary.validForKind("publish-if-expected-head", 44);
       if (typeof commit === "string" && typeof gitTree === "string" && treeAttestation !== null && treeAttestation !== undefined && publishTemplate.kind === "publish-if-expected-head") {
         const publish = bindLawIntent("git", Object.freeze({
           inputs: Object.freeze({
             desiredHead: commit,
-            expected: Object.freeze({ kind: "at", commit: repository.head }),
+            expected: Object.freeze({ kind: "at", commit: repository.baseCommit }),
             publicationId: publishTemplate.inputs.publicationId,
             publicationRef: repository.publicationRef,
             repository: repository.repository,
@@ -133,7 +142,7 @@ export const gitLawVector: ContractVector = Object.freeze({
         }
       }
     }
-    if (repository.tree === tree.root) {
+    if (repository.baseTree === tree.root || repository.candidateTree === candidateTree.root) {
       findings.push("identity-separation: Git tree was overloaded as CAS ArtifactRoot");
     }
     return lawTrace(this.id, trace, findings);

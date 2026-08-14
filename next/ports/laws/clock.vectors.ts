@@ -16,15 +16,16 @@ export const clockLawVector: ContractVector = Object.freeze({
     const findings: string[] = [];
     const trace: LawTraceEntry[] = [];
     const template = clockIntentCapsule.arbitrary.validForKind("observe-clock", 31);
-    if (template.kind !== "observe-clock") {
-      return lawTrace(this.id, trace, ["clock template failed"]);
+    const clock = await driver.fixture(Object.freeze({ kind: "clock", name: "clock-v2-source" }));
+    if (template.kind !== "observe-clock" || clock.kind !== "clock") {
+      return lawTrace(this.id, trace, ["clock template or source fixture failed"]);
     }
     const intent = bindLawIntent("clock", Object.freeze({
       inputs: template.inputs,
       kind: "observe-clock",
       preconditions: Object.freeze({
         notBeforeTick: "900719925474099312345",
-        sourceDigest: template.preconditions.sourceDigest,
+        sourceDigest: clock.sourceDigest,
       }),
       runId: template.runId,
     }));
@@ -38,7 +39,7 @@ export const clockLawVector: ContractVector = Object.freeze({
     if (field(ready.value, "tick") !== "900719925474099312345") {
       findings.push("observe-after: huge decimal tick differed");
     }
-    if (field(ready.value, "sourceDigest") !== template.preconditions.sourceDigest) {
+    if (field(ready.value, "sourceDigest") !== clock.sourceDigest) {
       findings.push("observe-after: source digest differed");
     }
     return lawTrace(this.id, trace, findings);

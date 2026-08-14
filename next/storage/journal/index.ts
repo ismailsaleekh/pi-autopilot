@@ -101,6 +101,7 @@ interface WriterState {
   readonly path: string;
   previousHash: Buffer;
   byteLength: bigint;
+  recordCount: number;
   closed: boolean;
   poisoned: boolean;
   superseded: boolean;
@@ -573,6 +574,26 @@ async function appendRecord(
     ));
   }
   try {
+    if (record.kind === "run-genesis" && state.recordCount !== 0) {
+      return appendRejection(journalError(
+        "invalid-argument",
+        "feedback",
+        "append-committed-batch",
+        "genesis may be appended only when no durable record exists in the selected journal history",
+        state.path,
+        state.epoch,
+      ));
+    }
+    if (record.kind !== "run-genesis" && state.recordCount === 0) {
+      return appendRejection(journalError(
+        "invalid-argument",
+        "feedback",
+        "append-committed-batch",
+        "the first durable record must be authority-minted genesis",
+        state.path,
+        state.epoch,
+      ));
+    }
     if (
       (record.kind === "decision-committed"
         || record.kind === "command-settled"
@@ -617,6 +638,7 @@ async function appendRecord(
     if (supersededError !== null) {
       return appendRejection(supersededError);
     }
+    state.recordCount += 1;
     return Object.freeze({
       chainHash: chainHashText(state.previousHash),
       endByteLength: state.byteLength.toString(10),
@@ -653,29 +675,6 @@ export async function appendCommittedBatch(
       "feedback",
       "append-committed-batch",
       "journal append accepts only authority-minted PreparedCommit capabilities",
-      state.path,
-      state.epoch,
-    ));
-  }
-  if (
-    batch.kind === "prepared-genesis"
-    && (state.byteLength !== 0n || state.epoch !== "00000000000000000001")
-  ) {
-    return appendRejection(journalError(
-      "invalid-argument",
-      "feedback",
-      "append-committed-batch",
-      "genesis may be appended only to an empty first epoch",
-      state.path,
-      state.epoch,
-    ));
-  }
-  if (batch.kind !== "prepared-genesis" && state.byteLength === 0n) {
-    return appendRejection(journalError(
-      "invalid-argument",
-      "feedback",
-      "append-committed-batch",
-      "the first durable record must be authority-minted genesis",
       state.path,
       state.epoch,
     ));
@@ -799,6 +798,14 @@ async function openJournalInternal(
       return Object.freeze({ kind: "error", error: beforeFirst });
     }
 
+    let recordCount = 0;
+    for await (const step of replayPlanSteps(scanned.plan)) {
+      if (step.kind === "error") {
+        await segmentFile.close();
+        return Object.freeze({ kind: "error", error: step.error });
+      }
+      recordCount += 1;
+    }
     const state: WriterState = {
       byteLength: 0n,
       closed: false,
@@ -809,6 +816,7 @@ async function openJournalInternal(
       path: segmentPath,
       poisoned: false,
       previousHash: Buffer.from(scanned.plan.chainHead),
+      recordCount,
       superseded: false,
       queue: Promise.resolve(),
     };

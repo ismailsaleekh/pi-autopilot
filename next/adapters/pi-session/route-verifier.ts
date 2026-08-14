@@ -34,12 +34,19 @@ const ALLOWED_ENVIRONMENT_KEYS = new Set([
   "WINDIR",
 ]);
 
-export const PI_ISOLATED_SETTINGS_TEXT = `${JSON.stringify({
-  compaction: { enabled: false },
-  defaultProjectTrust: "never",
-  enableInstallTelemetry: false,
-  retry: { enabled: false, provider: { maxRetries: 0 } },
-}, null, 2)}\n`;
+export const PI_ISOLATED_SETTINGS_TEXT = `{
+  "compaction": {
+    "enabled": false
+  },
+  "defaultProjectTrust": "never",
+  "enableInstallTelemetry": false,
+  "retry": {
+    "enabled": false,
+    "provider": {
+      "maxRetries": 0
+    }
+  }
+}\n`;
 
 function refused(route: PiSubscriptionRoute, code: string): PiRouteGuardObservation {
   return Object.freeze({ code, kind: "refused", model: route.model, provider: route.provider });
@@ -190,7 +197,7 @@ export function createPiCliSubscriptionRouteVerifier<Handle>(
           "--no-refresh",
         ]),
         captureDirectory: request.captureDirectory,
-        captureId: `${request.captureId}-${safeCapturePart(request.route.provider)}-${safeCapturePart(request.route.model)}-auth`,
+        captureId: `${safeCapturePart(request.captureId)}-${safeCapturePart(request.route.provider)}-${safeCapturePart(request.route.model)}-auth`,
         cwd: request.cwd,
         environment: request.environment,
         executable: request.command.executable,

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { setTimeout as waitForDelay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { defineCapsule, jsonValue } from "../../../authority/protocol/schema.js";
 import {
   ProcessAdapter,
   ProcessHandle,
@@ -20,6 +21,7 @@ import {
 
 const fixtureModule = fileURLToPath(new URL("./process-fixture.js", import.meta.url));
 const GIBIBYTE = 1024 * 1024 * 1024;
+const environmentCapsule = defineCapsule("ProcessFixtureEnvironment", jsonValue());
 
 async function temporaryDirectory(label: string): Promise<string> {
   return mkdtemp(join(tmpdir(), `autopilot-process-${label}-`));
@@ -182,7 +184,9 @@ test("explicit environment allowlist excludes ambient parent variables", async (
     const observation = await exited(adapter, handle);
     await handle.capturesSettled();
     assert.deepEqual(observation.environmentKeys, ["ALLOWED_ONLY"]);
-    const childEnvironment: unknown = JSON.parse(await outputText(adapter, handle));
+    const decodedEnvironment = environmentCapsule.decodeCanonical(Buffer.from(await outputText(adapter, handle), "utf8"));
+    assert.equal(decodedEnvironment.kind, "ok");
+    const childEnvironment: unknown = decodedEnvironment.kind === "ok" ? decodedEnvironment.value : null;
     assert.equal(typeof childEnvironment, "object");
     assert.notEqual(childEnvironment, null);
     if (typeof childEnvironment !== "object" || childEnvironment === null) {

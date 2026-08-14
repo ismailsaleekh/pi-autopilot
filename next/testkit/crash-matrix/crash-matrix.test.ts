@@ -41,8 +41,8 @@ test("crash-point registry is complete, unique, and classifies every exposed dur
 
 test("toy object-first machine resumes equivalently at every demonstrated store and journal point", () => {
   const matrix = verifyCrashMatrix(toyCrashScenario, TOY_CRASH_POINTS);
-  assert.equal(matrix.invalid, 0, JSON.stringify(matrix.results));
-  assert.equal(matrix.notReached, 0, JSON.stringify(matrix.results));
+  assert.equal(matrix.invalid, 0);
+  assert.equal(matrix.notReached, 0);
   assert.equal(matrix.verified, TOY_CRASH_POINTS.length);
   for (const result of matrix.results) {
     assert.equal(result.kind, "verified");
@@ -54,8 +54,8 @@ test("toy object-first machine resumes equivalently at every demonstrated store 
 
 test("toy git publication resumes equivalently at every compare-and-swap window", () => {
   const matrix = verifyCrashMatrix(toyGitCrashScenario, GIT_TOY_CRASH_POINTS);
-  assert.equal(matrix.invalid, 0, JSON.stringify(matrix.results));
-  assert.equal(matrix.notReached, 0, JSON.stringify(matrix.results));
+  assert.equal(matrix.invalid, 0);
+  assert.equal(matrix.notReached, 0);
   assert.equal(matrix.verified, GIT_TOY_CRASH_POINTS.length);
 });
 

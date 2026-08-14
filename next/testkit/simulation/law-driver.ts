@@ -130,6 +130,33 @@ export class SimLawDriver implements LawDriver {
       this.repositories.set(record.repository, record);
       return Object.freeze({ kind: "repository", name: request.name, ...record });
     }
+    if (request.kind === "repository-history") {
+      const base = this.trees.get(request.baseTreeName);
+      const candidate = this.trees.get(request.candidateTreeName);
+      const baseTemplate = gitIntentCapsule.arbitrary.validForKind("materialize-workspace", 500 + this.fixtureSequence);
+      const candidateTemplate = gitIntentCapsule.arbitrary.validForKind("integrate-candidate", 600 + this.fixtureSequence);
+      const observe = gitIntentCapsule.arbitrary.validForKind("observe-repository-ref", 700 + this.fixtureSequence);
+      if (base === undefined || candidate === undefined || baseTemplate.kind !== "materialize-workspace" || candidateTemplate.kind !== "integrate-candidate" || observe.kind !== "observe-repository-ref") return Object.freeze({ kind: "invalid", diagnostic: "repository history fixture could not mint distinct Git identities" });
+      const record: NamedRepository = Object.freeze({
+        runId: request.runId,
+        repository: baseTemplate.inputs.repository,
+        publicationRef: observe.inputs.publicationRef,
+        head: baseTemplate.inputs.baseCommit,
+        tree: baseTemplate.inputs.baseTree,
+      });
+      this.repositories.set(record.repository, record);
+      return Object.freeze({
+        kind: "repository-history",
+        name: request.name,
+        runId: request.runId,
+        repository: record.repository,
+        baseCommit: record.head,
+        baseTree: record.tree,
+        candidateCommit: candidateTemplate.inputs.candidateCommit,
+        candidateTree: candidateTemplate.inputs.candidateTree,
+        publicationRef: record.publicationRef,
+      });
+    }
     if (request.kind === "root-list") {
       const roots: string[] = [];
       for (const name of request.treeNames) {
@@ -139,6 +166,17 @@ export class SimLawDriver implements LawDriver {
       }
       const reference = this.createArtifact(`law/root-list-${String(this.fixtureSequence)}.json`, canonicalEncodeUnknown(Object.freeze({ roots: Object.freeze(roots) })));
       return reference === null ? Object.freeze({ kind: "invalid", diagnostic: "root-list could not be installed" }) : Object.freeze({ kind: "root-list", name: request.name, reference });
+    }
+    if (request.kind === "clock") {
+      const clock = clockIntentCapsule.arbitrary.validForKind("observe-clock", 750 + this.fixtureSequence);
+      return clock.kind === "observe-clock" ? Object.freeze({ kind: "clock", name: request.name, sourceDigest: clock.preconditions.sourceDigest }) : Object.freeze({ kind: "invalid", diagnostic: "clock fixture failed" });
+    }
+    if (request.kind === "active-child") {
+      const launch = childIntentCapsule.arbitrary.validForKind("launch-child-session", 800 + this.fixtureSequence);
+      const child = launchedTemplate(900 + this.fixtureSequence);
+      const processDescriptor = this.createCapture("active-child-descriptor", Object.freeze({ name: request.name }));
+      if (launch.kind !== "launch-child-session" || child === null || processDescriptor === null) return Object.freeze({ kind: "invalid", diagnostic: "active child fixture failed" });
+      return Object.freeze({ kind: "active-child", name: request.name, childId: child.childId, childEpoch: launch.preconditions.childEpoch, runId: launch.runId, processDescriptor });
     }
     if (request.kind === "child-script") return Object.freeze({ kind: "child-script", name: request.name });
     this.secrets.set(request.handle, request.bytes.slice());
@@ -312,7 +350,7 @@ export class SimLawDriver implements LawDriver {
     if (decoded.kind === "error") return Object.freeze({ kind: "rejected" });
     const intent = decoded.value;
     const notBefore = BigInt(intent.preconditions.notBeforeTick);
-    const result = this.clockTick < notBefore ? retryResult("clock-not-ready", "monotonic clock has not reached notBeforeTick") : Object.freeze({ kind: "ok", value: Object.freeze({ clockId: intent.inputs.clockId, sourceDigest: intent.preconditions.sourceDigest, tick: this.clockTick.toString() }) });
+    const result = this.clockTick < notBefore ? retryResult("clock.not-before", "monotonic clock has not reached notBeforeTick") : Object.freeze({ kind: "ok", value: Object.freeze({ clockId: intent.inputs.clockId, sourceDigest: intent.preconditions.sourceDigest, tick: this.clockTick.toString() }) });
     return this.emit(Object.freeze({ actionId: intent.actionId, kind: "clock-observed", result, runId: intent.runId }));
   }
 

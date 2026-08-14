@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { fileURLToPath } from "node:url";
+import { canonicalEncodeUnknown } from "../../../authority/protocol/schema.js";
 
 async function flood(byteLength: number): Promise<void> {
   const chunk = Buffer.alloc(1024 * 1024, 0x78);
@@ -52,7 +53,9 @@ async function main(): Promise<void> {
     return;
   }
   if (mode === "environment") {
-    process.stdout.write(`${JSON.stringify(process.env)}\n`);
+    const environment: Record<string, string> = Object.create(null);
+    for (const [key, value] of Object.entries(process.env)) if (value !== undefined) environment[key] = value;
+    process.stdout.write(Buffer.from(canonicalEncodeUnknown(Object.freeze(environment))));
     return;
   }
   if (mode === "text") {

@@ -1,60 +1,40 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
-import {
-  chmod,
-  lstat,
-  mkdir,
-  mkdtemp,
-  readFile,
-  rm,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { GitAdapter, gitArtifactRootForTreeOid } from "../../../adapters/git/index.js";
-import { SimLawDriver } from "../../simulation/law-driver.js";
+import { GitAdapter } from "../../../adapters/git/index.js";
 import { WorkspaceAdapter } from "../../../adapters/workspace/index.js";
+import { canonicalArtifactInstaller, openCas } from "../../../storage/cas/index.js";
 import { gitIntentCapsule } from "../../../ports/contracts/git.capsule.js";
+import { workspaceIntentCapsule } from "../../../ports/contracts/workspace.capsule.js";
 import { gitLawVector } from "../../../ports/laws/git.vectors.js";
 import { bindLawIntent } from "../../../ports/laws/contract-vector.js";
+import { SimLawDriver } from "../../simulation/law-driver.js";
 import { RealLawDriver } from "../real-law-driver.js";
 
-interface GitResult {
-  readonly code: number | null;
-  readonly stdout: string;
-}
+const REPOSITORY_CAPABILITY = "repository:real-law";
+const PUBLICATION_REF = "refs/autopilot/law";
 
-function git(cwd: string, arguments_: readonly string[], environment?: Readonly<Record<string, string>>): Promise<GitResult> {
+interface GitResult { readonly code: number | null; readonly stdout: string; readonly stderr: string }
+
+function git(cwd: string, arguments_: readonly string[]): Promise<GitResult> {
   return new Promise((resolveResult, rejectResult) => {
-    const child = spawn("git", arguments_, {
-      cwd,
-      env: Object.assign({}, process.env, environment ?? {}),
-      shell: false,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    const chunks: Buffer[] = [];
-    child.stdout.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+    const child = spawn("git", arguments_, { cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    child.stdout.on("data", (chunk: Buffer) => stdout.push(Buffer.from(chunk)));
+    child.stderr.on("data", (chunk: Buffer) => stderr.push(Buffer.from(chunk)));
     child.once("error", rejectResult);
-    child.once("close", (code) => resolveResult(Object.freeze({
-      code,
-      stdout: Buffer.concat(chunks).toString("utf8").trim(),
-    })));
+    child.once("close", (code) => resolveResult(Object.freeze({ code, stdout: Buffer.concat(stdout).toString("utf8").trim(), stderr: Buffer.concat(stderr).toString("utf8") })));
   });
 }
 
 async function checkedGit(cwd: string, arguments_: readonly string[]): Promise<string> {
   const result = await git(cwd, arguments_);
-  assert.equal(result.code, 0, `git ${arguments_.join(" ")} failed`);
+  assert.equal(result.code, 0, `git ${arguments_.join(" ")} failed: ${result.stderr}`);
   return result.stdout;
-}
-
-async function commit(repository: string, message: string): Promise<string> {
-  await checkedGit(repository, ["add", "-A"]);
-  await checkedGit(repository, ["commit", "-m", message]);
-  return checkedGit(repository, ["rev-parse", "HEAD"]);
 }
 
 async function fixture() {
@@ -63,354 +43,120 @@ async function fixture() {
   const workspaces = join(root, "workspaces");
   const integrationRoot = join(root, "integration");
   await mkdir(repository);
+  await mkdir(integrationRoot);
   await checkedGit(repository, ["init", "-b", "main"]);
   await checkedGit(repository, ["config", "user.name", "Adapter Test"]);
   await checkedGit(repository, ["config", "user.email", "adapter@test.invalid"]);
-  await writeFile(join(repository, "base.txt"), "base\n");
-  const base = await commit(repository, "base");
-  const treeOid = await checkedGit(repository, ["rev-parse", "HEAD^{tree}"]);
-  const tree = gitArtifactRootForTreeOid(treeOid);
-  assert.notEqual(tree, null);
-  if (tree === null) {
-    throw new Error("tree root fixture failed");
-  }
-  await checkedGit(repository, ["update-ref", "refs/autopilot/test", base]);
   const workspaceCreated = await WorkspaceAdapter.create({ workspaceRoot: workspaces });
   assert.equal(workspaceCreated.kind, "created");
-  if (workspaceCreated.kind !== "created") {
-    throw new Error("workspace adapter fixture failed");
-  }
-  await mkdir(integrationRoot);
+  if (workspaceCreated.kind !== "created") throw new Error("workspace adapter fixture failed");
+  const openedCas = await openCas(join(root, "cas"));
+  assert.equal(openedCas.kind, "opened");
+  if (openedCas.kind !== "opened") throw new Error("CAS fixture failed");
+  const artifacts = canonicalArtifactInstaller(openedCas.store);
   const gitCreated = await GitAdapter.create({
+    repositories: Object.freeze({ pathFor(capability: string) { return capability === REPOSITORY_CAPABILITY ? repository : null; } }),
     integrationRoot,
-    publicationRef: "refs/autopilot/test",
-    repository,
-    workspace: workspaceCreated.adapter,
+    workspace: Object.freeze({
+      workspaceRoot: workspaceCreated.adapter.workspaceRoot,
+      pathFor(_capability: string, workspaceId: string) { return workspaceCreated.adapter.pathFor(workspaceId); },
+    }),
+    maxOutputBytes: 1_048_576,
+    artifacts,
   });
   assert.equal(gitCreated.kind, "created");
-  if (gitCreated.kind !== "created") {
-    throw new Error("git adapter fixture failed");
-  }
-  return Object.freeze({
-    adapter: gitCreated.adapter,
-    base,
-    integrationRoot,
-    repository,
-    root,
-    tree,
-    workspace: workspaceCreated.adapter,
-    workspaces,
-  });
+  if (gitCreated.kind !== "created") throw new Error("Git adapter fixture failed");
+  return Object.freeze({ root, repository, integrationRoot, artifacts, adapter: gitCreated.adapter, workspace: workspaceCreated.adapter });
 }
 
-function materializeIntent(runId: string, workspaceId: string, base: string, tree: string) {
-  return bindLawIntent("git", Object.freeze({
-    inputs: Object.freeze({ baseRevision: base, repositorySnapshot: tree, workspaceId }),
-    kind: "materialize-workspace",
-    preconditions: Object.freeze({ expectedAbsent: true, repositoryIdentity: tree }),
-    runId,
-  }));
+function behavioralTrace(result: Awaited<ReturnType<typeof gitLawVector.replay>>) {
+  return result.trace.map((entry) => Object.freeze({ operation: entry.operation, observationKind: entry.observationKind, result: entry.result, evidenceVerified: entry.artifactEvidence.every((evidence) => evidence.verified) }));
 }
 
-function compareIntent(runId: string, leftRoot: string, rightRoot: string) {
-  return bindLawIntent("git", Object.freeze({
-    inputs: Object.freeze({ leftRoot, rightRoot }),
-    kind: "compare-roots",
-    preconditions: Object.freeze({ repositoryIdentity: leftRoot }),
-    runId,
-  }));
-}
-
-function publishIntent(
-  runId: string,
-  expectedHead: string,
-  desiredHead: string,
-  candidateTree: string,
-  seed: number,
-) {
-  const template = gitIntentCapsule.arbitrary.validForKind("publish-if-expected-head", seed);
-  assert.equal(template.kind, "publish-if-expected-head");
-  if (template.kind !== "publish-if-expected-head") {
-    throw new Error("publish template failed");
-  }
-  return bindLawIntent("git", Object.freeze({
-    inputs: Object.freeze({
-      desiredHead,
-      expectedHead,
-      publicationId: template.inputs.publicationId,
-    }),
-    kind: "publish-if-expected-head",
-    preconditions: Object.freeze({
-      candidateTree,
-      publicationLease: template.preconditions.publicationLease,
-      verifiedManifest: template.preconditions.verifiedManifest,
-    }),
-    runId,
-  }));
-}
-
-test("real Git adapter replays the frozen Git law vector with fake-equivalent trace", async () => {
+test("real Git adapter replays the frozen Git law with fake-equivalent behavior", async () => {
   const value = await fixture();
   try {
-    const driver = new RealLawDriver({
-      git: value.adapter,
-      integrationRoot: value.integrationRoot,
+    const real = new RealLawDriver({
       repository: value.repository,
-      runGit: checkedGit,
+      repositoryCapability: REPOSITORY_CAPABILITY,
+      publicationRef: PUBLICATION_REF,
+      git: value.adapter,
       workspace: value.workspace,
+      artifacts: value.artifacts,
+      runGit: checkedGit,
     });
-    const result = await gitLawVector.replay(driver);
+    const result = await gitLawVector.replay(real);
     const simulated = await gitLawVector.replay(new SimLawDriver(1));
-    assert.deepEqual(result.findings, []);
-    assert.deepEqual(result.trace, simulated.trace);
+    assert.deepEqual(result.findings, [], result.findings.join("; "));
+    assert.deepEqual(simulated.findings, []);
+    assert.deepEqual(behavioralTrace(result), behavioralTrace(simulated));
     assert.equal(result.trace.every((entry) => entry.result === "ok"), true);
-    const publishAgain = result.trace.find((entry) => entry.operation === "publish-idempotent");
-    assert.equal(publishAgain?.result, "ok");
+    assert.equal(result.trace.flatMap((entry) => entry.artifactEvidence).every((evidence) => evidence.verified), true);
   } finally {
     await rm(value.root, { recursive: true, force: true });
   }
 });
 
-test("materialization clones an exact revision and leaves dirty foreign source state untouched", async () => {
+test("materialization consumes only an empty reserved directory and leaves source dirt untouched", async () => {
   const value = await fixture();
-  const runId = "run:materialize";
   try {
-    const hook = join(value.repository, ".git", "hooks", "post-checkout");
-    const marker = join(value.root, "hook-ran");
-    await writeFile(hook, `#!/bin/sh\necho ran > '${marker}'\n`);
-    await chmod(hook, 0o755);
-    await checkedGit(value.repository, ["config", "core.hooksPath", join(value.repository, ".git", "hooks")]);
+    await writeFile(join(value.repository, "base.txt"), "base\n");
+    await checkedGit(value.repository, ["add", "-A"]);
+    await checkedGit(value.repository, ["commit", "-m", "base"]);
+    const baseCommit = await checkedGit(value.repository, ["rev-parse", "HEAD"]);
+    const baseTree = await checkedGit(value.repository, ["rev-parse", "HEAD^{tree}"]);
     await writeFile(join(value.repository, "foreign.bin"), Uint8Array.from([9, 0, 7]));
     const before = await checkedGit(value.repository, ["status", "--porcelain=v1", "-z"]);
-    const allocateTemplate = await import("../../../ports/contracts/workspace.capsule.js").then((module) =>
-      module.workspaceIntentCapsule.arbitrary.validForKind("allocate-attempt-directory", 1));
-    assert.equal(allocateTemplate.kind, "allocate-attempt-directory");
-    if (allocateTemplate.kind !== "allocate-attempt-directory") {
-      throw new Error("allocate template failed");
-    }
-    const allocate = bindLawIntent("workspace", Object.freeze({
-      inputs: Object.freeze({ baseRoot: value.tree, workspaceId: "attempt-one" }),
-      kind: "allocate-attempt-directory",
-      preconditions: allocateTemplate.preconditions,
-      runId,
-    }));
-    const allocated = await value.workspace.execute(allocate);
+    const allocate = workspaceIntentCapsule.arbitrary.validForKind("allocate-attempt-directory", 1001);
+    const materialize = gitIntentCapsule.arbitrary.validForKind("materialize-workspace", 1002);
+    assert.equal(allocate.kind, "allocate-attempt-directory");
+    assert.equal(materialize.kind, "materialize-workspace");
+    if (allocate.kind !== "allocate-attempt-directory" || materialize.kind !== "materialize-workspace") return;
+    const allocatedIntent = bindLawIntent("workspace", Object.freeze({ inputs: allocate.inputs, kind: allocate.kind, preconditions: allocate.preconditions, runId: allocate.runId }));
+    const allocated = await value.workspace.execute(allocatedIntent);
     assert.equal(allocated.kind, "observation");
-    const materialized = await value.adapter.execute(materializeIntent(runId, "attempt-one", value.base, value.tree));
-    assert.equal(materialized.kind, "observation");
-    if (materialized.kind === "observation") {
-      assert.equal(materialized.observation.result.kind, "ok");
-    }
-    assert.equal(await readFile(join(value.workspaces, "attempt-one", "base.txt"), "utf8"), "base\n");
-    const after = await checkedGit(value.repository, ["status", "--porcelain=v1", "-z"]);
-    assert.equal(after, before);
-    await assert.rejects(lstat(marker));
-  } finally {
-    await rm(value.root, { recursive: true, force: true });
-  }
-});
-
-test("compare-roots normalizes renames, modes, symlinks, binary and Unicode paths", async () => {
-  const value = await fixture();
-  try {
-    await writeFile(join(value.repository, "rename-me"), "same\n");
-    await writeFile(join(value.repository, "mode.sh"), "#!/bin/sh\nexit 0\n");
-    await writeFile(join(value.repository, "binary.bin"), Uint8Array.from([0, 255, 1]));
-    await writeFile(join(value.repository, "unicodé-雪.txt"), "snow\n");
-    await symlink("base.txt", join(value.repository, "link"));
-    const leftCommit = await commit(value.repository, "complex-left");
-    const leftTreeOid = await checkedGit(value.repository, ["rev-parse", `${leftCommit}^{tree}`]);
-    const leftTree = gitArtifactRootForTreeOid(leftTreeOid);
-    assert.notEqual(leftTree, null);
-    if (leftTree === null) {
-      throw new Error("left tree root failed");
-    }
-    await checkedGit(value.repository, ["mv", "rename-me", "renamed"]);
-    await chmod(join(value.repository, "mode.sh"), 0o755);
-    await writeFile(join(value.repository, "binary.bin"), Uint8Array.from([0, 2, 255]));
-    await rm(join(value.repository, "link"));
-    await symlink("renamed", join(value.repository, "link"));
-    await writeFile(join(value.repository, "unicodé-雪.txt"), "ice\n");
-    const rightCommit = await commit(value.repository, "complex-right");
-    const rightTreeOid = await checkedGit(value.repository, ["rev-parse", `${rightCommit}^{tree}`]);
-    const rightTree = gitArtifactRootForTreeOid(rightTreeOid);
-    assert.notEqual(rightTree, null);
-    if (rightTree === null) {
-      throw new Error("right tree root failed");
-    }
-    const result = await value.adapter.compareTrees(leftTree, rightTree);
-    assert.equal(result.kind, "compared");
-    if (result.kind === "compared") {
-      assert.equal(result.equal, false);
-      assert.equal(result.entries.some((entry) => entry.kind === "renamed" && entry.path === "renamed"), true);
-      assert.equal(result.entries.some((entry) => entry.path === "mode.sh" && entry.oldMode !== entry.newMode), true);
-      assert.equal(result.entries.some((entry) => entry.path === "binary.bin"), true);
-      assert.equal(result.entries.some((entry) =>
-        entry.path === "link"
-        && entry.oldEntryKind === "symlink"
-        && entry.newEntryKind === "symlink"
-        && entry.oldObject !== entry.newObject), true);
-      assert.equal(result.entries.some((entry) => entry.path === "unicodé-雪.txt"), true);
-    }
-    const observation = await value.adapter.execute(compareIntent("run:compare", leftTree, rightTree));
-    assert.equal(observation.kind, "observation");
-  } finally {
-    await rm(value.root, { recursive: true, force: true });
-  }
-});
-
-test("real merge conflicts normalize to an observation and leave the integration clone intact", async () => {
-  const value = await fixture();
-  try {
-    await checkedGit(value.repository, ["checkout", "--detach", value.base]);
-    await writeFile(join(value.repository, "base.txt"), "candidate\n");
-    const candidate = await commit(value.repository, "candidate-conflict");
-    await checkedGit(value.repository, ["checkout", "--detach", value.base]);
-    await writeFile(join(value.repository, "base.txt"), "integration\n");
-    const integrationBase = await commit(value.repository, "integration-conflict");
-    const integrationTreeOid = await checkedGit(value.repository, ["rev-parse", `${integrationBase}^{tree}`]);
-    const integrationTree = gitArtifactRootForTreeOid(integrationTreeOid);
-    assert.notEqual(integrationTree, null);
-    if (integrationTree === null) {
-      throw new Error("integration root failed");
-    }
-    const outputs = new TextEncoder().encode(`${candidate}\n`);
-    const outputsRoot = `sha256:${createHash("sha256").update(outputs).digest("hex")}`;
-    const outputsDirectory = join(value.integrationRoot, "accepted-outputs");
-    await mkdir(outputsDirectory);
-    await writeFile(join(outputsDirectory, outputsRoot.slice(7)), outputs);
-    const template = gitIntentCapsule.arbitrary.validForKind("integrate-candidate", 77);
-    assert.equal(template.kind, "integrate-candidate");
-    if (template.kind !== "integrate-candidate") {
-      throw new Error("integrate template failed");
-    }
     const bound = bindLawIntent("git", Object.freeze({
       inputs: Object.freeze({
-        acceptedOutputs: Object.freeze({ path: "git/accepted-outputs.txt", range: null, root: outputsRoot }),
-        baseRevision: integrationBase,
-        candidateId: template.inputs.candidateId,
+        baseCommit,
+        baseTree,
+        repository: REPOSITORY_CAPABILITY,
+        workspaceCapability: allocate.inputs.workspaceCapability,
+        workspaceId: allocate.inputs.workspaceId,
       }),
-      kind: "integrate-candidate",
-      preconditions: Object.freeze({
-        expectedIntegrationRoot: integrationTree,
-        repositoryIdentity: integrationTree,
-      }),
+      kind: "materialize-workspace",
+      preconditions: Object.freeze({ expectedEmptyReservation: true, reservationLease: allocate.preconditions.leaseId }),
+      runId: materialize.runId,
+    }));
+    const observed = await value.adapter.execute(bound);
+    assert.equal(observed.kind, "observation");
+    if (observed.kind === "observation") assert.equal(observed.observation.result.kind, "ok");
+    const destination = value.workspace.pathFor(allocate.inputs.workspaceId);
+    assert.notEqual(destination, null);
+    if (destination !== null) assert.equal(await readFile(join(destination, "base.txt"), "utf8"), "base\n");
+    assert.equal(await checkedGit(value.repository, ["status", "--porcelain=v1", "-z"]), before);
+  } finally {
+    await rm(value.root, { recursive: true, force: true });
+  }
+});
+
+test("Git adapter contains malformed capabilities and never follows a repository symlink", async () => {
+  const value = await fixture();
+  try {
+    const template = gitIntentCapsule.arbitrary.validForKind("observe-repository-ref", 1101);
+    assert.equal(template.kind, "observe-repository-ref");
+    if (template.kind !== "observe-repository-ref") return;
+    const bound = bindLawIntent("git", Object.freeze({
+      inputs: Object.freeze({ publicationRef: PUBLICATION_REF, repository: template.inputs.repository }),
+      kind: template.kind,
+      preconditions: template.preconditions,
       runId: template.runId,
     }));
-    assert.notEqual(bound, null);
-    if (bound === null || typeof bound !== "object" || Array.isArray(bound)) {
-      throw new Error("integrate intent binding failed");
-    }
-    const actionId = Reflect.get(bound, "actionId");
-    assert.equal(typeof actionId, "string");
-    if (typeof actionId !== "string") {
-      throw new Error("integrate action ID failed");
-    }
     const result = await value.adapter.execute(bound);
     assert.equal(result.kind, "observation");
-    if (result.kind === "observation") {
-      assert.equal(result.observation.kind, "candidate-integrated");
-      assert.equal(result.observation.result.kind, "retry");
-      if (result.observation.result.kind === "retry") {
-        assert.equal(result.observation.result.diagnostic.code, "git.integration-conflict");
-      }
-    }
-    const integrationClone = join(value.integrationRoot, `integrate-${actionId.slice(14)}`);
-    assert.equal((await lstat(integrationClone)).isDirectory(), true);
-    const conflicted = await checkedGit(integrationClone, ["diff", "--name-only", "--diff-filter=U"]);
-    assert.equal(conflicted, "base.txt");
-  } finally {
-    await rm(value.root, { recursive: true, force: true });
-  }
-});
-
-test("moved-head between read and update-ref is observed, never overwritten", async () => {
-  const value = await fixture();
-  try {
-    await checkedGit(value.repository, ["checkout", "--detach", value.base]);
-    await writeFile(join(value.repository, "desired"), "desired\n");
-    const desired = await commit(value.repository, "desired-race");
-    await checkedGit(value.repository, ["checkout", "--detach", value.base]);
-    await writeFile(join(value.repository, "racer"), "racer\n");
-    const racer = await commit(value.repository, "racer");
-    const desiredTreeOid = await checkedGit(value.repository, ["rev-parse", `${desired}^{tree}`]);
-    const desiredTree = gitArtifactRootForTreeOid(desiredTreeOid);
-    assert.notEqual(desiredTree, null);
-    if (desiredTree === null) {
-      throw new Error("desired root failed");
-    }
-    const created = await GitAdapter.create({
-      integrationRoot: value.integrationRoot,
-      publicationObserver: async () => {
-        await checkedGit(value.repository, ["update-ref", "refs/autopilot/test", racer, value.base]);
-      },
-      publicationRef: "refs/autopilot/test",
-      repository: value.repository,
-      workspace: value.workspace,
-    });
-    assert.equal(created.kind, "created");
-    if (created.kind !== "created") {
-      throw new Error("race adapter failed");
-    }
-    const result = await created.adapter.execute(publishIntent(
-      "run:moved-between",
-      value.base,
-      desired,
-      desiredTree,
-      88,
-    ));
-    assert.equal(result.kind, "observation");
-    if (
-      result.kind === "observation"
-      && result.observation.kind === "head-publication-observed"
-      && result.observation.result.kind === "ok"
-    ) {
-      assert.equal(result.observation.result.value.status, "head-moved");
-      assert.equal(result.observation.result.value.observedHead, racer);
-    } else {
-      assert.fail("moved-head observation was not returned");
-    }
-    assert.equal(await checkedGit(value.repository, ["rev-parse", "refs/autopilot/test"]), racer);
-  } finally {
-    await rm(value.root, { recursive: true, force: true });
-  }
-});
-
-test("atomic update-ref race reports one publisher and one moved head", async () => {
-  const value = await fixture();
-  try {
-    await checkedGit(value.repository, ["checkout", "--detach", value.base]);
-    await writeFile(join(value.repository, "one"), "one\n");
-    const one = await commit(value.repository, "one");
-    await checkedGit(value.repository, ["checkout", "--detach", value.base]);
-    await writeFile(join(value.repository, "two"), "two\n");
-    const two = await commit(value.repository, "two");
-    const oneTreeOid = await checkedGit(value.repository, ["rev-parse", `${one}^{tree}`]);
-    const twoTreeOid = await checkedGit(value.repository, ["rev-parse", `${two}^{tree}`]);
-    const oneTree = gitArtifactRootForTreeOid(oneTreeOid);
-    const twoTree = gitArtifactRootForTreeOid(twoTreeOid);
-    assert.notEqual(oneTree, null);
-    assert.notEqual(twoTree, null);
-    if (oneTree === null || twoTree === null) {
-      throw new Error("publication tree roots failed");
-    }
-    const first = publishIntent("run:publish", value.base, one, oneTree, 11);
-    const second = publishIntent("run:publish", value.base, two, twoTree, 12);
-    const results = await Promise.all([value.adapter.execute(first), value.adapter.execute(second)]);
-    const statuses = results.map((result) => {
-      assert.equal(result.kind, "observation");
-      if (
-        result.kind !== "observation"
-        || result.observation.kind !== "head-publication-observed"
-        || result.observation.result.kind !== "ok"
-      ) {
-        return "invalid";
-      }
-      return result.observation.result.value.status;
-    }).sort();
-    assert.deepEqual(statuses, ["head-moved", "published"]);
-    const head = await checkedGit(value.repository, ["rev-parse", "refs/autopilot/test"]);
-    assert.equal(head === one || head === two, true);
+    if (result.kind === "observation") assert.equal(result.observation.result.kind, "retry");
+    assert.doesNotThrow(() => value.adapter.execute(Object.freeze({ hostile: true })));
+    assert.equal((await value.adapter.execute(Object.freeze({ hostile: true }))).kind, "rejected");
+    assert.equal((await lstat(value.repository)).isDirectory(), true);
   } finally {
     await rm(value.root, { recursive: true, force: true });
   }

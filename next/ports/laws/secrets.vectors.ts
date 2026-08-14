@@ -22,20 +22,25 @@ export const secretsLawVector: ContractVector = Object.freeze({
       handle: "secret:law-model-route-v2",
       bytes: secretBytes,
     }));
+    const child = await driver.fixture(Object.freeze({ kind: "active-child", name: "secret-v2-child" }));
     const template = secretsIntentCapsule.arbitrary.validForKind("authorize-secret-use", 62);
-    if (secret.kind !== "secret" || template.kind !== "authorize-secret-use") {
-      return lawTrace(this.id, trace, ["secret fixture failed"]);
+    if (secret.kind !== "secret" || child.kind !== "active-child" || template.kind !== "authorize-secret-use") {
+      return lawTrace(this.id, trace, ["secret or active-child fixture failed"]);
     }
     const authorize = bindLawIntent("secrets", Object.freeze({
       inputs: Object.freeze({
-        childId: template.inputs.childId,
+        childId: child.childId,
         destination: template.inputs.destination,
         purposeId: template.inputs.purposeId,
         secretHandle: secret.handle,
       }),
       kind: "authorize-secret-use",
-      preconditions: template.preconditions,
-      runId: template.runId,
+      preconditions: Object.freeze({
+        childEpoch: child.childEpoch,
+        policyDigest: template.preconditions.policyDigest,
+        processDescriptor: child.processDescriptor,
+      }),
+      runId: child.runId,
     }));
     const authorized = await lawCall(driver, "secrets", "authorize", authorize, "secret-use-authorized", "ok");
     trace.push(authorized.trace);
@@ -50,10 +55,10 @@ export const secretsLawVector: ContractVector = Object.freeze({
         inputs: Object.freeze({ leaseId, secretHandle: secret.handle }),
         kind: "revoke-secret-use",
         preconditions: Object.freeze({
-          childEpoch: template.preconditions.childEpoch,
-          processDescriptor: template.preconditions.processDescriptor,
+          childEpoch: child.childEpoch,
+          processDescriptor: child.processDescriptor,
         }),
-        runId: template.runId,
+        runId: child.runId,
       }));
       const revoked = await lawCall(driver, "secrets", "revoke", revoke, "secret-use-revoked", "ok");
       trace.push(revoked.trace);
