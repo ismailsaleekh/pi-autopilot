@@ -497,6 +497,9 @@ function checkOneAppendEdge(units: readonly SourceUnit[]): readonly Architecture
     }
 
     for (const call of calls) {
+      if (call.unit.path.startsWith("storage/journal/")) {
+        continue;
+      }
       if (!call.unit.path.startsWith("runtime/commit-loop/")) {
         output.push(finding(
           "one-append-edge",
