@@ -45,7 +45,8 @@ import {
 } from "./intent-construction.js";
 import { defineCapsule, literal, object } from "../../authority/protocol/schema.js";
 import type { JsonValue } from "../../authority/protocol/schema.js";
-import { artifactRefSchema, digestSchema } from "../../authority/protocol/identifiers.js";
+import { artifactPathSchema, artifactRefSchema, kindIdSchema, digestSchema } from "../../authority/protocol/identifiers.js";
+import type { ArtifactPath, KindId } from "../../authority/protocol/identifiers.js";
 
 export type RuntimePortIntent = WorkspaceIntent | GitIntent | ChildIntent | StoreIntent | ClockIntent | SecretsIntent;
 
@@ -91,6 +92,32 @@ const receiptCapsule = defineCapsule("RuntimeArtifactRecordingReceipt", object({
   kind: literal("recorded"),
   reference: artifactRefSchema,
 }));
+const recorderKindCapsule = defineCapsule("RuntimeArtifactRecorderKind", kindIdSchema);
+const recorderPathCapsule = defineCapsule("RuntimeArtifactRecorderPath", artifactPathSchema);
+
+export interface CanonicalRuntimeArtifactInstaller {
+  readonly install: (request: Readonly<{ readonly bytes: Uint8Array; readonly codec: KindId; readonly codecVersion: KindId; readonly path: ArtifactPath }>) => Promise<Readonly<{ readonly kind: "installed"; readonly reference: ArtifactRef }> | Readonly<{ readonly kind: "error" }>>;
+  readonly read: (reference: ArtifactRef, maxBytes: number) => Promise<Readonly<{ readonly bytes: Uint8Array; readonly kind: "read" }> | Readonly<{ readonly kind: "error" }>>;
+}
+
+export function canonicalRuntimeArtifactRecorder(installer: CanonicalRuntimeArtifactInstaller): RuntimeArtifactRecorder {
+  return Object.freeze({
+    async record(artifact: NormalizedArtifact, expectedDigest: Digest) {
+      const codec = recorderKindCapsule.decode(`codec:runtime-${artifact.kind}`);
+      const version = recorderKindCapsule.decode("version:2");
+      const path = recorderPathCapsule.decode(artifact.path);
+      if (expectedDigest !== artifact.digest || codec.kind !== "ok" || version.kind !== "ok" || path.kind !== "ok") return Object.freeze({ kind: "error" });
+      const installed = await installer.install(Object.freeze({ bytes: artifact.canonicalBytes, codec: codec.value, codecVersion: version.value, path: path.value }));
+      return installed.kind === "installed"
+        ? Object.freeze({ digest: artifact.digest, kind: "recorded", reference: installed.reference })
+        : installed;
+    },
+    async read(reference: ArtifactRef, maxBytes: number) {
+      const read = await installer.read(reference, maxBytes);
+      return read.kind === "read" ? read.bytes : null;
+    },
+  });
+}
 
 const observationKindByIntent = Object.freeze({
   "allocate-attempt-directory": "attempt-directory-allocated",
