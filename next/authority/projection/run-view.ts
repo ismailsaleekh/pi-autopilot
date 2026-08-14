@@ -124,19 +124,15 @@ export function projectRunState(state: RunState): RunView {
       status: value.acceptedOutput === null ? "declared" : "accepted",
     })));
   const openFindings = Object.freeze((findingValues ?? Object.freeze([]))
-    .filter((value) => value.kind === "finding" && value.status === "open")
-    .map((value): OpenFindingView => {
-      if (value.kind !== "finding") {
-        throw new Error("closed index kind narrowing failed");
-      }
-      return Object.freeze({
-        findingId: value.finding.findingId,
-        kind: value.finding.kind,
-        ownerWorkItemId: findingOwner(state, value.finding),
-        detail: findingDetail(value.finding),
-        subjectRoot: findingSubject(value.finding),
-      });
-    }));
+    .flatMap((value): readonly OpenFindingView[] => value.kind === "finding" && value.status === "open"
+      ? Object.freeze([Object.freeze({
+          findingId: value.finding.findingId,
+          kind: value.finding.kind,
+          ownerWorkItemId: findingOwner(state, value.finding),
+          detail: findingDetail(value.finding),
+          subjectRoot: findingSubject(value.finding),
+        })])
+      : Object.freeze([])));
   return Object.freeze({
     runId: state.identity.runId,
     lastSequence: state.lastSequence,

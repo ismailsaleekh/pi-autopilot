@@ -148,7 +148,7 @@ export function canonicalCommandsDigest(commands: readonly Command[]): Digest {
 const commandArtifactCapsule = defineCapsule("CanonicalCommandArtifact", artifactRefSchema);
 
 /** Deterministic singleton CAS reference; runtime installs these exact bytes before append. */
-export function canonicalCommandArtifact(commands: readonly Command[]): ArtifactRef {
+export function canonicalCommandArtifact(commands: readonly Command[]): ArtifactRef | null {
   const bytes = canonicalEncodeUnknown(commands);
   const digest = canonicalCommandsDigest(commands);
   const decoded = commandArtifactCapsule.decode(Object.freeze({
@@ -161,10 +161,7 @@ export function canonicalCommandArtifact(commands: readonly Command[]): Artifact
     range: null,
     root: digest,
   }));
-  if (decoded.kind === "error") {
-    throw new Error(`canonical command artifact invariant failed: ${decoded.error.diagnostic}`);
-  }
-  return decoded.value;
+  return decoded.kind === "ok" ? decoded.value : null;
 }
 
 export function recordSemanticRootsMatch(
@@ -181,7 +178,8 @@ export function recordSemanticRootsMatch(
   const settlementMatches = record.kind !== "command-settled"
     || (record.observationDigest === record.observation.digest
       && String(record.observation.blob) === String(record.observationDigest));
-  return record.commandDigest === canonicalCommandsDigest(record.commands)
+  return commandArtifact !== null
+    && record.commandDigest === canonicalCommandsDigest(record.commands)
     && canonicalDigestUnknown(record.commandArtifact) === canonicalDigestUnknown(commandArtifact)
     && record.commandArtifact.byteLength === String(commandBytes.byteLength)
     && settlementMatches;

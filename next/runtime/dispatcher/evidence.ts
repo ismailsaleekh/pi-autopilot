@@ -9,6 +9,7 @@ import {
 } from "../../authority/protocol/identifiers.js";
 import type { EvidenceId } from "../../authority/protocol/identifiers.js";
 import type { ExecuteEvidence } from "../../authority/protocol/command.capsule.js";
+import { brandEvidenceEnvelope } from "../../authority/protocol/evidence-fact.capsule.js";
 import type { EvidenceEnvelope } from "../../authority/protocol/evidence-fact.capsule.js";
 import {
   canonicalDigestUnknown,
@@ -79,7 +80,7 @@ export function makeEvidenceEnvelope(command: ExecuteEvidence, receiptInput: unk
   }
   return Object.freeze({
     kind: "minted",
-    envelope: Object.freeze({
+    envelope: brandEvidenceEnvelope(Object.freeze({
       acceptedOutput: command.candidateTree,
       actionId: command.actionId,
       attemptId: receipt.value.attemptId,
@@ -96,6 +97,6 @@ export function makeEvidenceEnvelope(command: ExecuteEvidence, receiptInput: unk
       runId: command.runId,
       tree: command.candidateTree,
       workItemId: command.workItemId,
-    }),
+    })),
   });
 }

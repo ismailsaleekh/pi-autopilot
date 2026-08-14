@@ -1,6 +1,7 @@
 import {
   arrayOf,
   brandedText,
+  canonicalDigestUnknown,
   defineCapsule,
   literal,
   nullable,
@@ -8,7 +9,7 @@ import {
   text,
   union,
 } from "./schema.js";
-import type { Infer } from "./schema.js";
+import type { Digest, Infer } from "./schema.js";
 
 export type { Digest } from "./schema.js";
 
@@ -151,13 +152,33 @@ export type ByteRange = Infer<typeof byteRangeSchema>;
 export type Diagnostic = Infer<typeof diagnosticSchema>;
 export type ExitObservation = Infer<typeof exitObservationSchema>;
 
+export function artifactRefsEqual(left: ArtifactRef, right: ArtifactRef): boolean {
+  return canonicalDigestUnknown(left) === canonicalDigestUnknown(right);
+}
+
+export function exitObservationsEqual(left: ExitObservation, right: ExitObservation): boolean {
+  return canonicalDigestUnknown(left) === canonicalDigestUnknown(right);
+}
+
 export type NonEmpty<Value> = readonly [Value, ...Value[]];
 
 const decimalNaturalCapsule = defineCapsule("DecimalNaturalValue", decimalNaturalSchema);
+const indexRootValueCapsule = defineCapsule("IndexRootValue", indexRootSchema);
 
 export function decimalNatural(value: string): DecimalNatural | null {
   const decoded = decimalNaturalCapsule.decode(value);
   return decoded.kind === "ok" ? decoded.value : null;
+}
+
+export function indexRoot(value: string): IndexRoot | null {
+  const decoded = indexRootValueCapsule.decode(value);
+  return decoded.kind === "ok" ? decoded.value : null;
+}
+
+/** Digest and authenticated-index roots share the same exact sha256 text grammar. */
+export function indexRootFromDigest(value: Digest): IndexRoot {
+  const decoded = indexRootValueCapsule.decode(value);
+  return decoded.kind === "ok" ? decoded.value : indexRootValueCapsule.arbitrary.valid(0);
 }
 
 export function zeroDecimalNatural(): DecimalNatural {

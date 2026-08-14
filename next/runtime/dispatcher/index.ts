@@ -44,6 +44,7 @@ import {
   verifyChildRouteIntent,
 } from "./intent-construction.js";
 import { defineCapsule, literal, object } from "../../authority/protocol/schema.js";
+import type { JsonValue } from "../../authority/protocol/schema.js";
 import { artifactRefSchema, diagnosticCode, digestSchema } from "../../authority/protocol/identifiers.js";
 
 export type RuntimePortIntent = WorkspaceIntent | GitIntent | ChildIntent | StoreIntent | ClockIntent | SecretsIntent;
@@ -172,6 +173,10 @@ function binding(command: Command): PortBinding | BoundaryFeedback {
   }
 }
 
+function jsonObject(value: JsonValue): value is Readonly<Record<string, JsonValue>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 async function callPort(dependencies: DispatcherDependencies, bindingValue: PortBinding): Promise<RuntimePortObservation | BoundaryFeedback> {
   let raw: unknown;
   try {
@@ -183,9 +188,7 @@ async function callPort(dependencies: DispatcherDependencies, bindingValue: Port
   if (inert.kind !== "ok") {
     return inert;
   }
-  const wrapper = typeof inert.value === "object" && inert.value !== null && !Array.isArray(inert.value)
-    ? inert.value as { readonly [field: string]: import("../../authority/protocol/schema.js").JsonValue }
-    : null;
+  const wrapper = jsonObject(inert.value) ? inert.value : null;
   const candidate = wrapper?.["kind"] === "observation" ? wrapper["observation"] : inert.value;
   if (candidate === undefined) {
     return feedback("$.observation", "port wrapper omitted observation");

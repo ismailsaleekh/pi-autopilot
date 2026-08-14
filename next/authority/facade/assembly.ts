@@ -2,7 +2,7 @@ import {
   deriveActionTransition,
   deriveSemanticTransition,
 } from "../evolution/fold.js";
-import { eligibleOutcomeForState } from "../model/eligibility.js";
+import { eligibleOutcomeForState } from "../outcome/index.js";
 import { stateDigest } from "../model/run-state.js";
 import type { RunState } from "../model/run-state.js";
 import { semanticFeedback } from "../facade/feedback.js";
@@ -48,22 +48,18 @@ function sameOutcome(left: TerminalOutcome, right: TerminalOutcome): boolean {
   return terminalOutcomeCapsule.digest(left) === terminalOutcomeCapsule.digest(right);
 }
 
-function decodeRecord<Record extends DecisionCommitted | CommandSettled | OutcomeCommitted | RunSuspended | RunResumed>(
-  input: Record,
-  expected: Record["kind"],
-): Record | Feedback {
+function decodeRecord(input: unknown, expected: "run-suspended"): RunSuspended | Feedback;
+function decodeRecord(input: unknown, expected: "run-resumed"): RunResumed | Feedback;
+function decodeRecord(input: unknown, expected: "decision-committed"): DecisionCommitted | Feedback;
+function decodeRecord(input: unknown, expected: "command-settled"): CommandSettled | Feedback;
+function decodeRecord(input: unknown, expected: "outcome-committed"): OutcomeCommitted | Feedback;
+function decodeRecord(input: unknown, expected: "run-suspended" | "run-resumed" | "decision-committed" | "command-settled" | "outcome-committed"): DecisionCommitted | CommandSettled | OutcomeCommitted | RunSuspended | RunResumed | Feedback {
   const encoded = journalRecordCapsule.encodeUnknown(input);
-  if (encoded.kind === "error") {
-    return assemblyFeedback(encoded.error.path, encoded.error.diagnostic);
-  }
+  if (encoded.kind === "error") return assemblyFeedback(encoded.error.path, encoded.error.diagnostic);
   const decoded = journalRecordCapsule.decodeCanonical(encoded.value);
-  if (decoded.kind === "error" || decoded.value.kind !== expected) {
-    return assemblyFeedback(
-      decoded.kind === "error" ? decoded.error.path : "$.kind",
-      decoded.kind === "error" ? decoded.error.diagnostic : "record decoded to a different family",
-    );
-  }
-  return decoded.value as Record;
+  if (decoded.kind === "error") return assemblyFeedback(decoded.error.path, decoded.error.diagnostic);
+  if (decoded.value.kind === expected) return decoded.value;
+  return assemblyFeedback("$.kind", "record decoded to a different family");
 }
 
 function mint(fields: PreparedCommitFields): PreparedCommit | Feedback {
@@ -149,7 +145,7 @@ function assembleLifecycle(
       ...base,
       kind: "run-suspended",
       reason: stimulus.reason,
-    }) as RunSuspended, "run-suspended");
+    }), "run-suspended");
     return decoded.kind === "feedback"
       ? decoded
       : mint(Object.freeze({ kind: "prepared-suspension", record: decoded }));
@@ -158,7 +154,7 @@ function assembleLifecycle(
     ...base,
     kind: "run-resumed",
     resumeFromSequence: stimulus.resumeFromSequence,
-  }) as RunResumed, "run-resumed");
+  }), "run-resumed");
   return decoded.kind === "feedback"
     ? decoded
     : mint(Object.freeze({ kind: "prepared-resumption", record: decoded }));
@@ -236,13 +232,17 @@ function assembleSemantic(
       eligibilityStateDigest,
       kind: "outcome-committed",
       outcome,
-    }) as OutcomeCommitted, "outcome-committed");
+    }), "outcome-committed");
     return decoded.kind === "feedback"
       ? decoded
       : mint(Object.freeze({ kind: "prepared-outcome", record: decoded }));
   }
+  const commandArtifact = canonicalCommandArtifact(effectiveCommands);
+  if (commandArtifact === null) {
+    return assemblyFeedback("$.commands", "canonical command artifact could not be represented");
+  }
   const commandFields = Object.freeze({
-    commandArtifact: canonicalCommandArtifact(effectiveCommands),
+    commandArtifact,
     commandDigest: canonicalCommandsDigest(effectiveCommands),
     commands: effectiveCommands,
   });
@@ -256,7 +256,7 @@ function assembleSemantic(
       observation: stimulus.observation,
       observationDigest: stimulus.observationDigest,
       outcome,
-    }) as CommandSettled, "command-settled");
+    }), "command-settled");
     return decoded.kind === "feedback"
       ? decoded
       : mint(Object.freeze({ kind: "prepared-command-settlement", record: decoded }));
@@ -268,7 +268,7 @@ function assembleSemantic(
     ...common,
     ...commandFields,
     kind: "decision-committed",
-  }) as DecisionCommitted, "decision-committed");
+  }), "decision-committed");
   return decoded.kind === "feedback"
     ? decoded
     : mint(Object.freeze({ kind: "prepared-decision", record: decoded }));

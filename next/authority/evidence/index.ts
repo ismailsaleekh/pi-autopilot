@@ -1,6 +1,8 @@
 import { indexKey, indexValues, lookupIndex } from "../model/authenticated-index.js";
 import type { RunState } from "../model/run-state.js";
+import { evidenceEnvelopeDigest } from "../protocol/evidence-fact.capsule.js";
 import type { EvidenceFact } from "../protocol/evidence-fact.capsule.js";
+import { artifactRefsEqual, exitObservationsEqual } from "../protocol/identifiers.js";
 import type {
   ArtifactRef,
   ArtifactRoot,
@@ -9,7 +11,6 @@ import type {
   KindId,
   WorkItemId,
 } from "../protocol/identifiers.js";
-import { canonicalDigestUnknown } from "../protocol/schema.js";
 import type { ResolvedIndexPage } from "../protocol/state-index.capsule.js";
 
 export interface EvidenceClaim {
@@ -46,15 +47,15 @@ function rejected(code: ClaimRejectionCode, diagnostic: string): ClaimCheck {
 }
 
 export function sameArtifactRef(left: ArtifactRef, right: ArtifactRef): boolean {
-  return canonicalDigestUnknown(left) === canonicalDigestUnknown(right);
+  return artifactRefsEqual(left, right);
 }
 
 function sameExit(left: ExitObservation, right: ExitObservation): boolean {
-  return canonicalDigestUnknown(left) === canonicalDigestUnknown(right);
+  return exitObservationsEqual(left, right);
 }
 
 function envelopeDigestMatches(evidence: EvidenceFact): boolean {
-  return evidence.envelopeDigest === canonicalDigestUnknown(evidence.envelope);
+  return evidence.envelopeDigest === evidenceEnvelopeDigest(evidence.envelope);
 }
 
 function successful(exit: ExitObservation): boolean {

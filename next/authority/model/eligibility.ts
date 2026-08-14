@@ -1,6 +1,5 @@
 import { compareDecimalNatural, zeroDecimalNatural } from "../protocol/identifiers.js";
 import type { ResolvedIndexPage } from "../protocol/state-index.capsule.js";
-import type { TerminalOutcome } from "../protocol/terminal-outcome.capsule.js";
 import { indexKey, lookupIndex } from "./authenticated-index.js";
 import type { RunState } from "./run-state.js";
 
@@ -16,10 +15,6 @@ export interface T1Checks {
   readonly publicationContainsCandidate: boolean;
   readonly finalAttestationsBound: boolean;
 }
-
-export type Eligibility =
-  | { readonly kind: "ineligible"; readonly checks: T1Checks }
-  | { readonly kind: "eligible"; readonly outcome: TerminalOutcome; readonly checks: T1Checks };
 
 function zero(value: RunState["counters"]["declaredAtoms"]): boolean {
   return compareDecimalNatural(value, zeroDecimalNatural()) === 0;
@@ -103,59 +98,5 @@ export function t1Checks(state: RunState, pages: readonly ResolvedIndexPage[]): 
     noBlockingFindings: noBlocking,
     publicationContainsCandidate: published,
     finalAttestationsBound: finalBound,
-  });
-}
-
-export function eligibleOutcomeForState(
-  state: RunState,
-  pages: readonly ResolvedIndexPage[],
-): Eligibility {
-  if (state.phase === "planning" && state.planningGap !== null) {
-    const gap = state.planningGap;
-    return Object.freeze({
-      kind: "eligible",
-      checks: t1Checks(state, pages),
-      outcome: Object.freeze({
-        kind: "t2",
-        reason: gap.reason,
-        sourceAnchors: gap.sourceAnchors,
-        sourceEvidence: gap.sourceEvidence,
-        explanation: gap.explanation,
-      }),
-    });
-  }
-  const checks = t1Checks(state, pages);
-  const eligible = checks.c1RequirementsBound
-    && checks.c2AtomsDispositioned
-    && checks.c3FinalEvidenceGreen
-    && checks.c4ReviewedDiffAndManifest
-    && checks.c5IdentityBindings
-    && checks.c6AcceptedWorkRetained
-    && checks.c7NoProductGap
-    && checks.noBlockingFindings
-    && checks.publicationContainsCandidate
-    && checks.finalAttestationsBound;
-  if (!eligible || state.currentPlan === null || state.currentCandidate === null || state.currentPublication === null || state.finalAttestations === null || state.currentPublication.observedHead === null || state.currentPublication.publicationTreeAttestation === null) {
-    return Object.freeze({ kind: "ineligible", checks });
-  }
-  return Object.freeze({
-    kind: "eligible",
-    checks,
-    outcome: Object.freeze({
-      kind: "t1",
-      advisoryDisclosures: state.finalAttestations.advisoryDisclosures,
-      c1ToC7Proof: state.finalAttestations.c1ToC7Proof,
-      candidateId: state.currentCandidate.candidateId,
-      coverageRoot: state.currentPlan.coverageRoot,
-      evidenceIndexRoot: state.finalAttestations.evidenceIndexRoot,
-      finalManifest: state.finalAttestations.finalManifest,
-      finalTree: state.currentCandidate.tree,
-      gitTree: state.currentCandidate.gitTree,
-      gitTreeCasAttestation: state.currentCandidate.gitTreeCasAttestation.attestation,
-      publicationId: state.currentPublication.publicationId,
-      publicationTreeAttestation: state.currentPublication.publicationTreeAttestation.attestation,
-      publishedRevision: state.currentPublication.observedHead,
-      reviewedDiff: state.currentCandidate.reviewedDiff,
-    }),
   });
 }

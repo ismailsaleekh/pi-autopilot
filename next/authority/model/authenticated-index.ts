@@ -2,15 +2,14 @@ import {
   addDecimalNatural,
   compareDecimalNatural,
   decimalNatural,
-  decimalNaturalSchema,
-  indexRootSchema,
+  indexRootFromDigest,
+  zeroDecimalNatural,
 } from "../protocol/identifiers.js";
 import type {
   DecimalNatural,
   Digest,
   IndexRoot,
 } from "../protocol/identifiers.js";
-import { defineCapsule } from "../protocol/schema.js";
 import {
   indexKeyDigest,
   indexMutationDigest,
@@ -60,22 +59,17 @@ interface DigestEntry {
   readonly valueDigest: Digest;
 }
 
-const indexRootCapsule = defineCapsule("AuthorityIndexRoot", indexRootSchema);
-const decimalValueCapsule = defineCapsule("AuthorityDecimalValue", decimalNaturalSchema);
-
-function knownDecimal(value: string, seed: number): DecimalNatural {
-  const decoded = decimalValueCapsule.decode(value);
-  return decoded.kind === "ok" ? decoded.value : decimalValueCapsule.arbitrary.valid(seed);
+function knownDecimal(value: string): DecimalNatural {
+  return decimalNatural(value) ?? zeroDecimalNatural();
 }
 
-const ZERO = knownDecimal("0", 0);
-const ONE = knownDecimal("1", 1);
-const MAX_HOT_COUNT = knownDecimal(String(MAX_HOT_INDEX_VALUES), MAX_HOT_INDEX_VALUES);
+const ZERO = knownDecimal("0");
+const ONE = knownDecimal("1");
+const MAX_HOT_COUNT = knownDecimal(String(MAX_HOT_INDEX_VALUES));
 const EMPTY_LEAF = sparseEmptyLeafDigest();
 
-function rootFromDigest(value: Digest): IndexRoot | null {
-  const decoded = indexRootCapsule.decode(value);
-  return decoded.kind === "ok" ? decoded.value : null;
+function rootFromDigest(value: Digest): IndexRoot {
+  return indexRootFromDigest(value);
 }
 
 function combine(left: Digest, right: Digest): Digest {
@@ -185,7 +179,7 @@ export function sparseRoot(
 }
 
 export function initialAuthenticatedIndex(name: IndexName): AuthenticatedIndexState {
-  const root = EMPTY_ROOT ?? indexRootCapsule.arbitrary.valid(0);
+  const root = EMPTY_ROOT;
   return Object.freeze({ name, root, count: ZERO, hotComplete: true, hot: Object.freeze([]) });
 }
 

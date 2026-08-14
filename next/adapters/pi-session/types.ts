@@ -1,9 +1,7 @@
-import type { ArtifactRef } from "../../authority/protocol/identifiers.js";
-import type { SubscriptionRoute } from "../../authority/protocol/route.capsule.js";
-import type { ChildObservation, ChildIntent, LaunchChildSession, VerifyPiRoute } from "../../ports/contracts/child.capsule.js";
+import type { ChildArtifactReference, ChildObservation, ChildIntent, ChildSubscriptionRoute, LaunchChildSession, VerifyPiRoute } from "../../ports/contracts/child.capsule.js";
 
-export type PiThinkingLevel = SubscriptionRoute["thinking"];
-export type PiSubscriptionRoute = SubscriptionRoute;
+export type PiThinkingLevel = ChildSubscriptionRoute["thinking"];
+export type PiSubscriptionRoute = ChildSubscriptionRoute;
 export interface PiCliCommand { readonly executable: string; readonly prefixArguments: readonly string[] }
 
 /** Resolver supplies physical locations only; intent owns every semantic choice. */
@@ -17,8 +15,8 @@ export interface PiSessionLaunchBinding {
 }
 export interface PiSessionBindingResolver {
   readonly resolveLaunch: (intent: LaunchChildSession | VerifyPiRoute) => Promise<unknown>;
-  readonly persistProcessDescriptor: (descriptor: PiDurableChildDescriptor) => Promise<ArtifactRef>;
-  readonly loadProcessDescriptor: (reference: ArtifactRef) => Promise<unknown>;
+  readonly persistProcessDescriptor: (descriptor: PiDurableChildDescriptor) => Promise<ChildArtifactReference>;
+  readonly loadProcessDescriptor: (reference: ChildArtifactReference) => Promise<unknown>;
 }
 
 export interface PiDurableProcessDescriptor {

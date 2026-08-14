@@ -25,6 +25,10 @@ export type SystemClockCreateResult =
   | { readonly clock: SystemClockAdapter; readonly kind: "created" }
   | { readonly diagnostic: ClockDiagnostic; readonly kind: "rejected" };
 
+function safePositiveInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
 function diagnostic(code: string, message: string): ClockDiagnostic {
   return Object.freeze({ code, message });
 }
@@ -79,7 +83,7 @@ export class SystemClockAdapter {
       const tickNanoseconds = Reflect.get(input, "tickNanoseconds");
       const waiter = Reflect.get(input, "waiter");
       const maxWaitSliceMilliseconds = Reflect.get(input, "maxWaitSliceMilliseconds");
-      if (typeof monotonicNow !== "function" || typeof sourceId !== "string" || typeof tickNanoseconds !== "bigint" || tickNanoseconds <= 0n || !Number.isSafeInteger(maxWaitSliceMilliseconds) || maxWaitSliceMilliseconds <= 0) {
+      if (typeof monotonicNow !== "function" || typeof sourceId !== "string" || typeof tickNanoseconds !== "bigint" || tickNanoseconds <= 0n || !safePositiveInteger(maxWaitSliceMilliseconds)) {
         return Object.freeze({ kind: "rejected", diagnostic: diagnostic("clock.invalid-options", "clock source, quantum, and bounded wait slice are required") });
       }
       const waitMethod = waiter === null ? null : typeof waiter === "object" && waiter !== null ? Reflect.get(waiter, "wait") : undefined;
@@ -96,7 +100,7 @@ export class SystemClockAdapter {
         sourceId,
         tickNanoseconds,
         waiter: waitMethod === null ? null : Object.freeze({ wait: async (milliseconds: number): Promise<void> => { await Reflect.apply(waitMethod, waiter, [milliseconds]); } }),
-        maxWaitSliceMilliseconds: maxWaitSliceMilliseconds as number,
+        maxWaitSliceMilliseconds,
       });
       return Object.freeze({ kind: "created", clock: new SystemClockAdapter(options, origin) });
     } catch {

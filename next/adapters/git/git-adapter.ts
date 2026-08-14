@@ -1,22 +1,23 @@
-import { createHash } from "node:crypto";
-import { lstat, readdir, rm } from "node:fs/promises";
+import { lstat, readdir } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import {
+  decodeGitArtifactPath,
+  decodeGitKindId,
+  decodeGitObjectId,
+  decodeGitTreeId,
+  encodeGitCanonicalValue,
   gitIntentCapsule,
   gitObservationCapsule,
 } from "../../ports/contracts/git.capsule.js";
-import type { GitIntent, GitObservation } from "../../ports/contracts/git.capsule.js";
-import type { GitCapture } from "../../authority/protocol/git-values.js";
-import type { ArtifactPath, ArtifactRef, ArtifactRoot, KindId } from "../../authority/protocol/identifiers.js";
-import { canonicalEncodeUnknown, defineCapsule } from "../../authority/protocol/schema.js";
-import {
-  decimalNaturalSchema,
-  digestSchema,
-  artifactPathSchema,
-  gitObjectIdSchema,
-  gitTreeIdSchema,
-  kindIdSchema,
-} from "../../authority/protocol/identifiers.js";
+import type {
+  ArtifactPath,
+  ArtifactRef,
+  ArtifactRoot,
+  GitCapture,
+  GitIntent,
+  GitObservation,
+  KindId,
+} from "../../ports/contracts/git.capsule.js";
 import { runGit } from "./git-process.js";
 
 export interface GitAdapterDiagnostic { readonly code: string; readonly message: string }
@@ -80,17 +81,9 @@ const AUTHOR_ENV = Object.freeze({
   GIT_COMMITTER_EMAIL: "autopilot@invalid",
   GIT_COMMITTER_NAME: "Pi Autopilot",
 });
-const digestCapsule = defineCapsule("GitCaptureDigest", digestSchema);
-const decimalCapsule = defineCapsule("GitCaptureDecimal", decimalNaturalSchema);
-const objectCapsule = defineCapsule("GitCaptureObject", gitObjectIdSchema);
-const treeCapsule = defineCapsule("GitCaptureTree", gitTreeIdSchema);
-const kindCapsule = defineCapsule("GitCaptureKind", kindIdSchema);
-const pathCapsule = defineCapsule("GitCapturePath", artifactPathSchema);
-
 function diagnostic(code: string, message: string): GitAdapterDiagnostic { return Object.freeze({ code, message }); }
 function contractDiagnostic(code: string, message: string) { return Object.freeze({ code, message, related: Object.freeze([]) }); }
 function decodeUtf8(bytes: Uint8Array): string | null { try { return new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch { return null; } }
-function hash(bytes: Uint8Array): string { return `sha256:${createHash("sha256").update(bytes).digest("hex")}`; }
 function below(root: string, candidate: string): boolean { const rel = relative(root, candidate); return rel.length > 0 && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel); }
 function validOid(value: string, format: GitObjectFormat): boolean { return OID.test(value) && value.length === (format === "sha1" ? 40 : 64); }
 function revision(bytes: Uint8Array, format: GitObjectFormat): string | null { const value = decodeUtf8(bytes)?.trim() ?? ""; return validOid(value, format) ? value : null; }
@@ -111,24 +104,16 @@ async function capture(
   max: number,
 ): Promise<GitCapture | null> {
   if (bytes.byteLength > max || ids.length > 4) return null;
-  const digest = digestCapsule.decode(hash(bytes));
-  const length = decimalCapsule.decode(String(bytes.byteLength));
-  const codecValue = kindCapsule.decode(codec);
-  const versionValue = kindCapsule.decode(version);
+  const codecValue = decodeGitKindId(codec);
+  const versionValue = decodeGitKindId(version);
   const objectIds = ids.flatMap((id) => {
-    const decoded = objectCapsule.decode(id);
-    return decoded.kind === "ok" ? [decoded.value] : [];
+    const decoded = decodeGitObjectId(id);
+    return decoded === null ? [] : [decoded];
   });
-  if (digest.kind !== "ok" || length.kind !== "ok" || codecValue.kind !== "ok" || versionValue.kind !== "ok" || objectIds.length !== ids.length) return null;
-  const pathValue = pathCapsule.decode(path);
-  if (pathValue.kind !== "ok") return null;
-  const installed = await installer.install(Object.freeze({
-    bytes,
-    codec: codecValue.value,
-    codecVersion: versionValue.value,
-    path: pathValue.value,
-  }));
-  return installed.kind === "installed" && installed.reference.digest === digest.value && installed.reference.byteLength === length.value
+  const pathValue = decodeGitArtifactPath(path);
+  if (codecValue === null || versionValue === null || pathValue === null || objectIds.length !== ids.length) return null;
+  const installed = await installer.install(Object.freeze({ bytes, codec: codecValue, codecVersion: versionValue, path: pathValue }));
+  return installed.kind === "installed" && installed.reference.byteLength === String(bytes.byteLength)
     ? Object.freeze({ artifact: installed.reference, objectIds: Object.freeze(objectIds) })
     : null;
 }
@@ -208,7 +193,7 @@ export class GitAdapter {
     }
     const installed = await this.options.artifacts.installTree(Object.freeze(entries));
     if (installed.kind !== "installed") return null;
-    const bytes = canonicalEncodeUnknown(Object.freeze({
+    const bytes = encodeGitCanonicalValue(Object.freeze({
       artifactRoot: installed.root,
       format: "pi-autopilot.git-tree-cas-attestation.v2",
       gitTree: tree,
@@ -252,7 +237,7 @@ export class GitAdapter {
     const written = staged.kind === "exited" && staged.code === 0 ? await runGit(["write-tree"], { cwd: workspace, maxOutputBytes: this.options.maxOutputBytes }) : null;
     const tree = written?.kind === "exited" && written.code === 0 ? revision(written.stdout, repository.format) : null;
     if (tree === null) return this.retry(intent, "workspace-sealed", "git.seal-failed", "workspace could not be sealed");
-    const bytes = canonicalEncodeUnknown(Object.freeze({ format: "pi-autopilot.git-tree-capture.v2", gitTree: tree }));
+    const bytes = encodeGitCanonicalValue(Object.freeze({ format: "pi-autopilot.git-tree-capture.v2", gitTree: tree }));
     const value = await capture(this.options.artifacts, bytes, "codec:git-tree-capture", "version:2", "git/tree-capture.canonical.json", [tree], this.options.maxOutputBytes);
     return value === null ? this.retry(intent, "workspace-sealed", "git.capture-bound", "seal capture exceeded bound") : this.observation(intent, "workspace-sealed", Object.freeze({ kind: "ok", value: Object.freeze({ capture: value, gitTree: tree, workspaceId: intent.inputs.workspaceId }) }));
   }
@@ -272,7 +257,13 @@ export class GitAdapter {
     if (base === null || candidate === null || await this.tree(repository, base) !== intent.inputs.baseTree || await this.tree(repository, candidate) !== intent.inputs.candidateTree) return this.retry(intent, "candidate-integrated", "git.integration-precondition", "commit/tree binding differs");
     const directory = resolve(this.options.integrationRoot, `integration-${intent.actionId.slice(14)}`);
     if (!below(this.options.integrationRoot, directory)) return this.retry(intent, "candidate-integrated", "git.integration-path", "integration path unsafe");
-    try { await rm(directory, { recursive: true, force: true }); } catch { return this.retry(intent, "candidate-integrated", "git.integration-clean", "integration path unavailable"); }
+    try {
+      const existing = await readdir(directory);
+      if (existing.length !== 0) return this.retry(intent, "candidate-integrated", "git.integration-clean", "integration workspace reservation is not empty");
+    } catch (error: unknown) {
+      const code = typeof error === "object" && error !== null ? Reflect.get(error, "code") : null;
+      if (code !== "ENOENT") return this.retry(intent, "candidate-integrated", "git.integration-clean", "integration workspace reservation is unavailable");
+    }
     const clone = await runGit(["clone", "--no-local", "--no-hardlinks", "--no-checkout", "--no-tags", "--", repository.path, directory], { cwd: this.options.integrationRoot, maxOutputBytes: this.options.maxOutputBytes });
     if (clone.kind !== "exited" || clone.code !== 0) return this.retry(intent, "candidate-integrated", "git.integration-clone", "clone failed");
     await runGit(["checkout", "--detach", "--force", base], { cwd: directory, maxOutputBytes: this.options.maxOutputBytes });
@@ -287,7 +278,7 @@ export class GitAdapter {
     const commit = headOut.kind === "exited" ? revision(headOut.stdout, repository.format) : null;
     const tree = treeOut.kind === "exited" ? revision(treeOut.stdout, repository.format) : null;
     if (commit === null || tree === null) return this.retry(intent, "candidate-integrated", "git.integration-result", "integrated identity unavailable");
-    const manifest = await capture(this.options.artifacts, canonicalEncodeUnknown({ base, candidate, commit, tree }), "codec:git-integration-manifest", "version:2", "git/integration-manifest.canonical.json", [base, candidate, commit, tree], this.options.maxOutputBytes);
+    const manifest = await capture(this.options.artifacts, encodeGitCanonicalValue({ base, candidate, commit, tree }), "codec:git-integration-manifest", "version:2", "git/integration-manifest.canonical.json", [base, candidate, commit, tree], this.options.maxOutputBytes);
     const diffResult = await runGit(["diff-tree", "--no-commit-id", "--root", "--raw", "-z", "-r", "-M", "--no-ext-diff", base, commit], { cwd: directory, maxOutputBytes: this.options.maxOutputBytes });
     const diff = diffResult.kind === "exited" && diffResult.code === 0 && !diffResult.stdoutTruncated
       ? await capture(this.options.artifacts, diffResult.stdout, "codec:git-raw-diff", "version:2", "git/integrated-diff.bin", [base, commit], this.options.maxOutputBytes)
@@ -319,8 +310,8 @@ export class GitAdapter {
     return after?.kind === "at" && after.commit === desired ? this.publication(intent, desiredTree, desired, "desired-head") : this.publication(intent, desiredTree, after?.kind === "at" ? after.commit : null, "head-moved");
   }
   private publication(intent: Extract<GitIntent, { kind: "publish-if-expected-head" }>, tree: string, head: string | null, status: "desired-head" | "head-moved"): GitAdapterExecution {
-    const gitTree = treeCapsule.decode(tree);
-    return gitTree.kind !== "ok" ? this.retry(intent, "head-publication-observed", "git.tree-invalid", "Git tree identity invalid") : this.observation(intent, "head-publication-observed", Object.freeze({ kind: "ok", value: Object.freeze({ desiredHead: intent.inputs.desiredHead, gitTree: gitTree.value, observedHead: head, publicationId: intent.inputs.publicationId, status }) }));
+    const gitTree = decodeGitTreeId(tree);
+    return gitTree === null ? this.retry(intent, "head-publication-observed", "git.tree-invalid", "Git tree identity invalid") : this.observation(intent, "head-publication-observed", Object.freeze({ kind: "ok", value: Object.freeze({ desiredHead: intent.inputs.desiredHead, gitTree, observedHead: head, publicationId: intent.inputs.publicationId, status }) }));
   }
   private retry(intent: GitIntent, kind: GitObservation["kind"], code: string, message: string): GitAdapterExecution { return this.observation(intent, kind, Object.freeze({ kind: "retry", diagnostic: contractDiagnostic(code, message) })); }
   private observation(intent: GitIntent, kind: GitObservation["kind"], result: unknown): GitAdapterExecution {

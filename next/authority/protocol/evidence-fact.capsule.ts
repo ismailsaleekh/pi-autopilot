@@ -14,6 +14,7 @@ import {
   workspaceRelativePathSchema,
 } from "./identifiers.js";
 import {
+  canonicalDigestUnknown,
   defineCapsule,
   literal,
   object,
@@ -47,7 +48,17 @@ export const evidenceEnvelopeSchema = object({
   workItemId: workItemIdSchema,
 });
 
-export type EvidenceEnvelope = Infer<typeof evidenceEnvelopeSchema>;
+type DerivedEvidenceEnvelope = Infer<typeof evidenceEnvelopeSchema>;
+declare const evidenceEnvelopeCapability: unique symbol;
+
+export interface EvidenceEnvelope extends DerivedEvidenceEnvelope {
+  readonly [evidenceEnvelopeCapability]: true;
+}
+
+/** Runtime dispatcher is the sole policy-authorized semantic evidence minter. */
+export function brandEvidenceEnvelope(value: DerivedEvidenceEnvelope): EvidenceEnvelope {
+  return Object.freeze({ ...value, [evidenceEnvelopeCapability]: true as const });
+}
 
 export const evidenceObservedFactSchema = object({
   envelope: evidenceEnvelopeSchema,
@@ -64,6 +75,10 @@ export type EvidenceObservedFact = Infer<typeof evidenceObservedFactSchema>;
 export type EvidenceFact = Infer<typeof evidenceFactSchema>;
 
 export const evidenceFactCapsule = defineCapsule("EvidenceFact", evidenceFactSchema);
+
+export function evidenceEnvelopeDigest(envelope: Infer<typeof evidenceEnvelopeSchema>) {
+  return canonicalDigestUnknown(envelope);
+}
 
 export const evidenceFactExhaustive = Object.freeze({
   "evidence-fact": true,

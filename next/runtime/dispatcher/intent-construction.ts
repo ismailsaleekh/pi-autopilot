@@ -17,7 +17,6 @@ import {
   childIntentCapsule,
 } from "../../ports/contracts/child.capsule.js";
 import type {
-  ChildIntent,
   ExecuteEvidenceCommand,
   ExecuteValidationCommand,
   InspectChildSession,
@@ -25,21 +24,19 @@ import type {
   VerifyPiRoute,
 } from "../../ports/contracts/child.capsule.js";
 import { clockIntentCapsule } from "../../ports/contracts/clock.capsule.js";
-import type { ClockIntent, ObserveClock } from "../../ports/contracts/clock.capsule.js";
+import type { ObserveClock } from "../../ports/contracts/clock.capsule.js";
 import { gitIntentCapsule } from "../../ports/contracts/git.capsule.js";
 import type {
-  GitIntent,
   IntegrateCandidate,
   MaterializeWorkspace as MaterializeWorkspaceIntent,
   PublishIfExpectedHead,
 } from "../../ports/contracts/git.capsule.js";
 import { storeIntentCapsule } from "../../ports/contracts/store.capsule.js";
-import type { InstallSealedObject, StoreIntent } from "../../ports/contracts/store.capsule.js";
+import type { InstallSealedObject } from "../../ports/contracts/store.capsule.js";
 import { workspaceIntentCapsule } from "../../ports/contracts/workspace.capsule.js";
 import type {
   AllocateAttemptDirectory,
   ApplyAttemptIsolation,
-  WorkspaceIntent,
 } from "../../ports/contracts/workspace.capsule.js";
 import type { BoundaryFeedback, BoundaryResult } from "../boundary-codecs/index.js";
 
@@ -47,16 +44,23 @@ function feedback(path: string, diagnostic: string): BoundaryFeedback {
   return Object.freeze({ kind: "feedback", code: "boundary-schema", path, diagnostic });
 }
 
-interface IntentCapsuleLike {
+interface IntentCapsuleLike<Intent> {
   readonly encodeUnknown: (value: unknown) => { readonly kind: "ok"; readonly value: Uint8Array } | { readonly kind: "error"; readonly error: { readonly path: string; readonly diagnostic: string } };
-  readonly decodeCanonical: (value: Uint8Array) => { readonly kind: "ok"; readonly value: unknown } | { readonly kind: "error"; readonly error: { readonly path: string; readonly diagnostic: string } };
+  readonly decodeCanonical: (value: Uint8Array) => { readonly kind: "ok"; readonly value: Intent } | { readonly kind: "error"; readonly error: { readonly path: string; readonly diagnostic: string } };
 }
 
-function normalize<Intent extends { readonly actionId: Command["actionId"]; readonly kind: string }>(
-  capsule: IntentCapsuleLike,
+function hasKind<Union extends { readonly kind: string }, Kind extends Union["kind"]>(
+  value: Union,
+  kind: Kind,
+): value is Extract<Union, { readonly kind: Kind }> {
+  return value.kind === kind;
+}
+
+function normalize<Union extends { readonly actionId: Command["actionId"]; readonly kind: string }, Kind extends Union["kind"]>(
+  capsule: IntentCapsuleLike<Union>,
   input: unknown,
-  expectedKind: Intent["kind"],
-): BoundaryResult<Intent> {
+  expectedKind: Kind,
+): BoundaryResult<Extract<Union, { readonly kind: Kind }>> {
   const encoded = capsule.encodeUnknown(input);
   if (encoded.kind === "error") {
     return feedback(encoded.error.path, encoded.error.diagnostic);
@@ -65,10 +69,10 @@ function normalize<Intent extends { readonly actionId: Command["actionId"]; read
   if (decoded.kind === "error") {
     return feedback(decoded.error.path, decoded.error.diagnostic);
   }
-  if (typeof decoded.value !== "object" || decoded.value === null || !("kind" in decoded.value) || decoded.value.kind !== expectedKind) {
+  if (!hasKind(decoded.value, expectedKind)) {
     return feedback("$.kind", "intent capsule decoded a different closed operation");
   }
-  return Object.freeze({ kind: "ok", value: decoded.value as Intent, canonicalBytes: encoded.value });
+  return Object.freeze({ kind: "ok", value: decoded.value, canonicalBytes: encoded.value });
 }
 
 function envelope(command: Command, kind: string, inputs: object, preconditions: object) {
@@ -82,7 +86,7 @@ function envelope(command: Command, kind: string, inputs: object, preconditions:
 }
 
 export function prepareWorkspaceIntent(command: PrepareWorkspace): BoundaryResult<AllocateAttemptDirectory> {
-  return normalize<AllocateAttemptDirectory>(workspaceIntentCapsule, envelope(command, "allocate-attempt-directory", {
+  return normalize(workspaceIntentCapsule, envelope(command, "allocate-attempt-directory", {
     workspaceCapability: command.workspaceCapability,
     workspaceId: command.workspaceId,
   }, {
@@ -92,7 +96,7 @@ export function prepareWorkspaceIntent(command: PrepareWorkspace): BoundaryResul
 }
 
 export function applyWorkspaceIsolationIntent(command: ApplyWorkspaceIsolation): BoundaryResult<ApplyAttemptIsolation> {
-  return normalize<ApplyAttemptIsolation>(workspaceIntentCapsule, envelope(command, "apply-attempt-isolation", {
+  return normalize(workspaceIntentCapsule, envelope(command, "apply-attempt-isolation", {
     isolationPolicy: command.isolationPolicy,
     workspaceCapability: command.workspaceCapability,
     workspaceId: command.workspaceId,
@@ -105,7 +109,7 @@ export function applyWorkspaceIsolationIntent(command: ApplyWorkspaceIsolation):
 }
 
 export function materializeWorkspaceIntent(command: MaterializeWorkspace): BoundaryResult<MaterializeWorkspaceIntent> {
-  return normalize<MaterializeWorkspaceIntent>(gitIntentCapsule, envelope(command, "materialize-workspace", {
+  return normalize(gitIntentCapsule, envelope(command, "materialize-workspace", {
     baseCommit: command.baseCommit,
     baseTree: command.baseTree,
     repository: command.repository,
@@ -118,7 +122,7 @@ export function materializeWorkspaceIntent(command: MaterializeWorkspace): Bound
 }
 
 export function verifyChildRouteIntent(command: VerifyChildRoute): BoundaryResult<VerifyPiRoute> {
-  return normalize<VerifyPiRoute>(childIntentCapsule, envelope(command, "verify-pi-route", {
+  return normalize(childIntentCapsule, envelope(command, "verify-pi-route", {
     captureId: command.captureId,
     route: command.route,
   }, {
@@ -128,7 +132,7 @@ export function verifyChildRouteIntent(command: VerifyChildRoute): BoundaryResul
 }
 
 export function launchChildIntent(command: LaunchChild): BoundaryResult<LaunchChildSession> {
-  return normalize<LaunchChildSession>(childIntentCapsule, envelope(command, "launch-child-session", {
+  return normalize(childIntentCapsule, envelope(command, "launch-child-session", {
     attemptId: command.attemptId,
     captureId: command.captureId,
     memorySeed: command.memorySeed,
@@ -151,7 +155,7 @@ export function launchChildIntent(command: LaunchChild): BoundaryResult<LaunchCh
 }
 
 export function inspectChildIntent(command: InspectChild): BoundaryResult<InspectChildSession> {
-  return normalize<InspectChildSession>(childIntentCapsule, envelope(command, "inspect-child-session", {
+  return normalize(childIntentCapsule, envelope(command, "inspect-child-session", {
     childId: command.childId,
     processDescriptor: command.processDescriptor,
   }, {
@@ -160,7 +164,7 @@ export function inspectChildIntent(command: InspectChild): BoundaryResult<Inspec
 }
 
 export function evidenceIntent(command: ExecuteEvidence): BoundaryResult<ExecuteEvidenceCommand> {
-  return normalize<ExecuteEvidenceCommand>(childIntentCapsule, envelope(command, "execute-evidence-command", {
+  return normalize(childIntentCapsule, envelope(command, "execute-evidence-command", {
     candidateTree: command.candidateTree,
     commandSpec: command.commandSpec,
     ruleId: command.ruleId,
@@ -171,7 +175,7 @@ export function evidenceIntent(command: ExecuteEvidence): BoundaryResult<Execute
 }
 
 export function validationIntent(command: ExecuteValidationRule): BoundaryResult<ExecuteValidationCommand> {
-  return normalize<ExecuteValidationCommand>(childIntentCapsule, envelope(command, "execute-validation-command", {
+  return normalize(childIntentCapsule, envelope(command, "execute-validation-command", {
     candidateTree: command.candidateTree,
     ruleId: command.ruleId,
     ruleInputs: command.inputs,
@@ -180,7 +184,7 @@ export function validationIntent(command: ExecuteValidationRule): BoundaryResult
 }
 
 export function integrateCandidateIntent(command: BuildIntegratedCandidate): BoundaryResult<IntegrateCandidate> {
-  return normalize<IntegrateCandidate>(gitIntentCapsule, envelope(command, "integrate-candidate", {
+  return normalize(gitIntentCapsule, envelope(command, "integrate-candidate", {
     baseCommit: command.baseCommit,
     baseTree: command.baseTree,
     candidateCommit: command.candidateCommit,
@@ -195,7 +199,7 @@ export function integrateCandidateIntent(command: BuildIntegratedCandidate): Bou
 }
 
 export function publishCandidateIntent(command: PublishCompareAndSwap): BoundaryResult<PublishIfExpectedHead> {
-  return normalize<PublishIfExpectedHead>(gitIntentCapsule, envelope(command, "publish-if-expected-head", {
+  return normalize(gitIntentCapsule, envelope(command, "publish-if-expected-head", {
     desiredHead: command.desiredHead,
     expected: command.expected,
     publicationId: command.publicationId,
@@ -209,7 +213,7 @@ export function publishCandidateIntent(command: PublishCompareAndSwap): Boundary
 }
 
 export function observeClockIntent(command: ObserveClockCommand): BoundaryResult<ObserveClock> {
-  return normalize<ObserveClock>(clockIntentCapsule, envelope(command, "observe-clock", {
+  return normalize(clockIntentCapsule, envelope(command, "observe-clock", {
     clockId: command.clockId,
   }, {
     notBeforeTick: command.notBeforeTick,
@@ -218,7 +222,7 @@ export function observeClockIntent(command: ObserveClockCommand): BoundaryResult
 }
 
 export function installArtifactIntent(command: InstallArtifactCommand): BoundaryResult<InstallSealedObject> {
-  return normalize<InstallSealedObject>(storeIntentCapsule, envelope(command, "install-sealed-object", {
+  return normalize(storeIntentCapsule, envelope(command, "install-sealed-object", {
     artifact: command.artifact,
   }, {
     expectedDigest: command.artifact.digest,
@@ -231,4 +235,3 @@ void (childIntentCapsule satisfies typeof childIntentCapsule);
 void (gitIntentCapsule satisfies typeof gitIntentCapsule);
 void (storeIntentCapsule satisfies typeof storeIntentCapsule);
 void (clockIntentCapsule satisfies typeof clockIntentCapsule);
-void (null as WorkspaceIntent | ChildIntent | GitIntent | StoreIntent | ClockIntent | null);

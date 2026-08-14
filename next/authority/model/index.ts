@@ -17,8 +17,8 @@ export type {
   MutationApplication,
   MutationPreparation,
 } from "./authenticated-index.js";
-export { eligibleOutcomeForState, t1Checks } from "./eligibility.js";
-export type { Eligibility, T1Checks } from "./eligibility.js";
+export { t1Checks } from "./eligibility.js";
+export type { T1Checks } from "./eligibility.js";
 export { initialState } from "./genesis.js";
 export { stateDigest } from "./run-state.js";
 export type {

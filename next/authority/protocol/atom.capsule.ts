@@ -145,9 +145,17 @@ export const LEGAL_DISPOSITIONS = Object.freeze({
 }) satisfies Readonly<Record<AtomKind, readonly DispositionMeaning["kind"][]>>;
 
 export function dispositionIsLegal(atom: Atom, disposition: AtomDisposition): boolean {
-  return atom.atomId === disposition.atomId
-    && atom.runId === disposition.runId
-    && (LEGAL_DISPOSITIONS[atom.kind] as readonly DispositionMeaning["kind"][]).includes(disposition.meaning.kind);
+  if (atom.atomId !== disposition.atomId || atom.runId !== disposition.runId) return false;
+  const meaning = disposition.meaning.kind;
+  switch (atom.kind) {
+    case "ACCEPTANCE": return meaning === "verified-by" || meaning === "n-a-with-reason";
+    case "CONSTRAINT": return meaning === "guards" || meaning === "run-level-guard" || meaning === "n-a-with-reason";
+    case "DECISION": return meaning === "honored-by" || meaning === "invalidated-premise-to-operator-question" || meaning === "n-a-with-reason";
+    case "PREMISE": return meaning === "verified" || meaning === "refuted-to-operator-question" || meaning === "unverifiable-to-recorded-assumption" || meaning === "n-a-with-reason";
+    case "QUESTION": return meaning === "answered-by-operator-atom" || meaning === "nonmaterial-assumption" || meaning === "n-a-with-reason";
+    case "REFERENCE": return meaning === "consumed" || meaning === "excluded-historical" || meaning === "n-a-with-reason";
+    case "WORK": return meaning === "implemented-by" || meaning === "n-a-with-reason";
+  }
 }
 
 void arrayOf;

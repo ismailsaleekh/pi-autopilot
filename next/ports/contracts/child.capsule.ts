@@ -214,6 +214,8 @@ export const childObservationSchema = union([
   validationCommandExecutedSchema,
 ]);
 
+export type ChildArtifactReference = Infer<typeof artifactRefSchema>;
+export type ChildSubscriptionRoute = Infer<typeof subscriptionRouteSchema>;
 export type VerifyPiRoute = Infer<typeof verifyPiRouteSchema>;
 export type LaunchChildSession = Infer<typeof launchChildSessionSchema>;
 export type InspectChildSession = Infer<typeof inspectChildSessionSchema>;

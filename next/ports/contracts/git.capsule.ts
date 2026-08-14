@@ -1,12 +1,15 @@
 import { expectedRefStateSchema, gitCaptureSchema, gitTreeCasAttestationSchema } from "../../authority/protocol/git-values.js";
 import {
   actionIdSchema,
+  artifactPathSchema,
   artifactRootSchema,
   candidateIdSchema,
   childEpochSchema,
   gitCommitIdSchema,
+  gitObjectIdSchema,
   gitRefSchema,
   gitTreeIdSchema,
+  kindIdSchema,
   leaseIdSchema,
   publicationIdSchema,
   repositoryCapabilitySchema,
@@ -16,13 +19,16 @@ import {
 } from "../../authority/protocol/identifiers.js";
 import {
   booleanValue,
+  canonicalEncodeUnknown,
   defineCapsule,
   literal,
   nullable,
   object,
   union,
 } from "../../authority/protocol/schema.js";
-import type { Infer } from "../../authority/protocol/schema.js";
+import type { Infer, JsonValue } from "../../authority/protocol/schema.js";
+export type { ArtifactPath, ArtifactRef, ArtifactRoot, KindId } from "../../authority/protocol/identifiers.js";
+export type { GitCapture } from "../../authority/protocol/git-values.js";
 import { toolResultSchemaFor } from "../../authority/protocol/tool-result.capsule.js";
 import { defineIntentCapsule } from "./intent-capsule.js";
 
@@ -236,6 +242,31 @@ export type GitObservation = Infer<typeof gitObservationSchema>;
 
 export const gitIntentCapsule = defineIntentCapsule("GitIntent", "git", gitIntentSchema);
 export const gitObservationCapsule = defineCapsule("GitObservation", gitObservationSchema);
+
+const adapterArtifactPathCapsule = defineCapsule("GitAdapterArtifactPath", artifactPathSchema);
+const adapterKindIdCapsule = defineCapsule("GitAdapterKindId", kindIdSchema);
+const adapterObjectIdCapsule = defineCapsule("GitAdapterObjectId", gitObjectIdSchema);
+const adapterTreeIdCapsule = defineCapsule("GitAdapterTreeId", gitTreeIdSchema);
+
+export function decodeGitArtifactPath(value: string) {
+  const decoded = adapterArtifactPathCapsule.decode(value);
+  return decoded.kind === "ok" ? decoded.value : null;
+}
+export function decodeGitKindId(value: string) {
+  const decoded = adapterKindIdCapsule.decode(value);
+  return decoded.kind === "ok" ? decoded.value : null;
+}
+export function decodeGitObjectId(value: string) {
+  const decoded = adapterObjectIdCapsule.decode(value);
+  return decoded.kind === "ok" ? decoded.value : null;
+}
+export function decodeGitTreeId(value: string) {
+  const decoded = adapterTreeIdCapsule.decode(value);
+  return decoded.kind === "ok" ? decoded.value : null;
+}
+export function encodeGitCanonicalValue(value: JsonValue): Uint8Array {
+  return canonicalEncodeUnknown(value);
+}
 
 export const gitIntentExhaustive = Object.freeze({
   "compare-roots": true,

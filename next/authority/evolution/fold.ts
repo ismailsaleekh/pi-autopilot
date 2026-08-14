@@ -1,4 +1,4 @@
-import { eligibleOutcomeForState } from "../model/eligibility.js";
+import { eligibleOutcomeForState } from "../outcome/index.js";
 import { initialState } from "../model/genesis.js";
 import { stateDigest } from "../model/run-state.js";
 import type { RunIndexes, RunState } from "../model/run-state.js";
