@@ -634,38 +634,6 @@ async function appendRecord(
  * production call edge when that lane lands. The function serializes every
  * operation for this opaque handle and acknowledges only after fdatasync.
  */
-/** Dedicated bootstrap edge; genesis cannot be represented as PreparedCommit. */
-export async function appendGenesisRecord(
-  handle: JournalWriterHandle,
-  genesis: Extract<JournalRecord, { readonly kind: "run-genesis" }>,
-): Promise<JournalAppendResult> {
-  const state = writerStates.get(handle);
-  if (state === undefined) {
-    return appendRejection(journalError(
-      "unknown-handle",
-      "feedback",
-      "append-genesis-record",
-      "writer capability was not minted by openJournal in this process",
-    ));
-  }
-  if (state.byteLength !== 0n || state.epoch !== "00000000000000000001") {
-    return appendRejection(journalError(
-      "invalid-argument",
-      "feedback",
-      "append-genesis-record",
-      "genesis may be appended only to an empty first epoch",
-      state.path,
-      state.epoch,
-    ));
-  }
-  const operation = state.queue.then(
-    () => appendRecord(state, genesis),
-    () => appendRecord(state, genesis),
-  );
-  state.queue = operation.then(() => undefined, () => undefined);
-  return operation;
-}
-
 export async function appendCommittedBatch(
   handle: JournalWriterHandle,
   batch: PreparedCommit,
@@ -685,6 +653,29 @@ export async function appendCommittedBatch(
       "feedback",
       "append-committed-batch",
       "journal append accepts only authority-minted PreparedCommit capabilities",
+      state.path,
+      state.epoch,
+    ));
+  }
+  if (
+    batch.kind === "prepared-genesis"
+    && (state.byteLength !== 0n || state.epoch !== "00000000000000000001")
+  ) {
+    return appendRejection(journalError(
+      "invalid-argument",
+      "feedback",
+      "append-committed-batch",
+      "genesis may be appended only to an empty first epoch",
+      state.path,
+      state.epoch,
+    ));
+  }
+  if (batch.kind !== "prepared-genesis" && state.byteLength === 0n) {
+    return appendRejection(journalError(
+      "invalid-argument",
+      "feedback",
+      "append-committed-batch",
+      "the first durable record must be authority-minted genesis",
       state.path,
       state.epoch,
     ));

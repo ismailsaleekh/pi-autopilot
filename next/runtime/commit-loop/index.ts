@@ -1,6 +1,7 @@
 import {
   initial,
   prepare,
+  prepareGenesis,
   project,
   replay,
 } from "../../authority/facade/index.js";
@@ -30,7 +31,6 @@ import {
 import type { Stimulus } from "../../authority/protocol/stimulus.capsule.js";
 import {
   appendCommittedBatch,
-  appendGenesisRecord,
   closeJournal,
   openJournal,
   replayJournal,
@@ -321,7 +321,7 @@ class CommitLoopEngine implements RuntimeCommitLoop {
   }
 
   public async ensureGenesis(): Promise<CommitLoopFailure | null> {
-    const appended = await appendGenesisRecord(this.handle, this.openValue.genesis);
+    const appended = await this.appendPrepared(prepareGenesis(this.openValue.genesis));
     return appended.kind === "acknowledged" ? null : journalResult(appended.error);
   }
 
@@ -384,6 +384,9 @@ class CommitLoopEngine implements RuntimeCommitLoop {
         : journalResult(appended.error);
     }
     const record = prepared.record;
+    if (record.kind === "run-genesis") {
+      return Object.freeze({ kind: "fatal", diagnostic: "stimulus preparation returned genesis after bootstrap" });
+    }
     const folded = replay(this.state, Object.freeze([record]));
     if (folded.kind !== "applied") {
       return Object.freeze({ kind: "fatal", diagnostic: `acknowledged commit could not replay: ${folded.error.code}` });

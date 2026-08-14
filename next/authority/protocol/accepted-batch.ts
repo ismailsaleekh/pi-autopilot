@@ -4,6 +4,7 @@ import type {
   DecisionCommitted,
   JournalRecord,
   OutcomeCommitted,
+  RunGenesis,
   RunResumed,
   RunSuspended,
 } from "./journal-record.capsule.js";
@@ -12,6 +13,7 @@ import type { DecodeError } from "./schema.js";
 export const preparedCommitCapability: unique symbol = Symbol();
 
 export type PreparedCommitKind =
+  | "prepared-genesis"
   | "prepared-decision"
   | "prepared-command-settlement"
   | "prepared-suspension"
@@ -19,6 +21,11 @@ export type PreparedCommitKind =
   | "prepared-outcome";
 
 export type PreparedCommit =
+  | {
+      readonly kind: "prepared-genesis";
+      readonly record: RunGenesis;
+      readonly [preparedCommitCapability]: true;
+    }
   | {
       readonly kind: "prepared-decision";
       readonly record: DecisionCommitted;
@@ -46,6 +53,7 @@ export type PreparedCommit =
     };
 
 export type PreparedCommitFields =
+  | { readonly kind: "prepared-genesis"; readonly record: RunGenesis }
   | { readonly kind: "prepared-decision"; readonly record: DecisionCommitted }
   | { readonly kind: "prepared-command-settlement"; readonly record: CommandSettled }
   | { readonly kind: "prepared-suspension"; readonly record: RunSuspended }
@@ -62,6 +70,8 @@ function semanticMismatch(path: string, diagnostic: string): DecodeError {
 
 function expectedRecordKind(kind: PreparedCommitKind): JournalRecord["kind"] {
   switch (kind) {
+    case "prepared-genesis":
+      return "run-genesis";
     case "prepared-decision":
       return "decision-committed";
     case "prepared-command-settlement":
@@ -107,7 +117,9 @@ export function mintPreparedCommit(fields: PreparedCommitFields): PreparedCommit
     });
   }
   let commit: PreparedCommit;
-  if (fields.kind === "prepared-decision" && decoded.value.kind === "decision-committed") {
+  if (fields.kind === "prepared-genesis" && decoded.value.kind === "run-genesis") {
+    commit = { kind: fields.kind, record: decoded.value, [preparedCommitCapability]: true };
+  } else if (fields.kind === "prepared-decision" && decoded.value.kind === "decision-committed") {
     commit = { kind: fields.kind, record: decoded.value, [preparedCommitCapability]: true };
   } else if (fields.kind === "prepared-command-settlement" && decoded.value.kind === "command-settled") {
     commit = { kind: fields.kind, record: decoded.value, [preparedCommitCapability]: true };
