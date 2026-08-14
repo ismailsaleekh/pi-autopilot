@@ -28,12 +28,9 @@ export function initial(genesis: RunGenesis): RunState {
 }
 
 /** Authority-owned bootstrap mint; storage still accepts only PreparedCommit. */
-export function prepareGenesis(genesis: RunGenesis): PreparedCommit {
+export function prepareGenesis(genesis: RunGenesis): PreparedCommit | null {
   const minted = mintPreparedCommit(Object.freeze({ kind: "prepared-genesis", record: genesis }));
-  if (minted.kind !== "minted") {
-    throw new Error(`run genesis invariant failed: ${minted.error.diagnostic}`);
-  }
-  return minted.commit;
+  return minted.kind === "minted" ? minted.commit : null;
 }
 
 export function replay(state: RunState, batch: readonly FoldInput[]): FoldResult {

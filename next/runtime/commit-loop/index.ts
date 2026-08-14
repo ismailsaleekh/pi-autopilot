@@ -321,7 +321,11 @@ class CommitLoopEngine implements RuntimeCommitLoop {
   }
 
   public async ensureGenesis(): Promise<CommitLoopFailure | null> {
-    const appended = await this.appendPrepared(prepareGenesis(this.openValue.genesis));
+    const prepared = prepareGenesis(this.openValue.genesis);
+    if (prepared === null) {
+      return Object.freeze({ kind: "fatal", diagnostic: "authority rejected canonical run genesis" });
+    }
+    const appended = await this.appendPrepared(prepared);
     return appended.kind === "acknowledged" ? null : journalResult(appended.error);
   }
 
