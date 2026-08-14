@@ -10,6 +10,7 @@ import type {
 import {
   canonicalEncodeUnknown,
   defineCapsule,
+  digestBytes,
 } from "../../authority/protocol/schema.js";
 import { artifactPath, artifactRootFor, bytesEqual, bytesHex, cloneBytes, digestForBytes } from "./values.js";
 
@@ -173,9 +174,9 @@ export class ArtifactCatalog {
     if (file === undefined) {
       return Object.freeze({ kind: "missing", diagnostic: "artifact root or path is absent" });
     }
-    const offset = ref.range?.offset ?? 0;
-    const length = ref.range?.length ?? file.bytes.length;
-    if (offset > file.bytes.length || length > file.bytes.length - offset) {
+    const offset = ref.range === null ? 0 : Number(ref.range.offset);
+    const length = ref.range === null ? file.bytes.length : Number(ref.range.length);
+    if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(length) || offset < 0 || length < 0 || offset > file.bytes.length || length > file.bytes.length - offset) {
       return Object.freeze({ kind: "invalid", diagnostic: "artifact byte range exceeds the file" });
     }
     return Object.freeze({
@@ -189,10 +190,24 @@ export class ArtifactCatalog {
   public reference(rootInput: unknown, pathInput: unknown): ArtifactRef | null {
     const root = this.decodeRoot(rootInput);
     const path = artifactPath(typeof pathInput === "string" ? pathInput : "");
-    if (root === null || path === null || !this.trees.get(root)?.some((file) => file.path === path)) {
+    const file = root === null || path === null ? undefined : this.trees.get(root)?.find((candidate) => candidate.path === path);
+    if (root === null || path === null || file === undefined) {
       return null;
     }
-    return Object.freeze({ root, path, range: null });
+    const digest = digestBytes(file.bytes);
+    const encoded = artifactRefCapsule.encodeUnknown(Object.freeze({
+      blob: digest,
+      byteLength: String(file.bytes.byteLength),
+      codec: "codec:simulation-artifact",
+      codecVersion: "version:2",
+      digest,
+      path,
+      range: null,
+      root,
+    }));
+    if (encoded.kind === "error") return null;
+    const decoded = artifactRefCapsule.decodeCanonical(encoded.value);
+    return decoded.kind === "ok" ? decoded.value : null;
   }
 
   public serialize(rootInput: unknown): Uint8Array | null {
