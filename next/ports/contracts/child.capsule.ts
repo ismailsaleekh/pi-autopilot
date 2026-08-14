@@ -1,5 +1,6 @@
 import {
   actionIdSchema,
+  artifactPathSchema,
   artifactRefSchema,
   artifactRootSchema,
   attemptIdSchema,
@@ -8,6 +9,7 @@ import {
   childIdSchema,
   decimalNaturalSchema,
   exitObservationSchema,
+  kindIdSchema,
   processGroupIdSchema,
   processIdSchema,
   roleIdSchema,
@@ -26,15 +28,64 @@ import {
   subscriptionRouteSchema,
 } from "../../authority/protocol/route.capsule.js";
 import {
+  arrayOf,
   defineCapsule,
   literal,
+  natural,
   nullable,
   object,
+  text,
   union,
 } from "../../authority/protocol/schema.js";
 import type { Infer } from "../../authority/protocol/schema.js";
+export type { ArtifactPath, ArtifactRef, KindId } from "../../authority/protocol/identifiers.js";
 import { toolResultSchemaFor } from "../../authority/protocol/tool-result.capsule.js";
 import { defineIntentCapsule } from "./intent-capsule.js";
+
+const durableProcessDescriptorSchema = object({
+  captureId: captureIdSchema,
+  environmentKeys: arrayOf(text("identifier")),
+  groupId: natural(),
+  pid: natural(),
+  processBirthMarker: text("non-empty"),
+  stderrPath: text("non-empty"),
+  stdoutPath: text("non-empty"),
+});
+
+const durableChildDescriptorSchema = object({
+  childEpoch: childEpochSchema,
+  childId: childIdSchema,
+  process: durableProcessDescriptorSchema,
+  runId: runIdSchema,
+  sessionDirectory: text("non-empty"),
+  sessionId: kindIdSchema,
+  workspaceId: workspaceIdSchema,
+});
+
+const durableChildDescriptorCapsule = defineCapsule("DurableChildDescriptor", durableChildDescriptorSchema);
+const descriptorCodecCapsule = defineCapsule("DurableChildDescriptorCodec", kindIdSchema);
+const descriptorPathCapsule = defineCapsule("DurableChildDescriptorPath", artifactPathSchema);
+
+export function encodeDurableChildDescriptor(value: unknown): Uint8Array | null {
+  const encoded = durableChildDescriptorCapsule.encodeUnknown(value);
+  return encoded.kind === "ok" ? encoded.value : null;
+}
+export function decodeDurableChildDescriptor(bytes: Uint8Array) {
+  const decoded = durableChildDescriptorCapsule.decodeCanonical(bytes);
+  return decoded.kind === "ok" ? decoded.value : null;
+}
+export function durableChildDescriptorCodec() {
+  const decoded = descriptorCodecCapsule.decode("codec:pi-child-process-descriptor");
+  return decoded.kind === "ok" ? decoded.value : null;
+}
+export function durableChildDescriptorVersion() {
+  const decoded = descriptorCodecCapsule.decode("version:2");
+  return decoded.kind === "ok" ? decoded.value : null;
+}
+export function durableChildDescriptorPath() {
+  const decoded = descriptorPathCapsule.decode("runtime/process/descriptor.canonical.json");
+  return decoded.kind === "ok" ? decoded.value : null;
+}
 
 export const verifyPiRouteSchema = object({
   actionId: actionIdSchema,
@@ -215,6 +266,8 @@ export const childObservationSchema = union([
 ]);
 
 export type ChildArtifactReference = Infer<typeof artifactRefSchema>;
+export type ChildDurableDescriptor = Infer<typeof durableChildDescriptorSchema>;
+export type ChildDurableProcessDescriptor = Infer<typeof durableProcessDescriptorSchema>;
 export type ChildSubscriptionRoute = Infer<typeof subscriptionRouteSchema>;
 export type VerifyPiRoute = Infer<typeof verifyPiRouteSchema>;
 export type LaunchChildSession = Infer<typeof launchChildSessionSchema>;

@@ -1,14 +1,22 @@
 import { opendir } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
-import { childIntentCapsule, childObservationCapsule } from "../../ports/contracts/child.capsule.js";
+import {
+  childIntentCapsule,
+  childObservationCapsule,
+  decodeDurableChildDescriptor,
+  durableChildDescriptorCodec,
+  durableChildDescriptorPath,
+  durableChildDescriptorVersion,
+  encodeDurableChildDescriptor,
+} from "../../ports/contracts/child.capsule.js";
 import type { ChildIntent, ChildObservation, LaunchChildSession, VerifyPiRoute } from "../../ports/contracts/child.capsule.js";
 import type {
   PiDurableChildDescriptor,
-  PiDurableProcessDescriptor,
   PiProcessExecutor,
   PiProcessObservation,
   PiRouteGuardObservation,
   PiRouteVerifier,
+  PiSessionArtifactStore,
   PiSessionBindingResolver,
   PiSessionDiagnostic,
   PiSessionExecution,
@@ -18,6 +26,7 @@ import type {
 
 const FORBIDDEN_ENV = /(?:API_KEY|AUTH_TOKEN|OAUTH_TOKEN|BEARER_TOKEN|BASE_URL|AUTH_FILE)$/;
 const MAX_SESSION_ENTRIES = 4096;
+const MAX_DESCRIPTOR_BYTES = 64 * 1024;
 
 function diagnostic(code: string, message: string): PiSessionDiagnostic { return Object.freeze({ code, message }); }
 function contractDiagnostic(code: string, message: string) { return Object.freeze({ code, message, related: Object.freeze([]) }); }
@@ -46,36 +55,14 @@ function execution(candidate: unknown, facts: PiSessionPhysicalObservation): PiS
 function retry(intent: ChildIntent, kind: ChildObservation["kind"], code: string, message: string): PiSessionExecution {
   return execution(Object.freeze({ actionId: intent.actionId, kind, result: Object.freeze({ kind: "retry", diagnostic: contractDiagnostic(code, message) }), runId: intent.runId }), physical("0", `child-${intent.actionId.slice(14)}`));
 }
+function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.byteLength !== right.byteLength) return false;
+  let difference = 0;
+  for (let index = 0; index < left.byteLength; index += 1) difference |= (left[index] ?? 0) ^ (right[index] ?? 0);
+  return difference === 0;
+}
 function decimalBound(value: string): number | null {
   try { const parsed = BigInt(value); return parsed > 0n && parsed <= 1_073_741_824n ? Number(parsed) : null; } catch { return null; }
-}
-function durableProcessDescriptor(input: unknown): PiDurableProcessDescriptor | null {
-  try {
-    if (typeof input !== "object" || input === null || Array.isArray(input)) return null;
-    const captureId = Reflect.get(input, "captureId");
-    const environmentKeys = Reflect.get(input, "environmentKeys");
-    const groupId = Reflect.get(input, "groupId");
-    const pid = Reflect.get(input, "pid");
-    const processBirthMarker = Reflect.get(input, "processBirthMarker");
-    const stderrPath = Reflect.get(input, "stderrPath");
-    const stdoutPath = Reflect.get(input, "stdoutPath");
-    if (typeof captureId !== "string" || !Array.isArray(environmentKeys) || environmentKeys.length > 512 || !environmentKeys.every((key) => typeof key === "string") || !Number.isSafeInteger(groupId) || groupId < 1 || !Number.isSafeInteger(pid) || pid < 1 || typeof processBirthMarker !== "string" || processBirthMarker.length === 0 || typeof stderrPath !== "string" || !isAbsolute(stderrPath) || typeof stdoutPath !== "string" || !isAbsolute(stdoutPath)) return null;
-    return Object.freeze({ captureId, environmentKeys: Object.freeze([...environmentKeys].sort()), groupId, pid, processBirthMarker, stderrPath, stdoutPath });
-  } catch { return null; }
-}
-function durableChildDescriptor(input: unknown): PiDurableChildDescriptor | null {
-  try {
-    if (typeof input !== "object" || input === null || Array.isArray(input)) return null;
-    const childEpoch = Reflect.get(input, "childEpoch");
-    const childId = Reflect.get(input, "childId");
-    const process = durableProcessDescriptor(Reflect.get(input, "process"));
-    const runId = Reflect.get(input, "runId");
-    const sessionDirectory = Reflect.get(input, "sessionDirectory");
-    const sessionId = Reflect.get(input, "sessionId");
-    const workspaceId = Reflect.get(input, "workspaceId");
-    if (![childEpoch, childId, runId, sessionId, workspaceId].every((value) => typeof value === "string" && value.length > 0) || process === null || typeof sessionDirectory !== "string" || !isAbsolute(sessionDirectory)) return null;
-    return Object.freeze({ childEpoch, childId, process, runId, sessionDirectory, sessionId, workspaceId });
-  } catch { return null; }
 }
 function binding(input: unknown): PiSessionLaunchBinding | null {
   try {
@@ -138,6 +125,7 @@ export class PiSessionAdapter<Handle> {
   public constructor(
     private readonly processes: PiProcessExecutor<Handle>,
     private readonly bindings: PiSessionBindingResolver,
+    private readonly artifacts: PiSessionArtifactStore,
     private readonly routeVerifier: PiRouteVerifier,
     private readonly terminationGraceMilliseconds: number,
   ) {}
@@ -183,20 +171,39 @@ export class PiSessionAdapter<Handle> {
       await this.processes.terminate(started.handle, Object.freeze({ graceMilliseconds: this.terminationGraceMilliseconds }));
       return retry(intent, "child-session-launched", "pi-session.descriptor-identity", "launched process lacked a matching durable identity descriptor");
     }
-    const descriptorDocument: PiDurableChildDescriptor = Object.freeze({ childEpoch: intent.preconditions.childEpoch, childId: id, process: described.descriptor, runId: intent.runId, sessionDirectory: bound.sessionDirectory, sessionId: id, workspaceId: intent.inputs.workspaceId });
-    let descriptor;
-    try { descriptor = await this.bindings.persistProcessDescriptor(descriptorDocument); } catch {
+    const descriptorBytes = encodeDurableChildDescriptor(Object.freeze({ childEpoch: intent.preconditions.childEpoch, childId: id, process: described.descriptor, runId: intent.runId, sessionDirectory: bound.sessionDirectory, sessionId: id, workspaceId: intent.inputs.workspaceId }));
+    const codec = durableChildDescriptorCodec();
+    const codecVersion = durableChildDescriptorVersion();
+    const path = durableChildDescriptorPath();
+    if (descriptorBytes === null || descriptorBytes.byteLength > MAX_DESCRIPTOR_BYTES || codec === null || codecVersion === null || path === null) {
       await this.processes.terminateDescriptor(described.descriptor, Object.freeze({ graceMilliseconds: this.terminationGraceMilliseconds }));
-      return retry(intent, "child-session-launched", "pi-session.descriptor", "process descriptor could not be persisted; launched group was fenced");
+      return retry(intent, "child-session-launched", "pi-session.descriptor", "process descriptor could not be canonically encoded; launched group was fenced");
     }
+    let installed;
+    try { installed = await this.artifacts.install(Object.freeze({ bytes: descriptorBytes, codec, codecVersion, path })); } catch { installed = Object.freeze({ kind: "error" as const }); }
+    if (installed.kind !== "installed") {
+      await this.processes.terminateDescriptor(described.descriptor, Object.freeze({ graceMilliseconds: this.terminationGraceMilliseconds }));
+      return retry(intent, "child-session-launched", "pi-session.descriptor", "process descriptor could not be CAS-installed; launched group was fenced");
+    }
+    const readback = await this.artifacts.read(installed.reference, descriptorBytes.byteLength);
+    if (readback.kind !== "read" || !sameBytes(readback.bytes, descriptorBytes)) {
+      await this.processes.terminateDescriptor(described.descriptor, Object.freeze({ graceMilliseconds: this.terminationGraceMilliseconds }));
+      return retry(intent, "child-session-launched", "pi-session.descriptor-readback", "installed descriptor failed exact readback; launched group was fenced");
+    }
+    const descriptor = installed.reference;
     const process = processWire(started.observation, intent);
     const session = Object.freeze({ process, sessionFile: null, sessionId: id, sessionFiles: Object.freeze([]) });
     return execution(Object.freeze({ actionId: intent.actionId, kind: "child-session-launched", result: Object.freeze({ kind: "ok", value: Object.freeze({ childEpoch: intent.preconditions.childEpoch, childId: id, process, processDescriptor: descriptor, session, workspaceId: intent.inputs.workspaceId }) }), runId: intent.runId }), Object.freeze({ ...physical(intent.preconditions.childEpoch, id), process: started.observation, sessionDirectory: bound.sessionDirectory, sessionId: id }));
   }
   private async loadDescriptor(intent: Extract<ChildIntent, { kind: "inspect-child-session" | "fence-child-session" }>): Promise<PiDurableChildDescriptor | null> {
-    let loaded: unknown;
-    try { loaded = await this.bindings.loadProcessDescriptor(intent.inputs.processDescriptor); } catch { loaded = null; }
-    const descriptor = durableChildDescriptor(loaded);
+    const codec = durableChildDescriptorCodec();
+    const codecVersion = durableChildDescriptorVersion();
+    const path = durableChildDescriptorPath();
+    const reference = intent.inputs.processDescriptor;
+    if (codec === null || codecVersion === null || path === null || reference.codec !== codec || reference.codecVersion !== codecVersion || reference.path !== path || String(reference.digest) !== String(reference.blob) || Number(reference.byteLength) > MAX_DESCRIPTOR_BYTES) return null;
+    let loaded;
+    try { loaded = await this.artifacts.read(reference, MAX_DESCRIPTOR_BYTES); } catch { loaded = Object.freeze({ kind: "error" as const }); }
+    const descriptor = loaded.kind === "read" ? decodeDurableChildDescriptor(loaded.bytes) : null;
     return descriptor !== null
       && descriptor.childId === intent.inputs.childId
       && descriptor.childEpoch === intent.preconditions.childEpoch

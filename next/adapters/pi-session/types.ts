@@ -1,4 +1,4 @@
-import type { ChildArtifactReference, ChildObservation, ChildIntent, ChildSubscriptionRoute, LaunchChildSession, VerifyPiRoute } from "../../ports/contracts/child.capsule.js";
+import type { ArtifactPath, ChildArtifactReference, ChildObservation, ChildIntent, ChildSubscriptionRoute, KindId, LaunchChildSession, VerifyPiRoute } from "../../ports/contracts/child.capsule.js";
 
 export type PiThinkingLevel = ChildSubscriptionRoute["thinking"];
 export type PiSubscriptionRoute = ChildSubscriptionRoute;
@@ -15,8 +15,6 @@ export interface PiSessionLaunchBinding {
 }
 export interface PiSessionBindingResolver {
   readonly resolveLaunch: (intent: LaunchChildSession | VerifyPiRoute) => Promise<unknown>;
-  readonly persistProcessDescriptor: (descriptor: PiDurableChildDescriptor) => Promise<ChildArtifactReference>;
-  readonly loadProcessDescriptor: (reference: ChildArtifactReference) => Promise<unknown>;
 }
 
 export interface PiDurableProcessDescriptor {
@@ -28,7 +26,6 @@ export interface PiDurableProcessDescriptor {
   readonly stderrPath: string;
   readonly stdoutPath: string;
 }
-
 export interface PiDurableChildDescriptor {
   readonly childEpoch: string;
   readonly childId: string;
@@ -37,6 +34,16 @@ export interface PiDurableChildDescriptor {
   readonly sessionDirectory: string;
   readonly sessionId: string;
   readonly workspaceId: string;
+}
+
+export interface PiSessionArtifactStore {
+  readonly install: (request: Readonly<{
+    readonly bytes: Uint8Array;
+    readonly codec: KindId;
+    readonly codecVersion: KindId;
+    readonly path: ArtifactPath;
+  }>) => Promise<Readonly<{ readonly kind: "installed"; readonly reference: ChildArtifactReference }> | Readonly<{ readonly kind: "error" }>>;
+  readonly read: (reference: ChildArtifactReference, maxBytes: number) => Promise<Readonly<{ readonly bytes: Uint8Array; readonly kind: "read" }> | Readonly<{ readonly kind: "error" }>>;
 }
 
 export type PiProcessDescriptorResult =
