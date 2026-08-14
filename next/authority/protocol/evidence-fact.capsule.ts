@@ -47,12 +47,7 @@ export const evidenceEnvelopeSchema = object({
   workItemId: workItemIdSchema,
 });
 
-type DerivedEvidenceEnvelope = Infer<typeof evidenceEnvelopeSchema>;
-declare const evidenceEnvelopeCapability: unique symbol;
-
-export interface EvidenceEnvelope extends DerivedEvidenceEnvelope {
-  readonly [evidenceEnvelopeCapability]: true;
-}
+export type EvidenceEnvelope = Infer<typeof evidenceEnvelopeSchema>;
 
 export const evidenceObservedFactSchema = object({
   envelope: evidenceEnvelopeSchema,

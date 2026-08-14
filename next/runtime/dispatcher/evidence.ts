@@ -2,6 +2,7 @@ import {
   artifactRefSchema,
   attemptIdSchema,
   evidenceIdSchema,
+  evidenceObligationIdSchema,
   exitObservationSchema,
   kindIdSchema,
   workspaceRelativePathSchema,
@@ -33,6 +34,7 @@ const hostEvidenceReceiptCapsule = defineCapsule(
   hostEvidenceReceiptSchema,
 );
 const evidenceIdCapsule = defineCapsule("RuntimeEvidenceId", evidenceIdSchema);
+const evidenceObligationIdCapsule = defineCapsule("RuntimeEvidenceObligationId", evidenceObligationIdSchema);
 
 export type EvidenceMintResult =
   | { readonly kind: "minted"; readonly envelope: EvidenceEnvelope }
@@ -66,7 +68,8 @@ export function makeEvidenceEnvelope(command: ExecuteEvidence, receiptInput: unk
     return receipt;
   }
   const derivedEvidenceId = evidenceId(command, receipt.value);
-  if (derivedEvidenceId === null) {
+  const obligationId = evidenceObligationIdCapsule.decode(`evidence-obligation:${command.commandId}`);
+  if (derivedEvidenceId === null || obligationId.kind !== "ok") {
     return Object.freeze({
       kind: "feedback",
       code: "boundary-schema",
@@ -77,15 +80,19 @@ export function makeEvidenceEnvelope(command: ExecuteEvidence, receiptInput: unk
   return Object.freeze({
     kind: "minted",
     envelope: Object.freeze({
+      acceptedOutput: command.candidateTree,
       actionId: command.actionId,
       attemptId: receipt.value.attemptId,
+      class: "mechanical",
       command: command.commandSpec,
       cwd: receipt.value.cwd,
       environment: receipt.value.environment,
       evidenceId: derivedEvidenceId,
       exit: receipt.value.exit,
       kindId: receipt.value.kindId,
+      obligationId: obligationId.value,
       output: receipt.value.output,
+      ruleId: command.ruleId,
       runId: command.runId,
       tree: command.candidateTree,
       workItemId: command.workItemId,
